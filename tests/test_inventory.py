@@ -1,0 +1,178 @@
+"""Tests for the inventory stage: manifest loading, validation, asset registration."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from app.stages.inventory.builder import build_stage
+from app.schemas.state import initial_state
+import yaml
+
+
+class InventoryStageTests(unittest.TestCase):
+    def _build_manifest_file(self, tmpdir: str, manifest: dict) -> Path:
+        path = Path(tmpdir) / "manifest.yaml"
+        path.write_text(yaml.dump(manifest), encoding="utf-8")
+        return path
+
+    def _run_inventory(self, manifest_path: Path, data_dir: str | None = None) -> dict:
+        state = initial_state(
+            session_id="test-session",
+            input_manifest_ref=str(manifest_path),
+            data_dir=data_dir or tmpdir,
+        )
+        graph = build_stage()
+        return graph.invoke(state)
+
+    def test_inventory_fails_without_manifest_ref(self):
+        state = initial_state(session_id="test", input_manifest_ref="")
+        graph = build_stage()
+        result = graph.invoke(state)
+        self.assertEqual(result["supervision_state"], "failed_terminal")
+        inventory_out = result["stage_outputs"]["inventory"]
+        self.assertEqual(inventory_out["status"], "failed")
+
+    def test_inventory_fails_with_missing_manifest_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = {"session_id": "s1", "assets": []}
+            path = self._build_manifest_file(tmpdir, manifest)
+            path.unlink()
+            state = initial_state(
+                session_id="test",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+
+    def test_inventory_succeeds_with_valid_manifest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "ont.fq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n")
+            manifest = {
+                "session_id": "s1",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(fq)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertIn("asset_registry_ref", result)
+            self.assertIsNotNone(result["asset_registry_ref"])
+            registry_path = Path(result["asset_registry_ref"])
+            self.assertTrue(registry_path.exists())
+            registry = json.loads(registry_path.read_text())
+            self.assertEqual(registry["session_id"], "s1")
+            self.assertEqual(len(registry["assets"]), 1)
+
+    def test_inventory_registers_multiple_assets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ont = Path(tmpdir) / "ont.fq"
+            ont.write_text("@r1\nACGT\n+\n!!!!\n")
+            short1 = Path(tmpdir) / "R1.fq"
+            short2 = Path(tmpdir) / "R2.fq"
+            short1.write_text("@s1\nACGT\n+\n!!!!\n")
+            short2.write_text("@s2\nTGCA\n+\n!!!!\n")
+            manifest = {
+                "session_id": "s2",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(ont)]},
+                    {"asset_type": "raw_short_dna_reads", "paths": [str(short1), str(short2)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s2",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            self.assertEqual(len(registry["assets"]), 3)
+            asset_types = {a["asset_type"] for a in registry["assets"]}
+            self.assertEqual(asset_types, {"raw_long_reads", "raw_short_dna_reads"})
+
+    def test_inventory_triggers_review_for_ambiguous_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = {
+                "session_id": "s3",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": ["a.fq"]},
+                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": ["b.fq"]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s3",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertIsNotNone(result.get("active_interrupt"))
+            self.assertEqual(result["active_interrupt"]["stage"], "inventory")
+            self.assertEqual(result["current_stage"], "read_qc")
+
+    def test_inventory_with_existing_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fa = Path(tmpdir) / "asm.fa"
+            fa.write_text(">ctg1\nACGTACGT\n")
+            manifest = {
+                "session_id": "s4",
+                "assets": [
+                    {"asset_type": "assembly_fasta_registered", "paths": [str(fa)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s4",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertEqual(result["current_stage"], "read_qc")
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
+
+    def test_inventory_writes_ledger_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "ont.fq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n")
+            manifest = {
+                "session_id": "s5",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(fq)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s5",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            events_path = Path(tmpdir) / "ledger" / "s5" / "events.jsonl"
+            self.assertTrue(events_path.exists())
+            lines = events_path.read_text().strip().split("\n")
+            events = [json.loads(line) for line in lines]
+            self.assertTrue(any(e["event_type"] == "assets_registered" for e in events))
+            asset_event = next(e for e in events if e["event_type"] == "assets_registered")
+            self.assertEqual(asset_event["asset_count"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

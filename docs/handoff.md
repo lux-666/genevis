@@ -5,28 +5,33 @@ repository.
 
 ## Current Status
 
-The project is in Phase 0.
+The project is in Phase 1: structurally complete, awaiting Phase 2 work.
 
 Completed:
 
 - Repository scaffold exists.
-- Parent graph placeholder can route through all genome domain stages.
+- Parent graph routes through all genome domain stages and handles terminal failures.
 - Shared schema contracts exist for state, assets, plans, descriptors, artifacts,
-  commands, and events.
+  commands, events, and manifests.
 - Descriptor roots and initial ONT/CLR asset policy exist.
 - Documentation now defines architecture, governance, stage contracts, descriptor
   rules, and phase plan.
 - Structure tests cover stage order, initial state shape, and required document
   roots.
+- **Input manifest schema** (`InputManifest`, `InputAssetSpec`) validates asset
+  types, file existence, format, compression, platform, and layout.
+- **Inventory stage** loads manifests, validates inputs, registers assets, writes
+  the asset registry JSON artifact, and records ledger events.
+- Inventory routing supports success, failure, and review-required paths.
+- Ambiguous long-read vs long-RNA inputs trigger an `active_interrupt`.
+- CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 
 Not completed:
 
-- No real input manifest parser.
-- No real asset registry writer.
 - No real method descriptors for bioinformatics tools.
 - No LocalRunner or RemoteRunner execution.
-- No review interrupt implementation.
-- No real CLI beyond a placeholder message.
+- No review interrupt resumption logic (interrupt is set but not yet resumed).
+- Skip logic for existing-assembly inputs is not yet wired into downstream stages.
 
 ## Read Order
 
@@ -74,20 +79,20 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Start Phase 1: Parent Graph and Inventory MVP.
+Start Phase 2: QC, Survey, and Assembly Planning.
 
 Recommended first slice:
 
-1. Add tests for an input manifest schema.
-2. Implement `InputManifest` and `InputAssetSpec` in `app/schemas/assets.py` or a
-   new `app/schemas/manifest.py`.
-3. Implement lightweight manifest loading in `app/stages/inventory/nodes.py`.
-4. Register assets into a JSON artifact under `data/artifacts/asset_registry/`.
-5. Write a ledger event through `app/control/ledger.py`.
-6. Keep the parent graph shape unchanged.
+1. Replace the `read_qc` placeholder with real input validation: check that
+   `raw_long_reads` exists in the asset registry.
+2. Add a `StagePlan` for read QC with candidate methods (NanoPlot, SeqKit stats,
+   optional Filtlong).
+3. Add planner rules to `config/defaults.yaml` or descriptor policy for when
+   Filtlong is conservative-only.
+4. Add genome survey skip/run policy: skip when `clean_short_dna_reads` is absent.
+5. Keep the parent graph shape unchanged.
 
-Do not start with Flye, NextDenovo, or runner execution. Inventory is the
-foundation for every later planner decision.
+Inventory is now the foundation for every later planner decision.
 
 ## Immediate Design Decisions Already Made
 
@@ -104,24 +109,24 @@ foundation for every later planner decision.
 
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
-- Placeholder stages always advance. Phase 1 must replace this behavior for
-  `inventory`.
-- The parent graph currently reaches `done` even with a fake manifest. That is
-  acceptable for scaffold smoke only.
+- Only `inventory` has real routing; all other stages are still placeholders that
+  always advance.
 - `LocalRunner` and `RemoteRunner` intentionally raise `NotImplementedError`.
-- Review gates are documented but not implemented.
+- Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.
+- Existing assembly inputs are registered but downstream skip logic is not wired.
 - No `.gitignore` exists yet; avoid committing cache or data outputs.
 
-## Files Most Likely To Change In Phase 1
+## Files Most Likely To Change In Phase 2
 
-- `app/schemas/assets.py`
-- `app/schemas/state.py`
-- `app/stages/inventory/nodes.py`
-- `app/stages/inventory/builder.py`
-- `app/stages/inventory/routing.py`
-- `app/control/ledger.py`
-- `app/entrypoints/run.py`
-- `tests/test_project_scaffold.py`
+- `app/schemas/plan.py`
+- `app/stages/read_qc/nodes.py`
+- `app/stages/read_qc/builder.py`
+- `app/stages/read_qc/routing.py`
+- `app/stages/genome_survey/nodes.py`
+- `app/stages/genome_survey/routing.py`
+- `app/stages/assembly/nodes.py`
+- `config/defaults.yaml`
+- `descriptors/packages/` and `descriptors/methods/`
 - new tests under `tests/`
 - docs touched when behavior changes
 

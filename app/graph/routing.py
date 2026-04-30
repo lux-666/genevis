@@ -8,11 +8,17 @@ from app.stages import STAGE_ORDER, TERMINAL_STAGE
 
 def route_controller(state: TopLevelState) -> dict:
     """Record that the parent graph evaluated routing."""
+    supervision = state.get("supervision_state")
+    if supervision in ("failed_terminal", "completed"):
+        return {}
     return {"supervision_state": "idle"}
 
 
 def route_from_current_stage(state: TopLevelState) -> str:
     """Return the graph node name for the current stage."""
+    supervision = state.get("supervision_state")
+    if supervision == "failed_terminal":
+        return "end"
     current_stage = state.get("current_stage", "inventory")
     if current_stage == TERMINAL_STAGE:
         return "end"

@@ -64,6 +64,26 @@ class Ledger:
             },
         )
 
+    def record_assets_registered(
+        self,
+        session_id: str,
+        assets: list[dict[str, Any]],
+        *,
+        registry_ref: str,
+        ambiguous: bool = False,
+    ) -> None:
+        """Append an asset-registration event."""
+        self.record_event(
+            session_id,
+            "assets_registered",
+            {
+                "registry_ref": registry_ref,
+                "asset_count": len(assets),
+                "assets": assets,
+                "ambiguous": ambiguous,
+            },
+        )
+
     def record_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Append a business event."""
         session_dir = self.session_dir(session_id)
