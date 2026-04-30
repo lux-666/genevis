@@ -1,0 +1,88 @@
+scenario: ont_clr_long_reads
+
+asset_types:
+  raw_long_reads:
+    allowed_stages:
+      - inventory
+      - read_qc
+    produces:
+      - clean_long_reads
+
+  clean_long_reads:
+    allowed_stages:
+      - assembly
+      - assembly_review
+    allowed_methods:
+      assembly:
+        - flye
+        - nextdenovo
+        - canu
+      assembly_review:
+        - minimap2_depth_stats
+        - nextpolish_lgs
+        - purge_dups
+    produces:
+      - draft_assembly
+
+  clean_short_dna_reads:
+    allowed_stages:
+      - genome_survey
+      - assembly_review
+    allowed_methods:
+      genome_survey:
+        - jellyfish
+        - genomescope
+      assembly_review:
+        - merqury
+        - nextpolish_sgs
+
+  hic_reads_registered:
+    allowed_stages:
+      - hic_scaffolding
+    allowed_methods:
+      hic_scaffolding:
+        - hicpro
+        - juicer
+        - 3d_dna
+        - juicebox_manual_review
+
+  draft_assembly:
+    allowed_stages:
+      - assembly_review
+      - hic_scaffolding
+      - repeat_annotation
+      - gene_annotation
+
+  predicted_proteins:
+    allowed_stages:
+      - function_annotation
+
+planner_policies:
+  genome_survey:
+    run_if:
+      - asset_exists: clean_short_dna_reads
+    skip_if:
+      - asset_missing: clean_short_dna_reads
+    on_skip:
+      set:
+        plan.genome_survey_enabled: false
+        plan.genome_size_source: user_or_optional
+
+  assembly:
+    primary_input: clean_long_reads
+    require_genome_size_for:
+      - nextdenovo
+      - canu
+    optional_genome_size_for:
+      - flye
+
+  assembly_review:
+    always_run:
+      - quast
+      - busco
+    review_gate:
+      type: interrupt
+      required_after:
+        - quast
+        - busco
+        - merqury_or_depth_if_available

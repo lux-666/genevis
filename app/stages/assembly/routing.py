@@ -1,0 +1,1 @@
+"""Assembly stage routing placeholder."""

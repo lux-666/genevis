@@ -1,0 +1,1 @@
+"""Gene structure annotation stage."""

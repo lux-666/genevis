@@ -1,0 +1,12 @@
+packages: {}
+methods: {}
+by_stage:
+  inventory: []
+  read_qc: []
+  genome_survey: []
+  assembly: []
+  assembly_review: []
+  hic_scaffolding: []
+  repeat_annotation: []
+  gene_annotation: []
+  function_annotation: []

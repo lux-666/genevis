@@ -1,0 +1,1 @@
+"""Generated script validation placeholder."""

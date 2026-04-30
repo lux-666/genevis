@@ -1,0 +1,22 @@
+project:
+  name: gene_agent
+  scenario: ont_clr_long_reads
+
+runtime:
+  checkpointer: memory
+  runner: local
+  forge_mode: template
+  notebook_trace: true
+
+planner:
+  genome_survey:
+    run_only_with_asset: clean_short_dna_reads
+    skip_reason_without_short_reads: no_low_error_short_reads
+  assembly:
+    primary_input: clean_long_reads
+    default_candidates:
+      - flye
+      - nextdenovo
+      - canu
+  review:
+    assembly_review_requires_human_gate: true

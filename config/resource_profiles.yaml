@@ -1,0 +1,17 @@
+profiles:
+  light_qc:
+    cpu_cores: 8
+    memory_gb: 16
+    walltime_hours: 2
+  long_read_assembly:
+    cpu_cores: 64
+    memory_gb: 256
+    walltime_hours: 72
+  annotation_heavy:
+    cpu_cores: 48
+    memory_gb: 192
+    walltime_hours: 96
+  hic_scaffolding:
+    cpu_cores: 32
+    memory_gb: 128
+    walltime_hours: 48
