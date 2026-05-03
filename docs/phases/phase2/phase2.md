@@ -1,173 +1,189 @@
-# Phase 2: CycloneSEQ Contract And First Method Slice
+# Phase 2 CycloneSEQ Single-Line Implementation Plan
 
-## 1. Phase Goal
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> `superpowers:subagent-driven-development` or `superpowers:executing-plans`
+> before implementing code from this plan. Steps use checkbox (`- [ ]`) syntax
+> for implementation tracking. Documentation checkboxes are not evidence that
+> code exists.
 
-Phase 2 designs the full CycloneSEQ genome assembly and annotation workflow,
-then implements only one narrow executable vertical slice first.
+**Goal:** Build a single-line CycloneSEQ genome assembly and annotation workflow
+contract from FASTQ / FASTQ.gz inventory through function annotation, while
+making SeqKit stats the first real executable method.
 
-Target backbone:
+**Architecture:** Phase 2 follows the biological backbone in order:
+`inventory -> read_qc -> genome_survey -> assembly -> assembly_review ->
+hic_scaffolding -> repeat_annotation -> gene_annotation -> function_annotation`.
+Each numbered task advances one stage or one concrete substep. The only real
+tool execution planned first is SeqKit stats; later tools are candidate
+descriptors and contracts until their own tasks implement them.
 
-1. [ ] inventory
-2. [ ] read_qc
-3. [ ] genome_survey
-4. [ ] assembly
-5. [ ] assembly_review
-6. [ ] hic_scaffolding
-7. [ ] repeat_annotation
-8. [ ] gene_annotation
-9. [ ] function_annotation
+**Tech Stack:** Python 3.11, LangGraph `StateGraph`, Pydantic v2, PyYAML,
+standard-library `unittest`, descriptor-backed CLI methods, local runner,
+JSON/JSONL artifacts and ledger records.
 
-Phase 2 assumes the user input is BGI CycloneSEQ downsampled or production
-FASTQ / FASTQ.gz. Inventory should identify it as `raw_long_reads`.
+---
 
-The first executable slice is:
+## Phase 2 Input Assumption
+
+The user provides BGI CycloneSEQ downsampled or production FASTQ / FASTQ.gz.
+Inventory identifies the input as:
 
 ```text
 raw_long_reads
--> read_qc.long_read_stats
--> SeqKit stats
--> stats artifact
--> ledger event
 ```
 
-This phase must not pretend the whole assembly pipeline is executable. It should
-make the complete contracts clear enough that later coding assistants know where
-to ask for human decisions instead of inventing behavior.
+Accepted suffixes:
 
-## 2. Reference From `rna_agent`
+- `.fastq`
+- `.fq`
+- `.fastq.gz`
+- `.fq.gz`
 
-Use `/Users/a1/Documents/BGIwork/rna_agent` as the implementation-pattern
-reference.
+Optional inputs may include short DNA reads, Hi-C reads, RNA-seq, Iso-Seq, long
+RNA, protein evidence, existing assembly, or known genome size.
 
-Reusable patterns:
+## Mainline Backbone
 
-- [ ] phase README plus numbered task docs
-- [ ] one real method path before broad feature expansion
-- [ ] descriptor-driven method selection
-- [ ] frozen attempt specs before runner execution
-- [ ] small state plus artifact references
-- [ ] ledger events for attempts and artifacts
-- [ ] explicit preflight gates before LLM, Forge, or runner calls
+```text
+inventory
+-> read_qc
+-> genome_survey
+-> assembly
+-> assembly_review
+-> hic_scaffolding
+-> repeat_annotation
+-> gene_annotation
+-> function_annotation
+```
 
-Do not copy:
+## Read QC Substeps
 
-- single-cell stage names
-- h5ad-specific input contracts
-- Harmony-specific prompt assets
-- annotation/benchmark assumptions from RNA workflows
+Phase 2 starts with SeqKit but keeps the full read QC shape:
 
-## 3. Phase 1 Items Moved Here
+1. `long_read_stats`
+   - candidates: SeqKit stats, NanoPlot, pyfastx
+   - output: raw/filtered read stats, N50, total bases, quality summary
+2. `length_filter`
+   - candidates: seqkit seq, Filtlong, fastplong, chopper
+   - output: `filtered_long_reads`
+3. `make_fofn`
+   - output: `filtered_long_reads.fofn` or `long_reads.fofn`
+   - purpose: stable input contract for assembly and downstream stages
 
-These were deliberately left unchecked in Phase 1 and now belong to Phase 2 or
-later Phase 2 follow-up work.
+## Stage Method Summary
 
-- [ ] Define real human review/resume protocol for assembly review and other
-  gates.
-- [ ] Align ledger, artifact, descriptor, and runner contracts toward the proven
-  `rna_agent` shape.
-- [ ] Decide requested-stage semantics before reintroducing any `--stages` CLI
-  option.
-- [ ] Add normalized manifest artifact only if Phase 2 needs immutable manifest
-  snapshots for runner or audit.
-- [ ] Add registry event metadata to asset provenance after ledger event IDs or
-  registry write events are defined.
+`genome_survey` has two modes:
 
-Human decision rule:
+- full mode with short reads: Jellyfish/Meryl + GenomeScope2/Smudgeplot;
+- CycloneSEQ-only fallback: rough coverage/genome-size estimate with low
+  confidence.
 
-明确要求：coding助手读到了应寻求人类帮助，而不是自己去构建具体方案。
+`assembly` uses a candidate set:
 
-## 4. CycloneSEQ Stage Contract Summary
+- Flye
+- hifiasm
+- NextDenovo
+- Canu
 
-### Inventory
+Each method produces a candidate assembly. `assembly_review` compares candidates
+using QUAST, BUSCO, Merqury, read mapping coverage, purge_dups_check, and
+contamination_check.
 
-- [x] Input: FASTQ / FASTQ.gz manifest paths.
-- [x] Output: `raw_long_reads` in asset registry.
-- [ ] Human question: what manifest metadata uniquely identifies CycloneSEQ when
-  filename/platform evidence is ambiguous?
+`hic_scaffolding` runs YaHS or Juicer + 3D-DNA + Juicebox only when Hi-C reads
+exist and chromosome-level assembly is requested. Otherwise it writes a skip
+record and annotation continues on the contig-level genome.
 
-### Read QC
+`repeat_annotation` runs before `gene_annotation` and produces repeat library,
+repeat GFF3, and softmasked genome using EDTA, RepeatModeler, RepeatMasker, and
+optional TRF.
 
-- [ ] Substep: `long_read_stats`
-  - candidates: SeqKit stats, NanoPlot, pyfastx
-  - output: raw/filtered read stats, N50, total bases, quality summary
-- [ ] Substep: `length_filter`
-  - candidates: seqkit seq, Filtlong, fastplong, chopper
-  - output: `filtered_long_reads`
-- [ ] Substep: `make_fofn`
-  - output: `filtered_long_reads.fofn`
-  - purpose: stable input contract for assembly and downstream stages
+`gene_annotation` consumes softmasked genome plus optional RNA-seq, Iso-Seq,
+long RNA, and protein evidence. Candidate methods include BRAKER3, MAKER,
+AUGUSTUS, and Miniprot. Outputs are `genes.gff3`, `transcripts.fa`, and
+`proteins.fa`.
 
-### Genome Survey
+`function_annotation` consumes `proteins.fa` and uses InterProScan,
+eggNOG-mapper, DIAMOND, and KofamScan candidates to produce `gene_function.tsv`,
+GO, KEGG, Pfam, and InterPro tables.
 
-- [ ] Full mode: if short DNA reads exist, plan Jellyfish/Meryl plus
-  GenomeScope2/Smudgeplot.
-- [ ] Fallback mode: if only CycloneSEQ long reads exist, estimate coverage and
-  genome size roughly, mark confidence low, and avoid pretending this is a
-  k-mer survey equivalent.
+## Plan Files
 
-### Assembly
+- [01 Inventory CycloneSEQ FASTQ](01_inventory_cycloneseq_fastq.md)
+- [02 Read QC SeqKit Stats](02_read_qc_seqkit_stats.md)
+- [03 Read QC Filter And FOFN Contract](03_read_qc_filter_fofn.md)
+- [04 Genome Survey Full And Fallback Modes](04_genome_survey_modes.md)
+- [05 Assembly Candidate Planning](05_assembly_candidates.md)
+- [06 Assembly Review Gate](06_assembly_review_gate.md)
+- [07 Hi-C Scaffolding Or Skip](07_hic_scaffolding.md)
+- [08 Repeat Annotation](08_repeat_annotation.md)
+- [09 Gene Annotation](09_gene_annotation.md)
+- [10 Function Annotation](10_function_annotation.md)
+- [11 Phase 2 Verification Handoff](11_phase2_verification_handoff.md)
 
-- [ ] Candidate set: Flye, hifiasm, NextDenovo, Canu.
-- [ ] Each method produces one candidate assembly plus logs and method metadata.
-- [ ] Planner should select a primary candidate and at most one fallback unless
-  the human explicitly broadens the run.
+## Recommended Task Order
 
-### Assembly Review
+1. Make CycloneSEQ FASTQ inventory register `raw_long_reads`.
+2. Implement SeqKit stats as the first real descriptor-backed method.
+3. Add read QC filter and FOFN contracts.
+4. Add genome survey full/fallback mode contracts.
+5. Add assembly candidate planning.
+6. Add assembly review gate contracts.
+7. Add Hi-C scaffold/skip behavior.
+8. Add repeat annotation contract.
+9. Add gene annotation contract.
+10. Add function annotation contract.
+11. Verify and update handoff.
 
-- [ ] Gate candidates with QUAST, BUSCO, Merqury, read mapping coverage,
-  purge_dups_check, and contamination_check when inputs permit.
-- [ ] Decide accept, rerun, purge, stop for human review, or continue with
-  explicit low-confidence notes.
-- [ ] Human question: what thresholds should be default for CycloneSEQ projects?
+## Phase 2 Done Criteria
 
-### Hi-C Scaffolding
+- CycloneSEQ FASTQ / FASTQ.gz inventory path is tested.
+- SeqKit stats runs from `raw_long_reads`, writes artifacts, and records ledger
+  events.
+- Read QC can express stats, filter, and FOFN substeps.
+- Genome survey can express full, fallback, and skipped modes.
+- Assembly can express candidate methods and candidate assembly refs.
+- Assembly review can block for human decision without inventing thresholds.
+- Hi-C absence produces a skip record and does not block annotation.
+- Repeat annotation precedes gene annotation.
+- Gene annotation outputs `genes.gff3`, `transcripts.fa`, and `proteins.fa`.
+- Function annotation consumes `proteins.fa`.
+- Graph state stores refs and summaries, not large files or metric tables.
 
-- [ ] If Hi-C reads exist, plan YaHS or Juicer + 3D-DNA + Juicebox.
-- [ ] If Hi-C reads are absent, mark skipped and continue annotation on
-  contig-level genome.
+## Human Decision Rule
 
-### Repeat Annotation
+Stop and ask before choosing:
 
-- [ ] Run before gene annotation.
-- [ ] Candidate set: EDTA, RepeatModeler, RepeatMasker.
-- [ ] Outputs: repeat library, repeat GFF3, softmasked genome.
+- CycloneSEQ platform profile defaults;
+- read filtering thresholds;
+- assembly method defaults;
+- assembly review thresholds;
+- purge/polish cutoffs;
+- Hi-C contact-map policy;
+- gene evidence merge policy;
+- requested-stage semantics;
+- review/resume payload schema.
 
-### Gene Annotation
+## Verification
 
-- [ ] Inputs: softmasked genome plus optional RNA-seq, Iso-Seq, and protein
-  evidence.
-- [ ] Candidate set: BRAKER3, MAKER, AUGUSTUS, Miniprot.
-- [ ] Outputs: genes.gff3, transcripts.fa, proteins.fa.
-
-### Function Annotation
-
-- [ ] Input: proteins.fa.
-- [ ] Candidate set: InterProScan, eggNOG-mapper, DIAMOND, KofamScan.
-- [ ] Outputs: gene_function.tsv, GO, KEGG, Pfam/InterPro tables.
-
-## 5. Task Order
-
-1. [ ] [01_phase2_decisions.md](01_phase2_decisions.md) - Migrate Phase 1 leftovers into Phase 2 decisions.
-2. [ ] [02_cycloneseq_method_inventory.md](02_cycloneseq_method_inventory.md) - Define CycloneSEQ stage and method inventory.
-3. [ ] [03_artifact_contracts.md](03_artifact_contracts.md) - Define artifact contract and asset transitions.
-4. [ ] [04_decision_gates.md](04_decision_gates.md) - Define decision gates and human-help triggers.
-5. [ ] [05_seqkit_stats_slice.md](05_seqkit_stats_slice.md) - Specify SeqKit stats vertical slice.
-6. [ ] [06_runner_ledger_alignment.md](06_runner_ledger_alignment.md) - Plan descriptor, FrozenAttemptSpec, runner, and
-   ledger alignment.
-7. [ ] [07_verification_handoff.md](07_verification_handoff.md) - Define verification, acceptance, and handoff
-   checkpoints.
-
-## 6. Verification
-
-Documentation-only changes:
+Documentation-only:
 
 ```bash
 git diff --check
 ```
 
-Before implementing Phase 2 code:
+Baseline:
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 ```
+
+SeqKit slice:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_read_qc tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
+git diff --check
+```
+
+明确要求：coding助手读到了应寻求人类帮助，而不是自己去构建具体方案。

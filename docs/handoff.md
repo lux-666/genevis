@@ -14,10 +14,11 @@ fad12d3 Implement Phase 1: Parent Graph and Inventory MVP
 The Phase 1 correction pass is captured in `docs/phases/phase1/phase1.md`, with
 task details under `docs/phases/phase1/`.
 
-Phase 2 planning has started in `docs/phases/phase2/phase2.md`. Phase 2 is
-CycloneSEQ-focused: design the full FASTQ / FASTQ.gz genome assembly and
-annotation contract, then implement the first narrow executable method slice:
-`read_qc.long_read_stats -> SeqKit stats`.
+Phase 2 planning is captured in `docs/phases/phase2/phase2.md` and the numbered
+task files under `docs/phases/phase2/`. Phase 2 is CycloneSEQ-focused: build the
+single-line FASTQ / FASTQ.gz genome assembly and annotation contract from
+inventory through function annotation, with the first real executable method
+slice `read_qc.long_read_stats -> SeqKit stats`.
 
 Completed:
 
@@ -38,17 +39,30 @@ Completed:
 - Ambiguous long-read vs long-RNA inputs trigger an `active_interrupt` and stop
   at inventory.
 - Existing assembly inputs route to `assembly_review` and publish skip reasons.
+- CycloneSEQ FASTQ / FASTQ.gz inventory input is accepted as genomic long-read
+  platform metadata and registers as `raw_long_reads`.
+- `read_qc.long_read_stats.seqkit_stats` is the first real executable method
+  slice. It resolves `raw_long_reads`, freezes a SeqKit stats attempt, runs via
+  the local runner when `execution_mode` is `local`, writes artifacts, records
+  ledger events, and keeps only refs plus a compact summary in graph state.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
-- Phase 2 documentation defines the CycloneSEQ target backbone, read QC substeps,
-  genome_survey full/fallback modes, assembly candidates, assembly_review gates,
-  Hi-C skip/scaffold policy, repeat/gene/function annotation contracts, and
-  human-help triggers.
+- Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
+  split by real workflow progress: CycloneSEQ FASTQ inventory, SeqKit stats,
+  read filtering/FOFN, genome survey, assembly candidates, assembly review,
+  Hi-C scaffold/skip, repeat annotation, gene annotation, function annotation,
+  and verification handoff.
+- Phase 2 documentation defines the CycloneSEQ target backbone, read QC
+  substeps, genome_survey full/fallback modes, assembly candidates,
+  assembly_review gates, Hi-C skip/scaffold policy, repeat/gene/function
+  annotation contracts, artifact boundaries, and human-help triggers.
 
 Not completed:
 
-- No real method descriptors for bioinformatics tools.
-- No LocalRunner or RemoteRunner execution.
+- No broad bioinformatics method catalog beyond the first SeqKit stats slice.
+- RemoteRunner execution is not implemented.
+- Read filtering, FOFN generation, genome survey, assembly, scaffold, repeat,
+  gene, and function annotation execution are not implemented.
 - Review interrupt resume logic is not implemented.
 
 ## Read Order
@@ -63,9 +77,19 @@ Read these files in order:
 6. `docs/descriptor_spec.md`
 7. `docs/phases/phase1/phase1.md`
 8. `docs/phases/phase2/phase2.md`
-9. `docs/phases/phase2/05_seqkit_stats_slice.md`
-10. `docs/phases/phase_completion_plan.md`
-11. This file again
+9. `docs/phases/phase2/01_inventory_cycloneseq_fastq.md`
+10. `docs/phases/phase2/02_read_qc_seqkit_stats.md`
+11. `docs/phases/phase2/03_read_qc_filter_fofn.md`
+12. `docs/phases/phase2/04_genome_survey_modes.md`
+13. `docs/phases/phase2/05_assembly_candidates.md`
+14. `docs/phases/phase2/06_assembly_review_gate.md`
+15. `docs/phases/phase2/07_hic_scaffolding.md`
+16. `docs/phases/phase2/08_repeat_annotation.md`
+17. `docs/phases/phase2/09_gene_annotation.md`
+18. `docs/phases/phase2/10_function_annotation.md`
+19. `docs/phases/phase2/11_phase2_verification_handoff.md`
+20. `docs/phases/phase_completion_plan.md`
+21. This file again
 
 Use `/Users/a1/Documents/BGIwork/rna_agent` as a reference for patterns only.
 Do not copy single-cell business names into this project.
@@ -75,7 +99,7 @@ Do not copy single-cell business names into this project.
 Use the conda environment already used for scaffold verification:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc -v
 ```
 
 ```bash
@@ -100,14 +124,11 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Start Phase 2 execution from
-`docs/phases/phase2/05_seqkit_stats_slice.md` only after reviewing
-`docs/phases/phase2/phase2.md`,
-`docs/phases/phase2/02_cycloneseq_method_inventory.md`,
-`docs/phases/phase2/03_artifact_contracts.md`, and
-`docs/phases/phase2/04_decision_gates.md`. The first implementation slice
-should stay narrow:
-`read_qc.long_read_stats -> SeqKit stats`.
+Continue Phase 2 execution from
+`docs/phases/phase2/03_read_qc_filter_fofn.md`. Tasks 01 and 02 are
+implemented: CycloneSEQ FASTQ inventory registers `raw_long_reads`, and
+`read_qc.long_read_stats -> SeqKit stats` can run locally when explicitly
+enabled.
 
 Do not implement broad assembly, annotation, requested-stage routing, or review
 resume before the corresponding human decision is explicit in the task docs.
@@ -121,20 +142,24 @@ resume before the corresponding human decision is explicit in the task docs.
 - `TopLevelState` should stay small and reference-based.
 - Real method execution must go through descriptors, frozen attempt specs, and
   runners.
+- Local execution is opt-in per stage output; the default graph path may plan
+  SeqKit stats and continue without running it.
 - Documentation is part of the product, not an afterthought.
 
 ## Known Risks
 
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
-- Only `inventory` has real routing; all other stages are still placeholders that
-  always advance.
-- `LocalRunner` and `RemoteRunner` intentionally raise `NotImplementedError`.
+- `inventory` and the SeqKit stats part of `read_qc` have real routing; the
+  downstream domain stages are still placeholders that always advance.
+- `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
+  intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
-- SeqKit stats is the planned first real method slice, but no Phase 2 execution
-  code has been written yet.
+- SeqKit is not installed in this local environment during verification; tests
+  use a temporary fake `seqkit` executable for the success path and cover the
+  missing-binary failure path.
 
 ## Files Most Likely To Change In Phase 2
 
@@ -144,7 +169,7 @@ resume before the corresponding human decision is explicit in the task docs.
 - `app/stages/read_qc/routing.py`
 - `app/stages/genome_survey/nodes.py`
 - `app/stages/genome_survey/routing.py`
-- `app/execution/local.py`
+- `app/execution/local_runner.py`
 - `app/schemas/commands.py`
 - `app/schemas/artifacts.py`
 - `config/defaults.yaml`

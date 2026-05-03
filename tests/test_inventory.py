@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +71,38 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(asset["provenance"]["manifest_ref"], str(path))
             self.assertEqual(asset["provenance"]["declared_path"], str(fq))
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
+
+    def test_inventory_registers_cycloneseq_fastq_as_raw_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "BGI_CycloneSEQ_sample.fastq.gz"
+
+            fq.write_bytes(gzip.compress(b"@r1\nACGT\n+\n!!!!\n"))
+            manifest = {
+                "session_id": "cyclone-s1",
+                "assets": [
+                    {
+                        "asset_type": "raw_long_reads",
+                        "paths": [str(fq)],
+                        "platform": "cycloneseq",
+                        "metadata": {"technology": "BGI CycloneSEQ"},
+                    },
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="cyclone-s1",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertEqual(result["current_stage"], "read_qc")
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            asset = registry["assets"][0]
+            self.assertEqual(asset["asset_type"], "raw_long_reads")
+            self.assertEqual(asset["platform"], "cycloneseq")
+            self.assertEqual(asset["format"], "fastq")
+            self.assertEqual(asset["metadata"]["compression"], "gzip")
 
     def test_inventory_registers_multiple_assets(self):
         with tempfile.TemporaryDirectory() as tmpdir:

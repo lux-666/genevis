@@ -1,0 +1,21 @@
+method_name: read_qc.long_read_stats.seqkit_stats
+stage: read_qc
+package_ref: seqkit
+goal: "Compute long-read FASTQ summary statistics with SeqKit stats."
+required_inputs:
+  - name: raw_long_reads
+    type: raw_long_reads
+    description: "Registered CycloneSEQ FASTQ or FASTQ.gz long-read input."
+expected_outputs:
+  - name: read_stats
+    type: read_qc.long_read_stats
+    description: "Tabular SeqKit stats output."
+review_rules:
+  - read_stats_artifact_exists
+human_review_triggers:
+  - stats_thresholds_required
+resource_hints:
+  cpu_cores: 1
+  memory_gb: 1.0
+  gpu_required: false
+  walltime_hours: 1.0

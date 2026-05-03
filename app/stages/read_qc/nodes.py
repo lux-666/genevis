@@ -1,1 +1,320 @@
-"""Read QC stage nodes placeholder."""
+"""Read QC stage nodes for the first SeqKit stats slice."""
+
+from __future__ import annotations
+
+import csv
+import json
+import shlex
+from pathlib import Path
+from typing import Any
+
+from app.control.ledger import Ledger
+from app.execution.artifacts import append_artifact_records
+from app.execution.local_runner import LocalRunner
+from app.graph.routing import next_stage_name
+from app.schemas.artifacts import ArtifactMeta
+from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.state import TopLevelState
+
+METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
+
+
+def _read_qc_output(state: TopLevelState) -> dict[str, Any]:
+    return dict((state.get("stage_outputs") or {}).get("read_qc", {}))
+
+
+def _update_read_qc_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["read_qc"] = {**_read_qc_output(state), **payload}
+    return {"stage_outputs": outputs}
+
+
+def _fail_update(state: TopLevelState, reason: str) -> dict:
+    return _update_read_qc_output(state, {"status": "failed", "reason": reason})
+
+
+def enter_read_qc(state: TopLevelState) -> dict:
+    """Mark read QC as running."""
+    return {"supervision_state": "running_stage"}
+
+
+def resolve_raw_long_reads(state: TopLevelState) -> dict:
+    """Resolve a single raw_long_reads asset from the asset registry."""
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return _fail_update(state, "missing asset_registry_ref for read_qc")
+
+    registry_path = Path(registry_ref)
+    if not registry_path.exists():
+        return _fail_update(state, f"asset registry not found: {registry_ref}")
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    assets = [asset for asset in registry.get("assets", []) if asset.get("asset_type") == "raw_long_reads"]
+    if not assets:
+        return _fail_update(state, "raw_long_reads asset not found in registry")
+    if len(assets) > 1:
+        return _fail_update(state, "multiple raw_long_reads assets require explicit multi-input policy")
+
+    asset = assets[0]
+    path = Path(asset["path"])
+    if not path.exists():
+        return _fail_update(state, f"raw_long_reads path not found: {path}")
+
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "resolved",
+            "input_asset_ref": asset.get("asset_id"),
+            "raw_long_reads_path": str(path),
+            "platform": asset.get("platform"),
+            "format": asset.get("format"),
+        },
+    )
+
+
+def plan_seqkit_stats(state: TopLevelState) -> dict:
+    """Load SeqKit descriptors and decide whether local execution is enabled."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") != "resolved":
+        return {}
+
+    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    if METHOD_NAME not in registry.methods:
+        return _fail_update(state, f"descriptor missing: {METHOD_NAME}")
+
+    update = {
+        "status": "planned",
+        "method_name": METHOD_NAME,
+        "package_name": registry.methods[METHOD_NAME].package_ref,
+    }
+    if read_qc_out.get("execution_mode") != "local":
+        update["skip_reason"] = "local_execution_not_enabled"
+    return _update_read_qc_output(state, update)
+
+
+def freeze_seqkit_attempt(state: TopLevelState) -> dict:
+    """Write a deterministic SeqKit command script and freeze an attempt spec."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") != "planned":
+        return {}
+
+    session_id = state["session_id"]
+    data_dir = Path(state.get("data_dir", "data"))
+    attempt_id = f"{session_id}:read_qc:seqkit_stats"
+    working_dir = data_dir / "work" / "read_qc" / session_id / "seqkit_stats"
+    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    input_path = Path(read_qc_out["raw_long_reads_path"])
+    stats_path = artifact_dir / "seqkit_stats.tsv"
+    script_path = working_dir / "run_seqkit_stats.sh"
+    script_path.write_text(
+        "set -e\n"
+        f"seqkit stats -a -T {shlex.quote(str(input_path))} > {shlex.quote(str(stats_path))}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    attempt = FrozenAttemptSpec(
+        attempt_id=attempt_id,
+        session_id=session_id,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        script_path=script_path,
+        working_dir=working_dir,
+        interpreter="/bin/bash",
+        expected_outputs=[stats_path],
+        env={str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
+        metadata={
+            "input_asset_ref": read_qc_out.get("input_asset_ref"),
+            "raw_long_reads_path": str(input_path),
+            "stats_path": str(stats_path),
+        },
+    )
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "frozen",
+            "frozen_attempt": attempt.model_dump(mode="json"),
+            "stats_output_path": str(stats_path),
+        },
+    )
+
+
+def run_seqkit_stats(state: TopLevelState) -> dict:
+    """Run the frozen SeqKit attempt locally."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") != "frozen":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(read_qc_out["frozen_attempt"])
+    ledger = Ledger(state.get("data_dir", "data"))
+    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(attempt.session_id, attempt)
+
+    result = LocalRunner().run(attempt)
+    if not result.success:
+        for path in attempt.expected_outputs:
+            if path.exists():
+                path.unlink()
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error = stderr.strip() or f"seqkit stats failed with return code {result.return_code}"
+        ledger.record_attempt_failed(
+            attempt.session_id,
+            attempt,
+            return_code=result.return_code,
+            error=error,
+        )
+        return _update_read_qc_output(
+            state,
+            {
+                "status": "failed",
+                "reason": error,
+                "execution_result": result.model_dump(mode="json"),
+            },
+        )
+
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "ran",
+            "execution_result": result.model_dump(mode="json"),
+        },
+    )
+
+
+def collect_seqkit_artifacts(state: TopLevelState) -> dict:
+    """Collect SeqKit stats and command artifacts."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") != "ran":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(read_qc_out["frozen_attempt"])
+
+    stats_path = Path(read_qc_out["stats_output_path"])
+    execution_result = read_qc_out["execution_result"]
+    stdout_path = Path(execution_result["stdout_path"])
+    stderr_path = Path(execution_result["stderr_path"])
+    if not stats_path.exists():
+        reason = f"expected SeqKit stats output missing: {stats_path}"
+        Ledger(state.get("data_dir", "data")).record_attempt_failed(
+            attempt.session_id,
+            attempt,
+            return_code=0,
+            error=reason,
+        )
+        return _update_read_qc_output(state, {"status": "failed", "reason": reason})
+
+    artifacts = [
+        ArtifactMeta.from_file(
+            stats_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type="read_qc.long_read_stats",
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "format": "tsv",
+                "tool": "seqkit",
+            },
+        )
+    ]
+    for path, artifact_type in [
+        (stdout_path, "command.stdout"),
+        (stderr_path, "command.stderr"),
+    ]:
+        if path.exists():
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    path,
+                    stage="read_qc",
+                    method_name=METHOD_NAME,
+                    artifact_type=artifact_type,
+                    metadata={"attempt_id": attempt.attempt_id},
+                )
+            )
+
+    append_artifact_records(state.get("data_dir", "data"), attempt.session_id, artifacts)
+    ledger = Ledger(state.get("data_dir", "data"))
+    artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+    ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)
+    for artifact in artifact_payloads:
+        ledger.record_artifact_registered(attempt.session_id, artifact, attempt_id=attempt.attempt_id)
+
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "completed",
+            "stats_artifact_ref": str(stats_path),
+            "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
+            "summary": _parse_seqkit_summary(stats_path),
+        },
+    )
+
+
+def commit_read_qc(state: TopLevelState) -> dict:
+    """Advance to genome_survey after read QC planning or execution."""
+    read_qc_out = _read_qc_output(state)
+    trace = [*state.get("route_trace", []), "read_qc_stage"]
+    next_stage = next_stage_name("read_qc")
+    status = "completed" if read_qc_out.get("status") == "completed" else read_qc_out.get("status", "planned")
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["read_qc"] = {**read_qc_out, "status": status}
+    return {
+        "current_stage": next_stage,
+        "supervision_state": "running_stage",
+        "route_trace": trace,
+        "stage_outputs": outputs,
+    }
+
+
+def fail_read_qc(state: TopLevelState) -> dict:
+    """Stop the workflow on read QC failure."""
+    read_qc_out = _read_qc_output(state)
+    return {
+        "current_stage": "read_qc",
+        "supervision_state": "failed_terminal",
+        "last_error": read_qc_out.get("reason", "read_qc failed"),
+    }
+
+
+def _parse_seqkit_summary(stats_path: Path) -> dict[str, Any]:
+    """Parse compact summary fields from SeqKit TSV output."""
+    with stats_path.open("r", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    if not rows:
+        return {}
+    row = rows[0]
+    sum_len = _parse_int(row.get("sum_len"))
+    return {
+        "num_seqs": _parse_int(row.get("num_seqs")),
+        "sum_len": sum_len,
+        "total_bases": sum_len,
+        "min_len": _parse_int(row.get("min_len")),
+        "avg_len": _parse_float(row.get("avg_len")),
+        "max_len": _parse_int(row.get("max_len")),
+        "n50": _parse_int(_row_value(row, "N50", "n50")),
+        "q20_percent": _parse_float(_row_value(row, "Q20(%)", "q20_percent", "Q20")),
+        "q30_percent": _parse_float(_row_value(row, "Q30(%)", "q30_percent", "Q30")),
+        "avg_qual": _parse_float(_row_value(row, "AvgQual", "avg_qual")),
+    }
+
+
+def _row_value(row: dict[str, str], *keys: str) -> str | None:
+    for key in keys:
+        if key in row:
+            return row[key]
+    return None
+
+
+def _parse_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value.replace(",", ""))
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value.replace(",", ""))

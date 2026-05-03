@@ -64,6 +64,76 @@ class Ledger:
             },
         )
 
+    def record_attempt_started(self, session_id: str, attempt: FrozenAttemptSpec) -> None:
+        """Append an attempt-start event."""
+        self.record_event(
+            session_id,
+            "attempt_started",
+            {
+                "attempt_id": attempt.attempt_id,
+                "stage": attempt.stage,
+                "method_name": attempt.method_name,
+                "working_dir": str(attempt.working_dir),
+            },
+        )
+
+    def record_attempt_succeeded(
+        self,
+        session_id: str,
+        attempt: FrozenAttemptSpec,
+        *,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Append an attempt-success event."""
+        self.record_event(
+            session_id,
+            "attempt_succeeded",
+            {
+                "attempt_id": attempt.attempt_id,
+                "stage": attempt.stage,
+                "method_name": attempt.method_name,
+                "artifacts": artifacts or [],
+            },
+        )
+
+    def record_attempt_failed(
+        self,
+        session_id: str,
+        attempt: FrozenAttemptSpec,
+        *,
+        return_code: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Append an attempt-failure event."""
+        self.record_event(
+            session_id,
+            "attempt_failed",
+            {
+                "attempt_id": attempt.attempt_id,
+                "stage": attempt.stage,
+                "method_name": attempt.method_name,
+                "return_code": return_code,
+                "error": error,
+            },
+        )
+
+    def record_artifact_registered(
+        self,
+        session_id: str,
+        artifact: dict[str, Any],
+        *,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Append an artifact-registration event."""
+        self.record_event(
+            session_id,
+            "artifact_registered",
+            {
+                "attempt_id": attempt_id,
+                "artifact": artifact,
+            },
+        )
+
     def record_assets_registered(
         self,
         session_id: str,

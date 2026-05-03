@@ -105,9 +105,11 @@ class FileInferenceTests(unittest.TestCase):
         self.assertEqual(_detect_platform(Path("ont_reads.fq"), "unknown"), "ont")
         self.assertEqual(_detect_platform(Path("clr_reads.fq"), "unknown"), "clr")
         self.assertEqual(_detect_platform(Path("hifi_reads.fq"), "unknown"), "pacbio_hifi")
+        self.assertEqual(_detect_platform(Path("sample_CycloneSEQ.fastq.gz"), "unknown"), "cycloneseq")
 
     def test_detect_platform_respects_declared(self):
         self.assertEqual(_detect_platform(Path("x.fq"), "illumina"), "illumina")
+        self.assertEqual(_detect_platform(Path("x.fq"), "cycloneseq"), "cycloneseq")
 
     def test_detect_layout_paired(self):
         self.assertEqual(
@@ -204,6 +206,18 @@ class ManifestValidationTests(unittest.TestCase):
             self.assertEqual(props["inferred_layout"], "paired")
             self.assertEqual(props["inferred_compression"], "gzip")
             self.assertEqual(props["inferred_format"], "fastq")
+
+    def test_infer_cycloneseq_platform_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "sample.fastq.gz"
+            fq.write_bytes(gzip.compress(b"@r1\nACGT\n+\n!!!!\n"))
+            spec = InputAssetSpec(
+                asset_type="raw_long_reads",
+                paths=[str(fq)],
+                metadata={"technology": "BGI CycloneSEQ"},
+            )
+            props = _infer_asset_properties(spec)
+            self.assertEqual(props["inferred_platform"], "cycloneseq")
 
 
 if __name__ == "__main__":

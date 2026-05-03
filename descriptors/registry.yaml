@@ -1,8 +1,11 @@
-packages: {}
-methods: {}
+packages:
+  seqkit: seqkit.yaml
+methods:
+  read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
 by_stage:
   inventory: []
-  read_qc: []
+  read_qc:
+    - read_qc.long_read_stats.seqkit_stats
   genome_survey: []
   assembly: []
   assembly_review: []

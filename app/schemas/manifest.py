@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.assets import AssetType
 
-Platform = Literal["ont", "clr", "pacbio_hifi", "illumina", "unknown"]
+Platform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown"]
 Layout = Literal["single", "paired", "unknown"]
 Format = Literal["fastq", "fasta", "bam", "cram", "hic", "assembly", "unknown"]
 Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
@@ -101,10 +101,24 @@ def _detect_format(path: Path) -> Format:
     return "unknown"
 
 
-def _detect_platform(path: Path, declared: Platform) -> Platform:
+def _metadata_indicates_cycloneseq(metadata: dict[str, Any]) -> bool:
+    """Return whether user metadata explicitly names BGI CycloneSEQ."""
+    values = [str(value).lower() for value in metadata.values() if isinstance(value, (str, int, float))]
+    return any("cycloneseq" in value or "cyclone seq" in value for value in values)
+
+
+def _detect_platform(
+    path: Path,
+    declared: Platform,
+    metadata: dict[str, Any] | None = None,
+) -> Platform:
     if declared != "unknown":
         return declared
     name = path.name.lower()
+    if "cycloneseq" in name or "cyclone_seq" in name or "cyclone-seq" in name:
+        return "cycloneseq"
+    if metadata and _metadata_indicates_cycloneseq(metadata):
+        return "cycloneseq"
     if "ont" in name or "nanopore" in name or "minion" in name:
         return "ont"
     if "clr" in name or "pacbio" in name or "sequel" in name:
@@ -152,7 +166,7 @@ def _infer_asset_properties(spec: InputAssetSpec) -> dict[str, Any]:
         first = paths[0]
         props["inferred_compression"] = _detect_compression(first)
         props["inferred_format"] = _detect_format(first)
-        props["inferred_platform"] = _detect_platform(first, spec.platform)
+        props["inferred_platform"] = _detect_platform(first, spec.platform, spec.metadata)
         props["inferred_layout"] = _detect_layout(paths)
     return props
 
