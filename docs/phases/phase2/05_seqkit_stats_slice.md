@@ -1,4 +1,4 @@
-# Task 5: Specify SeqKit Stats Vertical Slice
+# 05 SeqKit Stats Slice
 
 Status: planned.
 

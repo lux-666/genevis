@@ -1,4 +1,4 @@
-# Task 2: Define CycloneSEQ Stage And Method Inventory
+# 02 CycloneSEQ Method Inventory
 
 Status: planned.
 

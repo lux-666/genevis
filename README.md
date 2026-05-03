@@ -29,7 +29,7 @@ Start here if you are taking over the project:
 6. [docs/stage_contracts.md](docs/stage_contracts.md)
 7. [docs/phases/phase1/phase1.md](docs/phases/phase1/phase1.md)
 8. [docs/phases/phase2/phase2.md](docs/phases/phase2/phase2.md)
-9. [docs/phases/phase2/task5.md](docs/phases/phase2/task5.md)
+9. [docs/phases/phase2/05_seqkit_stats_slice.md](docs/phases/phase2/05_seqkit_stats_slice.md)
 10. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
 
 ## Current Implementation

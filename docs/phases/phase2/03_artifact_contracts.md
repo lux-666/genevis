@@ -1,4 +1,4 @@
-# Task 3: Define Artifact Contract And Asset Transitions
+# 03 Artifact Contracts
 
 Status: planned.
 

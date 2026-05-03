@@ -1,4 +1,4 @@
-# Task 1: Move Phase 1 Leftovers Into Phase 2 Decisions
+# 01 Phase 2 Decisions
 
 Status: planned.
 
@@ -30,7 +30,7 @@ for a real Phase 2 method slice.
 
 - `docs/phases/phase1/phase1.md`
 - `docs/phases/phase2/phase2.md`
-- `docs/phases/phase2/task*.md`
+- `docs/phases/phase2/01_*.md` through `07_*.md`
 
 ## Verification
 

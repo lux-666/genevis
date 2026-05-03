@@ -63,7 +63,7 @@ Read these files in order:
 6. `docs/descriptor_spec.md`
 7. `docs/phases/phase1/phase1.md`
 8. `docs/phases/phase2/phase2.md`
-9. `docs/phases/phase2/task5.md`
+9. `docs/phases/phase2/05_seqkit_stats_slice.md`
 10. `docs/phases/phase_completion_plan.md`
 11. This file again
 
@@ -100,9 +100,13 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Start Phase 2 task execution from `docs/phases/phase2/task5.md` only after
-reviewing `docs/phases/phase2/phase2.md`, `task2.md`, `task3.md`, and
-`task4.md`. The first implementation slice should stay narrow:
+Start Phase 2 execution from
+`docs/phases/phase2/05_seqkit_stats_slice.md` only after reviewing
+`docs/phases/phase2/phase2.md`,
+`docs/phases/phase2/02_cycloneseq_method_inventory.md`,
+`docs/phases/phase2/03_artifact_contracts.md`, and
+`docs/phases/phase2/04_decision_gates.md`. The first implementation slice
+should stay narrow:
 `read_qc.long_read_stats -> SeqKit stats`.
 
 Do not implement broad assembly, annotation, requested-stage routing, or review

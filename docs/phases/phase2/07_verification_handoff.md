@@ -1,4 +1,4 @@
-# Task 7: Define Verification, Acceptance, And Handoff Checkpoints
+# 07 Verification Handoff
 
 Status: planned.
 
@@ -43,7 +43,7 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m un
 
 ## Handoff Rule
 
-- [ ] Update `docs/handoff.md` after each Phase 2 task.
+- [ ] Update `docs/handoff.md` after each Phase 2 handoff document.
 - [ ] Keep checkboxes current.
 - [ ] Commit documentation changes separately from code changes when practical.
 - [ ] Stop and ask before changing stage order, method candidate sets, gate

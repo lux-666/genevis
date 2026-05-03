@@ -1,4 +1,4 @@
-# Task 6: Plan Descriptor, FrozenAttemptSpec, Runner, And Ledger Alignment
+# 06 Runner Ledger Alignment
 
 Status: planned.
 

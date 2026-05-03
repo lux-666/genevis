@@ -147,14 +147,14 @@ Human decision rule:
 
 ## 5. Task Order
 
-1. [ ] [task1.md](task1.md) - Migrate Phase 1 leftovers into Phase 2 decisions.
-2. [ ] [task2.md](task2.md) - Define CycloneSEQ stage and method inventory.
-3. [ ] [task3.md](task3.md) - Define artifact contract and asset transitions.
-4. [ ] [task4.md](task4.md) - Define decision gates and human-help triggers.
-5. [ ] [task5.md](task5.md) - Specify SeqKit stats vertical slice.
-6. [ ] [task6.md](task6.md) - Plan descriptor, FrozenAttemptSpec, runner, and
+1. [ ] [01_phase2_decisions.md](01_phase2_decisions.md) - Migrate Phase 1 leftovers into Phase 2 decisions.
+2. [ ] [02_cycloneseq_method_inventory.md](02_cycloneseq_method_inventory.md) - Define CycloneSEQ stage and method inventory.
+3. [ ] [03_artifact_contracts.md](03_artifact_contracts.md) - Define artifact contract and asset transitions.
+4. [ ] [04_decision_gates.md](04_decision_gates.md) - Define decision gates and human-help triggers.
+5. [ ] [05_seqkit_stats_slice.md](05_seqkit_stats_slice.md) - Specify SeqKit stats vertical slice.
+6. [ ] [06_runner_ledger_alignment.md](06_runner_ledger_alignment.md) - Plan descriptor, FrozenAttemptSpec, runner, and
    ledger alignment.
-7. [ ] [task7.md](task7.md) - Define verification, acceptance, and handoff
+7. [ ] [07_verification_handoff.md](07_verification_handoff.md) - Define verification, acceptance, and handoff
    checkpoints.
 
 ## 6. Verification
