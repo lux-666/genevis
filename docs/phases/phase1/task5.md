@@ -25,12 +25,11 @@ Do not copy:
 
 ## Required Behavior
 
-- Asset provenance includes:
-  - actual `manifest_ref`
-  - `declared_path` or `source_path`
-  - optional registry event metadata
-- Empty manifests fail by default.
-- If dry-run mode is desired later, it must be explicit.
+- [x] Asset provenance includes actual `manifest_ref`.
+- [x] Asset provenance includes `declared_path` or `source_path`.
+- [ ] Asset provenance includes optional registry event metadata.
+- [x] Empty manifests fail by default.
+- [x] If dry-run mode is desired later, it must be explicit.
 
 ## Files
 

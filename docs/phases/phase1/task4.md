@@ -26,11 +26,11 @@ Do not copy:
 
 ## Required Behavior
 
-- State stores `input_manifest_ref`, validation summary, warnings, errors, and
+- [x] State stores `input_manifest_ref`, validation summary, warnings, errors, and
   compact counts.
-- If normalized manifest content must be persisted, write it as an artifact
+- [ ] If normalized manifest content must be persisted, write it as an artifact
   under `data/artifacts/manifests/<session_id>/`.
-- `register_assets` reloads from `input_manifest_ref` or a normalized manifest
+- [x] `register_assets` reloads from `input_manifest_ref` or a normalized manifest
   artifact reference.
 
 ## Files

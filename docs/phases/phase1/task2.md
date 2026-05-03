@@ -27,12 +27,12 @@ Do not copy:
 
 ## Required Behavior
 
-- Existing assembly only should produce an `entry_mode` such as
+- [x] Existing assembly only should produce an `entry_mode` such as
   `existing_assembly`.
-- `skip_reasons` should include read QC, genome survey, and assembly.
-- Default next stage should be `assembly_review`, because an existing assembly
+- [x] `skip_reasons` should include read QC, genome survey, and assembly.
+- [x] Default next stage should be `assembly_review`, because an existing assembly
   still needs evaluation before annotation.
-- Stage order should not be changed.
+- [x] Stage order should not be changed.
 
 ## Files
 
@@ -44,12 +44,12 @@ Do not copy:
 
 ## Steps
 
-1. Update the existing-assembly test to expect `current_stage ==
+1. [x] Update the existing-assembly test to expect `current_stage ==
    "assembly_review"`.
-2. Add assertions for `skip_reasons`.
-3. Add compact route intent in inventory output or state.
-4. Route existing-assembly inventory commits to `assembly_review`.
-5. Run inventory tests.
+2. [x] Add assertions for `skip_reasons`.
+3. [x] Add compact route intent in inventory output or state.
+4. [x] Route existing-assembly inventory commits to `assembly_review`.
+5. [x] Run inventory tests.
 
 ## Verification
 

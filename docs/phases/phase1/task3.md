@@ -31,9 +31,9 @@ Do not copy:
 The framework currently does not specify which requested-stage semantics are
 desired. Present these options to the human and implement only the chosen one:
 
-1. Remove `--stages` until routing semantics are implemented.
-2. Restrict `--stages` to inventory-only smoke mode.
-3. Implement dependency-aware requested-stage routing later, after inventory
+1. [x] Remove `--stages` until routing semantics are implemented.
+2. [ ] Restrict `--stages` to inventory-only smoke mode.
+3. [ ] Implement dependency-aware requested-stage routing later, after inventory
    route intent and skip reasons are corrected.
 
 Recommended Phase 1 direction to present: option 1 or option 2. Do not implement

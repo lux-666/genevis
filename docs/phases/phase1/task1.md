@@ -33,11 +33,11 @@ Do not copy:
 
 ## Required Behavior
 
-- Ambiguous long-read vs long-RNA inputs set `active_interrupt`.
-- `supervision_state` becomes `blocked_human`.
-- `current_stage` remains `inventory`.
-- No downstream biological stage runs.
-- Asset registry is not written before human approval unless a human-approved
+- [x] Ambiguous long-read vs long-RNA inputs set `active_interrupt`.
+- [x] `supervision_state` becomes `blocked_human`.
+- [x] `current_stage` remains `inventory`.
+- [x] No downstream biological stage runs.
+- [x] Asset registry is not written before human approval unless a human-approved
   provisional-registration rule is explicitly added later.
 
 ## Files
@@ -49,13 +49,13 @@ Do not copy:
 
 ## Steps
 
-1. Change the test first so the ambiguous-input case expects `current_stage` to
+1. [x] Change the test first so the ambiguous-input case expects `current_stage` to
    stay `inventory`.
-2. Run the focused test and confirm it fails.
-3. Change inventory graph routing so `review_gate` ends the subgraph without
+2. [x] Run the focused test and confirm it fails.
+3. [x] Change inventory graph routing so `review_gate` ends the subgraph without
    commit.
-4. Make parent routing stop when `supervision_state == "blocked_human"`.
-5. Run the focused test again.
+4. [x] Make parent routing stop when `supervision_state == "blocked_human"`.
+5. [x] Run the focused test again.
 
 ## Verification
 
