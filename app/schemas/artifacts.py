@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -58,3 +58,18 @@ class ArtifactMeta(BaseModel):
             method_name=method_name,
             metadata=metadata or {},
         )
+
+
+class GenomeSurveyResult(BaseModel):
+    """Compact genome survey contract written by the genome_survey stage."""
+
+    session_id: str
+    mode: Literal["full", "fallback_low_confidence", "skipped"]
+    status: Literal["planned", "skipped"]
+    confidence: Literal["high", "low", "none"]
+    input_asset_refs: list[str] = Field(default_factory=list)
+    candidate_methods: list[str] = Field(default_factory=list)
+    estimates: dict[str, Any] = Field(default_factory=dict)
+    skip_reason: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

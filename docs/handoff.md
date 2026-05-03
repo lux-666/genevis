@@ -45,6 +45,10 @@ Completed:
   slice. It resolves `raw_long_reads`, freezes a SeqKit stats attempt, runs via
   the local runner when `execution_mode` is `local`, writes artifacts, records
   ledger events, and keeps only refs plus a compact summary in graph state.
+- `genome_survey` has a real deterministic contract stage. It chooses full
+  k-mer survey planning when `clean_short_dna_reads` exists, writes a
+  low-confidence CycloneSEQ fallback record for long-read-only inputs, or writes
+  `skip_reason: no_low_error_short_reads` when no usable survey input exists.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
 - Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
@@ -59,10 +63,11 @@ Completed:
 
 Not completed:
 
-- No broad bioinformatics method catalog beyond the first SeqKit stats slice.
+- No executable bioinformatics method catalog beyond the first SeqKit stats
+  slice.
 - RemoteRunner execution is not implemented.
-- Read filtering, FOFN generation, genome survey, assembly, scaffold, repeat,
-  gene, and function annotation execution are not implemented.
+- Read filtering, FOFN generation, genome survey tool execution, assembly,
+  scaffold, repeat, gene, and function annotation execution are not implemented.
 - Review interrupt resume logic is not implemented.
 
 ## Read Order
@@ -99,7 +104,7 @@ Do not copy single-cell business names into this project.
 Use the conda environment already used for scaffold verification:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey -v
 ```
 
 ```bash
@@ -124,11 +129,11 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 2 execution from
-`docs/phases/phase2/03_read_qc_filter_fofn.md`. Tasks 01 and 02 are
-implemented: CycloneSEQ FASTQ inventory registers `raw_long_reads`, and
-`read_qc.long_read_stats -> SeqKit stats` can run locally when explicitly
-enabled.
+This branch implements `docs/phases/phase2/04_genome_survey_modes.md`
+independently because task 03 is being implemented on a separate feature branch.
+Do not reimplement task 03 here. After the task 03 branch is merged with this
+branch, continue Phase 2 execution from
+`docs/phases/phase2/05_assembly_candidates.md`.
 
 Do not implement broad assembly, annotation, requested-stage routing, or review
 resume before the corresponding human decision is explicit in the task docs.
@@ -137,6 +142,7 @@ resume before the corresponding human decision is explicit in the task docs.
 
 - Stage order is fixed in `app/stages/__init__.py`.
 - `genome_survey` exists as a stage but must be skippable.
+- Genome survey output is a prior for assembly, not a hard prerequisite.
 - `hic_scaffolding` exists as a stage but must be skippable.
 - Assembly review is the main human-gated decision point.
 - `TopLevelState` should stay small and reference-based.
@@ -150,8 +156,11 @@ resume before the corresponding human decision is explicit in the task docs.
 
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
-- `inventory` and the SeqKit stats part of `read_qc` have real routing; the
-  downstream domain stages are still placeholders that always advance.
+- `inventory`, the SeqKit stats part of `read_qc`, and `genome_survey` have real
+  routing; downstream stages from `assembly` onward are still placeholders that
+  always advance.
+- Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
+  are planning placeholders only; there is no execution path for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.

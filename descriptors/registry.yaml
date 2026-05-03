@@ -2,8 +2,16 @@ packages:
   chopper: chopper.yaml
   fastplong: fastplong.yaml
   filtlong: filtlong.yaml
+  genomescope2: genomescope2.yaml
+  jellyfish: jellyfish.yaml
+  meryl: meryl.yaml
   seqkit: seqkit.yaml
+  smudgeplot: smudgeplot.yaml
 methods:
+  genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
+  genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
+  genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
+  genome_survey.model.smudgeplot: genome_survey/smudgeplot_model.yaml
   read_qc.length_filter.chopper: read_qc/chopper_length_filter.yaml
   read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
   read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
@@ -17,7 +25,11 @@ by_stage:
     - read_qc.length_filter.fastplong
     - read_qc.length_filter.filtlong
     - read_qc.length_filter.seqkit_seq
-  genome_survey: []
+  genome_survey:
+    - genome_survey.kmer_count.jellyfish
+    - genome_survey.kmer_count.meryl
+    - genome_survey.model.genomescope2
+    - genome_survey.model.smudgeplot
   assembly: []
   assembly_review: []
   hic_scaffolding: []

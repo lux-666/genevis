@@ -15,8 +15,10 @@ inventory -> read_qc -> genome_survey -> assembly -> assembly_review
 -> hic_scaffolding -> repeat_annotation -> gene_annotation -> function_annotation
 ```
 
-`genome_survey` runs only when low-error short DNA reads exist. `hic_scaffolding`
-runs only when Hi-C assets exist and chromosome-level assembly is requested.
+`genome_survey` plans a full k-mer survey only when low-error short DNA reads
+exist; CycloneSEQ-only projects get an explicit low-confidence fallback record.
+`hic_scaffolding` runs only when Hi-C assets exist and chromosome-level assembly
+is requested.
 
 ## Read First
 
@@ -39,10 +41,11 @@ Implemented:
 
 - thin parent graph skeleton
 - real inventory stage and a real `read_qc.long_read_stats` SeqKit stats slice
-- placeholder downstream domain stage subgraphs after read QC
+- real `genome_survey` full/fallback/skip contract stage
+- placeholder downstream domain stage subgraphs after genome survey
 - small `TopLevelState`
 - asset, plan, descriptor, artifact, command, and event schema roots
-- descriptor/config roots, including the SeqKit package and method descriptor
+- descriptor/config roots, including SeqKit and genome survey planning descriptors
 - phase plan and handoff documentation
 - Phase 1 inventory code for manifest loading, asset registry writing, ledger
   events, and CLI invocation
@@ -51,10 +54,10 @@ Implemented:
 
 Not implemented:
 
-- broad bioinformatics method catalog beyond SeqKit stats
+- executable bioinformatics method catalog beyond SeqKit stats
 - RemoteRunner execution
-- read filtering, FOFN generation, genome survey, assembly, scaffolding, repeat,
-  gene, or function annotation execution
+- read filtering, FOFN generation, genome survey tool execution, assembly,
+  scaffolding, repeat, gene, or function annotation execution
 - complete review interrupt blocking/resume semantics
 - production-grade requested-stage routing; the placeholder `--stages` flag is
   intentionally not exposed yet
@@ -73,7 +76,7 @@ annotation.
 Use the same environment and pycache prefix used during scaffold validation:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey -v
 ```
 
 ```bash

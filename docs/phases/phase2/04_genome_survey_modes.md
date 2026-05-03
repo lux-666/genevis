@@ -1,5 +1,7 @@
 # 04 Genome Survey Full And Fallback Modes
 
+Task status: implemented.
+
 ## Goal
 
 Add a real `genome_survey` contract after read QC with two modes:
@@ -11,9 +13,10 @@ Add a real `genome_survey` contract after read QC with two modes:
 
 - Modify: `app/stages/genome_survey/nodes.py`
 - Modify: `app/stages/genome_survey/routing.py`
-- Modify: `app/schemas/plan.py`
 - Modify: `app/schemas/artifacts.py`
-- Add descriptors later: `descriptors/methods/genome_survey/`
+- Add: `descriptors/packages/{jellyfish,meryl,genomescope2,smudgeplot}.yaml`
+- Add: `descriptors/methods/genome_survey/`
+- Modify: `descriptors/registry.yaml`
 - Test: `tests/test_genome_survey.py`
 - Keep baseline: `tests/test_project_scaffold.py`
 
@@ -112,16 +115,38 @@ Required guardrail:
 
 ## Tasks
 
-- [ ] Add route decision for full mode, fallback mode, and skipped mode.
-- [ ] Add `genome_survey_result` artifact schema.
-- [ ] Add skip reason `no_low_error_short_reads`.
-- [ ] Add low-confidence fallback summary for CycloneSEQ-only projects.
-- [ ] Add descriptor placeholders for Jellyfish, Meryl, GenomeScope2, and
+- [x] Add route decision for full mode, fallback mode, and skipped mode.
+- [x] Add `genome_survey_result` artifact schema.
+- [x] Add skip reason `no_low_error_short_reads`.
+- [x] Add low-confidence fallback summary for CycloneSEQ-only projects.
+- [x] Add descriptor placeholders for Jellyfish, Meryl, GenomeScope2, and
   Smudgeplot.
-- [ ] Add tests for full mode with short reads.
-- [ ] Add tests for fallback mode with only long reads.
-- [ ] Add tests that long-read-only mode cannot be marked high-confidence k-mer
+- [x] Add tests for full mode with short reads.
+- [x] Add tests for fallback mode with only long reads.
+- [x] Add tests that long-read-only mode cannot be marked high-confidence k-mer
   survey.
+
+## Implemented State
+
+- `app/stages/genome_survey/builder.py` now builds a real deterministic
+  subgraph instead of the generic placeholder.
+- `app/stages/genome_survey/nodes.py` resolves asset registry inputs, chooses
+  `full`, `fallback_low_confidence`, or `skipped`, writes a compact
+  `genome_survey_result.json`, appends artifact metadata, and advances to
+  `assembly`.
+- `app/schemas/artifacts.py` defines `GenomeSurveyResult` for compact survey
+  contract artifacts.
+- `descriptors/packages/` and `descriptors/methods/genome_survey/` now include
+  placeholders for Jellyfish, Meryl, GenomeScope2, and Smudgeplot. These are
+  planning descriptors, not executable method implementations.
+- Full mode requires `clean_short_dna_reads` and is marked `confidence: high`.
+- CycloneSEQ long-read fallback is marked `confidence: low`, may compute rough
+  coverage only when total bases and a genome-size prior are available, and
+  carries the guardrail note `not_equivalent_to_kmer_survey`.
+- Skipped mode writes `skip_reason: no_low_error_short_reads` so downstream
+  stages can inspect the reason without blocking assembly.
+- `tests/test_genome_survey.py` covers descriptor loading, missing registry,
+  full mode, low-confidence fallback, and skip behavior.
 
 ## Non-Goals
 
