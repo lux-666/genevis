@@ -28,8 +28,9 @@ Start here if you are taking over the project:
 5. [docs/architecture.md](docs/architecture.md)
 6. [docs/stage_contracts.md](docs/stage_contracts.md)
 7. [docs/phases/phase1/phase1.md](docs/phases/phase1/phase1.md)
-8. [docs/phases/phase1/task1.md](docs/phases/phase1/task1.md)
-9. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
+8. [docs/phases/phase2/phase2.md](docs/phases/phase2/phase2.md)
+9. [docs/phases/phase2/task5.md](docs/phases/phase2/task5.md)
+10. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
 
 ## Current Implementation
 
@@ -54,6 +55,10 @@ Not implemented:
 
 Phase 1 correction notes are documented in
 [docs/phases/phase1/phase1.md](docs/phases/phase1/phase1.md).
+
+Phase 2 CycloneSEQ planning is documented in
+[docs/phases/phase2/phase2.md](docs/phases/phase2/phase2.md). The first planned
+executable slice is `read_qc.long_read_stats` with SeqKit stats.
 
 ## Verification
 

@@ -14,6 +14,11 @@ fad12d3 Implement Phase 1: Parent Graph and Inventory MVP
 The Phase 1 correction pass is captured in `docs/phases/phase1/phase1.md`, with
 task details under `docs/phases/phase1/`.
 
+Phase 2 planning has started in `docs/phases/phase2/phase2.md`. Phase 2 is
+CycloneSEQ-focused: design the full FASTQ / FASTQ.gz genome assembly and
+annotation contract, then implement the first narrow executable method slice:
+`read_qc.long_read_stats -> SeqKit stats`.
+
 Completed:
 
 - Repository scaffold exists.
@@ -35,6 +40,10 @@ Completed:
 - Existing assembly inputs route to `assembly_review` and publish skip reasons.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
+- Phase 2 documentation defines the CycloneSEQ target backbone, read QC substeps,
+  genome_survey full/fallback modes, assembly candidates, assembly_review gates,
+  Hi-C skip/scaffold policy, repeat/gene/function annotation contracts, and
+  human-help triggers.
 
 Not completed:
 
@@ -53,9 +62,10 @@ Read these files in order:
 5. `docs/stage_contracts.md`
 6. `docs/descriptor_spec.md`
 7. `docs/phases/phase1/phase1.md`
-8. `docs/phases/phase1/task1.md`
-9. `docs/phases/phase_completion_plan.md`
-10. This file again
+8. `docs/phases/phase2/phase2.md`
+9. `docs/phases/phase2/task5.md`
+10. `docs/phases/phase_completion_plan.md`
+11. This file again
 
 Use `/Users/a1/Documents/BGIwork/rna_agent` as a reference for patterns only.
 Do not copy single-cell business names into this project.
@@ -90,10 +100,13 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Start Phase 2 only after confirming the Phase 1 correction commit is present on
-the feature branch. The next implementation slice should stay narrow: read QC
-planning based on the asset registry, without running heavy bioinformatics
-tools.
+Start Phase 2 task execution from `docs/phases/phase2/task5.md` only after
+reviewing `docs/phases/phase2/phase2.md`, `task2.md`, `task3.md`, and
+`task4.md`. The first implementation slice should stay narrow:
+`read_qc.long_read_stats -> SeqKit stats`.
+
+Do not implement broad assembly, annotation, requested-stage routing, or review
+resume before the corresponding human decision is explicit in the task docs.
 
 ## Immediate Design Decisions Already Made
 
@@ -116,6 +129,8 @@ tools.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
+- SeqKit stats is the planned first real method slice, but no Phase 2 execution
+  code has been written yet.
 
 ## Files Most Likely To Change In Phase 2
 
@@ -125,6 +140,9 @@ tools.
 - `app/stages/read_qc/routing.py`
 - `app/stages/genome_survey/nodes.py`
 - `app/stages/genome_survey/routing.py`
+- `app/execution/local.py`
+- `app/schemas/commands.py`
+- `app/schemas/artifacts.py`
 - `config/defaults.yaml`
 - `descriptors/packages/` and `descriptors/methods/`
 - new tests under `tests/`

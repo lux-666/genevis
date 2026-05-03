@@ -13,8 +13,9 @@ If you are taking over:
 4. `stage_contracts.md` tells you what each biological stage must do.
 5. `descriptor_spec.md` tells you how method/package descriptors work.
 6. `phases/phase1/phase1.md` gives the current Phase 1 critique and task order.
-7. `phases/phase1/task*.md` gives detailed task handoffs.
-8. `phases/phase_completion_plan.md` remains the long-range roadmap.
+7. `phases/phase2/phase2.md` gives the current CycloneSEQ Phase 2 design.
+8. `phases/phase2/task*.md` gives detailed Phase 2 handoffs.
+9. `phases/phase_completion_plan.md` remains the long-range roadmap.
 
 ## Document Roles
 
@@ -27,6 +28,8 @@ If you are taking over:
 | `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
 | `phases/phase1/phase1.md` | Current Phase 1 critique, summary, and task order |
 | `phases/phase1/task*.md` | Focused executable task handoffs |
+| `phases/phase2/phase2.md` | CycloneSEQ full-flow contract and first SeqKit vertical slice |
+| `phases/phase2/task*.md` | Phase 2 task handoffs with human-help triggers |
 | `phases/phase_completion_plan.md` | Phase-by-phase implementation roadmap |
 
 ## Update Rule

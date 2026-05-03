@@ -57,24 +57,49 @@ Files likely touched:
 - `tests/`
 - `docs/handoff.md`
 
-## Phase 2: QC, Survey, and Assembly Planning
+## Phase 2: CycloneSEQ Contracts And First Method Slice
 
-Goal: produce deterministic stage plans without running heavy tools by default.
+Goal: design the full CycloneSEQ FASTQ / FASTQ.gz genome assembly and annotation
+workflow, then run one narrow real method path first:
+`read_qc.long_read_stats -> SeqKit stats`.
+
+Current state: Phase 2 design tasks are documented in
+`docs/phases/phase2/phase2.md`.
 
 Tasks:
-- Add read QC planner rules for NanoPlot, SeqKit, Filtlong optional, SOAPnuke, and FastQC.
-- Add genome survey skip/run policy: run only with `clean_short_dna_reads`.
-- Add assembly candidate selection for Flye, NextDenovo, and Canu.
-- Add descriptors for the first package/method set.
-- Add template-mode FrozenAttemptSpec generation.
-- Add plan artifact writing so large planner details do not live in graph state.
+- Define the CycloneSEQ stage contract for:
+  - inventory
+  - read_qc
+  - genome_survey
+  - assembly
+  - assembly_review
+  - hic_scaffolding
+  - repeat_annotation
+  - gene_annotation
+  - function_annotation
+- Define read QC substeps:
+  - long-read stats with SeqKit stats, NanoPlot, or pyfastx
+  - length filtering with seqkit seq, Filtlong, fastplong, or chopper
+  - FOFN generation for stable assembly input
+- Define genome_survey full mode with short DNA reads and fallback mode with
+  CycloneSEQ-only long reads.
+- Define assembly candidate set: Flye, hifiasm, NextDenovo, Canu.
+- Define assembly_review gates with QUAST, BUSCO, Merqury, read mapping
+  coverage, purge_dups_check, and contamination_check.
+- Define Hi-C skip/scaffold policy, repeat annotation, gene annotation, and
+  function annotation contracts.
+- Add descriptors and FrozenAttemptSpec support for the first SeqKit stats path.
+- Keep unclear thresholds, resume payloads, requested-stage semantics, and tool
+  candidate changes as human-decision points.
 
 Exit criteria:
-- Long-read-only inputs skip genome survey with `no_low_error_short_reads`.
-- Short DNA reads enable Jellyfish/GenomeScope planning.
-- Assembly chooses a primary method and one fallback at most.
-- NextDenovo and Canu require genome size; Flye can proceed without it unless
-  memory-saving options require a size.
+- CycloneSEQ FASTQ / FASTQ.gz inputs are documented as `raw_long_reads`.
+- The full stage/method/artifact contract is documented with checkbox handoffs.
+- The first executable slice can be implemented without touching assembly,
+  annotation, remote execution, or automatic retry.
+- Coding assistants are explicitly told to ask the human before inventing
+  thresholds, requested-stage semantics, resume payloads, or broad candidate-set
+  changes.
 
 ## Phase 3: Runner, Ledger, and First Real Execution
 
