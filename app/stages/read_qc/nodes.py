@@ -12,11 +12,19 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
-from app.schemas.artifacts import ArtifactMeta
+from app.schemas.artifacts import (
+    READ_QC_FILTERED_LONG_READS,
+    READ_QC_FILTERED_LONG_READS_FOFN,
+    READ_QC_LONG_READS_FOFN,
+    READ_QC_LONG_READ_STATS,
+    ArtifactMeta,
+)
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 
 METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
+LENGTH_FILTER_METHOD_NAME = "read_qc.length_filter.seqkit_seq"
+MAKE_FOFN_METHOD_NAME = "read_qc.make_fofn.local"
 
 
 def _read_qc_output(state: TopLevelState) -> dict[str, Any]:
@@ -27,6 +35,18 @@ def _update_read_qc_output(state: TopLevelState, payload: dict[str, Any]) -> dic
     outputs = dict(state.get("stage_outputs") or {})
     outputs["read_qc"] = {**_read_qc_output(state), **payload}
     return {"stage_outputs": outputs}
+
+
+def _substep_status_update(
+    state: TopLevelState,
+    name: str,
+    payload: dict[str, Any],
+    status: str,
+) -> dict:
+    read_qc_out = _read_qc_output(state)
+    substeps = dict(read_qc_out.get("substeps") or {})
+    substeps[name] = {**dict(substeps.get(name) or {}), "name": name, **payload}
+    return _update_read_qc_output(state, {"status": status, "substeps": substeps})
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
@@ -89,6 +109,24 @@ def plan_seqkit_stats(state: TopLevelState) -> dict:
     }
     if read_qc_out.get("execution_mode") != "local":
         update["skip_reason"] = "local_execution_not_enabled"
+        update["substeps"] = {
+            **dict(read_qc_out.get("substeps") or {}),
+            "long_read_stats": {
+                "name": "long_read_stats",
+                "status": "skipped",
+                "method_name": METHOD_NAME,
+                "skip_reason": "local_execution_not_enabled",
+            },
+        }
+    else:
+        update["substeps"] = {
+            **dict(read_qc_out.get("substeps") or {}),
+            "long_read_stats": {
+                "name": "long_read_stats",
+                "status": "planned",
+                "method_name": METHOD_NAME,
+            },
+        }
     return _update_read_qc_output(state, update)
 
 
@@ -211,7 +249,7 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             stats_path,
             stage="read_qc",
             method_name=METHOD_NAME,
-            artifact_type="read_qc.long_read_stats",
+            artifact_type=READ_QC_LONG_READ_STATS,
             metadata={
                 "attempt_id": attempt.attempt_id,
                 "input_asset_ref": read_qc_out.get("input_asset_ref"),
@@ -249,6 +287,223 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             "stats_artifact_ref": str(stats_path),
             "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
             "summary": _parse_seqkit_summary(stats_path),
+            "substeps": {
+                **dict(read_qc_out.get("substeps") or {}),
+                "long_read_stats": {
+                    "name": "long_read_stats",
+                    "status": "executed",
+                    "method_name": METHOD_NAME,
+                    "artifact_ref": str(stats_path),
+                },
+            },
+        },
+    )
+
+
+def plan_length_filter(state: TopLevelState) -> dict:
+    """Plan length filtering only when an explicit approved threshold is present."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") == "failed":
+        return {}
+
+    request = dict(read_qc_out.get("length_filter_request") or {})
+    thresholds = dict(request.get("thresholds") or {})
+    approved = bool(request.get("approved") or request.get("human_approved"))
+    method_name = request.get("method_name") or LENGTH_FILTER_METHOD_NAME
+
+    if not request:
+        return _substep_status_update(
+            state,
+            "length_filter",
+            {"status": "skipped", "skip_reason": "no_filtering_requested"},
+            "length_filter_skipped",
+        )
+
+    min_len = thresholds.get("min_len")
+    if not approved or method_name != LENGTH_FILTER_METHOD_NAME or not isinstance(min_len, int) or min_len <= 0:
+        return _substep_status_update(
+            state,
+            "length_filter",
+            {
+                "status": "skipped",
+                "method_name": method_name,
+                "skip_reason": "threshold_decision_missing",
+                "thresholds": thresholds,
+            },
+            "length_filter_skipped",
+        )
+
+    return _substep_status_update(
+        state,
+        "length_filter",
+        {
+            "status": "planned",
+            "method_name": LENGTH_FILTER_METHOD_NAME,
+            "thresholds": {"min_len": min_len},
+        },
+        "length_filter_planned",
+    )
+
+
+def maybe_run_length_filter(state: TopLevelState) -> dict:
+    """Run SeqKit length filtering only for explicit approved thresholds."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") != "length_filter_planned":
+        return {}
+
+    substep = read_qc_out["substeps"]["length_filter"]
+    min_len = int(substep["thresholds"]["min_len"])
+    session_id = state["session_id"]
+    data_dir = Path(state.get("data_dir", "data"))
+    working_dir = data_dir / "work" / "read_qc" / session_id / "length_filter"
+    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    input_path = Path(read_qc_out["raw_long_reads_path"])
+    filtered_path = artifact_dir / "filtered_long_reads.fastq"
+    script_path = working_dir / "run_length_filter.sh"
+    script_path.write_text(
+        "set -e\n"
+        f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} > {shlex.quote(str(filtered_path))}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    attempt = FrozenAttemptSpec(
+        attempt_id=f"{session_id}:read_qc:length_filter",
+        session_id=session_id,
+        stage="read_qc",
+        method_name=LENGTH_FILTER_METHOD_NAME,
+        script_path=script_path,
+        working_dir=working_dir,
+        interpreter="/bin/bash",
+        expected_outputs=[filtered_path],
+        env={str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
+        metadata={
+            "input_asset_ref": read_qc_out.get("input_asset_ref"),
+            "raw_long_reads_path": str(input_path),
+            "filtered_long_reads_path": str(filtered_path),
+            "thresholds": {"min_len": min_len},
+        },
+    )
+
+    ledger = Ledger(data_dir)
+    ledger.create_session(session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(session_id, attempt)
+    result = LocalRunner().run(attempt)
+    if not result.success:
+        for path in attempt.expected_outputs:
+            if path.exists():
+                path.unlink()
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error = stderr.strip() or f"seqkit seq failed with return code {result.return_code}"
+        ledger.record_attempt_failed(session_id, attempt, return_code=result.return_code, error=error)
+        return _update_read_qc_output(state, {"status": "failed", "reason": error})
+
+    artifacts = [
+        ArtifactMeta.from_file(
+            filtered_path,
+            stage="read_qc",
+            method_name=LENGTH_FILTER_METHOD_NAME,
+            artifact_type=READ_QC_FILTERED_LONG_READS,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "thresholds": {"min_len": min_len},
+                "tool": "seqkit",
+            },
+        )
+    ]
+    for path, artifact_type in [
+        (result.stdout_path, "command.stdout"),
+        (result.stderr_path, "command.stderr"),
+    ]:
+        if path.exists():
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    path,
+                    stage="read_qc",
+                    method_name=LENGTH_FILTER_METHOD_NAME,
+                    artifact_type=artifact_type,
+                    metadata={"attempt_id": attempt.attempt_id},
+                )
+            )
+
+    append_artifact_records(data_dir, session_id, artifacts)
+    artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+    ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
+    for artifact in artifact_payloads:
+        ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+
+    substeps = dict(read_qc_out.get("substeps") or {})
+    substeps["length_filter"] = {
+        **dict(substeps.get("length_filter") or {}),
+        "name": "length_filter",
+        "status": "executed",
+        "method_name": LENGTH_FILTER_METHOD_NAME,
+        "thresholds": {"min_len": min_len},
+        "artifact_ref": str(filtered_path),
+    }
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "length_filter_executed",
+            "filtered_long_reads_ref": str(filtered_path),
+            "substeps": substeps,
+        },
+    )
+
+
+def make_fofn(state: TopLevelState) -> dict:
+    """Write a deterministic FOFN for raw or filtered long reads."""
+    read_qc_out = _read_qc_output(state)
+    if read_qc_out.get("status") not in {"length_filter_skipped", "length_filter_executed"}:
+        return {}
+
+    session_id = state["session_id"]
+    data_dir = Path(state.get("data_dir", "data"))
+    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    if read_qc_out.get("filtered_long_reads_ref"):
+        input_path = Path(read_qc_out["filtered_long_reads_ref"])
+        fofn_path = artifact_dir / "filtered_long_reads.fofn"
+        artifact_type = READ_QC_FILTERED_LONG_READS_FOFN
+        ref_key = "filtered_long_reads_fofn_ref"
+    else:
+        input_path = Path(read_qc_out["raw_long_reads_path"])
+        fofn_path = artifact_dir / "long_reads.fofn"
+        artifact_type = READ_QC_LONG_READS_FOFN
+        ref_key = "long_reads_fofn_ref"
+
+    fofn_path.write_text(f"{input_path}\n", encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        fofn_path,
+        stage="read_qc",
+        method_name=MAKE_FOFN_METHOD_NAME,
+        artifact_type=artifact_type,
+        metadata={"source_read_ref": str(input_path)},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    ledger = Ledger(data_dir)
+    ledger.create_session(session_id, state.get("input_manifest_ref", ""))
+    ledger.record_artifact_registered(session_id, artifact.model_dump(mode="json"))
+
+    substeps = dict(read_qc_out.get("substeps") or {})
+    substeps["make_fofn"] = {
+        "name": "make_fofn",
+        "status": "executed",
+        "method_name": MAKE_FOFN_METHOD_NAME,
+        "artifact_ref": str(fofn_path),
+    }
+    return _update_read_qc_output(
+        state,
+        {
+            "status": "fofn_ready",
+            ref_key: str(fofn_path),
+            "assembly_input_ref": str(fofn_path),
+            "substeps": substeps,
         },
     )
 
@@ -258,7 +513,11 @@ def commit_read_qc(state: TopLevelState) -> dict:
     read_qc_out = _read_qc_output(state)
     trace = [*state.get("route_trace", []), "read_qc_stage"]
     next_stage = next_stage_name("read_qc")
-    status = "completed" if read_qc_out.get("status") == "completed" else read_qc_out.get("status", "planned")
+    status = (
+        "completed"
+        if read_qc_out.get("status") in {"completed", "fofn_ready"}
+        else read_qc_out.get("status", "planned")
+    )
     outputs = dict(state.get("stage_outputs") or {})
     outputs["read_qc"] = {**read_qc_out, "status": status}
     return {

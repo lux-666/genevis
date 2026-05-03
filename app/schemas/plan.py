@@ -28,3 +28,15 @@ class StagePlan(BaseModel):
     skip_reason: str | None = None
     review_required: bool = False
     depends_on: list[str] = Field(default_factory=list)
+
+
+class StageSubstepPlan(BaseModel):
+    """A compact plan record for stage-internal substeps."""
+
+    name: str
+    status: Literal["planned", "skipped", "executed", "failed", "blocked_human"]
+    method_name: str | None = None
+    skip_reason: str | None = None
+    artifact_ref: str | None = None
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,11 +1,22 @@
 packages:
+  chopper: chopper.yaml
+  fastplong: fastplong.yaml
+  filtlong: filtlong.yaml
   seqkit: seqkit.yaml
 methods:
+  read_qc.length_filter.chopper: read_qc/chopper_length_filter.yaml
+  read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
+  read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
+  read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
 by_stage:
   inventory: []
   read_qc:
     - read_qc.long_read_stats.seqkit_stats
+    - read_qc.length_filter.chopper
+    - read_qc.length_filter.fastplong
+    - read_qc.length_filter.filtlong
+    - read_qc.length_filter.seqkit_seq
   genome_survey: []
   assembly: []
   assembly_review: []

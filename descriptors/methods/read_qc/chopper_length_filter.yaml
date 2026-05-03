@@ -1,0 +1,21 @@
+method_name: read_qc.length_filter.chopper
+stage: read_qc
+package_ref: chopper
+goal: "Candidate long-read filtering with chopper."
+required_inputs:
+  - name: raw_long_reads
+    type: raw_long_reads
+    description: "Registered long-read FASTQ or FASTQ.gz input."
+expected_outputs:
+  - name: filtered_long_reads
+    type: read_qc.filtered_long_reads
+    description: "FASTQ reads filtered with human-approved thresholds."
+review_rules:
+  - length_thresholds_explicitly_approved
+human_review_triggers:
+  - filtering_thresholds_missing
+resource_hints:
+  cpu_cores: 1
+  memory_gb: 2.0
+  gpu_required: false
+  walltime_hours: 2.0

@@ -9,6 +9,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
+READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
+READ_QC_LONG_READS_FOFN = "read_qc.long_reads.fofn"
+READ_QC_FILTERED_LONG_READS_FOFN = "read_qc.filtered_long_reads.fofn"
+
 
 def file_sha256(path: Path) -> str:
     """Return a file SHA256 digest."""

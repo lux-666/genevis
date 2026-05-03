@@ -20,7 +20,7 @@ def route_after_plan(state: TopLevelState) -> str:
     if read_qc_out.get("status") == "failed":
         return "fail"
     if read_qc_out.get("skip_reason") == "local_execution_not_enabled":
-        return "commit"
+        return "filter"
     return "freeze"
 
 
@@ -31,4 +31,14 @@ def route_after_run(state: TopLevelState) -> str:
 
 def route_after_collect(state: TopLevelState) -> str:
     """Route after artifact collection."""
+    return "fail" if _status(state) == "failed" else "filter"
+
+
+def route_after_length_filter(state: TopLevelState) -> str:
+    """Route after optional length filtering."""
+    return "fail" if _status(state) == "failed" else "fofn"
+
+
+def route_after_make_fofn(state: TopLevelState) -> str:
+    """Route after FOFN creation."""
     return "fail" if _status(state) == "failed" else "commit"
