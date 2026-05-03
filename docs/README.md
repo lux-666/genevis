@@ -12,7 +12,9 @@ If you are taking over:
 3. `architecture.md` tells you the system boundaries.
 4. `stage_contracts.md` tells you what each biological stage must do.
 5. `descriptor_spec.md` tells you how method/package descriptors work.
-6. `phases/phase_completion_plan.md` tells you the build order.
+6. `phases/phase1/phase1.md` gives the current Phase 1 critique and task order.
+7. `phases/phase1/task*.md` gives detailed task handoffs.
+8. `phases/phase_completion_plan.md` remains the long-range roadmap.
 
 ## Document Roles
 
@@ -23,6 +25,8 @@ If you are taking over:
 | `architecture.md` | Parent graph, modules, state categories, extension rule |
 | `stage_contracts.md` | Stable inputs, outputs, planning rules, and review triggers per stage |
 | `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
+| `phases/phase1/phase1.md` | Current Phase 1 critique, summary, and task order |
+| `phases/phase1/task*.md` | Focused executable task handoffs |
 | `phases/phase_completion_plan.md` | Phase-by-phase implementation roadmap |
 
 ## Update Rule

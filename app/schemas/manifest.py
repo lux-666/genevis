@@ -170,6 +170,9 @@ def validate_manifest(manifest: InputManifest, *, require_existing_files: bool =
     warnings: list[str] = []
     inferred: dict[str, Any] = {}
 
+    if not manifest.assets:
+        errors.append("manifest must declare at least one asset")
+
     for spec in manifest.assets:
         props = _infer_asset_properties(spec)
         inferred[spec.asset_type] = props

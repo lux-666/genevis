@@ -18,15 +18,6 @@ class InventoryStageTests(unittest.TestCase):
         path.write_text(yaml.dump(manifest), encoding="utf-8")
         return path
 
-    def _run_inventory(self, manifest_path: Path, data_dir: str | None = None) -> dict:
-        state = initial_state(
-            session_id="test-session",
-            input_manifest_ref=str(manifest_path),
-            data_dir=data_dir or tmpdir,
-        )
-        graph = build_stage()
-        return graph.invoke(state)
-
     def test_inventory_fails_without_manifest_ref(self):
         state = initial_state(session_id="test", input_manifest_ref="")
         graph = build_stage()
@@ -75,6 +66,10 @@ class InventoryStageTests(unittest.TestCase):
             registry = json.loads(registry_path.read_text())
             self.assertEqual(registry["session_id"], "s1")
             self.assertEqual(len(registry["assets"]), 1)
+            asset = registry["assets"][0]
+            self.assertEqual(asset["provenance"]["manifest_ref"], str(path))
+            self.assertEqual(asset["provenance"]["declared_path"], str(fq))
+            self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
     def test_inventory_registers_multiple_assets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,7 +118,9 @@ class InventoryStageTests(unittest.TestCase):
             result = graph.invoke(state)
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "inventory")
-            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertEqual(result["current_stage"], "inventory")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertIsNone(result.get("asset_registry_ref"))
 
     def test_inventory_with_existing_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -143,7 +140,10 @@ class InventoryStageTests(unittest.TestCase):
             )
             graph = build_stage()
             result = graph.invoke(state)
-            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["skip_reasons"]["read_qc"], "existing_assembly_input")
+            self.assertEqual(result["skip_reasons"]["genome_survey"], "existing_assembly_input")
+            self.assertEqual(result["skip_reasons"]["assembly"], "existing_assembly_input")
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
             self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
 

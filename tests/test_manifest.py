@@ -28,6 +28,9 @@ class ManifestSchemaTests(unittest.TestCase):
         manifest = InputManifest(session_id="test-01")
         self.assertEqual(manifest.session_id, "test-01")
         self.assertEqual(manifest.assets, [])
+        report = validate_manifest(manifest)
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("manifest must declare at least one asset" in e for e in report["errors"]))
 
     def test_input_manifest_with_assets(self):
         manifest = InputManifest(

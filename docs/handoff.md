@@ -5,7 +5,14 @@ repository.
 
 ## Current Status
 
-The project is in Phase 1: structurally complete, awaiting Phase 2 work.
+The project has a Phase 1 implementation commit:
+
+```text
+fad12d3 Implement Phase 1: Parent Graph and Inventory MVP
+```
+
+The Phase 1 correction pass is captured in `docs/phases/phase1/phase1.md`, with
+task details under `docs/phases/phase1/`.
 
 Completed:
 
@@ -23,15 +30,17 @@ Completed:
 - **Inventory stage** loads manifests, validates inputs, registers assets, writes
   the asset registry JSON artifact, and records ledger events.
 - Inventory routing supports success, failure, and review-required paths.
-- Ambiguous long-read vs long-RNA inputs trigger an `active_interrupt`.
+- Ambiguous long-read vs long-RNA inputs trigger an `active_interrupt` and stop
+  at inventory.
+- Existing assembly inputs route to `assembly_review` and publish skip reasons.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
+- The misleading `--stages` CLI flag is intentionally not exposed.
 
 Not completed:
 
 - No real method descriptors for bioinformatics tools.
 - No LocalRunner or RemoteRunner execution.
-- No review interrupt resumption logic (interrupt is set but not yet resumed).
-- Skip logic for existing-assembly inputs is not yet wired into downstream stages.
+- Review interrupt resume logic is not implemented.
 
 ## Read Order
 
@@ -43,8 +52,10 @@ Read these files in order:
 4. `docs/architecture.md`
 5. `docs/stage_contracts.md`
 6. `docs/descriptor_spec.md`
-7. `docs/phases/phase_completion_plan.md`
-8. This file again
+7. `docs/phases/phase1/phase1.md`
+8. `docs/phases/phase1/task1.md`
+9. `docs/phases/phase_completion_plan.md`
+10. This file again
 
 Use `/Users/a1/Documents/BGIwork/rna_agent` as a reference for patterns only.
 Do not copy single-cell business names into this project.
@@ -54,7 +65,7 @@ Do not copy single-cell business names into this project.
 Use the conda environment already used for scaffold verification:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold -v
 ```
 
 ```bash
@@ -79,20 +90,10 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Start Phase 2: QC, Survey, and Assembly Planning.
-
-Recommended first slice:
-
-1. Replace the `read_qc` placeholder with real input validation: check that
-   `raw_long_reads` exists in the asset registry.
-2. Add a `StagePlan` for read QC with candidate methods (NanoPlot, SeqKit stats,
-   optional Filtlong).
-3. Add planner rules to `config/defaults.yaml` or descriptor policy for when
-   Filtlong is conservative-only.
-4. Add genome survey skip/run policy: skip when `clean_short_dna_reads` is absent.
-5. Keep the parent graph shape unchanged.
-
-Inventory is now the foundation for every later planner decision.
+Start Phase 2 only after confirming the Phase 1 correction commit is present on
+the feature branch. The next implementation slice should stay narrow: read QC
+planning based on the asset registry, without running heavy bioinformatics
+tools.
 
 ## Immediate Design Decisions Already Made
 
@@ -113,8 +114,8 @@ Inventory is now the foundation for every later planner decision.
   always advance.
 - `LocalRunner` and `RemoteRunner` intentionally raise `NotImplementedError`.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.
-- Existing assembly inputs are registered but downstream skip logic is not wired.
-- No `.gitignore` exists yet; avoid committing cache or data outputs.
+- Requested-stage routing is not implemented; the CLI flag is intentionally not
+  exposed.
 
 ## Files Most Likely To Change In Phase 2
 
@@ -124,7 +125,6 @@ Inventory is now the foundation for every later planner decision.
 - `app/stages/read_qc/routing.py`
 - `app/stages/genome_survey/nodes.py`
 - `app/stages/genome_survey/routing.py`
-- `app/stages/assembly/nodes.py`
 - `config/defaults.yaml`
 - `descriptors/packages/` and `descriptors/methods/`
 - new tests under `tests/`

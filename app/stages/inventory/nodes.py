@@ -32,6 +32,8 @@ def _load_manifest(manifest_ref: str) -> InputManifest:
 def _build_asset_records(
     manifest: InputManifest,
     inferred: dict[str, Any],
+    *,
+    manifest_ref: str,
 ) -> list[AssetRecord]:
     """Convert validated manifest specs into AssetRecords."""
     records: list[AssetRecord] = []
@@ -54,10 +56,21 @@ def _build_asset_records(
                         "compression": props.get("inferred_compression", spec.compression),
                         **spec.metadata,
                     },
-                    provenance={"manifest_ref": str(path)},
+                    provenance={
+                        "manifest_ref": manifest_ref,
+                        "declared_path": p,
+                    },
                 )
             )
     return records
+
+
+def _entry_mode(manifest: InputManifest) -> str:
+    """Return the entry mode implied by manifest assets."""
+    asset_types = {asset.asset_type for asset in manifest.assets}
+    if asset_types == {"assembly_fasta_registered"}:
+        return "existing_assembly"
+    return "raw_inputs"
 
 
 def _write_registry(
@@ -120,7 +133,8 @@ def validate_inputs(state: TopLevelState) -> dict:
                 "valid": report["valid"],
                 "errors": report["errors"],
                 "warnings": report["warnings"],
-                "manifest": manifest.model_dump(mode="json"),
+                "asset_count": len(manifest.assets),
+                "entry_mode": _entry_mode(manifest),
             },
         },
     }
@@ -132,11 +146,12 @@ def register_assets(state: TopLevelState) -> dict:
     if inventory_out.get("status") != "validated" or not inventory_out.get("valid"):
         return {}
 
-    manifest = InputManifest.model_validate(inventory_out["manifest"])
+    manifest_ref = state["input_manifest_ref"]
+    manifest = _load_manifest(manifest_ref)
     report = validate_manifest(manifest)
     inferred = report["inferred"]
 
-    records = _build_asset_records(manifest, inferred)
+    records = _build_asset_records(manifest, inferred, manifest_ref=manifest_ref)
     data_dir = Path(state.get("data_dir", "data"))
     registry_path = _write_registry(records, data_dir=data_dir, session_id=manifest.session_id)
 
@@ -167,9 +182,21 @@ def commit_inventory(state: TopLevelState) -> dict:
     from app.graph.routing import next_stage_name
 
     trace = [*state.get("route_trace", []), "inventory_stage"]
-    next_stage = next_stage_name("inventory")
-    return {
+    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    if inventory_out.get("entry_mode") == "existing_assembly":
+        next_stage = "assembly_review"
+    else:
+        next_stage = next_stage_name("inventory")
+    update = {
         "current_stage": next_stage,
         "supervision_state": "completed" if next_stage == "done" else "running_stage",
         "route_trace": trace,
     }
+    if inventory_out.get("entry_mode") == "existing_assembly":
+        update["skip_reasons"] = {
+            **(state.get("skip_reasons") or {}),
+            "read_qc": "existing_assembly_input",
+            "genome_survey": "existing_assembly_input",
+            "assembly": "existing_assembly_input",
+        }
+    return update

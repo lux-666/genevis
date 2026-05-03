@@ -22,12 +22,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser.add_argument("--session-id", required=True, help="Unique session identifier")
     run_parser.add_argument("--manifest", required=True, help="Path to input manifest YAML/JSON")
     run_parser.add_argument("--data-dir", default="data", help="Output data directory")
-    run_parser.add_argument(
-        "--stages",
-        default=None,
-        help="Comma-separated list of stages to run (default: all)",
-    )
-
     return parser.parse_args(argv)
 
 
@@ -37,15 +31,10 @@ def _run_session(args: argparse.Namespace) -> int:
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
         return 1
 
-    requested_stages = None
-    if args.stages:
-        requested_stages = [s.strip() for s in args.stages.split(",")]
-
     state = initial_state(
         session_id=args.session_id,
         input_manifest_ref=str(manifest_path),
         data_dir=args.data_dir,
-        requested_stages=requested_stages,
     )
 
     graph = build_graph()

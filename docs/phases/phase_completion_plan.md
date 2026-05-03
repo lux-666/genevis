@@ -1,7 +1,8 @@
 # Phase Completion Plan
 
-This is the implementation roadmap. `docs/handoff.md` records current status
-and the next best task. `docs/stage_contracts.md` defines stage behavior.
+This is the long-range implementation roadmap. `docs/handoff.md` records current
+status and the next best task. `docs/stage_contracts.md` defines stage behavior.
+Operational phase/task handoffs live under `docs/phases/phase*/`.
 
 ## Phase 0: Scaffold and Contracts
 
@@ -13,13 +14,14 @@ Exit criteria:
 - Stage order matches the ONT/CLR workflow.
 - Structure tests pass.
 
-Current state: Phase 0 is structurally complete. Future changes in Phase 0
-should be limited to correcting contracts or documentation gaps discovered while
-starting Phase 1.
+Current state: Phase 0 is structurally complete.
 
 ## Phase 1: Parent Graph and Inventory MVP
 
 Goal: run the parent graph through inventory with a real input manifest and asset registry output.
+
+Current state: Phase 1 inventory corrections are documented in
+`docs/phases/phase1/phase1.md`.
 
 Tasks:
 - Add manifest tests first:

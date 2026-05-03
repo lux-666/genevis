@@ -64,7 +64,7 @@ def build_stage():
         },
     )
     graph.add_edge("register_assets", "commit")
-    graph.add_edge("review_gate", "commit")
+    graph.add_edge("review_gate", END)
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)
 
