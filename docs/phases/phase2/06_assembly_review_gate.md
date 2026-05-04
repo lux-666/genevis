@@ -1,5 +1,7 @@
 # 06 Assembly Review Gate
 
+Task status: implemented.
+
 ## Goal
 
 Make `assembly_review` the main human gate for accepting, rerunning, purging, or
@@ -11,7 +13,11 @@ stopping an assembly candidate.
 - Modify: `app/stages/assembly_review/routing.py`
 - Modify: `app/review/` if a shared review module exists
 - Modify: `app/schemas/artifacts.py`
-- Modify: `app/schemas/events.py`
+- Modify: `app/control/ledger.py`
+- Modify: `app/schemas/plan.py`
+- Add: `descriptors/packages/{quast,busco,merqury,minimap2,purge_dups}.yaml`
+- Add: `descriptors/methods/assembly_review/`
+- Modify: `descriptors/registry.yaml`
 - Test: `tests/test_assembly_review.py`
 
 ## Project Context
@@ -102,14 +108,44 @@ Review decision options:
 
 ## Tasks
 
-- [ ] Add assembly evaluation bundle schema.
-- [ ] Add review decision artifact schema.
-- [ ] Add descriptor placeholders for QUAST, BUSCO, Merqury, mapping coverage,
+- [x] Add assembly evaluation bundle schema.
+- [x] Add review decision artifact schema.
+- [x] Add descriptor placeholders for QUAST, BUSCO, Merqury, mapping coverage,
   purge_dups_check, and contamination_check.
-- [ ] Add blocked-human state for unresolved assembly review decisions.
-- [ ] Add tests that candidate disagreements do not auto-advance without policy.
-- [ ] Add tests that review output keeps rejected candidates traceable.
-- [ ] Add ledger event shape for review requested and review decision recorded.
+- [x] Add blocked-human state for unresolved assembly review decisions.
+- [x] Add tests that candidate disagreements do not auto-advance without policy.
+- [x] Add tests that review output keeps rejected candidates traceable.
+- [x] Add ledger event shape for review requested and review decision recorded.
+
+## Implemented State
+
+- `app/stages/assembly_review/builder.py` now builds a real deterministic review
+  gate instead of the generic placeholder.
+- `app/stages/assembly_review/nodes.py` resolves existing assembly registry
+  inputs and the `assembly` stage's `selected_candidate_refs` bundle JSON files.
+- Candidate refs, rejected candidate reasons, planned signals, review request
+  payloads, and deterministic decisions are kept traceable.
+- `AssemblyEvalBundle` and `ReviewDecisionArtifact` are defined in
+  `app/schemas/artifacts.py`.
+- `AssemblyReviewPlan` is defined in `app/schemas/plan.py`.
+- `app/review/base.py` defines shared `ReviewSignal`, `ReviewPayload`, and
+  review decision literals.
+- `app/control/ledger.py` records `review_requested` and `review_decision`
+  events.
+- QUAST and BUSCO are always planned as pending signals; Merqury is planned only
+  when `clean_short_dna_reads` exists; mapping coverage and purge_dups checks are
+  planned when `clean_long_reads` exists; contamination check remains a planned
+  pending signal.
+- The stage writes `assembly_eval_bundle.json`, `assembly_review_request.json`,
+  and `assembly_review_decision.json` artifacts as appropriate.
+- Existing assembly input can auto-accept deterministically and publish
+  `final_assembly_ref`; assembly-stage candidates always block for human review
+  until an approved resume payload exists.
+- No metric thresholds are encoded.
+- `tests/test_assembly_review.py` covers existing assembly auto-accept, 05
+  candidate bundle consumption, blocked-human review gates, registry-driven
+  signal planning, rejected candidate traceability, ledger events, and review
+  artifacts.
 
 ## Human Decisions Required
 

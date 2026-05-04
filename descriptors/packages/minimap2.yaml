@@ -1,0 +1,16 @@
+package_name: minimap2
+version_constraint: ">=2.26"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "minimap2 -ax map-ont {assembly} {reads} | samtools sort -o {bam}"
+  - "minimap2 -ax asm5 {assembly} {assembly} | samtools sort -o {bam}"
+help_summary: "Versatile sequence alignment program for long reads and assembly self-alignment."
+known_pitfalls:
+  - "Preset must match read type (map-ont, map-pb, asm5, etc.)."
+  - "Large genomes require substantial memory for index building."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 4.0

@@ -1,0 +1,15 @@
+package_name: quast
+version_constraint: ">=5.2"
+language: python
+install_channel: conda
+entry_patterns:
+  - "quast.py {assembly} -r {reference} -o {out_dir}"
+help_summary: "Quality Assessment Tool for Genome Assemblies."
+known_pitfalls:
+  - "Reference genome is optional but improves metric accuracy."
+  - "Large genomes require substantial memory for contig alignment."
+resource_defaults:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 4.0

@@ -54,6 +54,12 @@ Completed:
   NextDenovo, and Canu candidate plans, writes planned
   `draft_assembly.candidate` JSON bundles for at most one primary plus one
   fallback, and routes candidate refs to `assembly_review`.
+- `assembly_review` has a real human-gated review stage. It consumes existing
+  assembly inputs or assembly candidate bundle refs, plans pending QUAST/BUSCO/
+  Merqury/mapping/purge/contamination signals when inputs permit, writes
+  evaluation and review artifacts, records review ledger events, auto-accepts
+  only existing assembly inputs, and blocks assembly-stage candidates for human
+  decision without inventing thresholds.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
 - Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
@@ -109,7 +115,7 @@ Do not copy single-cell business names into this project.
 Use the conda environment already used for scaffold verification:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review -v
 ```
 
 ```bash
@@ -135,9 +141,9 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 ## Next Best Task
 
 Continue Phase 2 execution from
-`docs/phases/phase2/06_assembly_review_gate.md`. Task 05 only plans candidate
-assembly bundles; it does not run, compare, polish, purge, or scaffold assembly
-outputs.
+`docs/phases/phase2/07_hic_scaffolding.md`. Task 06 only plans/references review
+signals and blocks for human decision; it does not run QUAST, BUSCO, Merqury,
+mapping, purge_dups, contamination screening, polish, or scaffold operations.
 
 Do not implement broad assembly, annotation, requested-stage routing, or review
 resume before the corresponding human decision is explicit in the task docs.
@@ -149,6 +155,9 @@ resume before the corresponding human decision is explicit in the task docs.
 - Genome survey output is a prior for assembly, not a hard prerequisite.
 - Assembly candidate planning may use a genome-size prior, but candidate bundle
   planning is not real assembler execution.
+- Assembly review is the main human gate. Existing assembly input can
+  auto-accept as a deterministic pass-through, but assembly-stage candidates do
+  not auto-accept without an approved review/resume policy.
 - `hic_scaffolding` exists as a stage but must be skippable.
 - Assembly review is the main human-gated decision point.
 - `TopLevelState` should stay small and reference-based.
@@ -169,6 +178,9 @@ resume before the corresponding human decision is explicit in the task docs.
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
   placeholders only; there is no execution path for those tools.
+- Assembly review descriptors for QUAST, BUSCO, Merqury, minimap2-based mapping,
+  purge_dups, and contamination checks are planning placeholders only; there is
+  no execution path for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.

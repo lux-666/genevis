@@ -1,0 +1,15 @@
+package_name: merqury
+version_constraint: ">=1.3"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "merqury.sh {kmer_db} {assembly} {prefix}"
+help_summary: "Reference-free quality and completeness evaluation using k-mers."
+known_pitfalls:
+  - "Requires accurate short-read k-mer database as input."
+  - "QV and completeness thresholds require human approval."
+resource_defaults:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 4.0

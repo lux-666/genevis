@@ -1,0 +1,24 @@
+method_name: assembly_review.check.purge_dups
+stage: assembly_review
+package_ref: purge_dups
+goal: "Check for haplotigs and overlaps using read depth and self-alignment."
+required_inputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Draft assembly FASTA."
+  - name: coverage_stats
+    type: coverage_stats
+    description: "Read depth statistics from prior mapping."
+expected_outputs:
+  - name: purge_dups_bed
+    type: purge_dups_bed
+    description: "BED file of regions to purge."
+review_rules:
+  - purge_dups_bed_exists
+human_review_triggers:
+  - purge_cutoffs_not_approved
+resource_hints:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 2.0

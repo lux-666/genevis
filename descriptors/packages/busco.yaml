@@ -1,0 +1,15 @@
+package_name: busco
+version_constraint: ">=5.4"
+language: python
+install_channel: conda
+entry_patterns:
+  - "busco -i {assembly} -m genome -o {out_dir} --auto-lineage"
+help_summary: "Benchmarking Universal Single-Copy Orthologs for assembly completeness."
+known_pitfalls:
+  - "Lineage dataset must be downloaded or cached before first run."
+  - "Completeness and duplication thresholds require human approval."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 8.0

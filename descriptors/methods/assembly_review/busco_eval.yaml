@@ -1,0 +1,21 @@
+method_name: assembly_review.eval.busco
+stage: assembly_review
+package_ref: busco
+goal: "Assess assembly completeness and duplication with BUSCO."
+required_inputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Draft assembly FASTA to evaluate."
+expected_outputs:
+  - name: busco_report
+    type: busco_report
+    description: "BUSCO summary JSON and lineage-specific results."
+review_rules:
+  - busco_report_exists
+human_review_triggers:
+  - busco_threshold_not_approved
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 8.0

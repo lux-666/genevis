@@ -1,4 +1,5 @@
 packages:
+  busco: busco.yaml
   canu: canu.yaml
   chopper: chopper.yaml
   fastplong: fastplong.yaml
@@ -8,7 +9,11 @@ packages:
   hifiasm: hifiasm.yaml
   jellyfish: jellyfish.yaml
   meryl: meryl.yaml
+  merqury: merqury.yaml
+  minimap2: minimap2.yaml
   nextdenovo: nextdenovo.yaml
+  purge_dups: purge_dups.yaml
+  quast: quast.yaml
   seqkit: seqkit.yaml
   smudgeplot: smudgeplot.yaml
 methods:
@@ -16,6 +21,12 @@ methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
   assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
+  assembly_review.eval.quast: assembly_review/quast_eval.yaml
+  assembly_review.eval.busco: assembly_review/busco_eval.yaml
+  assembly_review.eval.merqury: assembly_review/merqury_eval.yaml
+  assembly_review.eval.mapping_coverage: assembly_review/mapping_coverage_eval.yaml
+  assembly_review.check.purge_dups: assembly_review/purge_dups_check.yaml
+  assembly_review.check.contamination: assembly_review/contamination_check.yaml
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
   genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
@@ -43,7 +54,13 @@ by_stage:
     - assembly.candidate.hifiasm
     - assembly.candidate.nextdenovo
     - assembly.candidate.canu
-  assembly_review: []
+  assembly_review:
+    - assembly_review.eval.quast
+    - assembly_review.eval.busco
+    - assembly_review.eval.merqury
+    - assembly_review.eval.mapping_coverage
+    - assembly_review.check.purge_dups
+    - assembly_review.check.contamination
   hic_scaffolding: []
   repeat_annotation: []
   gene_annotation: []

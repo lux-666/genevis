@@ -54,3 +54,29 @@ class AssemblyCandidatePlan(BaseModel):
     rejection_reason: str | None = None
     candidate_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyReviewPlan(BaseModel):
+    """Plan for assembly review evaluation signals and candidate decisions.
+
+    Thresholds are not stored here; they are human-approved policy.
+    """
+
+    stage: str = "assembly_review"
+    status: Literal["planned", "evaluating", "blocked_human", "completed", "failed"]
+    candidate_ids: list[str] = Field(default_factory=list)
+    planned_signals: list[str] = Field(default_factory=list)
+    available_signals: list[str] = Field(default_factory=list)
+    missing_signals: list[str] = Field(default_factory=list)
+    decision: Literal[
+        "pending",
+        "accept",
+        "rerun",
+        "purge",
+        "continue_low_confidence",
+        "stop_human_review",
+    ] = "pending"
+    selected_candidate_id: str | None = None
+    rejected_candidate_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

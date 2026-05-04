@@ -154,6 +154,50 @@ class Ledger:
             },
         )
 
+    def record_review_requested(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        reason: str,
+        signals: list[dict[str, Any]] | None = None,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Append a review-requested event."""
+        self.record_event(
+            session_id,
+            "review_requested",
+            {
+                "stage": stage,
+                "reason": reason,
+                "signals": signals or [],
+                "candidates": candidates or [],
+            },
+        )
+
+    def record_review_decision(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        decision: str,
+        candidate_id: str | None = None,
+        rejected_candidates: list[str] | None = None,
+        notes: list[str] | None = None,
+    ) -> None:
+        """Append a review-decision event."""
+        self.record_event(
+            session_id,
+            "review_decision",
+            {
+                "stage": stage,
+                "decision": decision,
+                "candidate_id": candidate_id,
+                "rejected_candidates": rejected_candidates or [],
+                "notes": notes or [],
+            },
+        )
+
     def record_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Append a business event."""
         session_dir = self.session_dir(session_id)

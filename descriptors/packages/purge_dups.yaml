@@ -1,0 +1,15 @@
+package_name: purge_dups
+version_constraint: ">=1.2"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "purge_dups -2 -T {cutoffs} -c {base_cov} {self_paf} > {dups_bed}"
+help_summary: "Haplotig and overlap purging based on read depth and self-alignment."
+known_pitfalls:
+  - "Cutoff values must be human-approved; no universal defaults exist."
+  - "Requires prior read-to-assembly alignment and coverage statistics."
+resource_defaults:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 2.0

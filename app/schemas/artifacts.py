@@ -90,3 +90,54 @@ class AssemblyCandidateBundle(BaseModel):
     logs: dict[str, str] = Field(default_factory=dict)
     rejection_reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyEvalSignal(BaseModel):
+    """One evaluation signal for an assembly candidate.
+
+    Thresholds are not stored here; they are human-approved policy
+    applied during rule evaluation.
+    """
+
+    signal_name: str
+    method_name: str
+    candidate_id: str
+    status: Literal["pending", "available", "missing", "failed"]
+    metric_refs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyEvalBundle(BaseModel):
+    """Collection of evaluation signals for one or more assembly candidates.
+
+    Does not contain thresholds or decisions; only what was collected
+    or referenced.
+    """
+
+    session_id: str
+    candidate_ids: list[str] = Field(default_factory=list)
+    signals: list[AssemblyEvalSignal] = Field(default_factory=list)
+    available_inputs: list[str] = Field(default_factory=list)
+    missing_inputs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewDecisionArtifact(BaseModel):
+    """Human or deterministic review decision recorded as an artifact."""
+
+    session_id: str
+    stage: str
+    decision: Literal[
+        "accept",
+        "rerun",
+        "purge",
+        "continue_low_confidence",
+        "stop_human_review",
+    ]
+    candidate_id: str | None = None
+    rejected_candidates: list[str] = Field(default_factory=list)
+    final_assembly_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
