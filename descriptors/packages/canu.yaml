@@ -1,0 +1,14 @@
+package_name: canu
+version_constraint: ">=2.2"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "canu -p {prefix} -d {output_dir} genomeSize={genome_size} -nanopore {reads}"
+help_summary: "Long-read assembler candidate with explicit genomeSize configuration."
+known_pitfalls:
+  - "Requires genome size and careful resource settings before execution."
+resource_defaults:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 72.0

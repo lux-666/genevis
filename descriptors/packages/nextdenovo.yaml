@@ -1,0 +1,14 @@
+package_name: nextdenovo
+version_constraint: ">=2.5"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "nextDenovo {run_cfg}"
+help_summary: "Long-read assembler candidate that commonly uses FOFN input and genome size configuration."
+known_pitfalls:
+  - "Requires an explicit genome size prior before planning execution."
+resource_defaults:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 72.0

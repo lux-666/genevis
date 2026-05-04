@@ -1,13 +1,21 @@
 packages:
+  canu: canu.yaml
   chopper: chopper.yaml
   fastplong: fastplong.yaml
   filtlong: filtlong.yaml
+  flye: flye.yaml
   genomescope2: genomescope2.yaml
+  hifiasm: hifiasm.yaml
   jellyfish: jellyfish.yaml
   meryl: meryl.yaml
+  nextdenovo: nextdenovo.yaml
   seqkit: seqkit.yaml
   smudgeplot: smudgeplot.yaml
 methods:
+  assembly.candidate.canu: assembly/canu_candidate.yaml
+  assembly.candidate.flye: assembly/flye_candidate.yaml
+  assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
+  assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
   genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
@@ -30,7 +38,11 @@ by_stage:
     - genome_survey.kmer_count.meryl
     - genome_survey.model.genomescope2
     - genome_survey.model.smudgeplot
-  assembly: []
+  assembly:
+    - assembly.candidate.flye
+    - assembly.candidate.hifiasm
+    - assembly.candidate.nextdenovo
+    - assembly.candidate.canu
   assembly_review: []
   hic_scaffolding: []
   repeat_annotation: []

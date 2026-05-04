@@ -40,3 +40,17 @@ class StageSubstepPlan(BaseModel):
     artifact_ref: str | None = None
     thresholds: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyCandidatePlan(BaseModel):
+    """Candidate selection plan for assembly before tool execution."""
+
+    method_name: str
+    status: Literal["compatible", "rejected", "selected"]
+    role: Literal["candidate", "primary", "fallback"] = "candidate"
+    required_inputs: list[str] = Field(default_factory=list)
+    optional_inputs: list[str] = Field(default_factory=list)
+    requires_genome_size: bool = False
+    rejection_reason: str | None = None
+    candidate_ref: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

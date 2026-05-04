@@ -1,5 +1,7 @@
 # 05 Assembly Candidate Planning
 
+Task status: implemented.
+
 ## Goal
 
 Make `assembly` candidate-driven instead of hardcoding one assembler.
@@ -13,7 +15,9 @@ comparison belongs to `assembly_review`.
 - Modify: `app/stages/assembly/routing.py`
 - Modify: `app/schemas/plan.py`
 - Modify: `app/schemas/artifacts.py`
-- Add descriptors later: `descriptors/methods/assembly/`
+- Add: `descriptors/packages/{flye,hifiasm,nextdenovo,canu}.yaml`
+- Add: `descriptors/methods/assembly/`
+- Modify: `descriptors/registry.yaml`
 - Test: `tests/test_assembly.py`
 
 ## Project Context
@@ -115,13 +119,36 @@ Each candidate method must declare:
 
 ## Tasks
 
-- [ ] Add assembly candidate plan schema.
-- [ ] Add candidate artifact bundle schema for `draft_assembly`.
-- [ ] Add descriptor placeholders for Flye, hifiasm, NextDenovo, and Canu.
-- [ ] Add tests for method selection requiring `clean_long_reads` or FOFN.
-- [ ] Add tests for missing genome size handling.
-- [ ] Add tests that only one primary plus one fallback can be auto-planned.
-- [ ] Route produced candidate assemblies to `assembly_review`.
+- [x] Add assembly candidate plan schema.
+- [x] Add candidate artifact bundle schema for `draft_assembly`.
+- [x] Add descriptor placeholders for Flye, hifiasm, NextDenovo, and Canu.
+- [x] Add tests for method selection requiring `clean_long_reads` or FOFN.
+- [x] Add tests for missing genome size handling.
+- [x] Add tests that only one primary plus one fallback can be auto-planned.
+- [x] Route produced candidate assemblies to `assembly_review`.
+
+## Implemented State
+
+- `app/stages/assembly/builder.py` now builds a real deterministic candidate
+  planning subgraph instead of the generic placeholder.
+- `app/stages/assembly/nodes.py` resolves an assembly input from read QC FOFN
+  refs first, then from registered `clean_long_reads`.
+- `app/schemas/plan.py` defines `AssemblyCandidatePlan`.
+- `app/schemas/artifacts.py` defines `AssemblyCandidateBundle`.
+- `descriptors/packages/` and `descriptors/methods/assembly/` register Flye,
+  hifiasm, NextDenovo, and Canu as planning candidates.
+- The stage writes `draft_assembly.candidate` JSON bundles for selected methods
+  only. It does not create FASTA files and does not run assemblers.
+- NextDenovo and Canu require a genome-size prior. If a human-requested method
+  requires genome size and no prior exists, the stage stops with
+  `blocked_human`.
+- Automatic planning is limited to one primary plus one fallback bundle and is
+  `execution_enabled: false`; real assembler choice/execution still belongs to a
+  later method-specific task and human approval.
+- Planned candidate refs are routed to `assembly_review`.
+- `tests/test_assembly.py` covers descriptor loading, missing input failure,
+  FOFN plus genome-size planning, genome-size-required blocking, and primary
+  plus fallback limits.
 
 ## Non-Goals
 

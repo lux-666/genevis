@@ -73,3 +73,20 @@ class GenomeSurveyResult(BaseModel):
     skip_reason: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyCandidateBundle(BaseModel):
+    """Planned assembly candidate bundle without running an assembler."""
+
+    session_id: str
+    candidate_id: str
+    method_name: str
+    status: Literal["planned", "rejected"]
+    artifact_type: str = "draft_assembly.candidate"
+    input_ref: str
+    input_type: str
+    genome_size_prior: int | None = None
+    expected_outputs: dict[str, str] = Field(default_factory=dict)
+    logs: dict[str, str] = Field(default_factory=dict)
+    rejection_reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

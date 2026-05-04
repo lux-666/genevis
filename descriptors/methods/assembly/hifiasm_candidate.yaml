@@ -1,0 +1,21 @@
+method_name: assembly.candidate.hifiasm
+stage: assembly
+package_ref: hifiasm
+goal: "Plan a hifiasm candidate assembly bundle without executing hifiasm."
+required_inputs:
+  - name: long_reads
+    type: clean_long_reads
+    description: "Clean long reads or an approved long-read FOFN."
+expected_outputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Planned draft assembly FASTA path for the hifiasm candidate."
+review_rules:
+  - candidate_bundle_exists
+human_review_triggers:
+  - cycloneseq_platform_profile_required
+resource_hints:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 48.0

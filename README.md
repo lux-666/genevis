@@ -6,7 +6,8 @@ assembly and annotation projects.
 The repository has a corrected Phase 1 inventory implementation and the first
 Phase 2 executable slice for CycloneSEQ read QC. The current value is the
 project shape, state contracts, stage contracts, descriptor roots, handoff
-documentation, inventory, and SeqKit stats execution boundary.
+documentation, inventory, SeqKit stats execution boundary, genome survey
+contracts, and assembly candidate planning.
 
 ## Biological Backbone
 
@@ -42,10 +43,13 @@ Implemented:
 - thin parent graph skeleton
 - real inventory stage and a real `read_qc.long_read_stats` SeqKit stats slice
 - real `genome_survey` full/fallback/skip contract stage
-- placeholder downstream domain stage subgraphs after genome survey
+- real `assembly` candidate planning stage with Flye, hifiasm, NextDenovo, and
+  Canu planning descriptors
+- placeholder downstream domain stage subgraphs after assembly
 - small `TopLevelState`
 - asset, plan, descriptor, artifact, command, and event schema roots
-- descriptor/config roots, including SeqKit and genome survey planning descriptors
+- descriptor/config roots, including SeqKit, genome survey, and assembly
+  planning descriptors
 - phase plan and handoff documentation
 - Phase 1 inventory code for manifest loading, asset registry writing, ledger
   events, and CLI invocation
@@ -56,8 +60,8 @@ Not implemented:
 
 - executable bioinformatics method catalog beyond SeqKit stats
 - RemoteRunner execution
-- read filtering, FOFN generation, genome survey tool execution, assembly,
-  scaffolding, repeat, gene, or function annotation execution
+- genome survey tool execution, assembly tool execution, scaffolding, repeat,
+  gene, or function annotation execution
 - complete review interrupt blocking/resume semantics
 - production-grade requested-stage routing; the placeholder `--stages` flag is
   intentionally not exposed yet
@@ -76,7 +80,7 @@ annotation.
 Use the same environment and pycache prefix used during scaffold validation:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly -v
 ```
 
 ```bash
