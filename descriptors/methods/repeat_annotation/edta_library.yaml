@@ -1,0 +1,25 @@
+method_name: repeat_annotation.library.edta
+stage: repeat_annotation
+package_ref: edta
+goal: "Plan EDTA as a de novo repeat library candidate without executing EDTA."
+required_inputs:
+  - name: final_assembly_for_annotation
+    type: draft_assembly
+    description: "Reviewed assembly FASTA for repeat annotation."
+expected_outputs:
+  - name: repeat_library
+    type: repeat_library
+    description: "Planned de novo repeat library FASTA."
+  - name: repeat_annotation_gff3
+    type: repeat_annotation
+    description: "Planned repeat annotation GFF3."
+review_rules:
+  - repeat_library_plan_exists
+human_review_triggers:
+  - repeat_library_method_selection_required
+  - low_confidence_repeat_annotation
+resource_hints:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 48.0

@@ -169,3 +169,43 @@ class HiCScaffoldPlan(BaseModel):
     review_required: bool = True
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepeatAnnotationPlan(BaseModel):
+    """Planned repeat annotation contract without running repeat tools."""
+
+    session_id: str
+    status: Literal["planned"]
+    strategy: Literal["provided", "de_novo"]
+    repeat_library_source: Literal["provided", "de_novo"]
+    final_assembly_for_annotation: str
+    provided_repeat_library_ref: str | None = None
+    library_candidate_methods: list[str] = Field(default_factory=list)
+    helper_methods: list[str] = Field(default_factory=list)
+    masking_method: str
+    expected_outputs: dict[str, str] = Field(default_factory=dict)
+    confidence: Literal["high", "low"] = "high"
+    low_confidence_reasons: list[str] = Field(default_factory=list)
+    method_selection_required: bool = False
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RepeatAnnotationBundle(BaseModel):
+    """Repeat annotation bundle consumed by downstream gene annotation."""
+
+    session_id: str
+    status: Literal["planned"]
+    strategy: Literal["provided", "de_novo"]
+    repeat_library_source: Literal["provided", "de_novo"]
+    final_assembly_for_annotation: str
+    repeat_library_ref: str
+    repeat_annotation_gff3_ref: str
+    softmasked_genome_ref: str
+    hardmasked_genome_ref: str | None = None
+    confidence: Literal["high", "low"] = "high"
+    low_confidence_reasons: list[str] = Field(default_factory=list)
+    candidate_methods: list[str] = Field(default_factory=list)
+    plan_artifact_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

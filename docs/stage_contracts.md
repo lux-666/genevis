@@ -263,11 +263,13 @@ Outputs:
 
 Planning rules:
 
-- Use RepeatModeler for de novo library discovery unless a trusted repeat
-  library is provided.
-- Use RepeatMasker for masking and GFF output.
-- Use TRF for tandem repeats.
-- Mark low-confidence repeat annotation when assembly fragmentation is high.
+- Use a provided repeat library when one is explicitly registered.
+- Otherwise record EDTA and RepeatModeler as de novo library candidates without
+  choosing a default until descriptor or human policy approves one.
+- Plan RepeatMasker for masking and GFF output.
+- Record TRF as an optional tandem-repeat helper.
+- Propagate explicit high-fragmentation or low-confidence assembly signals into
+  repeat annotation confidence without inventing numeric thresholds.
 
 ## 8. Gene Annotation
 

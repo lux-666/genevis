@@ -1,6 +1,7 @@
 packages:
   busco: busco.yaml
   canu: canu.yaml
+  edta: edta.yaml
   chopper: chopper.yaml
   3ddna: 3ddna.yaml
   fastplong: fastplong.yaml
@@ -17,8 +18,11 @@ packages:
   quast: quast.yaml
   juicer: juicer.yaml
   juicebox: juicebox.yaml
+  repeatmasker: repeatmasker.yaml
+  repeatmodeler: repeatmodeler.yaml
   seqkit: seqkit.yaml
   smudgeplot: smudgeplot.yaml
+  trf: trf.yaml
   yahs: yahs.yaml
 methods:
   assembly.candidate.canu: assembly/canu_candidate.yaml
@@ -38,6 +42,10 @@ methods:
   hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
   hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
   read_qc.length_filter.chopper: read_qc/chopper_length_filter.yaml
+  repeat_annotation.helper.trf: repeat_annotation/trf_helper.yaml
+  repeat_annotation.library.edta: repeat_annotation/edta_library.yaml
+  repeat_annotation.library.repeatmodeler: repeat_annotation/repeatmodeler_library.yaml
+  repeat_annotation.masking.repeatmasker: repeat_annotation/repeatmasker_masking.yaml
   read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
   read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
@@ -70,6 +78,10 @@ by_stage:
   hic_scaffolding:
     - hic_scaffolding.candidate.yahs
     - hic_scaffolding.candidate.juicer_3ddna_juicebox
-  repeat_annotation: []
+  repeat_annotation:
+    - repeat_annotation.library.edta
+    - repeat_annotation.library.repeatmodeler
+    - repeat_annotation.masking.repeatmasker
+    - repeat_annotation.helper.trf
   gene_annotation: []
   function_annotation: []

@@ -2,9 +2,61 @@
 
 from __future__ import annotations
 
-from app.stages.factory import build_placeholder_stage
+from langgraph.graph import END, START, StateGraph
+
+from app.schemas.state import TopLevelState
+from app.stages.repeat_annotation.nodes import (
+    commit_repeat_annotation,
+    enter_repeat_annotation,
+    fail_repeat_annotation,
+    plan_repeat_library,
+    plan_repeat_masking,
+    resolve_repeat_inputs,
+    select_repeat_strategy,
+)
+from app.stages.repeat_annotation.routing import (
+    route_after_library_plan,
+    route_after_masking_plan,
+    route_after_resolve,
+    route_after_select,
+)
 
 
 def build_stage():
-    """Build the repeat annotation placeholder subgraph."""
-    return build_placeholder_stage("repeat_annotation")
+    """Build the repeat annotation planning subgraph."""
+    graph = StateGraph(TopLevelState)
+
+    graph.add_node("enter", enter_repeat_annotation)
+    graph.add_node("resolve_repeat_inputs", resolve_repeat_inputs)
+    graph.add_node("select_repeat_strategy", select_repeat_strategy)
+    graph.add_node("plan_repeat_library", plan_repeat_library)
+    graph.add_node("plan_repeat_masking", plan_repeat_masking)
+    graph.add_node("commit", commit_repeat_annotation)
+    graph.add_node("fail", fail_repeat_annotation)
+
+    graph.add_edge(START, "enter")
+    graph.add_edge("enter", "resolve_repeat_inputs")
+    graph.add_conditional_edges(
+        "resolve_repeat_inputs",
+        route_after_resolve,
+        {"select": "select_repeat_strategy", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "select_repeat_strategy",
+        route_after_select,
+        {"library": "plan_repeat_library", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "plan_repeat_library",
+        route_after_library_plan,
+        {"masking": "plan_repeat_masking", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "plan_repeat_masking",
+        route_after_masking_plan,
+        {"commit": "commit", "fail": "fail"},
+    )
+    graph.add_edge("commit", END)
+    graph.add_edge("fail", END)
+
+    return graph.compile()

@@ -180,9 +180,9 @@ resume before the corresponding human decision is explicit in the task docs.
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
 - `inventory`, the SeqKit/read-filter/FOFN part of `read_qc`, `genome_survey`,
-  `assembly`, `assembly_review`, and `hic_scaffolding` have real routing;
-  downstream stages from `repeat_annotation` onward are still placeholders that
-  always advance.
+  `assembly`, `assembly_review`, `hic_scaffolding`, and `repeat_annotation` have
+  real routing; downstream stages from `gene_annotation` onward are still
+  placeholders that always advance.
 - Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
@@ -192,6 +192,8 @@ resume before the corresponding human decision is explicit in the task docs.
   no execution path for those tools.
 - Hi-C scaffolding descriptors for YaHS, Juicer, 3D-DNA, and Juicebox are
   planning placeholders only; there is no execution path for those tools.
+- Repeat annotation descriptors for EDTA, RepeatModeler, RepeatMasker, and TRF
+  are planning placeholders only; there is no execution path for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.

@@ -1,0 +1,15 @@
+package_name: edta
+version_constraint: ">=2.2"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "EDTA.pl --genome {assembly_fasta} --species others --step all"
+help_summary: "EDTA de novo repeat library and annotation candidate for plant and eukaryotic genomes."
+known_pitfalls:
+  - "Runtime and memory needs vary substantially with genome size and repeat content."
+  - "Species-specific parameters and dependency versions should be reviewed before execution."
+resource_defaults:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 48.0

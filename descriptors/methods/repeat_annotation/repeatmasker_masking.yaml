@@ -1,0 +1,28 @@
+method_name: repeat_annotation.masking.repeatmasker
+stage: repeat_annotation
+package_ref: repeatmasker
+goal: "Plan RepeatMasker softmasking and repeat GFF output without execution."
+required_inputs:
+  - name: final_assembly_for_annotation
+    type: draft_assembly
+    description: "Reviewed assembly FASTA for masking."
+  - name: repeat_library
+    type: repeat_library
+    description: "Provided or planned de novo repeat library."
+expected_outputs:
+  - name: softmasked_genome
+    type: softmasked_genome
+    description: "Planned softmasked genome FASTA for gene annotation."
+  - name: repeat_annotation_gff3
+    type: repeat_annotation
+    description: "Planned repeat annotation GFF3."
+review_rules:
+  - repeat_masking_plan_exists
+human_review_triggers:
+  - masking_policy_required
+  - low_confidence_repeat_annotation
+resource_hints:
+  cpu_cores: 24
+  memory_gb: 96.0
+  gpu_required: false
+  walltime_hours: 36.0

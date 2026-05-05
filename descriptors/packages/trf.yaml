@@ -1,0 +1,14 @@
+package_name: trf
+version_constraint: ">=4.09"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "trf {assembly_fasta} 2 7 7 80 10 50 500 -d -h"
+help_summary: "TRF tandem-repeat detection helper for repeat annotation planning."
+known_pitfalls:
+  - "Parameter choices affect tandem repeat sensitivity and should be policy-reviewed before execution."
+resource_defaults:
+  cpu_cores: 4
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 12.0

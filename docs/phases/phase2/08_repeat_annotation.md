@@ -1,5 +1,7 @@
 # 08 Repeat Annotation
 
+Task status: implemented.
+
 ## Goal
 
 Place repeat annotation before gene annotation and produce the repeat library,
@@ -8,9 +10,13 @@ repeat GFF3, and softmasked genome needed by downstream gene prediction.
 ## Files
 
 - Modify: `app/stages/repeat_annotation/nodes.py`
+- Modify: `app/stages/repeat_annotation/builder.py`
 - Modify: `app/stages/repeat_annotation/routing.py`
 - Modify: `app/schemas/artifacts.py`
-- Add descriptors later: `descriptors/methods/repeat_annotation/`
+- Modify: `app/schemas/assets.py`
+- Add: `descriptors/methods/repeat_annotation/`
+- Add: `descriptors/packages/{edta,repeatmodeler,repeatmasker,trf}.yaml`
+- Modify: `descriptors/registry.yaml`
 - Test: `tests/test_repeat_annotation.py`
 
 ## Project Context
@@ -91,13 +97,41 @@ Optional helper:
 
 ## Tasks
 
-- [ ] Add repeat annotation plan schema.
-- [ ] Add repeat annotation artifact bundle schema.
-- [ ] Add descriptor placeholders for EDTA, RepeatModeler, RepeatMasker, and TRF.
-- [ ] Add routing that requires repeat annotation before gene annotation.
-- [ ] Add tests that provided repeat library can skip de novo discovery.
-- [ ] Add tests that fragmented assemblies mark repeat annotation
+- [x] Add repeat annotation plan schema.
+- [x] Add repeat annotation artifact bundle schema.
+- [x] Add descriptor placeholders for EDTA, RepeatModeler, RepeatMasker, and TRF.
+- [x] Add routing that requires repeat annotation before gene annotation.
+- [x] Add tests that provided repeat library can skip de novo discovery.
+- [x] Add tests that fragmented assemblies mark repeat annotation
   low-confidence instead of hiding the issue.
+
+## Implemented State
+
+- `app/stages/repeat_annotation/builder.py` now builds a real planning subgraph
+  instead of the generic placeholder.
+- `app/stages/repeat_annotation/nodes.py` resolves
+  `final_assembly_for_annotation` from Hi-C scaffolding output first, then from
+  assembly review fallback refs.
+- Optional registered `repeat_library` assets are treated as provided repeat
+  libraries and skip de novo library discovery.
+- When no provided library exists, EDTA and RepeatModeler are recorded as de novo
+  library candidates, TRF is recorded as an optional helper, and method selection
+  remains deferred instead of defaulting to one tool.
+- RepeatMasker masking is planned for `repeat_annotation.gff3`,
+  `softmasked_genome.fasta`, and optional `hardmasked_genome.fasta`; no repeat
+  tools are executed in Phase 2.
+- `RepeatAnnotationPlan` and `RepeatAnnotationBundle` in
+  `app/schemas/artifacts.py` define the plan and downstream bundle contracts.
+- `app/schemas/assets.py` includes `repeat_library` so trusted/provided repeat
+  libraries can be registered in the asset registry.
+- Descriptor placeholders exist for `edta`, `repeatmodeler`, `repeatmasker`, and
+  `trf`, with method entries under `descriptors/methods/repeat_annotation/`.
+- Explicit upstream low-confidence or fragmented-assembly signals are propagated
+  into repeat annotation confidence without inventing numeric fragmentation
+  thresholds.
+- `tests/test_repeat_annotation.py` covers descriptor loading, missing assembly
+  failure, provided-library planning, de novo candidate planning, low-confidence
+  propagation, and routing to `gene_annotation`.
 
 ## Non-Goals
 

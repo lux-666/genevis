@@ -22,6 +22,7 @@ AssetType = Literal[
     "genome_survey_result",
     "hic_reads_registered",
     "chromosome_scaffolded_assembly",
+    "repeat_library",
     "repeat_annotation",
     "softmasked_genome",
     "gene_models",
