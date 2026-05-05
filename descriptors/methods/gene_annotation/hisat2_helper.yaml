@@ -1,0 +1,24 @@
+method_name: gene_annotation.helper.hisat2
+stage: gene_annotation
+package_ref: hisat2
+goal: "Plan HISAT2 RNA-seq alignment evidence generation without execution."
+required_inputs:
+  - name: rnaseq_reads
+    type: raw_rnaseq_reads
+    description: "RNA-seq reads for transcript evidence planning."
+  - name: softmasked_genome
+    type: softmasked_genome
+    description: "Softmasked genome FASTA from repeat annotation."
+expected_outputs:
+  - name: rnaseq_alignment_bam
+    type: gene_models
+    description: "Planned RNA-seq alignment evidence reference."
+review_rules:
+  - rnaseq_alignment_plan_exists
+human_review_triggers:
+  - rnaseq_alignment_policy_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 24.0

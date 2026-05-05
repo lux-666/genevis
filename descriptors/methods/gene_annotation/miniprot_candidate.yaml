@@ -1,0 +1,25 @@
+method_name: gene_annotation.candidate.miniprot
+stage: gene_annotation
+package_ref: miniprot
+goal: "Plan Miniprot protein homology evidence mapping without execution."
+required_inputs:
+  - name: softmasked_genome
+    type: softmasked_genome
+    description: "Softmasked genome FASTA from repeat annotation."
+  - name: reference_proteins
+    type: reference_proteins
+    description: "Reference protein FASTA evidence."
+expected_outputs:
+  - name: protein_homology_gff
+    type: gene_models
+    description: "Planned protein-supported gene model evidence."
+review_rules:
+  - protein_homology_plan_exists
+human_review_triggers:
+  - protein_reference_policy_required
+  - evidence_merge_policy_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 24.0

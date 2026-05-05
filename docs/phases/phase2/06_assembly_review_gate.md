@@ -147,6 +147,19 @@ Review decision options:
   signal planning, rejected candidate traceability, ledger events, and review
   artifacts.
 
+改动要点：
+
+- `app/stages/assembly_review/builder.py` 将 `assembly_review` 从 placeholder 换成
+  evaluation planning + human gate 子图。
+- `app/stages/assembly_review/nodes.py` 同时支持 existing assembly pass-through 和
+  assembly stage candidate bundle 输入；候选 assembly 默认进入 human review，不自动 accept。
+- `app/review/base.py` 定义 review signal/payload/decision 基础结构；`app/control/ledger.py`
+  增加 `review_requested` 和 `review_decision` 事件。
+- `AssemblyEvalBundle`、`ReviewDecisionArtifact`、`AssemblyReviewPlan` 分别定义评估 bundle、review decision 和 stage plan contract。
+- QUAST、BUSCO、Merqury、mapping coverage、purge_dups、contamination check descriptors
+  只作为 pending/planned signals，不编码阈值。
+- `tests/test_assembly_review.py` 是上手入口：覆盖 existing assembly deterministic accept、candidate refs 消费、blocked-human gate、ledger 事件、rejected candidate traceability。
+
 ## Human Decisions Required
 
 Stop and ask before choosing:

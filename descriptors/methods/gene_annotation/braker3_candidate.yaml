@@ -1,0 +1,25 @@
+method_name: gene_annotation.candidate.braker3
+stage: gene_annotation
+package_ref: braker3
+goal: "Plan BRAKER3 as a structural gene annotation candidate without execution."
+required_inputs:
+  - name: softmasked_genome
+    type: softmasked_genome
+    description: "Softmasked genome FASTA from repeat annotation."
+expected_outputs:
+  - name: genes_gff3
+    type: gene_models
+    description: "Planned gene models in GFF3 format."
+  - name: predicted_proteins
+    type: predicted_proteins
+    description: "Planned protein FASTA for function annotation."
+review_rules:
+  - gene_annotation_plan_exists
+human_review_triggers:
+  - gene_annotation_method_selection_required
+  - species_or_training_policy_required
+resource_hints:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 72.0

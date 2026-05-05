@@ -1,17 +1,24 @@
 packages:
+  augustus: augustus.yaml
+  braker3: braker3.yaml
   busco: busco.yaml
   canu: canu.yaml
-  edta: edta.yaml
   chopper: chopper.yaml
+  edta: edta.yaml
+  gemoma: gemoma.yaml
   3ddna: 3ddna.yaml
   fastplong: fastplong.yaml
   filtlong: filtlong.yaml
   flye: flye.yaml
   genomescope2: genomescope2.yaml
   hifiasm: hifiasm.yaml
+  hisat2: hisat2.yaml
+  isoquant: isoquant.yaml
   jellyfish: jellyfish.yaml
+  maker: maker.yaml
   meryl: meryl.yaml
   merqury: merqury.yaml
+  miniprot: miniprot.yaml
   minimap2: minimap2.yaml
   nextdenovo: nextdenovo.yaml
   purge_dups: purge_dups.yaml
@@ -22,6 +29,7 @@ packages:
   repeatmodeler: repeatmodeler.yaml
   seqkit: seqkit.yaml
   smudgeplot: smudgeplot.yaml
+  stringtie: stringtie.yaml
   trf: trf.yaml
   yahs: yahs.yaml
 methods:
@@ -38,6 +46,14 @@ methods:
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
   genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
+  gene_annotation.candidate.augustus: gene_annotation/augustus_candidate.yaml
+  gene_annotation.candidate.braker3: gene_annotation/braker3_candidate.yaml
+  gene_annotation.candidate.maker: gene_annotation/maker_candidate.yaml
+  gene_annotation.candidate.miniprot: gene_annotation/miniprot_candidate.yaml
+  gene_annotation.helper.gemoma: gene_annotation/gemoma_helper.yaml
+  gene_annotation.helper.hisat2: gene_annotation/hisat2_helper.yaml
+  gene_annotation.helper.isoquant: gene_annotation/isoquant_helper.yaml
+  gene_annotation.helper.stringtie: gene_annotation/stringtie_helper.yaml
   genome_survey.model.smudgeplot: genome_survey/smudgeplot_model.yaml
   hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
   hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
@@ -83,5 +99,13 @@ by_stage:
     - repeat_annotation.library.repeatmodeler
     - repeat_annotation.masking.repeatmasker
     - repeat_annotation.helper.trf
-  gene_annotation: []
+  gene_annotation:
+    - gene_annotation.candidate.braker3
+    - gene_annotation.candidate.maker
+    - gene_annotation.candidate.augustus
+    - gene_annotation.candidate.miniprot
+    - gene_annotation.helper.hisat2
+    - gene_annotation.helper.stringtie
+    - gene_annotation.helper.isoquant
+    - gene_annotation.helper.gemoma
   function_annotation: []

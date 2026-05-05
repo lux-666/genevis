@@ -124,6 +124,17 @@ Inventory output:
 - Existing ambiguous read review behavior and existing assembly routing remain
   covered by inventory tests.
 
+改动要点：
+
+- `app/schemas/manifest.py` 扩展 manifest 校验和平台推断，让 CycloneSEQ FASTQ
+  可以作为 long-read genomic input 进入 inventory。
+- `app/stages/inventory/nodes.py` 在 asset record 构建时把 CycloneSEQ FASTQ /
+  FASTQ.gz 标准化注册为 `raw_long_reads`，仍只把 `asset_registry_ref` 放进图状态。
+- `tests/test_manifest.py` 覆盖 CycloneSEQ 平台识别、文件格式推断和 manifest
+  校验边界。
+- `tests/test_inventory.py` 覆盖 CycloneSEQ FASTQ 注册、ambiguous long RNA/long DNA
+  review、existing assembly 直达 assembly review 的兼容路径。
+
 ## Non-Goals
 
 - Do not run SeqKit, NanoPlot, pyfastx, Jellyfish, or assembly tools here.

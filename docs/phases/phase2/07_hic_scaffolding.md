@@ -137,6 +137,17 @@ When Hi-C is absent:
   assembly failure, both skip paths, annotation continuation, fallback assembly
   preservation, and the human-blocked scaffold planning path.
 
+改动要点：
+
+- `app/stages/hic_scaffolding/builder.py` 将 `hic_scaffolding` 从 placeholder 换成
+  scaffold-or-skip 子图。
+- `app/stages/hic_scaffolding/nodes.py` 解析 assembly review 的 final assembly，并从
+  asset registry 查找 `hic_reads_registered`；没有 Hi-C 或未请求 chromosome-level 时写 skip record。
+- `HiCSkipRecord` 和 `HiCScaffoldPlan` 在 `app/schemas/artifacts.py` 中定义，分别表示非阻塞 skip 和待人工确认的 scaffold plan。
+- YaHS 与 Juicer + 3D-DNA + Juicebox descriptors 注册为候选；Hi-C 存在且请求 chromosome-level 时只规划并 `blocked_human`。
+- skip 路径会发布 `final_assembly_for_annotation`，让 `repeat_annotation` 可以继续消费 contig-level assembly。
+- `tests/test_hic_scaffolding.py` 覆盖缺 final assembly 失败、无 Hi-C skip、非 chromosome skip、Hi-C scaffold planning blocked-human。
+
 ## Human Decisions Required
 
 Stop and ask before choosing:

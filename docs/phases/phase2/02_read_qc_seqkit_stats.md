@@ -182,6 +182,20 @@ Stats should preserve or parse:
   missing `raw_long_reads`, fake-SeqKit success, compact state summaries with
   total bases, N50, Q20/Q30, AvgQual, and missing SeqKit failure behavior.
 
+改动要点：
+
+- `app/stages/read_qc/builder.py` 将 `read_qc` 从 placeholder 换成真实 SeqKit stats
+  子图。
+- `app/stages/read_qc/nodes.py` 负责解析 `raw_long_reads`、构建
+  `read_qc.long_read_stats.seqkit_stats` attempt、按显式 local execution 运行、收集
+  stats/stdout/stderr/log artifacts，并写 compact summary。
+- `app/execution/local_runner.py` 提供最小 subprocess runner；`app/execution/artifacts.py`
+  追加 session artifact index；`app/control/ledger.py` 记录 attempt 和 artifact 事件。
+- `descriptors/packages/seqkit.yaml`、`descriptors/methods/read_qc/seqkit_stats.yaml`
+  和 `descriptors/registry.yaml` 注册 SeqKit package/method。
+- `tests/test_read_qc.py` 覆盖 descriptor 加载、缺 registry/缺 `raw_long_reads`、fake
+  SeqKit 成功、缺 binary/输出缺失等失败路径。
+
 ## Failure Behavior
 
 - Missing asset registry: fail terminally with structured error.

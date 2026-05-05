@@ -1,5 +1,7 @@
 # 03 Read QC Filter And FOFN Contract
 
+Task status: implemented.
+
 ## Goal
 
 Extend `read_qc` planning after stats with two downstream substeps:
@@ -123,16 +125,41 @@ Purpose:
 
 ## Tasks
 
-- [ ] Add read QC stage plan fields for `long_read_stats`, `length_filter`, and
+- [x] Add read QC stage plan fields for `long_read_stats`, `length_filter`, and
   `make_fofn`.
-- [ ] Record `length_filter` as planned/skipped/executed without requiring
+- [x] Record `length_filter` as planned/skipped/executed without requiring
   thresholds.
-- [ ] Add FOFN artifact contract and tests.
-- [ ] Add skip reasons for no filtering requested and threshold decision missing.
-- [ ] Add candidate descriptor placeholders for SeqKit seq, Filtlong, fastplong,
+- [x] Add FOFN artifact contract and tests.
+- [x] Add skip reasons for no filtering requested and threshold decision missing.
+- [x] Add candidate descriptor placeholders for SeqKit seq, Filtlong, fastplong,
   and chopper.
-- [ ] Add tests proving assembly can later consume a FOFN ref without reading
+- [x] Add tests proving assembly can later consume a FOFN ref without reading
   FASTQ paths directly from graph state.
+
+## Implemented State
+
+- `app/stages/read_qc/builder.py` extends the real read QC graph beyond SeqKit
+  stats into length-filter planning and FOFN writing.
+- `app/stages/read_qc/nodes.py` records `length_filter` as executed or skipped
+  with explicit decision reasons, then writes `long_reads.fofn` or
+  `filtered_long_reads.fofn` as a small artifact.
+- `app/schemas/artifacts.py` defines read QC artifact type constants for stats,
+  filtered reads, raw FOFN, and filtered FOFN contracts.
+- `app/schemas/plan.py` adds stage-plan fields used to represent
+  `long_read_stats`, `length_filter`, and `make_fofn` decisions.
+- Descriptor placeholders exist for `seqkit seq`, Filtlong, fastplong, and
+  chopper under `descriptors/methods/read_qc/` and `descriptors/packages/`.
+- `tests/test_read_qc.py` covers no-threshold skip, unapproved threshold skip,
+  approved min-length filtering, filtered FOFN writing, and raw FOFN fallback.
+
+改动要点：
+
+- `app/stages/read_qc/nodes.py` 是核心入口：SeqKit stats 后接
+  `plan_length_filter` / `maybe_run_length_filter` / `make_fofn`，并把 assembly
+  后续要用的 FOFN ref 写进 state。
+- `app/stages/read_qc/routing.py` 增加过滤和 FOFN 后续路由，保持没有人工阈值时不自动过滤。
+- `descriptors/registry.yaml` 注册四个 length-filter candidate，但 Phase 2 默认不选过滤阈值。
+- `tests/test_read_qc.py` 是理解这个 slice 最快入口：看过滤跳过、批准过滤、FOFN 生成三组测试。
 
 ## Non-Goals
 

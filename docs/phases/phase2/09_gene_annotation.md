@@ -1,5 +1,7 @@
 # 09 Gene Annotation
 
+Task status: implemented.
+
 ## Goal
 
 Define gene annotation on top of `softmasked_genome` with optional RNA-seq,
@@ -7,10 +9,14 @@ Iso-Seq, long RNA, and protein evidence.
 
 ## Files
 
+- Modify: `app/stages/gene_annotation/builder.py`
 - Modify: `app/stages/gene_annotation/nodes.py`
 - Modify: `app/stages/gene_annotation/routing.py`
 - Modify: `app/schemas/artifacts.py`
-- Add descriptors later: `descriptors/methods/gene_annotation/`
+- Modify: `app/schemas/assets.py`
+- Add: `descriptors/methods/gene_annotation/`
+- Add: `descriptors/packages/{braker3,maker,augustus,miniprot,hisat2,stringtie,isoquant,gemoma}.yaml`
+- Modify: `descriptors/registry.yaml`
 - Test: `tests/test_gene_annotation.py`
 
 ## Project Context
@@ -81,7 +87,7 @@ Optional evidence:
 - RNA-seq
 - Iso-Seq
 - long RNA
-- protein evidence
+- reference protein evidence
 - lineage/species hints
 
 ## Candidate Methods
@@ -107,14 +113,47 @@ Optional evidence helpers:
 
 ## Tasks
 
-- [ ] Add gene annotation plan schema.
-- [ ] Add gene annotation artifact bundle schema.
-- [ ] Add descriptor placeholders for BRAKER3, MAKER, AUGUSTUS, and Miniprot.
-- [ ] Add optional evidence helper descriptors as backlog.
-- [ ] Add routing that consumes `softmasked_genome`.
-- [ ] Add tests for no-evidence ab initio planning.
-- [ ] Add tests for RNA/protein evidence changing method candidate planning.
-- [ ] Add review trigger when evidence sources conflict.
+- [x] Add gene annotation plan schema.
+- [x] Add gene annotation artifact bundle schema.
+- [x] Add descriptor placeholders for BRAKER3, MAKER, AUGUSTUS, and Miniprot.
+- [x] Add optional evidence helper descriptors as backlog.
+- [x] Add routing that consumes `softmasked_genome`.
+- [x] Add tests for no-evidence ab initio planning.
+- [x] Add tests for RNA/protein evidence changing method candidate planning.
+- [x] Add review trigger when evidence sources conflict.
+
+## Implemented State
+
+- `app/stages/gene_annotation/builder.py` now builds a real planning subgraph
+  instead of the generic placeholder.
+- `app/stages/gene_annotation/nodes.py` consumes
+  `repeat_annotation.softmasked_genome_ref` or `softmasked_genome` by default;
+  unmasked `final_assembly_for_annotation` fallback is accepted only when an
+  explicit fallback reason is already recorded.
+- Optional evidence is resolved from the asset registry as RNA-seq,
+  Iso-Seq/long-RNA, and `reference_proteins` evidence.
+- Evidence profile is recorded as `no_evidence`, `rnaseq`, `long_rna`,
+  `protein`, or `mixed_evidence` without changing stage order.
+- Candidate planning records BRAKER3, MAKER, AUGUSTUS, and Miniprot where
+  compatible, but does not choose a default primary method.
+- Helper planning records HISAT2/StringTie for RNA-seq, IsoQuant for long RNA,
+  and GeMoMa for reference protein evidence.
+- Mixed evidence and RNA/protein evidence combinations record review triggers
+  instead of inventing an evidence merge policy.
+- `GeneAnnotationPlan` and `GeneAnnotationBundle` in `app/schemas/artifacts.py`
+  define the plan and downstream function-annotation bundle contracts.
+- `app/schemas/assets.py` includes `reference_proteins` for optional protein
+  evidence registration.
+- Descriptor placeholders exist for `braker3`, `maker`, `augustus`, `miniprot`,
+  `hisat2`, `stringtie`, `isoquant`, and `gemoma`, with method entries under
+  `descriptors/methods/gene_annotation/`.
+- The stage publishes planned `genes.gff3`, `transcripts.fa`, `proteins.fa`, and
+  `evidence_report.json` refs, including `predicted_proteins_ref` and
+  `proteins_fasta_ref` for `function_annotation`.
+- `tests/test_gene_annotation.py` covers descriptor loading, missing softmasked
+  genome failure, no-evidence planning, RNA/long-RNA/protein evidence planning,
+  mixed-evidence review triggers, explicit unmasked fallback, and routing to
+  `function_annotation`.
 
 ## Human Decisions Required
 

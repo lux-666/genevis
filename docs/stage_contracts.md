@@ -277,10 +277,12 @@ Purpose: generate gene models, transcripts, and predicted proteins.
 
 Inputs:
 
-- required: `softmasked_genome` or final assembly
+- required by default: `softmasked_genome`
+- fallback: `final_assembly_for_annotation` only when an explicit unmasked
+  fallback reason is recorded
 - optional: `clean_rnaseq_reads`
 - optional: `clean_isoseq_reads`
-- optional: reference proteins
+- optional: `reference_proteins`
 - optional: `repeat_annotation`
 
 Outputs:
@@ -292,10 +294,12 @@ Outputs:
 
 Planning rules:
 
-- With assembly only, run an ab initio path such as AUGUSTUS or ANNEVO.
-- With related proteins, add Miniprot and/or GeMoMa.
+- With no evidence, plan an explicit ab initio path such as AUGUSTUS without
+  choosing a default method.
+- With related proteins, add Miniprot and/or GeMoMa candidates.
 - With RNA-seq, add HISAT2/StringTie and hints.
 - With Iso-seq or long RNA, add IsoQuant.
+- Mixed evidence requires a review/merge policy; do not select one by default.
 - Treat EVM as optional compatibility because maintenance status is a risk.
 
 Review triggers:

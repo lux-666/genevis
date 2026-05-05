@@ -1,0 +1,15 @@
+package_name: augustus
+version_constraint: ">=3.5"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "augustus --species={species} {softmasked_genome}"
+help_summary: "AUGUSTUS ab initio gene prediction candidate."
+known_pitfalls:
+  - "Species model choice is a biological policy decision."
+  - "No-evidence ab initio predictions should be reviewed before downstream use."
+resource_defaults:
+  cpu_cores: 8
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 24.0

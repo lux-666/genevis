@@ -209,3 +209,49 @@ class RepeatAnnotationBundle(BaseModel):
     plan_artifact_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneAnnotationPlan(BaseModel):
+    """Planned gene annotation contract without running annotation tools."""
+
+    session_id: str
+    status: Literal["planned"]
+    genome_input_ref: str
+    genome_input_source: Literal["softmasked_genome", "final_assembly_for_annotation"]
+    unmasked_fallback_reason: str | None = None
+    repeat_annotation_ref: str | None = None
+    rnaseq_read_refs: list[str] = Field(default_factory=list)
+    long_rna_read_refs: list[str] = Field(default_factory=list)
+    protein_evidence_refs: list[str] = Field(default_factory=list)
+    lineage_or_species_hints: dict[str, Any] = Field(default_factory=dict)
+    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"]
+    candidate_methods: list[str] = Field(default_factory=list)
+    helper_methods: list[str] = Field(default_factory=list)
+    expected_outputs: dict[str, str] = Field(default_factory=dict)
+    review_required: bool = False
+    review_triggers: list[str] = Field(default_factory=list)
+    method_selection_required: bool = True
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneAnnotationBundle(BaseModel):
+    """Gene annotation bundle consumed by downstream function annotation."""
+
+    session_id: str
+    status: Literal["planned"]
+    genome_input_ref: str
+    genome_input_source: Literal["softmasked_genome", "final_assembly_for_annotation"]
+    genes_gff3_ref: str
+    transcripts_fasta_ref: str
+    predicted_proteins_ref: str
+    evidence_report_ref: str
+    repeat_annotation_ref: str | None = None
+    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"]
+    candidate_methods: list[str] = Field(default_factory=list)
+    helper_methods: list[str] = Field(default_factory=list)
+    review_required: bool = False
+    review_triggers: list[str] = Field(default_factory=list)
+    plan_artifact_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

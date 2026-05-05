@@ -1,0 +1,24 @@
+method_name: gene_annotation.candidate.augustus
+stage: gene_annotation
+package_ref: augustus
+goal: "Plan AUGUSTUS ab initio gene prediction without execution."
+required_inputs:
+  - name: softmasked_genome
+    type: softmasked_genome
+    description: "Softmasked genome FASTA from repeat annotation."
+expected_outputs:
+  - name: genes_gff3
+    type: gene_models
+    description: "Planned ab initio gene models in GFF3 format."
+  - name: predicted_proteins
+    type: predicted_proteins
+    description: "Planned protein FASTA for function annotation."
+review_rules:
+  - ab_initio_plan_exists
+human_review_triggers:
+  - species_or_training_policy_required
+resource_hints:
+  cpu_cores: 8
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 24.0

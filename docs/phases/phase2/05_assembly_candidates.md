@@ -150,6 +150,20 @@ Each candidate method must declare:
   FOFN plus genome-size planning, genome-size-required blocking, and primary
   plus fallback limits.
 
+改动要点：
+
+- `app/stages/assembly/builder.py` 将 `assembly` 从 placeholder 换成 candidate
+  planning 子图。
+- `app/stages/assembly/nodes.py` 优先消费 read QC 产出的 `long_reads.fofn` /
+  `filtered_long_reads.fofn`，否则回退到 registry 中的 `clean_long_reads`。
+- `AssemblyCandidatePlan` 和 `AssemblyCandidateBundle` 分别在 `app/schemas/plan.py`
+  与 `app/schemas/artifacts.py` 中定义，候选 bundle 写到
+  `data/artifacts/assembly/{session_id}/candidates/`。
+- Flye、hifiasm、NextDenovo、Canu 的 package/method descriptors 注册在
+  `descriptors/registry.yaml`；NextDenovo/Canu 没有 genome-size prior 时会被 reject 而不是全局失败。
+- 自动规划只选一个 primary 和最多一个 fallback，`execution_enabled: false`，真实 assembler 执行留给后续 method task。
+- `tests/test_assembly.py` 覆盖缺输入失败、FOFN+genome size planning、genome-size-required reject、primary/fallback 数量限制。
+
 ## Non-Goals
 
 - Do not run assembly tools in Phase 2 unless a later method task explicitly

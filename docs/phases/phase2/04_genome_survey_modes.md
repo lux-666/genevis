@@ -148,6 +148,19 @@ Required guardrail:
 - `tests/test_genome_survey.py` covers descriptor loading, missing registry,
   full mode, low-confidence fallback, and skip behavior.
 
+改动要点：
+
+- `app/stages/genome_survey/builder.py` 将 `genome_survey` 从 placeholder 换成
+  full/fallback/skipped 三分支规划子图。
+- `app/stages/genome_survey/nodes.py` 解析 asset registry 中的 short DNA reads、long
+  reads 和 read QC summary，选择 full k-mer survey、CycloneSEQ-only low-confidence
+  fallback 或显式 skip。
+- `app/schemas/artifacts.py` 的 `GenomeSurveyResult` 是下游 assembly 读取的 compact
+  survey contract；图状态只保存 ref、mode、confidence、summary。
+- `descriptors/packages/{jellyfish,meryl,genomescope2,smudgeplot}.yaml` 和
+  `descriptors/methods/genome_survey/` 只注册规划候选，不执行工具。
+- `tests/test_genome_survey.py` 覆盖 short-read full mode、long-read-only fallback、无可用输入 skip、缺 registry 失败。
+
 ## Non-Goals
 
 - Do not run Jellyfish, Meryl, GenomeScope2, or Smudgeplot in this task unless a

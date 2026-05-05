@@ -1,0 +1,21 @@
+method_name: gene_annotation.helper.stringtie
+stage: gene_annotation
+package_ref: stringtie
+goal: "Plan StringTie transcript assembly evidence without execution."
+required_inputs:
+  - name: rnaseq_alignment_bam
+    type: gene_models
+    description: "RNA-seq alignment evidence reference."
+expected_outputs:
+  - name: transcript_evidence_gtf
+    type: gene_models
+    description: "Planned transcript evidence GTF."
+review_rules:
+  - transcript_evidence_plan_exists
+human_review_triggers:
+  - transcript_evidence_merge_policy_required
+resource_hints:
+  cpu_cores: 8
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 12.0
