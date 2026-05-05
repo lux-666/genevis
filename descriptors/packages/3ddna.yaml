@@ -1,0 +1,14 @@
+package_name: 3ddna
+version_constraint: ">=201008"
+language: cli
+install_channel: container
+entry_patterns:
+  - "run-asm-pipeline.sh {assembly_fasta} {merged_nodups_txt}"
+help_summary: "3D-DNA scaffolding and misjoin correction candidate after Juicer processing."
+known_pitfalls:
+  - "Assembly edits require manual contact-map review and approval."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 12.0

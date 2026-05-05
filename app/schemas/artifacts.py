@@ -141,3 +141,31 @@ class ReviewDecisionArtifact(BaseModel):
     final_assembly_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HiCSkipRecord(BaseModel):
+    """Explicit non-blocking Hi-C skip record."""
+
+    session_id: str
+    mode: Literal["skipped_no_hic", "skipped_not_chromosome_level"]
+    skip_reason: Literal["no_hic_reads", "not_chromosome_level_requested"]
+    pre_hic_assembly_ref: str
+    final_assembly_for_annotation: str
+    hic_read_refs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HiCScaffoldPlan(BaseModel):
+    """Planned Hi-C scaffolding bundle without running tools."""
+
+    session_id: str
+    status: Literal["planned"]
+    pre_hic_assembly_ref: str
+    fallback_assembly_ref: str
+    hic_read_refs: list[str] = Field(default_factory=list)
+    candidate_methods: list[str] = Field(default_factory=list)
+    expected_outputs: dict[str, str] = Field(default_factory=dict)
+    review_required: bool = True
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

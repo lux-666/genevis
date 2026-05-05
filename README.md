@@ -7,7 +7,8 @@ The repository has a corrected Phase 1 inventory implementation and the first
 Phase 2 executable slice for CycloneSEQ read QC. The current value is the
 project shape, state contracts, stage contracts, descriptor roots, handoff
 documentation, inventory, SeqKit stats execution boundary, genome survey
-contracts, assembly candidate planning, and the assembly review human gate.
+contracts, assembly candidate planning, the assembly review human gate, and
+Hi-C scaffold/skip planning.
 
 ## Biological Backbone
 
@@ -47,11 +48,14 @@ Implemented:
   Canu planning descriptors
 - real `assembly_review` human gate with evaluation/review artifacts and ledger
   events
-- placeholder downstream domain stage subgraphs after assembly review
+- real `hic_scaffolding` skip/scaffold planning stage with skip artifacts,
+  candidate descriptors, and human blocking when chromosome-level Hi-C
+  scaffolding is requested
+- placeholder downstream domain stage subgraphs after Hi-C scaffolding
 - small `TopLevelState`
 - asset, plan, descriptor, artifact, command, and event schema roots
 - descriptor/config roots, including SeqKit, genome survey, assembly planning,
-  and assembly review descriptors
+  assembly review, and Hi-C scaffolding descriptors
 - phase plan and handoff documentation
 - Phase 1 inventory code for manifest loading, asset registry writing, ledger
   events, and CLI invocation
@@ -62,8 +66,8 @@ Not implemented:
 
 - executable bioinformatics method catalog beyond SeqKit stats
 - RemoteRunner execution
-- genome survey tool execution, assembly tool execution, scaffolding, repeat,
-  gene, or function annotation execution
+- genome survey tool execution, assembly tool execution, Hi-C scaffolding tool
+  execution, repeat, gene, or function annotation execution
 - complete review interrupt blocking/resume semantics
 - production-grade requested-stage routing; the placeholder `--stages` flag is
   intentionally not exposed yet
@@ -82,7 +86,7 @@ annotation.
 Use the same environment and pycache prefix used during scaffold validation:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding -v
 ```
 
 ```bash

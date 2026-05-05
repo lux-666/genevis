@@ -1,5 +1,7 @@
 # 07 Hi-C Scaffolding Or Skip
 
+Task status: implemented.
+
 ## Goal
 
 Make `hic_scaffolding` conditionally scaffold assemblies when Hi-C reads exist,
@@ -86,11 +88,11 @@ Optional preprocessing candidate:
 
 ## Outputs
 
-When Hi-C runs:
+When Hi-C scaffold planning is possible:
 
-- `hic_qc_report`
-- `chromosome_scaffolded_assembly`
-- optional `juicebox_review_bundle`
+- planned `hic_qc_report`
+- planned `chromosome_scaffolded_assembly`
+- planned optional `juicebox_review_bundle`
 
 When Hi-C is absent:
 
@@ -99,13 +101,41 @@ When Hi-C is absent:
 
 ## Tasks
 
-- [ ] Add Hi-C skip record artifact schema.
-- [ ] Add scaffold bundle schema.
-- [ ] Add descriptor placeholders for YaHS and Juicer + 3D-DNA + Juicebox.
-- [ ] Add routing for no Hi-C reads.
-- [ ] Add routing for Hi-C present but chromosome-level assembly not requested.
-- [ ] Add tests that annotation continues after Hi-C skip.
-- [ ] Add tests that pre-Hi-C assembly remains available as fallback.
+- [x] Add Hi-C skip record artifact schema.
+- [x] Add scaffold bundle schema.
+- [x] Add descriptor placeholders for YaHS and Juicer + 3D-DNA + Juicebox.
+- [x] Add routing for no Hi-C reads.
+- [x] Add routing for Hi-C present but chromosome-level assembly not requested.
+- [x] Add tests that annotation continues after Hi-C skip.
+- [x] Add tests that pre-Hi-C assembly remains available as fallback.
+
+## Implemented State
+
+- `app/stages/hic_scaffolding/builder.py` now builds a real scaffold/skip
+  subgraph instead of the generic placeholder.
+- `app/stages/hic_scaffolding/nodes.py` resolves the reviewed assembly from
+  `assembly_review.final_assembly_ref` or
+  `assembly_review.final_assembly_for_scaffolding_or_annotation`.
+- Registered `hic_reads_registered` assets are resolved from the asset registry.
+  If none exist, the stage writes `hic_skip_record.json`, records
+  `skip_reason: no_hic_reads`, publishes `final_assembly_for_annotation` as the
+  pre-Hi-C assembly, and advances to `repeat_annotation`.
+- If Hi-C reads exist but `inventory.target_assembly_level` is not
+  `chromosome`, the stage writes a skip record with
+  `skip_reason: not_chromosome_level_requested` and keeps annotation
+  non-blocking on the contig-level assembly.
+- If Hi-C reads exist and chromosome-level assembly is requested, the stage
+  writes `hic_scaffold_plan.json`, records YaHS and Juicer + 3D-DNA + Juicebox
+  candidate methods, preserves the pre-Hi-C assembly as annotation fallback, and
+  blocks with `supervision_state: blocked_human`.
+- `HiCSkipRecord` and `HiCScaffoldPlan` are defined in
+  `app/schemas/artifacts.py`.
+- Descriptor placeholders exist for `yahs`, `juicer`, `3ddna`, and `juicebox`,
+  with method entries for `hic_scaffolding.candidate.yahs` and
+  `hic_scaffolding.candidate.juicer_3ddna_juicebox`.
+- `tests/test_hic_scaffolding.py` covers descriptor loading, missing final
+  assembly failure, both skip paths, annotation continuation, fallback assembly
+  preservation, and the human-blocked scaffold planning path.
 
 ## Human Decisions Required
 

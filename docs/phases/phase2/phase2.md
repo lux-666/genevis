@@ -89,9 +89,10 @@ Each method produces a candidate assembly. `assembly_review` compares candidates
 using QUAST, BUSCO, Merqury, read mapping coverage, purge_dups_check, and
 contamination_check.
 
-`hic_scaffolding` runs YaHS or Juicer + 3D-DNA + Juicebox only when Hi-C reads
+`hic_scaffolding` plans YaHS or Juicer + 3D-DNA + Juicebox only when Hi-C reads
 exist and chromosome-level assembly is requested. Otherwise it writes a skip
-record and annotation continues on the contig-level genome.
+record and annotation continues on the contig-level genome. Phase 2 does not run
+or accept Hi-C scaffolding tools without a later method-specific task.
 
 `repeat_annotation` runs before `gene_annotation` and produces repeat library,
 repeat GFF3, and softmasked genome using EDTA, RepeatModeler, RepeatMasker, and
@@ -174,14 +175,14 @@ git diff --check
 Baseline:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 ```
 
-SeqKit slice:
+Focused stage slice:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_read_qc tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_hic_scaffolding tests.test_project_scaffold -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 ```

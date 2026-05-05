@@ -1,0 +1,28 @@
+method_name: hic_scaffolding.candidate.juicer_3ddna_juicebox
+stage: hic_scaffolding
+package_ref: juicer
+goal: "Plan a Juicer plus 3D-DNA plus Juicebox Hi-C scaffolding candidate without execution."
+required_inputs:
+  - name: final_assembly
+    type: draft_assembly
+    description: "Reviewed assembly FASTA before Hi-C scaffolding."
+  - name: hic_reads
+    type: hic_reads_registered
+    description: "Registered Hi-C reads."
+expected_outputs:
+  - name: chromosome_scaffolded_assembly
+    type: chromosome_scaffolded_assembly
+    description: "Planned chromosome-level assembly output path."
+  - name: juicebox_review_bundle
+    type: juicebox_review_bundle
+    description: "Planned contact-map review bundle."
+review_rules:
+  - juicebox_review_bundle_exists
+human_review_triggers:
+  - contact_map_policy_required
+  - default_hic_path_required
+resource_hints:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 24.0

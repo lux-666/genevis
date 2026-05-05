@@ -1,0 +1,14 @@
+package_name: juicebox
+version_constraint: ">=1.11"
+language: cli
+install_channel: container
+entry_patterns:
+  - "juicebox_tools pre {merged_nodups_txt} {output_hic} {chrom_sizes}"
+help_summary: "Juicebox visualization/review tooling for Hi-C contact maps."
+known_pitfalls:
+  - "Manual review is required before accepting chromosome-level scaffolds."
+resource_defaults:
+  cpu_cores: 4
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 2.0

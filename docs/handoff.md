@@ -60,6 +60,12 @@ Completed:
   evaluation and review artifacts, records review ledger events, auto-accepts
   only existing assembly inputs, and blocks assembly-stage candidates for human
   decision without inventing thresholds.
+- `hic_scaffolding` has a real scaffold/skip planning stage. It consumes the
+  reviewed assembly, resolves registered `hic_reads_registered` assets, writes
+  explicit skip records when Hi-C is absent or chromosome-level assembly was not
+  requested, preserves the pre-Hi-C assembly as the annotation fallback, and
+  blocks for human choice when YaHS versus Juicer + 3D-DNA + Juicebox planning
+  is possible.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
 - Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
@@ -77,8 +83,9 @@ Not completed:
 - No executable bioinformatics method catalog beyond the first SeqKit stats
   slice.
 - RemoteRunner execution is not implemented.
-- Genome survey tool execution, assembly tool execution, scaffold, repeat, gene,
-  and function annotation execution are not implemented.
+- Genome survey tool execution, assembly tool execution, Hi-C scaffold tool
+  execution, repeat, gene, and function annotation execution are not
+  implemented.
 - Review interrupt resume logic is not implemented.
 
 ## Read Order
@@ -115,7 +122,7 @@ Do not copy single-cell business names into this project.
 Use the conda environment already used for scaffold verification:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding -v
 ```
 
 ```bash
@@ -141,9 +148,9 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 ## Next Best Task
 
 Continue Phase 2 execution from
-`docs/phases/phase2/07_hic_scaffolding.md`. Task 06 only plans/references review
-signals and blocks for human decision; it does not run QUAST, BUSCO, Merqury,
-mapping, purge_dups, contamination screening, polish, or scaffold operations.
+`docs/phases/phase2/08_repeat_annotation.md`. Task 07 only plans or skips Hi-C
+scaffolding; it does not run YaHS, Juicer, 3D-DNA, Juicebox, contact-map
+review, misjoin correction, or chromosome-level assembly acceptance.
 
 Do not implement broad assembly, annotation, requested-stage routing, or review
 resume before the corresponding human decision is explicit in the task docs.
@@ -159,6 +166,7 @@ resume before the corresponding human decision is explicit in the task docs.
   auto-accept as a deterministic pass-through, but assembly-stage candidates do
   not auto-accept without an approved review/resume policy.
 - `hic_scaffolding` exists as a stage but must be skippable.
+- Hi-C scaffold method choice and contact-map acceptance require human approval.
 - Assembly review is the main human-gated decision point.
 - `TopLevelState` should stay small and reference-based.
 - Real method execution must go through descriptors, frozen attempt specs, and
@@ -172,8 +180,9 @@ resume before the corresponding human decision is explicit in the task docs.
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
 - `inventory`, the SeqKit/read-filter/FOFN part of `read_qc`, `genome_survey`,
-  and `assembly` have real routing; downstream stages from `assembly_review`
-  onward are still placeholders that always advance.
+  `assembly`, `assembly_review`, and `hic_scaffolding` have real routing;
+  downstream stages from `repeat_annotation` onward are still placeholders that
+  always advance.
 - Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
@@ -181,6 +190,8 @@ resume before the corresponding human decision is explicit in the task docs.
 - Assembly review descriptors for QUAST, BUSCO, Merqury, minimap2-based mapping,
   purge_dups, and contamination checks are planning placeholders only; there is
   no execution path for those tools.
+- Hi-C scaffolding descriptors for YaHS, Juicer, 3D-DNA, and Juicebox are
+  planning placeholders only; there is no execution path for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.

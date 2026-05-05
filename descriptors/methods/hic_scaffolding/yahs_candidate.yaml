@@ -1,0 +1,28 @@
+method_name: hic_scaffolding.candidate.yahs
+stage: hic_scaffolding
+package_ref: yahs
+goal: "Plan a YaHS Hi-C scaffolding candidate without executing YaHS."
+required_inputs:
+  - name: final_assembly
+    type: draft_assembly
+    description: "Reviewed assembly FASTA before Hi-C scaffolding."
+  - name: hic_reads
+    type: hic_reads_registered
+    description: "Registered Hi-C reads or Hi-C alignment inputs."
+expected_outputs:
+  - name: chromosome_scaffolded_assembly
+    type: chromosome_scaffolded_assembly
+    description: "Planned chromosome-level assembly output path."
+  - name: hic_qc_report
+    type: hic_qc_report
+    description: "Planned Hi-C QC and contact-map summary."
+review_rules:
+  - scaffold_plan_exists
+human_review_triggers:
+  - contact_map_policy_required
+  - misjoin_correction_policy_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 12.0

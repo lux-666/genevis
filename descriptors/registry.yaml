@@ -2,6 +2,7 @@ packages:
   busco: busco.yaml
   canu: canu.yaml
   chopper: chopper.yaml
+  3ddna: 3ddna.yaml
   fastplong: fastplong.yaml
   filtlong: filtlong.yaml
   flye: flye.yaml
@@ -14,8 +15,11 @@ packages:
   nextdenovo: nextdenovo.yaml
   purge_dups: purge_dups.yaml
   quast: quast.yaml
+  juicer: juicer.yaml
+  juicebox: juicebox.yaml
   seqkit: seqkit.yaml
   smudgeplot: smudgeplot.yaml
+  yahs: yahs.yaml
 methods:
   assembly.candidate.canu: assembly/canu_candidate.yaml
   assembly.candidate.flye: assembly/flye_candidate.yaml
@@ -31,6 +35,8 @@ methods:
   genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
   genome_survey.model.smudgeplot: genome_survey/smudgeplot_model.yaml
+  hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
+  hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
   read_qc.length_filter.chopper: read_qc/chopper_length_filter.yaml
   read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
   read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
@@ -61,7 +67,9 @@ by_stage:
     - assembly_review.eval.mapping_coverage
     - assembly_review.check.purge_dups
     - assembly_review.check.contamination
-  hic_scaffolding: []
+  hic_scaffolding:
+    - hic_scaffolding.candidate.yahs
+    - hic_scaffolding.candidate.juicer_3ddna_juicebox
   repeat_annotation: []
   gene_annotation: []
   function_annotation: []
