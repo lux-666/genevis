@@ -4,7 +4,9 @@ packages:
   busco: busco.yaml
   canu: canu.yaml
   chopper: chopper.yaml
+  diamond: diamond.yaml
   edta: edta.yaml
+  eggnog_mapper: eggnog_mapper.yaml
   gemoma: gemoma.yaml
   3ddna: 3ddna.yaml
   fastplong: fastplong.yaml
@@ -13,8 +15,10 @@ packages:
   genomescope2: genomescope2.yaml
   hifiasm: hifiasm.yaml
   hisat2: hisat2.yaml
+  interproscan: interproscan.yaml
   isoquant: isoquant.yaml
   jellyfish: jellyfish.yaml
+  kofamscan: kofamscan.yaml
   maker: maker.yaml
   meryl: meryl.yaml
   merqury: merqury.yaml
@@ -54,6 +58,10 @@ methods:
   gene_annotation.helper.hisat2: gene_annotation/hisat2_helper.yaml
   gene_annotation.helper.isoquant: gene_annotation/isoquant_helper.yaml
   gene_annotation.helper.stringtie: gene_annotation/stringtie_helper.yaml
+  function_annotation.candidate.diamond: function_annotation/diamond_candidate.yaml
+  function_annotation.candidate.eggnog_mapper: function_annotation/eggnog_mapper_candidate.yaml
+  function_annotation.candidate.interproscan: function_annotation/interproscan_candidate.yaml
+  function_annotation.candidate.kofamscan: function_annotation/kofamscan_candidate.yaml
   genome_survey.model.smudgeplot: genome_survey/smudgeplot_model.yaml
   hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
   hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
@@ -108,4 +116,8 @@ by_stage:
     - gene_annotation.helper.stringtie
     - gene_annotation.helper.isoquant
     - gene_annotation.helper.gemoma
-  function_annotation: []
+  function_annotation:
+    - function_annotation.candidate.interproscan
+    - function_annotation.candidate.eggnog_mapper
+    - function_annotation.candidate.diamond
+    - function_annotation.candidate.kofamscan

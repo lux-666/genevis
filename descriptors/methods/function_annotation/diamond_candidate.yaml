@@ -1,0 +1,22 @@
+method_name: function_annotation.candidate.diamond
+stage: function_annotation
+package_ref: diamond
+goal: "Plan DIAMOND protein homology search without execution."
+required_inputs:
+  - name: proteins_fasta
+    type: predicted_proteins
+    description: "Predicted proteins FASTA from gene annotation."
+expected_outputs:
+  - name: gene_function_tsv
+    type: function_annotation_table
+    description: "Planned homology-backed functional annotation table."
+review_rules:
+  - database_provenance_required
+  - method_selection_required
+human_review_triggers:
+  - diamond_reference_database_policy_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 24.0

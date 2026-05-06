@@ -66,6 +66,13 @@ Completed:
   requested, preserves the pre-Hi-C assembly as the annotation fallback, and
   blocks for human choice when YaHS versus Juicer + 3D-DNA + Juicebox planning
   is possible.
+- `repeat_annotation` has a real planning stage for provided or de novo repeat
+  library strategy, RepeatMasker masking refs, and `softmasked_genome` handoff.
+- `gene_annotation` has a real planning stage that consumes softmasked genome,
+  records evidence-aware candidate methods, and publishes planned `proteins.fa`.
+- `function_annotation` has a real terminal planning stage that consumes planned
+  proteins, records InterProScan/eggNOG-mapper/DIAMOND/KofamScan candidates,
+  requires database provenance, and completes the workflow at `done`.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
 - The misleading `--stages` CLI flag is intentionally not exposed.
 - Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
@@ -73,6 +80,8 @@ Completed:
   read filtering/FOFN, genome survey, assembly candidates, assembly review,
   Hi-C scaffold/skip, repeat annotation, gene annotation, function annotation,
   and verification handoff.
+- Phase 2 task docs 01-10 include concise implementation/file-change notes for
+  onboarding without reading all stage code first.
 - Phase 2 documentation defines the CycloneSEQ target backbone, read QC
   substeps, genome_survey full/fallback modes, assembly candidates,
   assembly_review gates, Hi-C skip/scaffold policy, repeat/gene/function
@@ -147,13 +156,13 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 2 execution from
-`docs/phases/phase2/08_repeat_annotation.md`. Task 07 only plans or skips Hi-C
-scaffolding; it does not run YaHS, Juicer, 3D-DNA, Juicebox, contact-map
-review, misjoin correction, or chromosome-level assembly acceptance.
+Continue Phase 2 from `docs/phases/phase2/11_phase2_verification_handoff.md`:
+run the full contract verification suite, update any stale handoff status, and
+then scope the next method-specific execution slice only after human approval.
 
-Do not implement broad assembly, annotation, requested-stage routing, or review
-resume before the corresponding human decision is explicit in the task docs.
+Do not implement broad assembly, annotation, requested-stage routing, database
+downloads, or review resume before the corresponding human decision is explicit
+in the task docs.
 
 ## Immediate Design Decisions Already Made
 
@@ -174,15 +183,17 @@ resume before the corresponding human decision is explicit in the task docs.
 - Local execution is opt-in per stage output; the default graph path may plan
   SeqKit stats and continue without running it.
 - Documentation is part of the product, not an afterthought.
+- Function annotation database provenance is required before terminal commit;
+  missing or incomplete provenance should fail rather than silently advance.
 
 ## Known Risks
 
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
 - `inventory`, the SeqKit/read-filter/FOFN part of `read_qc`, `genome_survey`,
-  `assembly`, `assembly_review`, `hic_scaffolding`, `repeat_annotation`, and
-  `gene_annotation` have real routing; `function_annotation` is still a
-  placeholder that always advances.
+  `assembly`, `assembly_review`, `hic_scaffolding`, `repeat_annotation`,
+  `gene_annotation`, and `function_annotation` have real routing. Most stages are
+  still planning/contract stages rather than executable bioinformatics methods.
 - Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
@@ -197,6 +208,9 @@ resume before the corresponding human decision is explicit in the task docs.
 - Gene annotation descriptors for BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
   StringTie, IsoQuant, and GeMoMa are planning placeholders only; there is no
   execution path for those tools.
+- Function annotation descriptors for InterProScan, eggNOG-mapper, DIAMOND, and
+  KofamScan are planning placeholders only; there is no execution path or
+  automatic database download for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
 - Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.

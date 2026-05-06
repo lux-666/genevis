@@ -315,8 +315,10 @@ database-derived function.
 
 Inputs:
 
-- required: `predicted_proteins`
+- required: `predicted_proteins` / `proteins.fa`
 - optional: `gene_models`
+- optional: `transcripts.fa`
+- required before commit: database provenance records
 
 Outputs:
 
@@ -328,10 +330,13 @@ Outputs:
 
 Planning rules:
 
-- InterProScan is the domain/motif/GO backbone.
-- DIAMOND is the fast homology path for Swiss-Prot, UniProt, or NR.
-- KofamScan is the KO/pathway path.
-- Record database snapshot/version in provenance.
+- Record InterProScan, eggNOG-mapper, DIAMOND, and KofamScan as candidates
+  without choosing a default path.
+- InterProScan is the domain/motif/GO backbone candidate.
+- DIAMOND is the fast homology path candidate for Swiss-Prot, UniProt, or NR.
+- KofamScan is the KO/pathway candidate.
+- Record database name, version, snapshot date, command or descriptor version,
+  and input protein ref in provenance before committing.
 
 Review triggers:
 

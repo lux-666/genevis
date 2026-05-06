@@ -7,10 +7,10 @@ stage.
 
 ## Project Context
 
-The repo currently has Phase 1 inventory plus early Phase 2 contract code for
-read QC, genome survey, assembly planning, assembly review, and Hi-C
-scaffold/skip planning. This handoff task exists so every stage-by-stage change
-updates the coordination docs and proves it did not break the scaffold.
+The repo currently has Phase 1 inventory plus Phase 2 contract code from read QC
+through terminal function annotation planning. This handoff task exists so every
+stage-by-stage change updates the coordination docs and proves it did not break
+the scaffold.
 
 ## Reuse From `rna_agent`
 
@@ -42,10 +42,10 @@ Do not copy:
 - [x] Task 05 defines assembly candidates.
 - [x] Task 06 defines assembly review as the main human gate.
 - [x] Task 07 defines Hi-C scaffold/skip behavior.
-- [ ] Task 08 puts repeat annotation before gene annotation.
-- [ ] Task 09 defines gene annotation outputs.
-- [ ] Task 10 defines function annotation from `proteins.fa`.
-- [ ] `docs/handoff.md` points future agents to the current next task.
+- [x] Task 08 puts repeat annotation before gene annotation.
+- [x] Task 09 defines gene annotation outputs.
+- [x] Task 10 defines function annotation from `proteins.fa`.
+- [x] `docs/handoff.md` points future agents to the current next task.
 
 ## Implementation Acceptance
 
@@ -62,6 +62,8 @@ Phase 2 code is only complete when:
 - Hi-C absent path produces skip record and annotation can continue.
 - Repeat, gene, and function annotation contracts are represented by refs and
   artifact bundles.
+- Function annotation fails terminally when database provenance is missing,
+  incomplete, or mismatched to the input proteins ref.
 - No broad method execution is added without method-specific tasks.
 
 ## Required Verification
@@ -75,14 +77,14 @@ git diff --check
 Baseline:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding tests.test_repeat_annotation tests.test_gene_annotation tests.test_function_annotation -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 ```
 
 Focused stage slice:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_hic_scaffolding tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_function_annotation tests.test_gene_annotation tests.test_project_scaffold -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 ```
@@ -95,7 +97,7 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m un
 
 ## Handoff Rule
 
-- [ ] Update `docs/handoff.md` after each task changes code behavior.
+- [x] Update `docs/handoff.md` after each task changes code behavior.
 - [ ] Keep task checkboxes as implementation tracking.
 - [ ] Stop and ask before choosing platform defaults, biological thresholds,
   review payloads, requested-stage semantics, or broad method execution.

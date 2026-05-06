@@ -103,9 +103,11 @@ long RNA, and protein evidence. Candidate methods include BRAKER3, MAKER,
 AUGUSTUS, and Miniprot. Outputs are `genes.gff3`, `transcripts.fa`, and
 `proteins.fa`.
 
-`function_annotation` consumes `proteins.fa` and uses InterProScan,
-eggNOG-mapper, DIAMOND, and KofamScan candidates to produce `gene_function.tsv`,
-GO, KEGG, Pfam, and InterPro tables.
+`function_annotation` consumes `proteins.fa` and records InterProScan,
+eggNOG-mapper, DIAMOND, and KofamScan candidates to produce planned
+`gene_function.tsv`, GO, KEGG, Pfam, and InterPro table refs. Database provenance
+is required before the terminal commit; Phase 2 does not download databases or
+run the annotation tools.
 
 ## Plan Files
 
@@ -147,7 +149,7 @@ GO, KEGG, Pfam, and InterPro tables.
 - Hi-C absence produces a skip record and does not block annotation.
 - Repeat annotation precedes gene annotation.
 - Gene annotation outputs `genes.gff3`, `transcripts.fa`, and `proteins.fa`.
-- Function annotation consumes `proteins.fa`.
+- Function annotation consumes `proteins.fa` and requires database provenance.
 - Graph state stores refs and summaries, not large files or metric tables.
 
 ## Human Decision Rule
@@ -162,7 +164,8 @@ Stop and ask before choosing:
 - Hi-C contact-map policy;
 - gene evidence merge policy;
 - requested-stage semantics;
-- review/resume payload schema.
+- review/resume payload schema;
+- function annotation database snapshot/provenance policy beyond pre-seeded records.
 
 ## Verification
 

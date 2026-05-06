@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
@@ -252,6 +252,61 @@ class GeneAnnotationBundle(BaseModel):
     helper_methods: list[str] = Field(default_factory=list)
     review_required: bool = False
     review_triggers: list[str] = Field(default_factory=list)
+    plan_artifact_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class FunctionDatabaseProvenance(BaseModel):
+    """Database provenance required for planned function annotation."""
+
+    method_name: str
+    database_name: str
+    database_version: str
+    snapshot_date: str
+    input_proteins_ref: str
+    command: str | None = None
+    descriptor_version: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_command_or_descriptor_version(self):
+        if not self.command and not self.descriptor_version:
+            raise ValueError("function database provenance requires command or descriptor_version")
+        return self
+
+
+class FunctionAnnotationPlan(BaseModel):
+    """Planned function annotation contract without running tools."""
+
+    session_id: str
+    status: Literal["planned"]
+    proteins_fasta_ref: str
+    genes_gff3_ref: str | None = None
+    transcripts_fasta_ref: str | None = None
+    candidate_methods: list[str] = Field(default_factory=list)
+    expected_outputs: dict[str, str] = Field(default_factory=dict)
+    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
+    method_selection_required: bool = True
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class FunctionAnnotationBundle(BaseModel):
+    """Function annotation bundle for final workflow outputs."""
+
+    session_id: str
+    status: Literal["planned"]
+    proteins_fasta_ref: str
+    genes_gff3_ref: str | None = None
+    transcripts_fasta_ref: str | None = None
+    gene_function_tsv_ref: str
+    go_annotation_table_ref: str
+    kegg_annotation_table_ref: str
+    pfam_interpro_table_ref: str
+    annotated_gene_models_gff3_ref: str | None = None
+    candidate_methods: list[str] = Field(default_factory=list)
+    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
     plan_artifact_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,0 +1,15 @@
+package_name: eggnog_mapper
+version_constraint: ">=2.1"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "emapper.py -i {proteins_fasta} --itype proteins -o {output_prefix}"
+help_summary: "eggNOG-mapper orthology, GO, and pathway annotation candidate."
+known_pitfalls:
+  - "eggNOG database version and snapshot date must be recorded before execution."
+  - "Taxonomic scope choices can affect orthology assignment."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 48.0

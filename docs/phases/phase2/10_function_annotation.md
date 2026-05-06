@@ -1,5 +1,7 @@
 # 10 Function Annotation
 
+Task status: implemented.
+
 ## Goal
 
 Finish the single-line workflow by defining function annotation from
@@ -101,13 +103,54 @@ without a version or snapshot reference.
 
 ## Tasks
 
-- [ ] Add function annotation plan schema.
-- [ ] Add function annotation artifact bundle schema.
-- [ ] Add descriptor placeholders for InterProScan, eggNOG-mapper, DIAMOND, and
+- [x] Add function annotation plan schema.
+- [x] Add function annotation artifact bundle schema.
+- [x] Add descriptor placeholders for InterProScan, eggNOG-mapper, DIAMOND, and
   KofamScan.
-- [ ] Add tests that `proteins.fa` is required.
-- [ ] Add tests that database provenance is required in artifact metadata.
-- [ ] Add routing that marks workflow complete after function annotation.
+- [x] Add tests that `proteins.fa` is required.
+- [x] Add tests that database provenance is required in artifact metadata.
+- [x] Add routing that marks workflow complete after function annotation.
+
+## Implemented State
+
+- `app/stages/function_annotation/builder.py` now builds a terminal planning
+  subgraph instead of the generic placeholder.
+- `app/stages/function_annotation/nodes.py` resolves `proteins.fa` from
+  `gene_annotation.proteins_fasta_ref`, `predicted_proteins_ref`, or
+  `predicted_proteins`, and keeps optional `genes.gff3` / `transcripts.fa` refs.
+- Candidate planning records InterProScan, eggNOG-mapper, DIAMOND, and KofamScan
+  without selecting a default primary method or running any tool.
+- `validate_database_provenance` requires pre-seeded
+  `stage_outputs["function_annotation"]["database_provenance"]`; missing,
+  incomplete, or protein-ref-mismatched provenance fails terminally instead of
+  becoming best-effort metadata.
+- `FunctionDatabaseProvenance`, `FunctionAnnotationPlan`, and
+  `FunctionAnnotationBundle` are defined in `app/schemas/artifacts.py`.
+- The stage writes `function_annotation_plan.json` and
+  `function_annotation_bundle.json`, records `execution_enabled: false` and
+  `database_download_enabled: false`, and publishes planned function table refs.
+- A successful commit appends `function_annotation_stage`, sets
+  `current_stage: done`, and marks `supervision_state: completed`.
+- Descriptor placeholders exist for `interproscan`, `eggnog_mapper`, `diamond`,
+  and `kofamscan`, with method entries under
+  `descriptors/methods/function_annotation/`.
+- `tests/test_function_annotation.py` covers descriptor loading, missing protein
+  input, missing/incomplete provenance, protein-ref mismatch, alias resolution,
+  planned outputs, artifact writes, and terminal workflow completion.
+
+改动要点：
+
+- `app/stages/function_annotation/builder.py` 将 `function_annotation` 从 placeholder
+  换成 `resolve -> plan -> provenance -> commit` 的真实终端 StateGraph。
+- `app/stages/function_annotation/nodes.py` 实现 protein 输入解析、候选方法规划、
+  database provenance 硬校验、plan/bundle artifact 写入和路由到 `done`。
+- `FunctionDatabaseProvenance`、`FunctionAnnotationPlan`、`FunctionAnnotationBundle`
+  在 `app/schemas/artifacts.py` 中定义，明确 database name/version/snapshot/input
+  protein ref 以及 command 或 descriptor version 要求。
+- InterProScan、eggNOG-mapper、DIAMOND、KofamScan descriptors 注册为 planning
+  candidates；Phase 2 不下载数据库、不执行工具、不选择默认 function annotation 路径。
+- `tests/test_function_annotation.py` 是上手入口：看 proteins.fa 必需、provenance 必需、
+  provenance mismatch 失败、有效 provenance 后 workflow 完成四组测试。
 
 ## Non-Goals
 
