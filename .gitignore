@@ -14,6 +14,9 @@ data/
 logs/
 reports/
 
+app/entrypoints/workflow.ipynb
+docs/beginner_mainline_guide.md
+
 *.egg-info/
 dist/
 build/

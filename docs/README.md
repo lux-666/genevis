@@ -15,7 +15,8 @@ If you are taking over:
 6. `phases/phase1/phase1.md` gives the current Phase 1 critique and task order.
 7. `phases/phase2/phase2.md` gives the current CycloneSEQ Phase 2 design.
 8. `phases/phase2/01_*.md` through `11_*.md` give detailed Phase 2 handoffs.
-9. `phases/phase_completion_plan.md` remains the long-range roadmap.
+9. `phases/phase3/README.md` gives the next natural-entry and review/resume plan.
+10. `phases/phase_completion_plan.md` remains the long-range roadmap.
 
 ## Document Roles
 
@@ -30,6 +31,7 @@ If you are taking over:
 | `phases/phase1/task*.md` | Focused executable task handoffs |
 | `phases/phase2/phase2.md` | CycloneSEQ single-line implementation plan and first SeqKit vertical slice |
 | `phases/phase2/01_*.md` through `11_*.md` | Phase 2 stage-by-stage implementation handoffs with human-help triggers |
+| `phases/phase3/README.md` | Natural-language entry, review resume, and next execution-slice plan |
 | `phases/phase_completion_plan.md` | Phase-by-phase implementation roadmap |
 
 ## Update Rule

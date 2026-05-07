@@ -101,19 +101,29 @@ Exit criteria:
   thresholds, requested-stage semantics, resume payloads, or broad candidate-set
   changes.
 
-## Phase 3: Runner, Ledger, and First Real Execution
+## Phase 3: Natural Entry, Review Resume, and Real Execution
 
-Goal: run one real local or remote command path end to end.
+Goal: make the coordinator usable from natural language, resume human review gates,
+and then add more real execution slices one scoped method at a time.
+
+Current state: Phase 3 planning is documented in `docs/phases/phase3/README.md`.
 
 Tasks:
-- Implement LocalRunner and artifact collection.
-- Implement RemoteRunner using the existing SSH ControlMaster pattern from `rna_agent`.
-- Add ledger reconciliation for attempt status and artifacts.
-- Execute one light method first, preferably SeqKit stats or QUAST on a fixture.
+- Add a natural-language entry parser that produces the existing structured CLI /
+  `initial_state(...)` contract without becoming a second workflow engine.
+- Add human review/resume semantics for `assembly_review` and `hic_scaffolding`,
+  with structured decisions, artifacts, and ledger events.
+- Execute one additional light method after entry/resume are in place, preferably
+  QUAST on a tiny fixture or another narrow descriptor-backed slice.
+- Keep `RemoteRunner`, requested-stage routing, and broad method execution out of
+  scope until their semantics are explicit.
 
 Exit criteria:
-- A frozen attempt runs, writes logs, collects declared artifacts, and records ledger events.
-- Failed attempts write stderr/log references and do not corrupt graph state.
+- A natural-language request can start the existing graph path through a validated
+  structured request.
+- A blocked review state can resume with a validated decision and auditable record.
+- The next execution slice follows descriptors, frozen attempts, runner boundary,
+  artifact collection, and ledger events without duplicating YAML/config roles.
 
 ## Phase 4: Assembly Review Gate
 

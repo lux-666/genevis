@@ -1,5 +1,7 @@
 # 11 Phase 2 Verification Handoff
 
+Task status: implemented.
+
 ## Goal
 
 Keep Phase 2 measurable while the single-line CycloneSEQ plan grows stage by
@@ -81,25 +83,50 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m un
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 ```
 
-Focused stage slice:
+Focused final annotation slice:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_function_annotation tests.test_gene_annotation tests.test_project_scaffold -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_repeat_annotation tests.test_gene_annotation tests.test_function_annotation tests.test_project_scaffold -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 ```
 
-Later full contract tests should be added as the stage contracts become code:
+Full contract suite:
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
+## Verified State
+
+Verified on 2026-05-06:
+
+```bash
+git status --short
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
+git diff --check
+```
+
+Result: clean working tree before edits, 95 tests passed, compileall passed, and
+`git diff --check` passed.
+
+Provenance smoke checks also passed:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -c "from app.graph.builder import build_graph; from app.schemas.state import initial_state; proteins='data/work/gene_annotation/smoke/proteins.fa'; s=initial_state(session_id='smoke', input_manifest_ref='inputs/manifest.yaml'); s['current_stage']='function_annotation'; s['stage_outputs']={'gene_annotation': {'status': 'completed', 'proteins_fasta_ref': proteins}, 'function_annotation': {'database_provenance': [{'method_name': 'function_annotation.candidate.interproscan', 'database_name': 'InterPro', 'database_version': '99.0', 'snapshot_date': '2026-05-05', 'descriptor_version': 'interproscan.yaml', 'input_proteins_ref': proteins}]}}; r=build_graph().invoke(s, config={'configurable': {'thread_id': 'smoke'}}); print(r['current_stage']); print(r['supervision_state']); print(r['route_trace'])"
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -c "from app.graph.builder import build_graph; from app.schemas.state import initial_state; proteins='data/work/gene_annotation/smoke/proteins.fa'; s=initial_state(session_id='smoke-missing-provenance', input_manifest_ref='inputs/manifest.yaml'); s['current_stage']='function_annotation'; s['stage_outputs']={'gene_annotation': {'status': 'completed', 'proteins_fasta_ref': proteins}}; r=build_graph().invoke(s, config={'configurable': {'thread_id': 'smoke-missing-provenance'}}); print(r['current_stage']); print(r['supervision_state']); print(r['last_error'])"
+```
+
+Expected and observed: matching provenance reaches `done` / `completed`; missing
+provenance stays at `function_annotation` with `failed_terminal` and
+`database_provenance` in `last_error`.
+
 ## Handoff Rule
 
 - [x] Update `docs/handoff.md` after each task changes code behavior.
-- [ ] Keep task checkboxes as implementation tracking.
-- [ ] Stop and ask before choosing platform defaults, biological thresholds,
+- [x] Keep task checkboxes as implementation tracking.
+- [x] Stop and ask before choosing platform defaults, biological thresholds,
   review payloads, requested-stage semantics, or broad method execution.
 
 ## Non-Goals
