@@ -153,6 +153,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(summary["q30_percent"], 50.0)
             self.assertEqual(summary["avg_qual"], 18.5)
             self.assertNotIn("stats_table", result["stage_outputs"]["read_qc"])
+            self.assertNotIn("raw_long_reads_path", result["stage_outputs"]["read_qc"])
+            self.assertNotIn("frozen_attempt", result["stage_outputs"]["read_qc"])
+            self.assertNotIn("execution_result", result["stage_outputs"]["read_qc"])
+            self.assertNotIn("stats_output_path", result["stage_outputs"]["read_qc"])
 
             artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
             self.assertTrue(artifact_index.exists())
@@ -256,6 +260,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "read_qc.length_filter.seqkit_seq",
             )
             self.assertEqual(read_qc["substeps"]["length_filter"]["thresholds"], {"min_len": 1000})
+            self.assertNotIn("length_filter_request", read_qc)
             filtered_ref = Path(read_qc["filtered_long_reads_ref"])
             self.assertTrue(filtered_ref.exists())
             self.assertEqual(filtered_ref.read_text(encoding="utf-8"), fq.read_text(encoding="utf-8"))
@@ -312,6 +317,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
             self.assertNotIn("filtered_long_reads_ref", read_qc)
             self.assertNotIn("filtered_long_reads_fofn_ref", read_qc)
+            self.assertNotIn("length_filter_request", read_qc)
             self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
             self.assertEqual(Path(read_qc["long_reads_fofn_ref"]).read_text(encoding="utf-8"), f"{fq}\n")
 

@@ -518,8 +518,25 @@ def commit_read_qc(state: TopLevelState) -> dict:
         if read_qc_out.get("status") in {"completed", "fofn_ready"}
         else read_qc_out.get("status", "planned")
     )
+    committed_keys = [
+        "artifact_refs",
+        "assembly_input_ref",
+        "filtered_long_reads_fofn_ref",
+        "filtered_long_reads_ref",
+        "format",
+        "input_asset_ref",
+        "long_reads_fofn_ref",
+        "method_name",
+        "package_name",
+        "platform",
+        "skip_reason",
+        "stats_artifact_ref",
+        "substeps",
+        "summary",
+    ]
+    committed_read_qc = {key: read_qc_out[key] for key in committed_keys if key in read_qc_out}
     outputs = dict(state.get("stage_outputs") or {})
-    outputs["read_qc"] = {**read_qc_out, "status": status}
+    outputs["read_qc"] = {**committed_read_qc, "status": status}
     return {
         "current_stage": next_stage,
         "supervision_state": "running_stage",

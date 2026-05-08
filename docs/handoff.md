@@ -41,10 +41,12 @@ Completed:
 - Existing assembly inputs route to `assembly_review` and publish skip reasons.
 - CycloneSEQ FASTQ / FASTQ.gz inventory input is accepted as genomic long-read
   platform metadata and registers as `raw_long_reads`.
-- `read_qc.long_read_stats.seqkit_stats` is the first real executable method
-  slice. It resolves `raw_long_reads`, freezes a SeqKit stats attempt, runs via
-  the local runner when `execution_mode` is `local`, writes artifacts, records
-  ledger events, and keeps only refs plus a compact summary in graph state.
+- `read_qc` is the first realized production stage. It resolves `raw_long_reads`,
+  runs or preserves `read_qc.long_read_stats.seqkit_stats`, plans optional length
+  filtering, executes exactly one approved `seqkit seq` min-length filter when
+  explicitly requested, writes `long_reads.fofn` or `filtered_long_reads.fofn`,
+  records artifacts/ledger events, and commits only compact summaries plus refs to
+  graph state.
 - `genome_survey` has a real deterministic contract stage. It chooses full
   k-mer survey planning when `clean_short_dna_reads` exists, writes a
   low-confidence CycloneSEQ fallback record for long-read-only inputs, or writes
@@ -157,13 +159,13 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 2 from `docs/phases/phase2/11_phase2_verification_handoff.md`:
-run the full contract verification suite, update any stale handoff status, and
-then scope the next method-specific execution slice only after human approval.
+Continue Phase 3 from `docs/phases/phase3/05_genome_survey_realization.md` only
+after human approval: realize genome survey for valid short-read inputs while
+keeping ONT/CLR-only fallback non-blocking.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
-downloads, or review resume before the corresponding human decision is explicit
-in the task docs.
+downloads, or RemoteRunner before the corresponding human decision is explicit in
+the task docs.
 
 ## Immediate Design Decisions Already Made
 
@@ -191,10 +193,11 @@ in the task docs.
 
 - `DescriptorRegistry.load()` is scaffold-level only. It validates package/method
   references but does not yet validate asset compatibility.
-- `inventory`, the SeqKit/read-filter/FOFN part of `read_qc`, `genome_survey`,
-  `assembly`, `assembly_review`, `hic_scaffolding`, `repeat_annotation`,
-  `gene_annotation`, and `function_annotation` have real routing. Most stages are
-  still planning/contract stages rather than executable bioinformatics methods.
+- `inventory`, the realized SeqKit/read-filter/FOFN `read_qc` path,
+  `genome_survey`, `assembly`, `assembly_review`, `hic_scaffolding`,
+  `repeat_annotation`, `gene_annotation`, and `function_annotation` have real
+  routing. Most stages after read QC are still planning/contract stages rather
+  than executable bioinformatics methods.
 - Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
