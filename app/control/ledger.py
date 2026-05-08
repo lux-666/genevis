@@ -184,6 +184,9 @@ class Ledger:
         candidate_id: str | None = None,
         rejected_candidates: list[str] | None = None,
         notes: list[str] | None = None,
+        method_name: str | None = None,
+        artifact_ref: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Append a review-decision event."""
         self.record_event(
@@ -195,8 +198,27 @@ class Ledger:
                 "candidate_id": candidate_id,
                 "rejected_candidates": rejected_candidates or [],
                 "notes": notes or [],
+                "method_name": method_name,
+                "artifact_ref": artifact_ref,
+                "metadata": metadata or {},
             },
         )
+
+    def read_session(self, session_id: str) -> dict[str, Any] | None:
+        session_path = self.session_dir(session_id) / "session.json"
+        if not session_path.exists():
+            return None
+        return json.loads(session_path.read_text(encoding="utf-8"))
+
+    def read_events(self, session_id: str) -> list[dict[str, Any]]:
+        events_path = self.session_dir(session_id) / "events.jsonl"
+        if not events_path.exists():
+            return []
+        events: list[dict[str, Any]] = []
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                events.append(json.loads(line))
+        return events
 
     def record_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Append a business event."""

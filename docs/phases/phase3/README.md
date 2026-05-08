@@ -10,12 +10,13 @@
 review states resumable, then add real method execution one scoped slice at a
 time.
 
-**Architecture:** Phase 3 keeps the existing structured graph entry as the
-source of truth:
-`CLI / natural language adapter -> structured request -> initial_state(...) ->
-build_graph().invoke(...)`. LLM parsing stays outside LangGraph. Review/resume
-is a control-plane adapter over `active_interrupt`, stage artifacts, ledger
-events, and checkpoint state; it must not become an alternate router.
+**Architecture:** Phase 3 keeps the existing structured graph entry and blocked
+review state as the source of truth:
+`start / ask -> structured request -> initial_state(...) -> graph.invoke(...)
+-> blocked_human -> inspect review request -> structured decision -> resume`.
+LLM parsing stays outside LangGraph. Review/resume is a control-plane adapter
+over `active_interrupt`, stage artifacts, ledger events, and checkpoint state;
+it must not become an alternate router.
 
 **Tech Stack:** Python 3.11, LangGraph `StateGraph`, Pydantic v2, PyYAML only
 for existing descriptor/config roles, standard-library `unittest`,
@@ -42,6 +43,53 @@ gene-agent run --session-id ... --manifest ... [--data-dir ...]
 `assembly_review` and `hic_scaffolding`, but there is no approved resume command
 or resume payload schema.
 
+## Interaction Loop
+
+Phase 3 task 01 and task 02 are one interaction loop, not isolated features:
+
+```text
+start / ask
+  -> run graph
+  -> blocked_human
+  -> inspect review request
+  -> human decides
+  -> resume
+  -> continue graph
+```
+
+Task 01 owns how a workflow starts. It may let a user say "use
+inputs/manifest.yaml to start session s1", but it must only produce a narrow
+`EntryRequest` and then call the same structured run path.
+
+Task 02 owns what happens after a workflow pauses. It must let a user inspect
+the blocked state and review artifact, submit a structured decision, and resume
+the same workflow without restarting from inventory.
+
+## Identity And Progress Model
+
+Use these identities consistently:
+
+| Term | Meaning |
+|---|---|
+| `session_id` | Workflow run primary key. It answers "which workflow run is this?" |
+| `thread_id` | LangGraph checkpoint identity. It normally matches `session_id` for one run. |
+| `current_stage` | Current workflow location. |
+| `stage status` | Stage-level state such as planned, completed, failed, or blocked. |
+| `attempt_id` | One execution attempt for one stage/method. Multiple attempts may exist in one session. |
+| `checkpoint` / `state_version` | Recoverable state snapshot at a point in time. |
+| `artifact_ref` / `asset_ref` | Durable result references produced or registered by a stage/attempt. |
+| `ledger` | Append-only audit stream for session, attempt, artifact, review, and lifecycle events. |
+
+`session_id` alone is not enough to answer where the workflow is or whether a
+stage should rerun. A status/inspect command should use `session_id` to load the
+latest runtime state/checkpoint and ledger summary, then report
+`current_stage`, `supervision_state`, `active_interrupt`, stage statuses, and
+latest artifacts.
+
+If the user says "continue s1", the system must load the latest checkpoint for
+`session_id=s1` and resume from the blocked/current state. It must not create a
+fresh `initial_state(...)` unless the user explicitly starts a new workflow.
+
 ## Design Constraints
 
 - Keep the parent graph thin; do not add a natural-language parser node inside
@@ -54,6 +102,11 @@ or resume payload schema.
 - Use LLM parsing only to produce a validated structured request. The LLM must
   not mutate graph state, choose hidden defaults, write descriptors, or control
   resume directly.
+- Separate lifecycle actions:
+  - `resume` continues from a human gate after a validated decision.
+  - `retry` retries a failed retryable stage/method attempt.
+  - `rerun` creates a new attempt for an already completed or failed stage.
+  - `rebuild-from` recomputes a stage and downstream dependents.
 - Treat YAML sources narrowly:
   - `config/*.yaml` owns runtime defaults and manually approved policy knobs.
   - `descriptors/**/*.yaml` owns package/method/assets capability facts.
@@ -68,8 +121,8 @@ or resume payload schema.
 
 ## Plan Files
 
-- [01 Natural-Language Entry Parser](01_natural_language_entry_parser.md)
-- [02 Review Resume Semantics](02_review_resume_semantics.md)
+- [01 Entry Interaction](01_natural_language_entry_parser.md)
+- [02 Review Inspect And Resume Interaction](02_review_resume_semantics.md)
 - [03 Stage Method Catalog And Planner Corrections](03_stage_method_catalog_and_planner_corrections.md)
 
 ## Future Task Direction
@@ -107,6 +160,8 @@ events, and review handoff before code is changed.
 - Intent parsing errors fail before graph invocation.
 - A blocked `assembly_review` or `hic_scaffolding` state can resume from a
   validated decision payload.
+- A user can inspect session progress by `session_id` and see whether the run is
+  running, completed, failed, or blocked for human review.
 - Review decisions are auditable through artifacts and ledger events.
 - Stage method catalogs do not imply over-running filters, long-read k-mer
   survey, hifiasm for ONT/CLR, duplicated repeat-library discovery, or IsoQuant
@@ -123,6 +178,9 @@ Stop and ask before choosing:
 - natural-language command name and UX beyond the minimum `ask`/parser adapter;
 - default session-id generation policy;
 - review decision payload schema beyond task 02;
+- durable checkpoint/session snapshot format beyond the minimum required for
+  status and resume;
+- semantics for `retry`, `rerun`, and `rebuild-from`;
 - requested-stage routing semantics;
 - method candidate priority rules not already in descriptors;
 - new YAML source-of-truth roles;

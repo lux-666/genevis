@@ -147,8 +147,23 @@ class HiCSkipRecord(BaseModel):
     """Explicit non-blocking Hi-C skip record."""
 
     session_id: str
-    mode: Literal["skipped_no_hic", "skipped_not_chromosome_level"]
-    skip_reason: Literal["no_hic_reads", "not_chromosome_level_requested"]
+    mode: Literal["skipped_no_hic", "skipped_not_chromosome_level", "human_review_skip"]
+    skip_reason: Literal["no_hic_reads", "not_chromosome_level_requested", "human_review_skip"]
+    pre_hic_assembly_ref: str
+    final_assembly_for_annotation: str
+    hic_read_refs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HiCScaffoldDecisionArtifact(BaseModel):
+    """Human Hi-C scaffolding decision recorded without running tools."""
+
+    session_id: str
+    stage: Literal["hic_scaffolding"] = "hic_scaffolding"
+    decision: Literal["select_method", "skip", "stop_human_review"]
+    method_name: str | None = None
+    scaffold_plan_ref: str | None = None
     pre_hic_assembly_ref: str
     final_assembly_for_annotation: str
     hic_read_refs: list[str] = Field(default_factory=list)

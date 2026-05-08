@@ -156,6 +156,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "hic_scaffolding")
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(result["active_interrupt"]["stage"], "hic_scaffolding")
+            self.assertIn("blocked_at", result["active_interrupt"])
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "blocked_human")
             self.assertEqual(hic["mode"], "scaffold")

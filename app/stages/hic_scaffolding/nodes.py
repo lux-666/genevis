@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.control.ledger import Ledger
+from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
-from app.schemas.artifacts import ArtifactMeta, HiCScaffoldPlan, HiCSkipRecord
+from app.review.base import ResumeReviewRequest
+from app.schemas.artifacts import ArtifactMeta, HiCScaffoldDecisionArtifact, HiCScaffoldPlan, HiCSkipRecord
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 
@@ -208,8 +212,165 @@ def block_hic_scaffolding(state: TopLevelState) -> dict:
             "scaffold_plan_ref": hic_out.get("scaffold_plan_ref"),
             "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
             "final_assembly_for_annotation": hic_out.get("final_assembly_for_annotation"),
+            "blocked_at": datetime.now(timezone.utc).isoformat(),
         },
     }
+
+
+def apply_hic_scaffolding_resume_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    """Apply a validated Hi-C scaffolding decision to a blocked state."""
+
+    if request.stage != "hic_scaffolding":
+        raise ResumeValidationError("Hi-C resume requires stage hic_scaffolding")
+    hic_out = _hic_output(state)
+    allowed = {"select_method", "skip", "stop_human_review"}
+    if request.decision not in allowed:
+        raise ResumeValidationError(f"unsupported hic_scaffolding decision: {request.decision}")
+    if request.decision == "select_method":
+        if not request.method_name:
+            raise ResumeValidationError("hic_scaffolding select_method requires method_name")
+        if request.method_name not in set(hic_out.get("candidate_methods") or []):
+            raise ResumeValidationError(f"unknown hic_scaffolding method_name: {request.method_name}")
+        if not request.notes and not request.metadata.get("contact_map_policy"):
+            raise ResumeValidationError("hic_scaffolding select_method requires contact-map policy notes or metadata")
+    elif request.decision == "skip" and request.method_name:
+        raise ResumeValidationError("hic_scaffolding skip decision must not include method_name")
+
+    pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
+    final_assembly_for_annotation = hic_out.get("final_assembly_for_annotation") or pre_hic_assembly_ref
+    if not pre_hic_assembly_ref or not final_assembly_for_annotation:
+        raise ResumeValidationError("hic_scaffolding resume requires pre_hic_assembly_ref")
+
+    return _commit_hic_resume_decision(
+        state,
+        request,
+        pre_hic_assembly_ref=str(pre_hic_assembly_ref),
+        final_assembly_for_annotation=str(final_assembly_for_annotation),
+    )
+
+
+def _commit_hic_resume_decision(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    *,
+    pre_hic_assembly_ref: str,
+    final_assembly_for_annotation: str,
+) -> dict:
+    hic_out = _hic_output(state)
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    decision_ref = out_dir / "hic_scaffold_decision.json"
+    notes = list(request.notes)
+    if request.decision == "select_method":
+        notes.append("hic_scaffolding_execution_deferred_to_method_specific_task")
+        notes.append("annotation_continues_on_pre_hic_assembly_fallback")
+    skip_record_ref: str | None = None
+    if request.decision == "skip":
+        skip_record_ref = _write_human_hic_skip_record(
+            state,
+            pre_hic_assembly_ref=pre_hic_assembly_ref,
+            final_assembly_for_annotation=final_assembly_for_annotation,
+            hic_read_refs=hic_out.get("hic_read_refs", []),
+            notes=notes,
+            metadata=request.metadata,
+        )
+
+    artifact_payload = HiCScaffoldDecisionArtifact(
+        session_id=session_id,
+        decision=request.decision,
+        method_name=request.method_name,
+        scaffold_plan_ref=hic_out.get("scaffold_plan_ref"),
+        pre_hic_assembly_ref=pre_hic_assembly_ref,
+        final_assembly_for_annotation=final_assembly_for_annotation,
+        hic_read_refs=hic_out.get("hic_read_refs", []),
+        notes=notes,
+        metadata=request.metadata,
+    )
+    decision_ref.write_text(json.dumps(artifact_payload.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        decision_ref,
+        stage="hic_scaffolding",
+        method_name=request.method_name or HIC_CONTRACT_METHOD,
+        artifact_type="hic_scaffolding.decision",
+        metadata={"decision": request.decision},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_review_decision(
+        session_id,
+        "hic_scaffolding",
+        decision=request.decision,
+        notes=notes,
+        method_name=request.method_name,
+        artifact_ref=str(artifact.file_path),
+        metadata=request.metadata,
+    )
+
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["hic_scaffolding"] = {
+        **hic_out,
+        "status": "failed_terminal" if request.decision == "stop_human_review" else "completed",
+        "decision": request.decision,
+        "selected_method_name": request.method_name,
+        "pre_hic_assembly_ref": pre_hic_assembly_ref,
+        "final_assembly_for_annotation": final_assembly_for_annotation,
+        "review_decision_artifact_ref": str(artifact.file_path),
+        "notes": notes,
+    }
+    if skip_record_ref:
+        outputs["hic_scaffolding"]["skip_record_ref"] = skip_record_ref
+    if request.decision == "stop_human_review":
+        return {
+            "current_stage": "hic_scaffolding",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            "stage_outputs": outputs,
+            "last_error": "hic_scaffolding stopped by human review decision",
+        }
+    return {
+        "current_stage": next_stage_name("hic_scaffolding"),
+        "supervision_state": "running_stage",
+        "active_interrupt": None,
+        "stage_outputs": outputs,
+        "route_trace": [*state.get("route_trace", []), "hic_scaffolding_stage"],
+    }
+
+
+def _write_human_hic_skip_record(
+    state: TopLevelState,
+    *,
+    pre_hic_assembly_ref: str,
+    final_assembly_for_annotation: str,
+    hic_read_refs: list[str],
+    notes: list[str],
+    metadata: dict[str, Any],
+) -> str:
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    skip_record_ref = out_dir / "hic_skip_record.json"
+    record = HiCSkipRecord(
+        session_id=session_id,
+        mode="human_review_skip",
+        skip_reason="human_review_skip",
+        pre_hic_assembly_ref=pre_hic_assembly_ref,
+        final_assembly_for_annotation=final_assembly_for_annotation,
+        hic_read_refs=hic_read_refs,
+        notes=notes,
+        metadata=metadata,
+    )
+    skip_record_ref.write_text(json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        skip_record_ref,
+        stage="hic_scaffolding",
+        method_name=HIC_CONTRACT_METHOD,
+        artifact_type="hic_scaffolding.skip",
+        metadata={"mode": "human_review_skip", "skip_reason": "human_review_skip"},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    return str(skip_record_ref)
 
 
 def fail_hic_scaffolding(state: TopLevelState) -> dict:

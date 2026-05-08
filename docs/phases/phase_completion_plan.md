@@ -111,8 +111,9 @@ Current state: Phase 3 planning is documented in `docs/phases/phase3/README.md`.
 Tasks:
 - Add a natural-language entry parser that produces the existing structured CLI /
   `initial_state(...)` contract without becoming a second workflow engine.
-- Add human review/resume semantics for `assembly_review` and `hic_scaffolding`,
-  with structured decisions, artifacts, and ledger events.
+- Add session status/inspect plus human review/resume semantics for
+  `assembly_review` and `hic_scaffolding`, with structured decisions, artifacts,
+  and ledger events.
 - Execute one additional light method after entry/resume are in place, preferably
   QUAST on a tiny fixture or another narrow descriptor-backed slice.
 - Keep `RemoteRunner`, requested-stage routing, and broad method execution out of
@@ -121,7 +122,10 @@ Tasks:
 Exit criteria:
 - A natural-language request can start the existing graph path through a validated
   structured request.
-- A blocked review state can resume with a validated decision and auditable record.
+- A user can inspect a session by `session_id` and see current stage,
+  supervision state, active interrupt, and latest artifact refs.
+- A blocked review state can resume with a validated decision and auditable
+  record without restarting from `initial_state(...)`.
 - The next execution slice follows descriptors, frozen attempts, runner boundary,
   artifact collection, and ledger events without duplicating YAML/config roles.
 

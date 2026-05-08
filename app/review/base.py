@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 ReviewDecision = Literal[
     "pending",
@@ -18,6 +18,16 @@ ReviewDecision = Literal[
     "purge",
     "continue_low_confidence",
     "stop_human_review",
+]
+ReviewResumeStage = Literal["assembly_review", "hic_scaffolding"]
+ResumeReviewDecision = Literal[
+    "accept",
+    "purge",
+    "continue_low_confidence",
+    "stop_human_review",
+    "select_method",
+    "skip",
+    "rerun",
 ]
 
 
@@ -42,3 +52,19 @@ class ReviewPayload(BaseModel):
     signals: list[ReviewSignal] = Field(default_factory=list)
     decisions_allowed: list[ReviewDecision] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class ResumeReviewRequest(BaseModel):
+    """Structured human decision used to resume from a review gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    stage: ReviewResumeStage
+    decision: ResumeReviewDecision
+    candidate_id: str | None = None
+    method_name: str | None = None
+    final_assembly_ref: str | None = None
+    rejected_candidates: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

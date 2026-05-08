@@ -10,12 +10,14 @@ It collects or references evaluation signals and routes to:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
+from app.control.lifecycle import ResumeValidationError, UnsupportedLifecycleOperationError
 from app.execution.artifacts import append_artifact_records
-from app.review.base import ReviewPayload, ReviewSignal
+from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.schemas.artifacts import (
     ArtifactMeta,
     AssemblyEvalBundle,
@@ -270,8 +272,11 @@ def human_review_gate(state: TopLevelState) -> dict:
         "status": "blocked_human",
         "review_request_artifact_ref": request_ref,
     }
+    interrupt = payload.model_dump(mode="json")
+    interrupt["blocked_at"] = datetime.now(timezone.utc).isoformat()
+    interrupt["review_request_artifact_ref"] = request_ref
     return {
-        "active_interrupt": payload.model_dump(mode="json"),
+        "active_interrupt": interrupt,
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
     }
@@ -356,6 +361,92 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         }
 
     return update
+
+
+def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    """Apply a validated assembly review decision to a blocked state."""
+
+    if request.stage != "assembly_review":
+        raise ResumeValidationError("assembly review resume requires stage assembly_review")
+    ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
+    candidates = ar_out.get("candidates") or []
+    candidates_by_id = {candidate.get("candidate_id"): candidate for candidate in candidates}
+    allowed = {"accept", "purge", "continue_low_confidence", "stop_human_review"}
+    if request.decision == "rerun":
+        raise UnsupportedLifecycleOperationError("rerun is not implemented by review resume")
+    if request.decision not in allowed:
+        raise ResumeValidationError(f"unsupported assembly_review decision: {request.decision}")
+
+    if request.decision == "stop_human_review":
+        return _stop_assembly_review(state, request)
+
+    if not request.candidate_id:
+        raise ResumeValidationError("assembly_review resume requires candidate_id")
+    if request.candidate_id not in candidates_by_id:
+        raise ResumeValidationError(f"unknown assembly_review candidate_id: {request.candidate_id}")
+    if not request.final_assembly_ref:
+        raise ResumeValidationError("assembly_review resume requires final_assembly_ref")
+    candidate_final_ref = candidates_by_id[request.candidate_id].get("final_assembly_ref")
+    if candidate_final_ref and request.final_assembly_ref != candidate_final_ref:
+        raise ResumeValidationError("assembly_review final_assembly_ref does not match selected candidate")
+
+    stage_outputs = dict(state.get("stage_outputs") or {})
+    stage_outputs["assembly_review"] = {
+        **ar_out,
+        "decision": request.decision,
+        "selected_candidate_id": request.candidate_id,
+        "rejected_candidates": request.rejected_candidates,
+        "final_assembly_ref": request.final_assembly_ref,
+        "notes": request.notes,
+    }
+    updated_state = {**state, "stage_outputs": stage_outputs, "active_interrupt": None, "supervision_state": "running_stage"}
+    commit_update = commit_assembly_review(updated_state)
+    return {**commit_update, "active_interrupt": None}
+
+
+def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    stage_outputs = dict(state.get("stage_outputs") or {})
+    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    ledger = Ledger(state.get("data_dir", "data"))
+    ledger.record_review_decision(
+        state["session_id"],
+        "assembly_review",
+        decision="stop_human_review",
+        candidate_id=request.candidate_id,
+        rejected_candidates=request.rejected_candidates,
+        notes=request.notes,
+        metadata=request.metadata,
+    )
+    decision_artifact = ReviewDecisionArtifact(
+        session_id=state["session_id"],
+        stage="assembly_review",
+        decision="stop_human_review",
+        candidate_id=request.candidate_id,
+        rejected_candidates=request.rejected_candidates,
+        final_assembly_ref=request.final_assembly_ref,
+        notes=request.notes,
+        metadata=request.metadata,
+    )
+    decision_ref = _write_json_artifact(
+        state,
+        "assembly_review_decision.json",
+        decision_artifact.model_dump(mode="json"),
+        artifact_type="assembly_review.decision",
+    )
+    stage_outputs["assembly_review"] = {
+        **ar_out,
+        "status": "failed_terminal",
+        "decision": "stop_human_review",
+        "review_decision_artifact_ref": decision_ref,
+        "notes": request.notes,
+    }
+    return {
+        "current_stage": "assembly_review",
+        "supervision_state": "failed_terminal",
+        "active_interrupt": None,
+        "stage_outputs": stage_outputs,
+        "last_error": "assembly_review stopped by human review decision",
+    }
 
 
 def fail_assembly_review(state: TopLevelState) -> dict:

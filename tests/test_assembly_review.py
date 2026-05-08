@@ -148,6 +148,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
+            self.assertIn("blocked_at", result["active_interrupt"])
             # current_stage stays at assembly_review while blocked
             self.assertEqual(result["current_stage"], "assembly_review")
             ar_out = result["stage_outputs"]["assembly_review"]

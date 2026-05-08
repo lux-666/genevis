@@ -95,7 +95,7 @@ Not completed:
 - Genome survey tool execution, assembly tool execution, Hi-C scaffold tool
   execution, repeat, gene, and function annotation execution are not
   implemented.
-- Review interrupt resume logic is not implemented.
+- Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
 ## Read Order
 
@@ -213,7 +213,7 @@ in the task docs.
   automatic database download for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented.
-- Review interrupts are set but there is no resume / `ResumeInterrupt` logic yet.
+- Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
 - SeqKit is not installed in this local environment during verification; tests
