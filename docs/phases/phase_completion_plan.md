@@ -83,7 +83,7 @@ Tasks:
   - FOFN generation for stable assembly input
 - Define genome_survey full mode with short DNA reads and fallback mode with
   CycloneSEQ-only long reads.
-- Define assembly candidate set: Flye, hifiasm, NextDenovo, Canu.
+- Define assembly candidate set: Flye, NextDenovo, and Canu for ONT/CLR automatic planning, with hifiasm kept as an explicit HiFi/non-ONT compatibility route.
 - Define assembly_review gates with QUAST, BUSCO, Merqury, read mapping
   coverage, purge_dups_check, and contamination_check.
 - Define Hi-C skip/scaffold policy, repeat annotation, gene annotation, and

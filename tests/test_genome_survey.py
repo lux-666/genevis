@@ -134,7 +134,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["confidence"], "low")
             self.assertNotEqual(survey["confidence"], "high")
             self.assertEqual(survey["estimates"]["coverage"], 5.0)
+            self.assertEqual(survey["candidate_methods"], [])
             self.assertIn("not_equivalent_to_kmer_survey", survey["notes"])
+            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["candidate_methods"], [])
+            self.assertIn("not_equivalent_to_kmer_survey", payload["notes"])
 
     def test_no_usable_inputs_writes_skip_record(self):
         with tempfile.TemporaryDirectory() as tmpdir:

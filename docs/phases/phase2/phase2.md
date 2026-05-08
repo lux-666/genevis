@@ -78,12 +78,14 @@ Phase 2 starts with SeqKit but keeps the full read QC shape:
 - CycloneSEQ-only fallback: rough coverage/genome-size estimate with low
   confidence.
 
-`assembly` uses a candidate set:
+`assembly` uses an ONT/CLR automatic candidate set:
 
 - Flye
-- hifiasm
 - NextDenovo
 - Canu
+
+hifiasm remains registered as an explicit HiFi/non-ONT compatibility route, not
+an ONT/CLR default candidate.
 
 Each method produces a candidate assembly. `assembly_review` compares candidates
 using QUAST, BUSCO, Merqury, read mapping coverage, purge_dups_check, and

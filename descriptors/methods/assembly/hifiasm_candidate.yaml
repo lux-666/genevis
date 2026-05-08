@@ -1,19 +1,20 @@
 method_name: assembly.candidate.hifiasm
 stage: assembly
 package_ref: hifiasm
-goal: "Plan a hifiasm candidate assembly bundle without executing hifiasm."
+goal: "Plan a hifiasm compatibility candidate for explicit HiFi/non-ONT assembly routes without executing hifiasm."
 required_inputs:
   - name: long_reads
     type: clean_long_reads
-    description: "Clean long reads or an approved long-read FOFN."
+    description: "Clean HiFi-compatible reads or an explicitly approved non-ONT long-read FOFN."
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
     description: "Planned draft assembly FASTA path for the hifiasm candidate."
 review_rules:
   - candidate_bundle_exists
+  - compatibility_route_explicitly_requested
 human_review_triggers:
-  - cycloneseq_platform_profile_required
+  - explicit_hifi_or_non_ont_route_required
 resource_hints:
   cpu_cores: 32
   memory_gb: 128.0

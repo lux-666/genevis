@@ -104,9 +104,11 @@ Outputs:
 
 Planning rules:
 
-- For ONT, default to NanoPlot plus SeqKit stats.
-- Treat Filtlong as optional and conservative.
-- For CLR, prefer length/statistics preparation and FOFN generation.
+- For ONT/CLR, default to SeqKit stats plus deterministic FOFN preparation.
+- Treat NanoPlot or similar report generation as optional planning, not required
+  for the current executable mainline.
+- Treat Filtlong, chopper, fastplong, and seqkit seq as alternative length-filter
+  candidates; choose at most one unless a human explicitly approves chaining.
 - For short DNA and RNA-seq, SOAPnuke/FastQC planning is allowed.
 - Do not over-filter long reads before Flye unless the user or review policy
   explicitly requests it.
@@ -133,12 +135,13 @@ Outputs:
 
 Planning rules:
 
-- Run only when `clean_short_dna_reads` exists.
-- Use Jellyfish plus GenomeScope as the default path.
+- Run full k-mer survey only when `clean_short_dna_reads` exists.
+- Use Jellyfish plus GenomeScope as the default full-survey path.
 - Never feed ONT/CLR raw long reads into GenomeScope by default.
-- If short DNA reads are missing, skip with
-  `no_low_error_short_reads` and set genome size source to
-  `user_or_optional`.
+- If short DNA reads are missing but long reads and a size prior exist, record a
+  low-confidence coverage prior; do not label it as a k-mer survey.
+- If no usable survey inputs exist, skip with `no_low_error_short_reads` and set
+  genome size source to `user_or_optional`.
 
 Review triggers:
 
@@ -163,10 +166,13 @@ Outputs:
 
 Planning rules:
 
-- Flye is the simplest raw-read path.
-- NextDenovo is preferred for CLR, large genomes, high heterozygosity, or when
-  correct-then-assemble is desired.
-- Canu is a conservative fallback with heavier resource expectations.
+- Flye is the simplest ONT/CLR raw-read path and the default primary candidate.
+- NextDenovo is ONT/CLR-compatible for large or complex genomes, but requires a
+  genome-size prior or human-supplied genome size.
+- Canu is a conservative fallback with heavier resource expectations and also
+  requires a genome-size prior.
+- Keep hifiasm registered as a non-default HiFi/non-ONT compatibility route; do
+  not auto-select it for CycloneSEQ/ONT/CLR-only planning.
 - `genome_survey_result` provides priors; it is not a universal hard dependency.
 - Limit automatic attempts to one primary method plus one fallback.
 
@@ -299,6 +305,7 @@ Planning rules:
 - With related proteins, add Miniprot and/or GeMoMa candidates.
 - With RNA-seq, add HISAT2/StringTie and hints.
 - With Iso-seq or long RNA, add IsoQuant.
+- Do not treat genomic ONT/CLR long reads as IsoQuant evidence.
 - Mixed evidence requires a review/merge policy; do not select one by default.
 - Treat EVM as optional compatibility because maintenance status is a risk.
 

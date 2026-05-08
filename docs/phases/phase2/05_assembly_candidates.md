@@ -50,8 +50,9 @@ Suggested nodes:
 
 - `resolve_assembly_inputs`: prefer FOFN when present, otherwise read assets by
   ref.
-- `build_assembly_candidate_set`: create candidate descriptors for Flye,
-  hifiasm, NextDenovo, and Canu when compatible.
+- `build_assembly_candidate_set`: create ONT/CLR automatic candidate descriptors
+  for Flye, NextDenovo, and Canu when compatible; include hifiasm only for an
+  explicit HiFi/non-ONT compatibility route.
 - `select_primary_and_fallback`: enforce one primary plus at most one fallback.
 - `plan_candidate_attempts`: prepare candidate attempt specs or planned bundles,
   without running tools.
@@ -92,12 +93,15 @@ Optional:
 
 ## Candidate Set
 
-Candidates:
+ONT/CLR automatic candidates:
 
 - Flye
-- hifiasm
 - NextDenovo
 - Canu
+
+Explicit compatibility route:
+
+- hifiasm for HiFi/non-ONT planning only
 
 Each candidate method must declare:
 
@@ -136,7 +140,8 @@ Each candidate method must declare:
 - `app/schemas/plan.py` defines `AssemblyCandidatePlan`.
 - `app/schemas/artifacts.py` defines `AssemblyCandidateBundle`.
 - `descriptors/packages/` and `descriptors/methods/assembly/` register Flye,
-  hifiasm, NextDenovo, and Canu as planning candidates.
+  NextDenovo, and Canu as ONT/CLR automatic planning candidates; hifiasm remains
+  registered as an explicit HiFi/non-ONT compatibility candidate.
 - The stage writes `draft_assembly.candidate` JSON bundles for selected methods
   only. It does not create FASTA files and does not run assemblers.
 - NextDenovo and Canu require a genome-size prior. If a human-requested method
@@ -159,8 +164,8 @@ Each candidate method must declare:
 - `AssemblyCandidatePlan` 和 `AssemblyCandidateBundle` 分别在 `app/schemas/plan.py`
   与 `app/schemas/artifacts.py` 中定义，候选 bundle 写到
   `data/artifacts/assembly/{session_id}/candidates/`。
-- Flye、hifiasm、NextDenovo、Canu 的 package/method descriptors 注册在
-  `descriptors/registry.yaml`；NextDenovo/Canu 没有 genome-size prior 时会被 reject 而不是全局失败。
+- Flye、NextDenovo、Canu 是 ONT/CLR 自动候选；hifiasm 的 package/method descriptor
+  仍注册在 `descriptors/registry.yaml`，但只作为显式 HiFi/non-ONT 兼容路线；NextDenovo/Canu 没有 genome-size prior 时会被 reject 而不是全局失败。
 - 自动规划只选一个 primary 和最多一个 fallback，`execution_enabled: false`，真实 assembler 执行留给后续 method task。
 - `tests/test_assembly.py` 覆盖缺输入失败、FOFN+genome size planning、genome-size-required reject、primary/fallback 数量限制。
 

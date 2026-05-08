@@ -28,6 +28,10 @@ class AssemblyDescriptorTests(unittest.TestCase):
             self.assertEqual(registry.methods[method_name].stage, "assembly")
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["assembly"])
+        hifiasm = registry.methods["assembly.candidate.hifiasm"]
+        self.assertIn("compatibility candidate", hifiasm.goal)
+        self.assertIn("compatibility_route_explicitly_requested", hifiasm.review_rules)
+        self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
 
 
 class AssemblyStageTests(unittest.TestCase):
@@ -169,13 +173,78 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(assembly["fallback_method"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["fallback_method"], "assembly.candidate.nextdenovo")
+            self.assertNotIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
             self.assertEqual(set(assembly["candidate_methods"]), {
                 "assembly.candidate.flye",
-                "assembly.candidate.hifiasm",
                 "assembly.candidate.nextdenovo",
                 "assembly.candidate.canu",
             })
+
+    def test_explicit_hifiasm_request_remains_allowed_as_compatibility_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "pacbio_hifi",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "assembly": {
+                    "method_decision": {
+                        "primary": "assembly.candidate.hifiasm",
+                    }
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
+            self.assertIn("assembly.candidate.hifiasm", assembly["selected_methods"])
+            self.assertIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
+
+    def test_auto_planning_without_genome_size_selects_only_flye(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
+            self.assertEqual(assembly["fallback_method"], None)
+            self.assertEqual(assembly["selected_methods"], ["assembly.candidate.flye"])
+            self.assertEqual(
+                assembly["rejected_candidates"],
+                {
+                    "assembly.candidate.nextdenovo": "genome_size_required",
+                    "assembly.candidate.canu": "genome_size_required",
+                },
+            )
+            self.assertNotIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
 
 
 if __name__ == "__main__":

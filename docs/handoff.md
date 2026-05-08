@@ -50,10 +50,11 @@ Completed:
   low-confidence CycloneSEQ fallback record for long-read-only inputs, or writes
   `skip_reason: no_low_error_short_reads` when no usable survey input exists.
 - `assembly` has a real deterministic candidate planning stage. It resolves a
-  read QC FOFN or registered `clean_long_reads`, builds Flye, hifiasm,
-  NextDenovo, and Canu candidate plans, writes planned
-  `draft_assembly.candidate` JSON bundles for at most one primary plus one
-  fallback, and routes candidate refs to `assembly_review`.
+  read QC FOFN or registered `clean_long_reads`, auto-plans Flye plus compatible
+  NextDenovo/Canu routes for ONT/CLR, keeps hifiasm as an explicit HiFi/non-ONT
+  compatibility route, writes planned `draft_assembly.candidate` JSON bundles for
+  at most one primary plus one fallback, and routes candidate refs to
+  `assembly_review`.
 - `assembly_review` has a real human-gated review stage. It consumes existing
   assembly inputs or assembly candidate bundle refs, plans pending QUAST/BUSCO/
   Merqury/mapping/purge/contamination signals when inputs permit, writes
@@ -197,7 +198,9 @@ in the task docs.
 - Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
   are planning placeholders only; there is no execution path for those tools.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
-  placeholders only; there is no execution path for those tools.
+  placeholders only; there is no execution path for those tools. hifiasm is
+  registered as an explicit HiFi/non-ONT compatibility route, not an ONT/CLR
+  automatic candidate.
 - Assembly review descriptors for QUAST, BUSCO, Merqury, minimap2-based mapping,
   purge_dups, and contamination checks are planning placeholders only; there is
   no execution path for those tools.

@@ -209,6 +209,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{fq}\n")
             self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
             self.assertNotIn("filtered_long_reads_ref", read_qc)
+            self.assertNotIn("filtered_long_reads_fofn_ref", read_qc)
 
             artifact_events = [
                 json.loads(line)
@@ -310,6 +311,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "threshold_decision_missing",
             )
             self.assertNotIn("filtered_long_reads_ref", read_qc)
+            self.assertNotIn("filtered_long_reads_fofn_ref", read_qc)
+            self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
             self.assertEqual(Path(read_qc["long_reads_fofn_ref"]).read_text(encoding="utf-8"), f"{fq}\n")
 
     def test_missing_seqkit_records_failed_attempt(self):

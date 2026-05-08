@@ -132,6 +132,28 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertIn("gene_annotation.helper.isoquant", gene["helper_methods"])
             self.assertIn("gene_annotation.candidate.braker3", gene["candidate_methods"])
 
+    def test_genome_long_reads_do_not_enable_isoquant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            long_reads = Path(tmpdir) / "cycloneseq.fastq.gz"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:cycloneseq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(long_reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+
+            result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["evidence_profile"], "no_evidence")
+            self.assertNotIn("gene_annotation.helper.isoquant", gene["helper_methods"])
+
     def test_protein_evidence_adds_miniprot_and_gemoma(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins = Path(tmpdir) / "ref_proteins.fa"

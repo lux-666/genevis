@@ -1,6 +1,6 @@
 # 03 Stage Method Catalog And Planner Corrections
 
-Task status: planned.
+Task status: implemented (minimal approved scope).
 
 ## Goal
 
@@ -105,9 +105,10 @@ Current registry entries:
 - `assembly.candidate.nextdenovo`
 - `assembly.candidate.canu`
 
-Current code still includes `hifiasm` in the automatic ONT/CLR candidate list.
-That is the main bug in this audit. `hifiasm` should remain registered for a
-HiFi route, but it should not be auto-selected for ONT/CLR-only projects.
+Before this correction, code still included `hifiasm` in the automatic ONT/CLR
+candidate list. That was the main bug in this audit. `hifiasm` should remain
+registered for a HiFi/non-ONT route, but it should not be auto-selected for
+ONT/CLR-only projects.
 
 Corrections:
 
@@ -243,19 +244,20 @@ Corrections:
 
 ## Tasks
 
-- [ ] Update the stage/method documentation to distinguish defaults,
+- [x] Update the stage/method documentation to distinguish defaults,
   conditional candidates, helpers, and non-default compatibility routes.
-- [ ] Decide whether `internal` should be a real descriptor package or whether
-  local deterministic helpers stay outside the method registry.
+- [x] Decide whether `internal` should be a real descriptor package or whether
+  local deterministic helpers stay outside the method registry for this minimal
+  scope.
 - [ ] Add NanoPlot as an optional read QC report descriptor if approved.
 - [ ] Register FOFN generation as `read_qc.prepare.make_fofn` if the internal
   package decision is approved.
-- [ ] Add tests proving read QC never chains all length filters by default.
-- [ ] Keep genome survey full mode gated on `clean_short_dna_reads`.
-- [ ] Clarify long-read-only genome survey fallback versus skip semantics in
+- [x] Add tests proving read QC never chains all length filters by default.
+- [x] Keep genome survey full mode gated on `clean_short_dna_reads`.
+- [x] Clarify long-read-only genome survey fallback versus skip semantics in
   docs and tests.
-- [ ] Gate `hifiasm` out of ONT/CLR automatic assembly planning.
-- [ ] Update assembly tests so automatic ONT/CLR planning chooses Flye primary
+- [x] Gate `hifiasm` out of ONT/CLR automatic assembly planning.
+- [x] Update assembly tests so automatic ONT/CLR planning chooses Flye primary
   and NextDenovo/Canu-compatible fallback behavior, not hifiasm.
 - [ ] Add assembly-review polishing descriptors, starting with NextPolish if
   the scope is kept narrow.
@@ -263,26 +265,61 @@ Corrections:
   planned review execution slice.
 - [ ] Rename or split minimap2 contamination planning so it is clearly a mapping
   screen, not a complete taxonomy classifier.
-- [ ] Keep Hi-C scaffolding optional and gated by Hi-C assets plus chromosome
+- [x] Keep Hi-C scaffolding optional and gated by Hi-C assets plus chromosome
   target intent.
-- [ ] Keep repeat annotation routes alternative, not EDTA plus RepeatModeler by
+- [x] Keep repeat annotation routes alternative, not EDTA plus RepeatModeler by
   default.
-- [ ] Add gene annotation tests that genome ONT/CLR reads do not enable
+- [x] Add gene annotation tests that genome ONT/CLR reads do not enable
   IsoQuant.
 
-## Acceptance
+## Implementation Notes
+
+改动要点：
+
+- Updated `app/stages/assembly/nodes.py` so ONT/CLR automatic assembly planning
+  uses Flye, NextDenovo, and Canu only. `assembly.candidate.hifiasm` remains an
+  allowed explicit compatibility route when requested through `method_decision`,
+  but it is no longer auto-selected for CycloneSEQ/ONT/CLR-only planning.
+- Strengthened `tests/test_assembly.py` so automatic planning chooses Flye as
+  primary, NextDenovo as the genome-size-backed fallback, and Flye-only when no
+  genome-size prior exists; tests also assert hifiasm stays out of ONT/CLR
+  `candidate_methods` while remaining plannable as an explicit compatibility
+  route.
+- Strengthened `tests/test_read_qc.py`, `tests/test_genome_survey.py`, and
+  `tests/test_gene_annotation.py` for the existing gates: no default filter
+  chaining, no full k-mer survey from long reads alone, and no IsoQuant helper
+  from genomic ONT/CLR reads.
+- Updated `descriptors/methods/assembly/hifiasm_candidate.yaml` with existing
+  descriptor fields only: its goal, input description, review rule, and human
+  trigger now mark it as an explicit HiFi/non-ONT compatibility route rather than
+  a normal ONT/CLR candidate.
+- Updated `docs/stage_contracts.md`, `docs/handoff.md`, and the relevant phase
+  summaries to describe defaults, conditional candidates, helpers, and
+  non-default compatibility routes using existing naming conventions only. No new
+  YAML layer, descriptor role field, internal package, NanoPlot descriptor,
+  polishing descriptor, threshold, requested-stage routing, RemoteRunner behavior,
+  or real execution was added.
+
+## Minimal-Scope Acceptance
 
 - Registry and planner docs no longer imply that every method in a stage should
   run.
 - Read QC defaults are stats plus FOFN, with optional report and at most one
   approved filter route.
 - Full genome survey never runs from ONT/CLR long reads alone.
-- ONT/CLR assembly auto-planning does not select hifiasm.
-- Polishing is represented as a conditional assembly-review action before real
-  polishing execution is attempted.
+- ONT/CLR assembly auto-planning does not select hifiasm, while explicit hifiasm
+  compatibility planning remains allowed.
 - Hi-C, repeat, and gene annotation method roles are explicit and evidence-gated.
 - No thresholds, purge cutoffs, contact-map policies, annotation merge policies,
   or real execution defaults are invented.
+
+## Deferred Acceptance Pending Separate Approval
+
+- Polishing descriptors such as NextPolish are represented as conditional
+  assembly-review actions before real polishing execution is attempted.
+- Optional helper descriptors such as samtools/mosdepth or contamination-screen
+  candidates are added only when a later approved review-execution slice needs
+  them.
 
 ## Non-Goals
 

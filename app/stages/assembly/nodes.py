@@ -13,12 +13,13 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.state import TopLevelState
 
-ASSEMBLY_CANDIDATES = [
+ASSEMBLY_AUTO_CANDIDATES = [
     "assembly.candidate.flye",
-    "assembly.candidate.hifiasm",
     "assembly.candidate.nextdenovo",
     "assembly.candidate.canu",
 ]
+ASSEMBLY_COMPATIBILITY_CANDIDATES = ["assembly.candidate.hifiasm"]
+ASSEMBLY_CANDIDATES = [*ASSEMBLY_AUTO_CANDIDATES, *ASSEMBLY_COMPATIBILITY_CANDIDATES]
 GENOME_SIZE_REQUIRED = {
     "assembly.candidate.nextdenovo",
     "assembly.candidate.canu",
@@ -80,14 +81,15 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
         return {}
 
     registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-    missing = [method for method in ASSEMBLY_CANDIDATES if method not in registry.methods]
+    planned_methods = _planned_candidate_methods(assembly_out)
+    missing = [method for method in planned_methods if method not in registry.methods]
     if missing:
         return _fail_update(state, f"assembly descriptors missing: {missing}")
 
     genome_size_prior = assembly_out.get("genome_size_prior")
     candidate_plans: list[dict[str, Any]] = []
     rejected: dict[str, str] = {}
-    for method_name in ASSEMBLY_CANDIDATES:
+    for method_name in planned_methods:
         requires_genome_size = method_name in GENOME_SIZE_REQUIRED
         rejection_reason = "genome_size_required" if requires_genome_size and not genome_size_prior else None
         status = "rejected" if rejection_reason else "compatible"
@@ -108,11 +110,21 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
         state,
         {
             "status": "candidate_set_ready",
-            "candidate_methods": ASSEMBLY_CANDIDATES,
+            "candidate_methods": planned_methods,
             "candidate_plans": candidate_plans,
             "rejected_candidates": rejected,
         },
     )
+
+
+def _planned_candidate_methods(assembly_out: dict[str, Any]) -> list[str]:
+    decision = dict(assembly_out.get("method_decision") or {})
+    methods = list(ASSEMBLY_AUTO_CANDIDATES)
+    for key in ["primary", "fallback"]:
+        method = decision.get(key)
+        if method in ASSEMBLY_COMPATIBILITY_CANDIDATES and method not in methods:
+            methods.append(method)
+    return methods
 
 
 def select_primary_and_fallback(state: TopLevelState) -> dict:
