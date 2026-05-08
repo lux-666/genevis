@@ -118,38 +118,55 @@ fresh `initial_state(...)` unless the user explicitly starts a new workflow.
   `descriptors/registry.yaml` / `by_stage` as the method catalog and use Python
   only for temporary task-local compatibility filters until a descriptor policy
   exists.
+- Do not introduce new top-level stages for method-family roles that already
+  belong inside the current parent graph. In particular, proposed roles named
+  `assembly_qc`, `assembly_polish`, `gene_structure_annotation`, and
+  `functional_annotation` should map into existing `assembly_review`,
+  post-review actions, `gene_annotation`, and `function_annotation` unless a
+  future graph-contract change is explicitly approved.
 
 ## Plan Files
 
 - [01 Entry Interaction](01_natural_language_entry_parser.md)
 - [02 Review Inspect And Resume Interaction](02_review_resume_semantics.md)
 - [03 Stage Method Catalog And Planner Corrections](03_stage_method_catalog_and_planner_corrections.md)
+- [04 Read QC Realization](04_read_qc_realization.md)
+- [05 Genome Survey Realization](05_genome_survey_realization.md)
+- [06 Assembly Realization](06_assembly_realization.md)
+- [07 Assembly Review Realization](07_assembly_review_realization.md)
+- [08 Polish And Purge Decision Actions](08_polish_purge_decision_actions.md)
+- [09 Hi-C Scaffolding Realization](09_hic_scaffolding_realization.md)
+- [10 Repeat, Gene, And Function Annotation Realization](10_annotation_realization.md)
 
 ## Future Task Direction
 
-After tasks 01, 02, and 03 are implemented and verified, scope real execution
-slices one method at a time. The first good candidate is a tiny-fixture
-`assembly_review.eval.quast` execution slice because it exercises descriptor
-loading, frozen attempt generation, local runner execution, artifact collection,
-review signal update, and ledger events without touching the whole assembly or
-annotation catalog.
+After tasks 01, 02, and 03 are implemented and verified, real execution should
+follow the biological mainline from read QC onward instead of jumping to an
+isolated tool slice. Each task should make one stage genuinely usable, then pass
+stable refs to the next stage.
 
-Do not start broad real execution until the entry and resume surfaces are
-stable and the method catalog distinguishes defaults, conditional candidates,
-helpers, and non-default compatibility routes. Each method task should specify
-the exact descriptor, input fixture, runner mode, output artifacts, ledger
-events, and review handoff before code is changed.
+Do not broaden execution inside one task. Each stage realization should define
+which method route is in scope, which alternatives remain candidates, what
+artifacts are produced, and which decisions still require human approval.
 
 ## Recommended Task Order
 
 1. Add the natural-language entry parser outside LangGraph.
 2. Add validated review/resume semantics for existing blocked review gates.
 3. Correct stage method catalog and planner gates before real execution.
-4. Add one tiny real execution slice after entry/resume/catalog gates are in
-   place.
-5. Decide requested-stage routing only after natural entry and resume payloads
+4. Realize read QC: stats, FOFN, optional report, and optional approved
+   filtering.
+5. Realize genome survey only for valid short-read inputs; keep ONT/CLR-only
+   non-blocking.
+6. Realize the first ONT/CLR draft assembly route.
+7. Realize assembly review evaluation before the human gate.
+8. Realize post-review polish/purge/pass actions.
+9. Realize optional Hi-C scaffolding when Hi-C data and chromosome-level intent
+   exist.
+10. Realize repeat, gene, and function annotation in downstream order.
+11. Decide requested-stage routing only after natural entry and resume payloads
    are stable.
-6. Decide `RemoteRunner` semantics separately; do not bundle it with natural
+12. Decide `RemoteRunner` semantics separately; do not bundle it with natural
    entry, resume, or a local method slice.
 
 ## Phase 3 Done Criteria
@@ -166,6 +183,8 @@ events, and review handoff before code is changed.
 - Stage method catalogs do not imply over-running filters, long-read k-mer
   survey, hifiasm for ONT/CLR, duplicated repeat-library discovery, or IsoQuant
   on genome long reads.
+- QC and downstream stages progress from planning contracts to real method
+  execution one stage at a time.
 - Real method execution remains descriptor-backed:
   descriptor -> frozen attempt -> runner -> artifact records -> ledger events.
 - No new YAML layer duplicates request facts, checkpoint state, review payloads,

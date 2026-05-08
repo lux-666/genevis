@@ -104,7 +104,8 @@ Exit criteria:
 ## Phase 3: Natural Entry, Review Resume, and Real Execution
 
 Goal: make the coordinator usable from natural language, resume human review gates,
-and then add more real execution slices one scoped method at a time.
+and then realize the biological mainline one stage at a time from read QC
+onward.
 
 Current state: Phase 3 planning is documented in `docs/phases/phase3/README.md`.
 
@@ -114,8 +115,10 @@ Tasks:
 - Add session status/inspect plus human review/resume semantics for
   `assembly_review` and `hic_scaffolding`, with structured decisions, artifacts,
   and ledger events.
-- Execute one additional light method after entry/resume are in place, preferably
-  QUAST on a tiny fixture or another narrow descriptor-backed slice.
+- Realize read QC first: stats, stable FOFN handoff, optional report, and
+  optional approved filtering.
+- Realize genome survey, assembly, assembly review, post-review actions,
+  optional Hi-C scaffolding, and downstream annotation in order.
 - Keep `RemoteRunner`, requested-stage routing, and broad method execution out of
   scope until their semantics are explicit.
 
@@ -126,7 +129,7 @@ Exit criteria:
   supervision state, active interrupt, and latest artifact refs.
 - A blocked review state can resume with a validated decision and auditable
   record without restarting from `initial_state(...)`.
-- The next execution slice follows descriptors, frozen attempts, runner boundary,
+- Each stage realization follows descriptors, frozen attempts, runner boundary,
   artifact collection, and ledger events without duplicating YAML/config roles.
 
 ## Phase 4: Assembly Review Gate
