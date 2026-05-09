@@ -1,6 +1,6 @@
 # 10 Repeat, Gene, And Function Annotation Realization
 
-Task status: planned.
+Task status: partially implemented (repeat-layer slice).
 
 ## Goal
 
@@ -63,6 +63,30 @@ migration is explicitly scoped and tested.
 - `kegg_terms`
 - `interpro_domains`
 
+## Tasks
+
+- [x] Keep annotation stage names as `repeat_annotation`, `gene_annotation`, and `function_annotation`.
+- [x] Add the first explicit local repeat-layer execution route: provided repeat library plus RepeatMasker softmasking.
+- [x] Keep default repeat annotation behavior planning-only unless `stage_outputs.repeat_annotation.execution_mode == "local"` and `primary_method == "repeat_annotation.masking.repeatmasker"` are both explicit.
+- [x] Register RepeatMasker softmasked genome, repeat GFF3, command stdout/stderr, bundle artifacts, and ledger attempt events.
+- [x] Continue routing gene annotation from `softmasked_genome_ref`, now possibly materialized by local RepeatMasker.
+- [x] Keep de novo repeat library discovery, gene-structure annotation execution, function annotation execution, function database downloads, evidence merging, and thresholds deferred.
+
+## Implemented State
+
+- `app/stages/repeat_annotation/nodes.py` preserves existing planning behavior and adds an optional freeze/run/collect branch for local RepeatMasker only with a provided repeat library.
+- Local RepeatMasker validates `repeat_annotation.masking.repeatmasker`, writes deterministic `RepeatMasker -lib <repeat_library> -gff -xsmall <assembly>` attempts through `FrozenAttemptSpec`, executes them via `LocalRunner`, and records ledger events.
+- Success registers materialized `softmasked_genome.fasta`, `repeat_annotation.gff3`, command stdout/stderr, and the repeat annotation bundle. The stage then advances to `gene_annotation` with real repeat refs.
+- Failure records `attempt_failed` and stops at `repeat_annotation`; the workflow does not advance to gene annotation with missing masking outputs.
+- De novo repeat libraries remain planned only. Gene annotation and function annotation remain planning/provenance stages in this slice.
+
+改动要点：
+
+- `app/stages/repeat_annotation/builder.py` and `routing.py` insert optional RepeatMasker freeze/run/collect nodes before commit.
+- `app/schemas/artifacts.py` defines typed repeat plan, bundle, softmasked genome, hardmasked genome, and GFF3 artifact constants.
+- `descriptors/methods/repeat_annotation/repeatmasker_masking.yaml` now documents the provided-library local RepeatMasker route without renaming descriptors.
+- `tests/test_repeat_annotation.py` covers fake RepeatMasker success/failure, default planning-only behavior, local mode without explicit method, and de novo planning-only behavior.
+
 ## Acceptance
 
 - Downstream annotation progresses through repeat, gene, then function
@@ -72,3 +96,13 @@ migration is explicitly scoped and tested.
 - Database provenance is required before function annotation completes.
 - Evidence-poor gene annotation produces a review warning or human gate for
   annotation evidence selection instead of pretending to be high confidence.
+
+## Verification
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_repeat_annotation -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_repeat_annotation tests.test_gene_annotation tests.test_function_annotation -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_hic_scaffolding tests.test_repeat_annotation tests.test_gene_annotation tests.test_function_annotation -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
+git diff --check
+```

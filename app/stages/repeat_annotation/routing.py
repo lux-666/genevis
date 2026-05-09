@@ -26,4 +26,27 @@ def route_after_library_plan(state: TopLevelState) -> str:
 
 def route_after_masking_plan(state: TopLevelState) -> str:
     """Route after planning repeat masking."""
+    repeat_out = _output(state)
+    if repeat_out.get("status") == "failed":
+        return "fail"
+    if repeat_out.get("execution_enabled"):
+        return "freeze_repeatmasker"
+    return "commit"
+
+
+def route_after_repeatmasker_freeze(state: TopLevelState) -> str:
+    """Route after freezing RepeatMasker execution."""
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    return "run_repeatmasker" if status == "repeatmasker_frozen" else "fail"
+
+
+def route_after_repeatmasker_run(state: TopLevelState) -> str:
+    """Route after running RepeatMasker."""
+    return "fail" if _output(state).get("status") == "failed" else "collect_repeatmasker"
+
+
+def route_after_repeatmasker_collect(state: TopLevelState) -> str:
+    """Route after collecting RepeatMasker artifacts."""
     return "fail" if _output(state).get("status") == "failed" else "commit"

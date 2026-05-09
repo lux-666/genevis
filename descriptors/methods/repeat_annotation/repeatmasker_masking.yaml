@@ -1,21 +1,21 @@
 method_name: repeat_annotation.masking.repeatmasker
 stage: repeat_annotation
 package_ref: repeatmasker
-goal: "Plan RepeatMasker softmasking and repeat GFF output without execution."
+goal: "Plan RepeatMasker softmasking and support explicit opt-in local RepeatMasker execution with a provided repeat library."
 required_inputs:
   - name: final_assembly_for_annotation
     type: draft_assembly
     description: "Reviewed assembly FASTA for masking."
   - name: repeat_library
     type: repeat_library
-    description: "Provided or planned de novo repeat library."
+    description: "Provided repeat library for local RepeatMasker execution; planned de novo libraries remain deferred until materialized."
 expected_outputs:
   - name: softmasked_genome
     type: softmasked_genome
-    description: "Planned softmasked genome FASTA for gene annotation."
+    description: "Softmasked genome FASTA for gene annotation; materialized when local RepeatMasker execution is enabled."
   - name: repeat_annotation_gff3
     type: repeat_annotation
-    description: "Planned repeat annotation GFF3."
+    description: "Repeat annotation GFF3; materialized when local RepeatMasker execution is enabled."
 review_rules:
   - repeat_masking_plan_exists
 human_review_triggers:

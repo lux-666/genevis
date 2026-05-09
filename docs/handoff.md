@@ -77,8 +77,13 @@ Completed:
   selected, and a materialized Hi-C alignment input exists, registers scaffold candidate/review
   artifacts, preserves the pre-Hi-C assembly as the annotation fallback, and
   blocks for contact-map human review before chromosome-scale promotion.
-- `repeat_annotation` has a real planning stage for provided or de novo repeat
-  library strategy, RepeatMasker masking refs, and `softmasked_genome` handoff.
+- `repeat_annotation` has a real planning stage plus an explicit opt-in local
+  RepeatMasker route. It resolves `final_assembly_for_annotation`, handles
+  provided or de novo repeat library strategy, can run RepeatMasker locally when
+  `stage_outputs.repeat_annotation.execution_mode == "local"`, RepeatMasker is
+  explicitly selected, and a provided repeat library exists, registers real
+  softmasked genome/repeat GFF artifacts, and passes `softmasked_genome_ref` to
+  gene annotation.
 - `gene_annotation` has a real planning stage that consumes softmasked genome,
   records evidence-aware candidate methods, and publishes planned `proteins.fa`.
 - `function_annotation` has a real terminal planning stage that consumes planned
@@ -106,10 +111,12 @@ Completed:
 Not completed:
 
 - No broad executable bioinformatics method catalog beyond the realized SeqKit,
-  Jellyfish/GenomeScope2, Flye, explicit QUAST, and explicit YaHS slices.
+  Jellyfish/GenomeScope2, Flye, explicit QUAST, explicit YaHS, and explicit
+  RepeatMasker slices.
 - RemoteRunner execution is not implemented.
-- Raw Hi-C alignment generation, Juicer/3D-DNA/Juicebox execution, repeat, gene,
-  and function annotation execution are not implemented.
+- Raw Hi-C alignment generation, Juicer/3D-DNA/Juicebox execution, de novo repeat
+  library execution, gene annotation execution, and function annotation execution
+  are not implemented.
 - Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
 ## Read Order
@@ -222,8 +229,9 @@ corresponding human decision is explicit in the task docs.
 - Hi-C scaffolding has an opt-in local YaHS route for materialized assembly plus
   Hi-C alignment inputs. Raw Hi-C read alignment, Juicer, 3D-DNA, and Juicebox
   remain planning/manual placeholders only.
-- Repeat annotation descriptors for EDTA, RepeatModeler, RepeatMasker, and TRF
-  are planning placeholders only; there is no execution path for those tools.
+- Repeat annotation has an opt-in local RepeatMasker route for provided repeat
+  libraries. EDTA, RepeatModeler, and TRF remain planning placeholders only, and
+  de novo repeat library generation is not executed.
 - Gene annotation descriptors for BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
   StringTie, IsoQuant, and GeMoMa are planning placeholders only; there is no
   execution path for those tools.

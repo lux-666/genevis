@@ -26,6 +26,11 @@ HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
 HIC_SCAFFOLD_AGP = "hic_scaffolding.scaffold_agp"
 HIC_REVIEW_BUNDLE = "hic_scaffolding.review_bundle"
 HIC_QC_REPORT = "hic_scaffolding.qc_report"
+REPEAT_ANNOTATION_PLAN = "repeat_annotation.plan"
+REPEAT_ANNOTATION_BUNDLE = "repeat_annotation.bundle"
+REPEAT_ANNOTATION_GFF3 = "repeat_annotation.gff3"
+REPEAT_SOFTMASKED_GENOME = "repeat_annotation.softmasked_genome"
+REPEAT_HARDMASKED_GENOME = "repeat_annotation.hardmasked_genome"
 
 
 def file_sha256(path: Path) -> str:
@@ -224,7 +229,7 @@ class RepeatAnnotationBundle(BaseModel):
     """Repeat annotation bundle consumed by downstream gene annotation."""
 
     session_id: str
-    status: Literal["planned"]
+    status: Literal["planned", "executed"]
     strategy: Literal["provided", "de_novo"]
     repeat_library_source: Literal["provided", "de_novo"]
     final_assembly_for_annotation: str
