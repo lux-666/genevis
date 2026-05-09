@@ -1,7 +1,7 @@
 method_name: assembly_review.eval.quast
 stage: assembly_review
 package_ref: quast
-goal: "Evaluate assembly contiguity and correctness with QUAST."
+goal: "Evaluate assembly contiguity with reference-free QUAST basic reports before human review."
 required_inputs:
   - name: draft_assembly
     type: draft_assembly
@@ -9,7 +9,7 @@ required_inputs:
 expected_outputs:
   - name: quast_report
     type: quast_report
-    description: "QUAST HTML and TSV report directory."
+    description: "Reference-free QUAST basic report files, including report.tsv when local execution is enabled."
 review_rules:
   - quast_report_exists
 human_review_triggers:

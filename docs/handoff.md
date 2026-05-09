@@ -61,12 +61,14 @@ Completed:
   `stage_outputs.assembly.execution_mode == "local"`, registers a real draft
   assembly FASTA plus command artifacts, and routes candidate refs to
   `assembly_review`.
-- `assembly_review` has a real human-gated review stage. It consumes existing
-  assembly inputs or assembly candidate bundle refs, plans pending QUAST/BUSCO/
-  Merqury/mapping/purge/contamination signals when inputs permit, writes
-  evaluation and review artifacts, records review ledger events, auto-accepts
-  only existing assembly inputs, and blocks assembly-stage candidates for human
-  decision without inventing thresholds.
+- `assembly_review` has a real human-gated review stage plus an explicit opt-in
+  local QUAST evaluation route. It consumes existing assembly inputs or assembly
+  candidate bundle refs, plans QUAST/BUSCO/Merqury/mapping/purge/contamination
+  signals when inputs permit, can run QUAST locally for materialized draft FASTA
+  candidates when `stage_outputs.assembly_review.execution_mode == "local"`,
+  registers QUAST report artifacts and non-decisional metrics, records review and
+  attempt ledger events, auto-accepts only existing assembly inputs, and blocks
+  assembly-stage candidates for human decision without inventing thresholds.
 - `hic_scaffolding` has a real scaffold/skip planning stage. It consumes the
   reviewed assembly, resolves registered `hic_reads_registered` assets, writes
   explicit skip records when Hi-C is absent or chromosome-level assembly was not
@@ -97,7 +99,7 @@ Completed:
 Not completed:
 
 - No broad executable bioinformatics method catalog beyond the realized SeqKit,
-  Jellyfish/GenomeScope2, and explicit Flye slices.
+  Jellyfish/GenomeScope2, Flye, and explicit QUAST slices.
 - RemoteRunner execution is not implemented.
 - Hi-C scaffold tool execution, repeat, gene, and function annotation execution
   are not implemented.
@@ -162,9 +164,9 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from `docs/phases/phase3/07_assembly_review_realization.md` only
-after human approval: realize assembly review evaluation before the human gate
-while preserving the no-auto-accept review policy.
+Continue Phase 3 from `docs/phases/phase3/08_hic_scaffolding_realization.md` only
+after human approval: realize the first Hi-C scaffolding execution path while
+preserving human method/contact-map decisions.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -180,7 +182,7 @@ corresponding human decision is explicit in the task docs.
   behavior remains planning-only.
 - Assembly review is the main human gate. Existing assembly input can
   auto-accept as a deterministic pass-through, but assembly-stage candidates do
-  not auto-accept without an approved review/resume policy.
+  not auto-accept from QUAST metrics or without an approved review/resume policy.
 - `hic_scaffolding` exists as a stage but must be skippable.
 - Hi-C scaffold method choice and contact-map acceptance require human approval.
 - Assembly review is the main human-gated decision point.
@@ -209,9 +211,9 @@ corresponding human decision is explicit in the task docs.
   assembly candidate. NextDenovo and Canu remain planning placeholders and are not
   executed as automatic fallbacks. hifiasm is registered as an explicit
   HiFi/non-ONT compatibility route, not an ONT/CLR automatic candidate.
-- Assembly review descriptors for QUAST, BUSCO, Merqury, minimap2-based mapping,
-  purge_dups, and contamination checks are planning placeholders only; there is
-  no execution path for those tools.
+- Assembly review has an opt-in local QUAST route for materialized draft FASTA
+  candidates. BUSCO, Merqury, minimap2-based mapping, purge_dups, and
+  contamination checks remain planning placeholders only.
 - Hi-C scaffolding descriptors for YaHS, Juicer, 3D-DNA, and Juicebox are
   planning placeholders only; there is no execution path for those tools.
 - Repeat annotation descriptors for EDTA, RepeatModeler, RepeatMasker, and TRF
@@ -227,9 +229,9 @@ corresponding human decision is explicit in the task docs.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
-- SeqKit and Flye are not installed in this local environment during verification;
-  tests use temporary fake `seqkit` and `flye` executables for success paths and
-  cover missing/failing binary behavior.
+- SeqKit, Flye, and QUAST are not installed in this local environment during
+  verification; tests use temporary fake `seqkit`, `flye`, and `quast.py`
+  executables for success paths and cover missing/failing binary behavior.
 
 ## Files Most Likely To Change In Phase 2
 

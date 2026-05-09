@@ -18,6 +18,9 @@ GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
+ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
+ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
+ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
 
 
 def file_sha256(path: Path) -> str:

@@ -11,12 +11,32 @@ Assembly review is the main human gate.  These tests verify that:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from app.schemas.descriptors import DescriptorRegistry
 from app.stages.assembly_review.builder import build_stage
 from app.schemas.state import initial_state
+
+
+class AssemblyReviewDescriptorTests(unittest.TestCase):
+    def test_descriptor_registry_loads_assembly_review_methods(self):
+        registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+        expected = {
+            "assembly_review.eval.quast": "quast",
+            "assembly_review.eval.busco": "busco",
+            "assembly_review.eval.merqury": "merqury",
+            "assembly_review.eval.mapping_coverage": "minimap2",
+            "assembly_review.check.purge_dups": "purge_dups",
+            "assembly_review.check.contamination": "minimap2",
+        }
+        for method_name, package_name in expected.items():
+            self.assertIn(package_name, registry.packages)
+            self.assertIn(method_name, registry.methods)
+            self.assertEqual(registry.methods[method_name].stage, "assembly_review")
+            self.assertIn(method_name, registry.by_stage["assembly_review"])
 
 
 class AssemblyReviewStageTests(unittest.TestCase):
@@ -89,6 +109,37 @@ class AssemblyReviewStageTests(unittest.TestCase):
         )
         return path
 
+    def _fake_quast_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir()
+        quast = bin_dir / "quast.py"
+        if fail:
+            quast.write_text(
+                "#!/bin/sh\n"
+                "echo fake quast failed >&2\n"
+                "exit 9\n",
+                encoding="utf-8",
+            )
+        else:
+            quast.write_text(
+                "#!/bin/sh\n"
+                "outdir=\"\"\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = \"-o\" ]; then\n"
+                "    shift\n"
+                "    outdir=\"$1\"\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "mkdir -p \"$outdir\"\n"
+                "printf 'Assembly\tassembly\n# contigs\t1\nLargest contig\t8\nTotal length\t8\nN50\t8\nL50\t1\nGC (%)\t50.00\n' > \"$outdir/report.tsv\"\n"
+                "printf 'fake quast report\n' > \"$outdir/report.txt\"\n"
+                "printf 'fake quast stdout\n'\n",
+                encoding="utf-8",
+            )
+        quast.chmod(0o755)
+        return bin_dir
+
     def test_existing_assembly_auto_advances_deterministically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly_fasta = Path(tmpdir) / "existing.fa"
@@ -155,6 +206,160 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(ar_out["candidates"][0]["bundle_ref"], str(candidate_ref))
             self.assertEqual(ar_out["candidates"][0]["final_assembly_ref"], str(Path(tmpdir) / "flye_01.fasta"))
             self.assertTrue(Path(ar_out["eval_bundle_ref"]).exists())
+
+    def test_default_review_planning_does_not_run_quast(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            quast_signals = [
+                signal
+                for signal in result["stage_outputs"]["assembly_review"]["signals"]
+                if signal["signal_name"] == "quast"
+            ]
+            self.assertEqual(quast_signals[0]["status"], "pending")
+            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            event_types = [json.loads(line)["event_type"] for line in events_path.read_text().splitlines()]
+            self.assertIn("review_requested", event_types)
+            self.assertNotIn("attempt_started", event_types)
+
+    def test_local_quast_success_updates_signals_and_review_request(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["current_stage"] = "assembly_review"
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "quast_parameters": {"threads": 1},
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            ar_out = result["stage_outputs"]["assembly_review"]
+            quast_signal = next(signal for signal in ar_out["signals"] if signal["signal_name"] == "quast")
+            self.assertEqual(quast_signal["status"], "available")
+            self.assertTrue(quast_signal["metric_refs"])
+            self.assertEqual(quast_signal["metadata"]["metrics"]["n50"], 8)
+            self.assertEqual(quast_signal["metadata"]["metrics"]["total_length"], 8)
+            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request_quast = next(signal for signal in request_payload["signals"] if signal["signal_name"] == "quast")
+            self.assertEqual(request_quast["status"], "available")
+            self.assertEqual(request_quast["candidate_id"], "flye_01")
+            self.assertTrue(all(signal.get("candidate_id") for signal in request_payload["signals"]))
+            self.assertTrue(ar_out["eval_bundle_ref"].endswith("assembly_eval_bundle.evaluating.json"))
+            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_review" / "test-session" / "assembly_eval_bundle.planned.json").exists())
+
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn("assembly_review.quast_report_tsv", artifact_types)
+            self.assertIn("assembly_review.quast_report_txt", artifact_types)
+            self.assertIn("command.stdout", artifact_types)
+            self.assertIn("command.stderr", artifact_types)
+            ledger_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()
+            ]
+            event_types = [event["event_type"] for event in ledger_events]
+            self.assertIn("attempt_started", event_types)
+            self.assertIn("attempt_succeeded", event_types)
+            self.assertIn("artifact_registered", event_types)
+            self.assertIn("review_requested", event_types)
+
+    def test_local_quast_failure_marks_signal_failed_and_still_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir, fail=True)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            quast_signal = next(
+                signal for signal in result["stage_outputs"]["assembly_review"]["signals"] if signal["signal_name"] == "quast"
+            )
+            self.assertEqual(quast_signal["status"], "failed")
+            self.assertIn("candidate_not_rejected_from_metrics", quast_signal["notes"])
+            ledger_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()
+            ]
+            event_types = [event["event_type"] for event in ledger_events]
+            self.assertIn("attempt_failed", event_types)
+            self.assertIn("artifact_registered", event_types)
+            self.assertIn("review_requested", event_types)
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn("command.stdout", artifact_types)
+            self.assertIn("command.stderr", artifact_types)
+
+    def test_local_quast_missing_draft_marks_signal_missing_without_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(Path(tmpdir) / "missing.fasta"),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            quast_signal = next(
+                signal for signal in result["stage_outputs"]["assembly_review"]["signals"] if signal["signal_name"] == "quast"
+            )
+            self.assertEqual(quast_signal["status"], "missing")
+            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            event_types = [json.loads(line)["event_type"] for line in events_path.read_text().splitlines()]
+            self.assertIn("review_requested", event_types)
+            self.assertNotIn("attempt_started", event_types)
 
     def test_multiple_candidates_block_human(self):
         state = self._build_state(

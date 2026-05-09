@@ -3,10 +3,11 @@ version_constraint: ">=5.2"
 language: python
 install_channel: conda
 entry_patterns:
-  - "quast.py {assembly} -r {reference} -o {out_dir}"
+  - "quast.py {assembly} -o {out_dir} --threads {threads}"
+  - "quast.py {assembly} -r {reference} -o {out_dir} --threads {threads}"
 help_summary: "Quality Assessment Tool for Genome Assemblies."
 known_pitfalls:
-  - "Reference genome is optional but improves metric accuracy."
+  - "Reference-free basic mode is the Phase 3 task 07 execution path; reference mode is registered for later explicit use."
   - "Large genomes require substantial memory for contig alignment."
 resource_defaults:
   cpu_cores: 8

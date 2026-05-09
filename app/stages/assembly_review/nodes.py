@@ -10,6 +10,8 @@ It collects or references evaluation signals and routes to:
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,17 +19,23 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, UnsupportedLifecycleOperationError
 from app.execution.artifacts import append_artifact_records
+from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.schemas.artifacts import (
+    ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
+    ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
     ArtifactMeta,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
     ReviewDecisionArtifact,
 )
+from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import TopLevelState
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
+QUAST_METHOD = "assembly_review.eval.quast"
 
 
 def enter_assembly_review(state: TopLevelState) -> dict:
@@ -84,7 +92,9 @@ def resolve_candidates(state: TopLevelState) -> dict:
     )
 
     outputs = dict(stage_outputs)
+    existing_review = dict(stage_outputs.get("assembly_review") or {})
     outputs["assembly_review"] = {
+        **existing_review,
         "status": "resolved",
         "candidate_count": len(candidates),
         "candidates": candidates,
@@ -166,18 +176,244 @@ def plan_review_metrics(state: TopLevelState) -> dict:
     )
     eval_bundle_ref = _write_json_artifact(
         state,
-        "assembly_eval_bundle.json",
+        "assembly_eval_bundle.planned.json",
         eval_bundle.model_dump(mode="json"),
-        artifact_type="assembly_review.eval_bundle",
+        artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE,
     )
 
+    preserved = {key: ar_out[key] for key in ["execution_mode", "env", "quast_parameters"] if key in ar_out}
     ar_out["review_plan"] = review_plan_data
     ar_out["planned_signals"] = planned_signals
-    ar_out["signals"] = signals
+    ar_out["signals"] = [signal.model_dump(mode="json") for signal in eval_signals]
     ar_out["eval_bundle_ref"] = eval_bundle_ref
+    ar_out.update(preserved)
 
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = ar_out
+    return {"stage_outputs": outputs}
+
+
+def freeze_quast_attempts(state: TopLevelState) -> dict:
+    """Freeze local QUAST attempts for materialized assembly candidates."""
+    stage_outputs = state.get("stage_outputs") or {}
+    ar_out = stage_outputs.get("assembly_review", {})
+    if ar_out.get("status") == "failed" or not _local_quast_enabled(ar_out):
+        return {}
+
+    descriptor_error = _validate_review_methods([QUAST_METHOD])
+    if descriptor_error:
+        return _update_assembly_review_output(state, {"status": "failed", "reason": descriptor_error})
+
+    candidates = ar_out.get("candidates", [])
+    materialized = _materialized_quast_candidates(candidates)
+    signals = _mark_missing_quast_signals(
+        ar_out.get("signals", []),
+        candidates,
+        {candidate.get("candidate_id") for candidate in materialized},
+    )
+    if not materialized:
+        return _rewrite_eval_bundle(state, {**ar_out, "signals": signals}, status="quast_skipped")
+
+    threads, error = _quast_threads(ar_out)
+    if error:
+        return _update_assembly_review_output(state, {"status": "failed", "reason": error})
+
+    session_id = state["session_id"]
+    data_dir = Path(state.get("data_dir", "data"))
+    attempts = []
+    for candidate in materialized:
+        candidate_id = candidate.get("candidate_id", "unknown")
+        safe_id = _safe_candidate_id(candidate_id)
+        working_dir = data_dir / "work" / "assembly_review" / session_id / "quast" / safe_id
+        artifact_dir = data_dir / "artifacts" / "assembly_review" / session_id / "quast" / safe_id
+        working_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        script_path = working_dir / "run_quast.sh"
+        out_dir = artifact_dir / "quast_out"
+        report_tsv = out_dir / "report.tsv"
+        assembly_ref = Path(candidate["final_assembly_ref"])
+        script_path.write_text(
+            "set -e\n"
+            f"mkdir -p {shlex.quote(str(out_dir))}\n"
+            f"quast.py {shlex.quote(str(assembly_ref))} -o {shlex.quote(str(out_dir))} --threads {threads}\n"
+            f"test -f {shlex.quote(str(report_tsv))}\n",
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        attempt = FrozenAttemptSpec(
+            attempt_id=f"{session_id}:assembly_review:quast:{safe_id}",
+            session_id=session_id,
+            stage="assembly_review",
+            method_name=QUAST_METHOD,
+            script_path=script_path,
+            working_dir=working_dir,
+            interpreter="/bin/bash",
+            expected_outputs=[report_tsv],
+            env={str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
+            metadata={
+                "candidate_id": candidate_id,
+                "draft_assembly_ref": str(assembly_ref),
+                "quast_output_dir": str(out_dir),
+                "report_tsv": str(report_tsv),
+                "threads": threads,
+            },
+        )
+        attempts.append(attempt.model_dump(mode="json"))
+
+    return _update_assembly_review_output(
+        state,
+        {
+            "status": "quast_frozen",
+            "signals": signals,
+            "quast_frozen_attempts": attempts,
+        },
+    )
+
+
+def run_quast_attempts(state: TopLevelState) -> dict:
+    """Run frozen QUAST attempts locally."""
+    ar_out = (state.get("stage_outputs") or {}).get("assembly_review", {})
+    if ar_out.get("status") != "quast_frozen":
+        return {}
+
+    ledger = Ledger(state.get("data_dir", "data"))
+    results = []
+    for payload in ar_out.get("quast_frozen_attempts", []):
+        attempt = FrozenAttemptSpec.model_validate(payload)
+        ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+        ledger.record_attempt_started(attempt.session_id, attempt)
+        result = LocalRunner().run(attempt)
+        result_payload = result.model_dump(mode="json")
+        if not result.success:
+            stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+            error = stderr.strip() or f"QUAST failed with return code {result.return_code}"
+            ledger.record_attempt_failed(
+                attempt.session_id,
+                attempt,
+                return_code=result.return_code,
+                error=error,
+            )
+            result_payload["error"] = error
+        results.append(result_payload)
+
+    return _update_assembly_review_output(state, {"status": "quast_ran", "quast_execution_results": results})
+
+
+def collect_quast_artifacts(state: TopLevelState) -> dict:
+    """Collect QUAST artifacts and update review signals before rule evaluation."""
+    ar_out = (state.get("stage_outputs") or {}).get("assembly_review", {})
+    if ar_out.get("status") != "quast_ran":
+        return {}
+
+    attempts = {
+        payload["attempt_id"]: FrozenAttemptSpec.model_validate(payload)
+        for payload in ar_out.get("quast_frozen_attempts", [])
+    }
+    signals = list(ar_out.get("signals") or [])
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    artifact_refs = list(ar_out.get("artifact_refs") or [])
+    ledger = Ledger(data_dir)
+
+    for result in ar_out.get("quast_execution_results", []):
+        attempt = attempts[result["attempt_id"]]
+        candidate_id = str(attempt.metadata.get("candidate_id"))
+        artifacts: list[ArtifactMeta] = []
+        metric_refs: list[str] = []
+        notes = ["thresholds_not_applied_without_human_approval"]
+        metadata = {
+            "attempt_id": attempt.attempt_id,
+            "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
+            "quast_output_dir": attempt.metadata.get("quast_output_dir"),
+        }
+        if result.get("success"):
+            report_tsv = Path(attempt.metadata["report_tsv"])
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    report_tsv,
+                    stage="assembly_review",
+                    method_name=QUAST_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
+                    metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                )
+            )
+            metric_refs.append(str(report_tsv))
+            report_txt = Path(attempt.metadata["quast_output_dir"]) / "report.txt"
+            if report_txt.exists():
+                artifacts.append(
+                    ArtifactMeta.from_file(
+                        report_txt,
+                        stage="assembly_review",
+                        method_name=QUAST_METHOD,
+                        artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
+                        metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                    )
+                )
+                metric_refs.append(str(report_txt))
+            for path, artifact_type in [
+                (Path(result["stdout_path"]), "command.stdout"),
+                (Path(result["stderr_path"]), "command.stderr"),
+            ]:
+                if path.exists():
+                    artifacts.append(
+                        ArtifactMeta.from_file(
+                            path,
+                            stage="assembly_review",
+                            method_name=QUAST_METHOD,
+                            artifact_type=artifact_type,
+                            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                        )
+                    )
+            append_artifact_records(data_dir, session_id, artifacts)
+            artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+            ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
+            for artifact in artifact_payloads:
+                ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+            artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
+            metadata["metrics"] = _parse_quast_report_tsv(report_tsv)
+            notes.append("quast_executed_locally")
+            signals = _update_quast_signal(signals, candidate_id, "available", metric_refs, notes, metadata)
+        else:
+            for path, artifact_type in [
+                (Path(result["stdout_path"]), "command.stdout"),
+                (Path(result["stderr_path"]), "command.stderr"),
+            ]:
+                if path.exists():
+                    artifacts.append(
+                        ArtifactMeta.from_file(
+                            path,
+                            stage="assembly_review",
+                            method_name=QUAST_METHOD,
+                            artifact_type=artifact_type,
+                            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                        )
+                    )
+            if artifacts:
+                append_artifact_records(data_dir, session_id, artifacts)
+                artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+                for artifact in artifact_payloads:
+                    ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+                artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
+            failed_refs = [str(artifact.file_path) for artifact in artifacts]
+            metadata["return_code"] = result.get("return_code")
+            metadata["error"] = result.get("error")
+            signals = _update_quast_signal(
+                signals,
+                candidate_id,
+                "failed",
+                failed_refs,
+                ["quast_local_execution_failed", "candidate_not_rejected_from_metrics"],
+                metadata,
+            )
+
+    ar_out = {**ar_out, "signals": signals, "artifact_refs": _unique_refs(artifact_refs)}
+    update = _rewrite_eval_bundle(state, ar_out, status="evaluating")
+    outputs = update["stage_outputs"]
+    outputs["assembly_review"] = {
+        **outputs["assembly_review"],
+        "quast_frozen_attempts": [],
+        "quast_execution_results": [],
+    }
     return {"stage_outputs": outputs}
 
 
@@ -489,6 +725,195 @@ def _existing_assembly_ref(registry_ref: str) -> str | None:
         if asset.get("asset_type") == "assembly_fasta_registered":
             return str(asset.get("path"))
     return None
+
+
+def _update_assembly_review_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["assembly_review"] = {**dict(outputs.get("assembly_review") or {}), **payload}
+    return {"stage_outputs": outputs}
+
+
+def _local_quast_enabled(ar_out: dict[str, Any]) -> bool:
+    return ar_out.get("execution_mode") == "local"
+
+
+def _validate_review_methods(methods: list[str]) -> str | None:
+    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    missing = [method for method in methods if method not in registry.methods]
+    if missing:
+        return f"assembly_review descriptors missing: {missing}"
+    return None
+
+
+def _materialized_quast_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    materialized = []
+    for candidate in candidates:
+        final_ref = candidate.get("final_assembly_ref")
+        if final_ref and Path(final_ref).exists():
+            materialized.append(candidate)
+    return materialized
+
+
+def _safe_candidate_id(candidate_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate_id).strip("_") or "candidate"
+
+
+def _quast_threads(ar_out: dict[str, Any]) -> tuple[int, str | None]:
+    params = dict(ar_out.get("quast_parameters") or {})
+    raw_threads = params.get("threads", 1)
+    try:
+        threads = int(raw_threads)
+    except (TypeError, ValueError):
+        return 0, "assembly_review.quast_parameters.threads must be a positive integer"
+    if threads <= 0:
+        return 0, "assembly_review.quast_parameters.threads must be a positive integer"
+    return threads, None
+
+
+def _mark_missing_quast_signals(
+    signals: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    materialized_ids: set[Any],
+) -> list[dict[str, Any]]:
+    updated = list(signals)
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id")
+        if candidate_id in materialized_ids:
+            continue
+        updated = _update_quast_signal(
+            updated,
+            str(candidate_id),
+            "missing",
+            [],
+            ["quast_requires_materialized_draft_assembly", "execution_skipped"],
+            {"draft_assembly_ref": candidate.get("final_assembly_ref")},
+        )
+    return updated
+
+
+def _update_quast_signal(
+    signals: list[dict[str, Any]],
+    candidate_id: str,
+    status: str,
+    metric_refs: list[str],
+    notes: list[str],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    updated = []
+    matched = False
+    for signal in signals:
+        if signal.get("signal_name") == "quast" and signal.get("candidate_id") in {None, candidate_id}:
+            payload = {**signal, "candidate_id": candidate_id, "status": status, "metric_refs": metric_refs, "notes": notes, "metadata": metadata}
+            updated.append(payload)
+            matched = True
+        else:
+            updated.append(signal)
+    if not matched:
+        updated.append(
+            ReviewSignal(
+                signal_name="quast",
+                method_name=QUAST_METHOD,
+                candidate_id=candidate_id,
+                status=status,  # type: ignore[arg-type]
+                metric_refs=metric_refs,
+                notes=notes,
+                metadata=metadata,
+            ).model_dump(mode="json")
+        )
+    return updated
+
+
+def _rewrite_eval_bundle(state: TopLevelState, ar_out: dict[str, Any], *, status: str) -> dict:
+    previous_bundle = _read_eval_bundle(ar_out.get("eval_bundle_ref"))
+    signal_payloads = _candidate_eval_signals(previous_bundle, ar_out.get("signals", []))
+    eval_signals = [AssemblyEvalSignal.model_validate(signal) for signal in signal_payloads]
+    review_plan_data = dict(ar_out.get("review_plan") or {})
+    review_plan_data["status"] = status
+    review_plan_data["available_signals"] = sorted(
+        {signal.signal_name for signal in eval_signals if signal.status == "available"}
+    )
+    review_plan_data["missing_signals"] = sorted(
+        {signal.signal_name for signal in eval_signals if signal.status in {"missing", "failed"}}
+    )
+    eval_bundle = AssemblyEvalBundle(
+        session_id=state["session_id"],
+        candidate_ids=[candidate.get("candidate_id", "unknown") for candidate in ar_out.get("candidates", [])],
+        signals=eval_signals,
+        available_inputs=previous_bundle.get("available_inputs", []),
+        missing_inputs=previous_bundle.get("missing_inputs", []),
+        notes=["thresholds_not_applied_without_human_approval"],
+    )
+    filename = f"assembly_eval_bundle.{status}.json"
+    eval_bundle_ref = _write_json_artifact(
+        state,
+        filename,
+        eval_bundle.model_dump(mode="json"),
+        artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    )
+    return _update_assembly_review_output(
+        state,
+        {
+            **ar_out,
+            "status": status,
+            "signals": [signal.model_dump(mode="json") for signal in eval_signals],
+            "review_plan": review_plan_data,
+            "eval_bundle_ref": eval_bundle_ref,
+        },
+    )
+
+
+def _read_eval_bundle(ref: Any) -> dict[str, Any]:
+    if ref and Path(str(ref)).exists():
+        return json.loads(Path(str(ref)).read_text(encoding="utf-8"))
+    return {}
+
+
+def _candidate_eval_signals(previous_bundle: dict[str, Any], review_signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    updated_by_key = {
+        (signal.get("signal_name"), signal.get("candidate_id")): signal
+        for signal in review_signals
+        if signal.get("candidate_id") is not None
+    }
+    result = []
+    for signal in previous_bundle.get("signals", []):
+        key = (signal.get("signal_name"), signal.get("candidate_id"))
+        result.append(updated_by_key.pop(key, signal))
+    result.extend(updated_by_key.values())
+    return result
+
+
+def _parse_quast_report_tsv(path: Path) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    key_map = {
+        "# contigs": "contig_count",
+        "largest contig": "largest_contig",
+        "total length": "total_length",
+        "n50": "n50",
+        "l50": "l50",
+        "gc (%)": "gc_percent",
+    }
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        key = parts[0].strip().lower()
+        out_key = key_map.get(key)
+        if not out_key:
+            continue
+        raw = parts[1].strip().replace(",", "")
+        try:
+            metrics[out_key] = float(raw) if "." in raw else int(raw)
+        except ValueError:
+            metrics[f"{out_key}_raw"] = parts[1].strip()
+    return metrics
+
+
+def _unique_refs(refs: list[str]) -> list[str]:
+    unique = []
+    for ref in refs:
+        if ref not in unique:
+            unique.append(ref)
+    return unique
 
 
 def _available_review_inputs(state: TopLevelState) -> tuple[bool, bool, set[str], set[str]]:
