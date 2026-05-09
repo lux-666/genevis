@@ -52,11 +52,14 @@ Completed:
   GenomeScope2 execution with explicit `survey_parameters`, writes a
   low-confidence CycloneSEQ fallback record for long-read-only inputs, or writes
   `skip_reason: no_low_error_short_reads` when no usable survey input exists.
-- `assembly` has a real deterministic candidate planning stage. It resolves a
-  read QC FOFN or registered `clean_long_reads`, auto-plans Flye plus compatible
-  NextDenovo/Canu routes for ONT/CLR, keeps hifiasm as an explicit HiFi/non-ONT
-  compatibility route, writes planned `draft_assembly.candidate` JSON bundles for
-  at most one primary plus one fallback, and routes candidate refs to
+- `assembly` has a real deterministic candidate planning stage plus an explicit
+  opt-in local Flye execution route. It resolves a read QC FOFN or registered
+  `clean_long_reads`, auto-plans Flye plus compatible NextDenovo/Canu routes for
+  ONT/CLR, keeps hifiasm as an explicit HiFi/non-ONT compatibility route, writes
+  `draft_assembly.candidate` JSON bundles for at most one primary plus one
+  fallback, can run the primary Flye candidate locally when
+  `stage_outputs.assembly.execution_mode == "local"`, registers a real draft
+  assembly FASTA plus command artifacts, and routes candidate refs to
   `assembly_review`.
 - `assembly_review` has a real human-gated review stage. It consumes existing
   assembly inputs or assembly candidate bundle refs, plans pending QUAST/BUSCO/
@@ -93,12 +96,11 @@ Completed:
 
 Not completed:
 
-- No executable bioinformatics method catalog beyond the first SeqKit stats
-  slice.
+- No broad executable bioinformatics method catalog beyond the realized SeqKit,
+  Jellyfish/GenomeScope2, and explicit Flye slices.
 - RemoteRunner execution is not implemented.
-- Genome survey tool execution, assembly tool execution, Hi-C scaffold tool
-  execution, repeat, gene, and function annotation execution are not
-  implemented.
+- Hi-C scaffold tool execution, repeat, gene, and function annotation execution
+  are not implemented.
 - Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
 ## Read Order
@@ -160,9 +162,9 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from `docs/phases/phase3/06_assembly_realization.md` only
-after human approval: realize the first ONT/CLR draft assembly route while
-keeping candidate/fallback planning and review gates intact.
+Continue Phase 3 from `docs/phases/phase3/07_assembly_review_realization.md` only
+after human approval: realize assembly review evaluation before the human gate
+while preserving the no-auto-accept review policy.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -173,8 +175,9 @@ corresponding human decision is explicit in the task docs.
 - Stage order is fixed in `app/stages/__init__.py`.
 - `genome_survey` exists as a stage but must be skippable.
 - Genome survey output is a prior for assembly, not a hard prerequisite.
-- Assembly candidate planning may use a genome-size prior, but candidate bundle
-  planning is not real assembler execution.
+- Assembly candidate planning may use a genome-size prior. The only real
+  assembler execution path is explicit local Flye execution; default assembly
+  behavior remains planning-only.
 - Assembly review is the main human gate. Existing assembly input can
   auto-accept as a deterministic pass-through, but assembly-stage candidates do
   not auto-accept without an approved review/resume policy.
@@ -202,10 +205,10 @@ corresponding human decision is explicit in the task docs.
 - Genome survey has an opt-in local Jellyfish + GenomeScope2 path for
   `clean_short_dna_reads`, but Meryl and Smudgeplot remain planning placeholders
   only. Genome-size conflict review thresholds are intentionally not implemented.
-- Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
-  placeholders only; there is no execution path for those tools. hifiasm is
-  registered as an explicit HiFi/non-ONT compatibility route, not an ONT/CLR
-  automatic candidate.
+- Assembly has an opt-in local Flye execution path for the primary ONT/CLR draft
+  assembly candidate. NextDenovo and Canu remain planning placeholders and are not
+  executed as automatic fallbacks. hifiasm is registered as an explicit
+  HiFi/non-ONT compatibility route, not an ONT/CLR automatic candidate.
 - Assembly review descriptors for QUAST, BUSCO, Merqury, minimap2-based mapping,
   purge_dups, and contamination checks are planning placeholders only; there is
   no execution path for those tools.
@@ -224,9 +227,9 @@ corresponding human decision is explicit in the task docs.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
-- SeqKit is not installed in this local environment during verification; tests
-  use a temporary fake `seqkit` executable for the success path and cover the
-  missing-binary failure path.
+- SeqKit and Flye are not installed in this local environment during verification;
+  tests use temporary fake `seqkit` and `flye` executables for success paths and
+  cover missing/failing binary behavior.
 
 ## Files Most Likely To Change In Phase 2
 

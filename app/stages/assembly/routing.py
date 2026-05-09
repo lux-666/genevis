@@ -31,4 +31,19 @@ def route_after_select(state: TopLevelState) -> str:
 
 def route_after_plan(state: TopLevelState) -> str:
     """Route after writing planned candidate bundles."""
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "flye_execution_planned":
+        return "freeze_flye"
+    return "commit"
+
+
+def route_after_flye_run(state: TopLevelState) -> str:
+    """Route after running local Flye."""
+    return "fail" if _output(state).get("status") == "failed" else "collect_flye"
+
+
+def route_after_flye_collect(state: TopLevelState) -> str:
+    """Route after collecting Flye artifacts."""
     return "fail" if _output(state).get("status") == "failed" else "commit"

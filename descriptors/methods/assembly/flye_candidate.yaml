@@ -1,15 +1,19 @@
 method_name: assembly.candidate.flye
 stage: assembly
 package_ref: flye
-goal: "Plan a Flye candidate assembly bundle without executing Flye."
+goal: "Plan a Flye candidate assembly bundle, with explicit opt-in local Flye execution for ONT/CLR draft assembly."
 required_inputs:
   - name: long_reads
-    type: clean_long_reads
-    description: "Clean long reads or an approved long-read FOFN."
+    type: clean_long_reads_or_fofn
+    accepted_asset_types:
+      - clean_long_reads
+    accepted_refs:
+      - long_reads.fofn
+    description: "Clean long reads or an approved long-read FOFN from read_qc."
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
-    description: "Planned draft assembly FASTA path for the Flye candidate."
+    description: "Draft assembly FASTA path for the Flye candidate; exists after explicit local execution, otherwise remains a planned path."
 review_rules:
   - candidate_bundle_exists
 human_review_triggers:

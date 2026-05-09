@@ -330,6 +330,32 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertTrue(Path(ar_out["review_request_artifact_ref"]).exists())
 
+    def test_assembly_stage_executed_candidate_ref_points_to_real_fasta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "flye_draft.fasta"
+            draft.write_text(">contig1\nACGT\n", encoding="utf-8")
+            flye_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="test-session:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {
+                "status": "planned",
+                "selected_candidate_refs": [str(flye_ref)],
+                "draft_assembly_ref": str(draft),
+                "executed_candidate_refs": [str(flye_ref)],
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            candidate = result["stage_outputs"]["assembly_review"]["candidates"][0]
+            self.assertEqual(candidate["candidate_id"], "test-session:assembly.candidate.flye")
+            self.assertEqual(candidate["final_assembly_ref"], str(draft))
+            self.assertTrue(Path(candidate["final_assembly_ref"]).exists())
+
     def test_consumes_assembly_stage_selected_candidate_refs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             flye_ref = self._write_candidate_bundle(

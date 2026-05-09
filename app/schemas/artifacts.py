@@ -16,6 +16,8 @@ READ_QC_FILTERED_LONG_READS_FOFN = "read_qc.filtered_long_reads.fofn"
 GENOME_SURVEY_KMER_DB = "genome_survey.kmer_db"
 GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
+ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
+ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 
 
 def file_sha256(path: Path) -> str:
@@ -79,13 +81,13 @@ class GenomeSurveyResult(BaseModel):
 
 
 class AssemblyCandidateBundle(BaseModel):
-    """Planned assembly candidate bundle without running an assembler."""
+    """Assembly candidate bundle consumed by assembly_review."""
 
     session_id: str
     candidate_id: str
     method_name: str
-    status: Literal["planned", "rejected"]
-    artifact_type: str = "draft_assembly.candidate"
+    status: Literal["planned", "executed", "failed", "rejected"]
+    artifact_type: str = ASSEMBLY_CANDIDATE_BUNDLE
     input_ref: str
     input_type: str
     genome_size_prior: int | None = None
