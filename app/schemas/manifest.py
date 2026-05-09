@@ -27,6 +27,7 @@ _READ_TYPES: set[AssetType] = {
     "raw_rnaseq_reads",
     "raw_isoseq_or_long_rna_reads",
     "hic_reads_registered",
+    "hic_alignment_bam",
     "assembly_fasta_registered",
 }
 
@@ -88,7 +89,14 @@ def _detect_format(path: Path) -> Format:
     name = path.name.lower()
     if name.endswith(".fastq") or name.endswith(".fq") or name.endswith(".fastq.gz") or name.endswith(".fq.gz"):
         return "fastq"
-    if name.endswith(".fasta") or name.endswith(".fa") or name.endswith(".fasta.gz") or name.endswith(".fa.gz"):
+    if (
+        name.endswith(".fasta")
+        or name.endswith(".fa")
+        or name.endswith(".fna")
+        or name.endswith(".fasta.gz")
+        or name.endswith(".fa.gz")
+        or name.endswith(".fna.gz")
+    ):
         return "fasta"
     if name.endswith(".bam"):
         return "bam"

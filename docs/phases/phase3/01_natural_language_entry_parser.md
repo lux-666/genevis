@@ -74,17 +74,20 @@ gene-agent run --manifest inputs/manifest.yaml --data-dir data
 gene-agent run --session-id s1 --manifest inputs/manifest.yaml --data-dir data
 gene-agent ask "use inputs/manifest.yaml to start a workflow"
 gene-agent ask "use inputs/manifest.yaml to start session s1"
+gene-agent ask "start from /data/sample.fa as session s1"
+gene-agent ask "start a CycloneSEQ workflow from /data/reads/"
 ```
 
-Both must produce the same structured graph entry facts. The `ask` path is an
-adapter; it should not have its own workflow semantics. When `session_id` is
-omitted, the entrypoint generates the next daily id from existing ledger session
-directories: `gene-YYYYMMDD-NNNNNN`.
+Both structured and natural-language starts must end at the same graph entry
+contract: `initial_state(..., input_manifest_ref=<manifest.yaml>, ...)`. The
+`ask` path is an adapter; it should not have its own workflow semantics. When
+`session_id` is omitted, the entrypoint generates the next daily id from
+existing ledger session directories: `gene-YYYYMMDD-NNNNNN`.
 
 For example, this user request:
 
 ```text
-用 inputs/manifest.yaml 开一个 s1
+用 /data/sample.fa 开一个 s1
 ```
 
 should become:
@@ -93,15 +96,21 @@ should become:
 {
   "command": "run",
   "session_id": "s1",
-  "manifest": "inputs/manifest.yaml",
+  "source_paths": ["/data/sample.fa"],
   "data_dir": "data"
 }
+```
+
+The entry adapter then materializes a deterministic manifest, for example:
+
+```text
+data/manifests/s1/manifest.yaml
 ```
 
 Then the existing structured path should call:
 
 ```text
-initial_state(session_id="s1", input_manifest_ref="inputs/manifest.yaml", data_dir="data")
+initial_state(session_id="s1", input_manifest_ref="data/manifests/s1/manifest.yaml", data_dir="data")
 build_graph().invoke(..., config={"configurable": {"thread_id": "s1"}})
 ```
 
@@ -113,8 +122,14 @@ Create one narrow Pydantic model that represents only graph-entry facts:
 class EntryRequest(BaseModel):
     command: str = "run"
     session_id: str | None = None
-    manifest: str
+    manifest: str | None = None
+    source_paths: list[str] = []
     data_dir: str = "data"
+    sample_id: str | None = None
+    platform: str = "unknown"
+    asset_type_hint: str | None = None
+    target_assembly_level: str = "contig"
+    genome_size_estimate: int | None = None
 
     def to_cli_argv(self) -> list[str]:
         ...
@@ -140,8 +155,16 @@ session directories for that date.
 - validate the result as `EntryRequest`;
 - fail before graph invocation when required fields are missing.
 
-The parser may infer a manifest path from natural language as a convenience, but
-the validated request is still the only thing passed to the graph.
+The parser may infer a manifest path from natural language when the user
+explicitly names an existing `.yaml` / `.json` manifest. For ordinary data files
+or folders, it must extract `source_paths` and stable hints only. It must not
+write or fabricate manifest content. The deterministic entry adapter owns
+manifest materialization before the graph is invoked.
+
+Stable hints are limited to fields already supported by `InputManifest` or
+`InputAssetSpec`: `sample_id`, `platform`, `asset_type_hint`,
+`target_assembly_level`, and `genome_size_estimate`. The LLM must not invent
+method choices, thresholds, stages, database versions, or review decisions.
 
 ### CLI Reuse
 
@@ -153,7 +176,10 @@ gene-agent ask "run session s1 with manifest inputs/manifest.yaml"
 
 The `ask` command should produce `EntryRequest`, convert it to the existing
 structured run path, and invoke the same graph entry logic as `gene-agent run`.
-Structured callers must still be able to call `run` without any LLM dependency.
+If the request contains `source_paths`, the adapter first writes
+`data/manifests/{session_id}/manifest.yaml`, then reparses the generated
+`--manifest` path through the structured run command. Structured callers must
+still be able to call `run --manifest ...` without any LLM dependency.
 
 If a user asks to continue, inspect, retry, rerun, or rebuild an existing
 session, task 01 should not silently reinterpret that as a new `run`. Those
@@ -195,6 +221,8 @@ become a second request model.
 ## Tasks
 
 - [x] Add `EntryRequest` with `to_cli_argv()` for the existing `run` command.
+- [x] Allow `ask` requests to provide source files or folders and materialize
+  the internal manifest before invoking the structured run path.
 - [x] Add JSON extraction and schema validation for intent parser responses.
 - [x] Add LLM profile loading and chat-model factory behind `app/llm/`.
 - [x] Add intent prompt bundle files for genome workflow entry parsing.
@@ -213,15 +241,21 @@ become a second request model.
 改动要点：
 
 - Added `app/entrypoints/intent.py` with a narrow `EntryRequest` contract,
-  optional `session_id`, non-empty `manifest` / `data_dir` validation,
-  path-separator rejection for explicit `session_id`, strict extra-field
-  rejection, single-object JSON extraction, lifecycle-request rejection, and
-  LLM-backed parsing outside LangGraph.
+  optional `session_id`, either `manifest` or `source_paths`, stable manifest
+  hints, non-empty path / `data_dir` validation, path-separator rejection for
+  explicit `session_id`, strict extra-field rejection, single-object JSON
+  extraction, lifecycle-request rejection, and LLM-backed parsing outside
+  LangGraph.
+- Added `app/entrypoints/manifest_materializer.py` so `ask` can accept data
+  files or folders, infer the existing manifest asset contract deterministically
+  from paths and hints, write `data/manifests/{session_id}/manifest.yaml`, and
+  then reuse the existing `run --manifest ...` entrypoint.
 - Extended `app/entrypoints/run.py` with the minimum `ask` adapter. `ask` parses
-  natural language, converts the result through `EntryRequest.to_cli_argv()`,
-  reparses the existing structured `run` command, and reuses `_run_session(...)`.
-  Both `run` and `ask` generate `gene-YYYYMMDD-NNNNNN` when `session_id` is
-  omitted; explicit ids remain supported.
+  natural language, materializes a manifest when source paths are provided,
+  converts the result through `EntryRequest.to_cli_argv()`, reparses the
+  existing structured `run` command, and reuses `_run_session(...)`. Both `run`
+  and `ask` generate `gene-YYYYMMDD-NNNNNN` when `session_id` is omitted;
+  explicit ids remain supported.
 - Kept `--stages` unexposed and rejected lifecycle-like requests such as resume,
   inspect, retry, rerun, and rebuild before graph invocation.
 - Implemented `app/llm/config.py`, `app/llm/factory.py`, and
@@ -261,7 +295,9 @@ Result: 32 tests passed.
   stage, method, threshold, or review decisions; it is generated by default and
   may still be explicitly provided.
 - `--stages` remains unexposed until requested-stage semantics are approved.
-- Parser output contains only stable graph-entry fields.
+- Parser output contains only stable graph-entry fields and manifest hints.
+- `ask` accepts source files or folders without requiring users to hand-write
+  `manifest.yaml`; generated manifests remain the internal graph-entry contract.
 - `ask` cannot accidentally restart a blocked session when the user intended to
   continue or inspect it.
 - No new YAML layer duplicates CLI args, state fields, or method catalogs.

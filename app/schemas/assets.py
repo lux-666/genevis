@@ -22,6 +22,7 @@ AssetType = Literal[
     "draft_assembly",
     "genome_survey_result",
     "hic_reads_registered",
+    "hic_alignment_bam",
     "chromosome_scaffolded_assembly",
     "repeat_library",
     "repeat_annotation",

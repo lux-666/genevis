@@ -3,10 +3,11 @@ version_constraint: ">=1.2"
 language: cli
 install_channel: conda
 entry_patterns:
-  - "yahs {assembly_fasta} {hic_alignments_bam}"
+  - "yahs -o {out_prefix} {assembly_fasta} {hic_alignments_bam}"
 help_summary: "YaHS Hi-C scaffolding candidate for chromosome-level genome assembly."
 known_pitfalls:
-  - "Requires Hi-C alignment preprocessing and contact-map review before acceptance."
+  - "Phase 3 local execution requires precomputed Hi-C alignments; raw Hi-C read alignment is deferred."
+  - "Requires contact-map review before acceptance."
   - "Misjoin correction policy must be approved by a human."
 resource_defaults:
   cpu_cores: 16

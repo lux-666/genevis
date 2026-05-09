@@ -58,8 +58,10 @@ start / ask
 ```
 
 Task 01 owns how a workflow starts. It may let a user say "use
-inputs/manifest.yaml to start session s1", but it must only produce a narrow
-`EntryRequest` and then call the same structured run path.
+inputs/manifest.yaml to start session s1" or "start from /data/sample.fa", but
+it must only produce a narrow `EntryRequest`. For source files or folders, the
+adapter materializes the internal manifest first and then calls the same
+structured `run --manifest ...` path.
 
 Task 02 owns what happens after a workflow pauses. It must let a user inspect
 the blocked state and review artifact, submit a structured decision, and resume

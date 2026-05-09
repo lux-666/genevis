@@ -97,6 +97,7 @@ def _run_session(args: argparse.Namespace) -> int:
 def _run_ask(args: argparse.Namespace) -> int:
     _load_dotenv_without_override()
     from app.entrypoints.intent import parse_request_with_llm
+    from app.entrypoints.manifest_materializer import materialize_entry_manifest
 
     data_dir = args.data_dir or "data"
     defaults = {
@@ -106,6 +107,11 @@ def _run_ask(args: argparse.Namespace) -> int:
     try:
         request = parse_request_with_llm(args.request_text, defaults=defaults)
     except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        request = materialize_entry_manifest(request)
+    except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     structured_args = _parse_args(request.to_cli_argv())

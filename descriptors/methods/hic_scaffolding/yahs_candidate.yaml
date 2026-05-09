@@ -1,14 +1,14 @@
 method_name: hic_scaffolding.candidate.yahs
 stage: hic_scaffolding
 package_ref: yahs
-goal: "Plan a YaHS Hi-C scaffolding candidate without executing YaHS."
+goal: "Plan a YaHS Hi-C scaffolding candidate, with explicit opt-in local YaHS execution when a materialized Hi-C alignment input exists."
 required_inputs:
   - name: final_assembly
     type: draft_assembly
     description: "Reviewed assembly FASTA before Hi-C scaffolding."
-  - name: hic_reads
-    type: hic_reads_registered
-    description: "Registered Hi-C reads or Hi-C alignment inputs."
+  - name: hic_alignment
+    type: hic_alignment_bam
+    description: "Materialized Hi-C alignment input for local YaHS execution; raw Hi-C read alignment is deferred."
 expected_outputs:
   - name: chromosome_scaffolded_assembly
     type: chromosome_scaffolded_assembly

@@ -59,6 +59,9 @@ Implemented:
 - phase plan and handoff documentation
 - Phase 1 inventory code for manifest loading, asset registry writing, ledger
   events, and CLI invocation
+- natural-language `ask` entry that extracts source files/folders and stable
+  hints, materializes an internal manifest, and reuses the structured
+  `run --manifest ...` graph entry path
 - minimal local subprocess runner for frozen attempts
 - SeqKit stats artifact registration and ledger attempt events
 

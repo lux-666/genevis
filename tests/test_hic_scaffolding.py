@@ -1,8 +1,9 @@
-"""Tests for Phase 2 Hi-C scaffolding or skip behavior."""
+"""Tests for Phase 3 Hi-C scaffolding realization."""
 
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,28 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         state["current_stage"] = "hic_scaffolding"
         state["asset_registry_ref"] = registry_ref
         return state
+
+    def _fake_yahs_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "yahs"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "if " + repr(fail) + ":\n"
+            "    print('fake yahs failed', file=sys.stderr)\n"
+            "    sys.exit(8)\n"
+            "args = sys.argv[1:]\n"
+            "prefix = args[args.index('-o') + 1]\n"
+            "p = pathlib.Path(prefix)\n"
+            "p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "pathlib.Path(str(p) + '_scaffolds_final.fa').write_text('>scaffold1\\nACGT\\n', encoding='utf-8')\n"
+            "pathlib.Path(str(p) + '_scaffolds_final.agp').write_text('scaffold1\\t1\\t4\\t1\\tW\\tctg1\\t1\\t4\\t+\\n', encoding='utf-8')\n"
+            "print('fake yahs ok')\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return bin_dir
 
     def test_missing_final_assembly_ref_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -169,6 +192,229 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(plan["status"], "planned")
             self.assertEqual(plan["pre_hic_assembly_ref"], str(assembly))
             self.assertEqual(plan["fallback_assembly_ref"], str(assembly))
+            self.assertEqual(plan["hic_read_refs"], ["s1:hic_reads_registered:hic_R1.fq.gz", "s1:hic_reads_registered:hic_R2.fq.gz"])
+            self.assertEqual(plan["hic_alignment_refs"], [])
+            self.assertNotIn("yahs_frozen_attempt", hic)
+
+    def test_hic_alignment_plan_keeps_alignment_refs_separate_from_read_refs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            alignment = Path(tmpdir) / "hic.bam"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            alignment.write_text("bam", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_alignment_bam:hic.bam",
+                        "asset_type": "hic_alignment_bam",
+                        "path": str(alignment),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+            }
+
+            result = build_stage().invoke(state)
+
+            plan = json.loads(Path(result["stage_outputs"]["hic_scaffolding"]["scaffold_plan_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(plan["hic_read_refs"], [])
+            self.assertEqual(plan["hic_alignment_refs"], ["s1:hic_alignment_bam:hic.bam"])
+
+    def test_local_yahs_success_registers_candidate_artifacts_and_blocks_human(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            alignment = Path(tmpdir) / "hic.bam"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            alignment.write_text("bam", encoding="utf-8")
+            bin_dir = self._fake_yahs_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_alignment_bam:hic.bam",
+                        "asset_type": "hic_alignment_bam",
+                        "path": str(alignment),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.yahs",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "hic_scaffolding")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "blocked_human")
+            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.yahs")
+            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
+            self.assertTrue(Path(hic["chromosome_scaffolded_assembly_candidate_ref"]).exists())
+            self.assertTrue(Path(hic["hic_review_bundle_ref"]).exists())
+            self.assertTrue(Path(hic["hic_qc_report_ref"]).exists())
+            self.assertIn("yahs_executed_locally", hic["notes"])
+            self.assertIn("hic_review_bundle_ref", result["active_interrupt"])
+            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("hic_scaffolding.chromosome_scaffolded_assembly", artifact_types)
+            self.assertIn("hic_scaffolding.scaffold_agp", artifact_types)
+            self.assertIn("hic_scaffolding.review_bundle", artifact_types)
+            self.assertIn("hic_scaffolding.qc_report", artifact_types)
+            self.assertIn("command.stdout", artifact_types)
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn("attempt_started", [event["event_type"] for event in events])
+            self.assertIn("attempt_succeeded", [event["event_type"] for event in events])
+
+    def test_local_mode_without_explicit_method_remains_planning_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            alignment = Path(tmpdir) / "hic.bam"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            alignment.write_text("bam", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_alignment_bam:hic.bam",
+                        "asset_type": "hic_alignment_bam",
+                        "path": str(alignment),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {"execution_mode": "local"},
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertIn("execution_deferred_to_method_specific_task", hic["notes"])
+            self.assertNotIn("selected_method_name", hic)
+            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+
+    def test_local_yahs_without_alignment_blocks_without_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            hic_r1 = Path(tmpdir) / "hic_R1.fq.gz"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            hic_r1.write_text("reads", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_reads_registered:hic_R1.fq.gz",
+                        "asset_type": "hic_reads_registered",
+                        "path": str(hic_r1),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.yahs",
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertIn("alignment_required_before_yahs", hic["notes"])
+            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+
+    def test_local_yahs_failure_registers_logs_and_preserves_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            alignment = Path(tmpdir) / "hic.bam"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            alignment.write_text("bam", encoding="utf-8")
+            bin_dir = self._fake_yahs_bin(tmpdir, fail=True)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_alignment_bam:hic.bam",
+                        "asset_type": "hic_alignment_bam",
+                        "path": str(alignment),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.yahs",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
+            self.assertIn("yahs_local_execution_failed", hic["notes"])
+            self.assertNotIn("chromosome_scaffolded_assembly_candidate_ref", hic)
+            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+            self.assertIn("command.stdout", artifact_types)
+            self.assertIn("command.stderr", artifact_types)
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn("attempt_failed", [event["event_type"] for event in events])
+
+    def test_local_mode_with_juicer_selection_remains_planning_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            alignment = Path(tmpdir) / "hic.bam"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            alignment.write_text("bam", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_alignment_bam:hic.bam",
+                        "asset_type": "hic_alignment_bam",
+                        "path": str(alignment),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["status"], "blocked_human")
+            self.assertNotIn("selected_method_name", hic)
+            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
 
 
 if __name__ == "__main__":

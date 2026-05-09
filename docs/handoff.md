@@ -69,12 +69,14 @@ Completed:
   registers QUAST report artifacts and non-decisional metrics, records review and
   attempt ledger events, auto-accepts only existing assembly inputs, and blocks
   assembly-stage candidates for human decision without inventing thresholds.
-- `hic_scaffolding` has a real scaffold/skip planning stage. It consumes the
-  reviewed assembly, resolves registered `hic_reads_registered` assets, writes
-  explicit skip records when Hi-C is absent or chromosome-level assembly was not
-  requested, preserves the pre-Hi-C assembly as the annotation fallback, and
-  blocks for human choice when YaHS versus Juicer + 3D-DNA + Juicebox planning
-  is possible.
+- `hic_scaffolding` has a real scaffold/skip planning stage plus an explicit
+  opt-in local YaHS route. It consumes the reviewed assembly, resolves
+  registered Hi-C read/alignment assets, writes explicit skip records when Hi-C
+  is absent or chromosome-level assembly was not requested, can run YaHS locally
+  when `stage_outputs.hic_scaffolding.execution_mode == "local"`, YaHS is explicitly
+  selected, and a materialized Hi-C alignment input exists, registers scaffold candidate/review
+  artifacts, preserves the pre-Hi-C assembly as the annotation fallback, and
+  blocks for contact-map human review before chromosome-scale promotion.
 - `repeat_annotation` has a real planning stage for provided or de novo repeat
   library strategy, RepeatMasker masking refs, and `softmasked_genome` handoff.
 - `gene_annotation` has a real planning stage that consumes softmasked genome,
@@ -83,6 +85,11 @@ Completed:
   proteins, records InterProScan/eggNOG-mapper/DIAMOND/KofamScan candidates,
   requires database provenance, and completes the workflow at `done`.
 - CLI `gene-agent run --session-id ... --manifest ...` executes the full graph.
+- CLI `gene-agent ask "..."` can start from user data files or folders by
+  extracting source paths and stable hints, materializing
+  `data/manifests/{session_id}/manifest.yaml`, and then reusing the structured
+  `run --manifest ...` path. Existing `.yaml` / `.json` manifests still pass
+  through directly.
 - The misleading `--stages` CLI flag is intentionally not exposed.
 - Phase 2 planning docs follow the `rna_agent` implementation-plan style and are
   split by real workflow progress: CycloneSEQ FASTQ inventory, SeqKit stats,
@@ -99,10 +106,10 @@ Completed:
 Not completed:
 
 - No broad executable bioinformatics method catalog beyond the realized SeqKit,
-  Jellyfish/GenomeScope2, Flye, and explicit QUAST slices.
+  Jellyfish/GenomeScope2, Flye, explicit QUAST, and explicit YaHS slices.
 - RemoteRunner execution is not implemented.
-- Hi-C scaffold tool execution, repeat, gene, and function annotation execution
-  are not implemented.
+- Raw Hi-C alignment generation, Juicer/3D-DNA/Juicebox execution, repeat, gene,
+  and function annotation execution are not implemented.
 - Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
 ## Read Order
@@ -164,9 +171,7 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from `docs/phases/phase3/08_hic_scaffolding_realization.md` only
-after human approval: realize the first Hi-C scaffolding execution path while
-preserving human method/contact-map decisions.
+Continue Phase 3 from the next approved task after `docs/phases/phase3/09_hic_scaffolding_realization.md`. Do not start repeat/gene/function execution or broader Hi-C alignment/manual-review tooling without explicit human approval.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -214,8 +219,9 @@ corresponding human decision is explicit in the task docs.
 - Assembly review has an opt-in local QUAST route for materialized draft FASTA
   candidates. BUSCO, Merqury, minimap2-based mapping, purge_dups, and
   contamination checks remain planning placeholders only.
-- Hi-C scaffolding descriptors for YaHS, Juicer, 3D-DNA, and Juicebox are
-  planning placeholders only; there is no execution path for those tools.
+- Hi-C scaffolding has an opt-in local YaHS route for materialized assembly plus
+  Hi-C alignment inputs. Raw Hi-C read alignment, Juicer, 3D-DNA, and Juicebox
+  remain planning/manual placeholders only.
 - Repeat annotation descriptors for EDTA, RepeatModeler, RepeatMasker, and TRF
   are planning placeholders only; there is no execution path for those tools.
 - Gene annotation descriptors for BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
@@ -229,8 +235,8 @@ corresponding human decision is explicit in the task docs.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
-- SeqKit, Flye, and QUAST are not installed in this local environment during
-  verification; tests use temporary fake `seqkit`, `flye`, and `quast.py`
+- SeqKit, Flye, QUAST, and YaHS are not installed in this local environment during
+  verification; tests use temporary fake `seqkit`, `flye`, `quast.py`, and `yahs`
   executables for success paths and cover missing/failing binary behavior.
 
 ## Files Most Likely To Change In Phase 2

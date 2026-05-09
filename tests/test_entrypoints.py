@@ -244,6 +244,148 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(captured["data_dir"], str(root / "data"))
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
 
+    def test_ask_materializes_fasta_source_path_manifest_before_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assembly = root / "assembly.fa"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            request = EntryRequest(session_id="s1", source_paths=[str(assembly)], data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    argparse.Namespace(request_text=f"use {assembly}", session_id=None, data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            manifest = Path(captured["input_manifest_ref"])
+            self.assertTrue(manifest.exists())
+            self.assertEqual(manifest, root / "data" / "manifests" / "s1" / "manifest.yaml")
+            text = manifest.read_text(encoding="utf-8")
+            self.assertIn("assembly_fasta_registered", text)
+            self.assertIn(str(assembly), text)
+            self.assertIn("session_id: s1", text)
+            self.assertIn("session_id: s1", stdout)
+
+    def test_ask_materializes_hic_alignment_bam_manifest_before_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hic_bam = root / "sample.hic.bam"
+            hic_bam.write_text("bam", encoding="utf-8")
+            request = EntryRequest(session_id="s1", source_paths=[str(hic_bam)], data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    argparse.Namespace(request_text=f"use {hic_bam}", session_id=None, data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            text = Path(captured["input_manifest_ref"]).read_text(encoding="utf-8")
+            self.assertIn("hic_alignment_bam", text)
+            self.assertIn(str(hic_bam), text)
+            self.assertIn("session_id: s1", stdout)
+
+    def test_ask_materializes_plain_bam_as_raw_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bam = root / "sample.bam"
+            bam.write_text("bam", encoding="utf-8")
+            request = EntryRequest(session_id="s1", source_paths=[str(bam)], data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    argparse.Namespace(request_text=f"use {bam}", session_id=None, data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            text = Path(captured["input_manifest_ref"]).read_text(encoding="utf-8")
+            self.assertIn("raw_long_reads", text)
+            self.assertNotIn("hic_alignment_bam", text)
+
+    def test_ask_materializes_folder_source_paths_manifest_before_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads_dir = root / "reads"
+            reads_dir.mkdir()
+            read1 = reads_dir / "cycloneseq_1.fastq"
+            read2 = reads_dir / "cycloneseq_2.fastq"
+            read1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            read2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            request = EntryRequest(session_id="s1", source_paths=[str(reads_dir)], data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    argparse.Namespace(request_text=f"use {reads_dir}", session_id=None, data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            manifest = Path(captured["input_manifest_ref"])
+            text = manifest.read_text(encoding="utf-8")
+            self.assertIn("raw_long_reads", text)
+            self.assertIn("cycloneseq", text)
+            self.assertIn(str(read1), text)
+            self.assertIn(str(read2), text)
+            self.assertIn("session_id: s1", stdout)
+
+    def test_ask_rejects_unsupported_source_file_before_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            notes = root / "notes.txt"
+            notes.write_text("not a biological input\n", encoding="utf-8")
+            request = EntryRequest(session_id="s1", source_paths=[str(notes)], data_dir=str(root / "data"))
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph"
+            ) as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    argparse.Namespace(request_text=f"use {notes}", session_id=None, data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("unsupported source file type", stderr)
+            build_graph.assert_not_called()
+
     def test_ask_lifecycle_failure_does_not_invoke_graph(self):
         with patch("app.entrypoints.intent.parse_request_with_llm", side_effect=ValueError("Lifecycle requests")), patch(
             "app.entrypoints.run.build_graph"

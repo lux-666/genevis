@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import get_args
 
 from app.entrypoints.intent import parse_intent_response, parse_request_with_llm, reject_lifecycle_request
 from app.llm.config import load_llm_profile
-from app.schemas.entry import EntryRequest
+from app.llm.prompts import load_prompt_bundle
+from app.schemas.entry import EntryAssetTypeHint, EntryRequest
 
 
 class _FakeResponse:
@@ -52,6 +54,13 @@ class IntentParsingTests(unittest.TestCase):
         self.assertIsNone(request.session_id)
         self.assertEqual(request.to_cli_argv(), ["run", "--manifest", "inputs/manifest.yaml", "--data-dir", "data"])
 
+    def test_entry_request_can_start_from_source_paths_before_manifest_materialization(self):
+        request = EntryRequest(session_id="s1", source_paths=["inputs/assembly.fa"], data_dir="out")
+
+        self.assertEqual(request.source_paths, ["inputs/assembly.fa"])
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            request.to_cli_argv()
+
     def test_valid_json_parses_entry_request(self):
         request = parse_intent_response(
             '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml","data_dir":"out"}'
@@ -77,9 +86,15 @@ class IntentParsingTests(unittest.TestCase):
         self.assertEqual(request.session_id, "parsed")
         self.assertEqual(request.data_dir, "custom")
 
-    def test_missing_required_manifest_fails(self):
-        with self.assertRaisesRegex(ValueError, "manifest"):
+    def test_missing_manifest_and_source_paths_fails(self):
+        with self.assertRaisesRegex(ValueError, "manifest or source_paths"):
             parse_intent_response('{"command":"run","session_id":"s1"}')
+
+    def test_manifest_and_source_paths_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "manifest and source_paths are mutually exclusive"):
+            parse_intent_response(
+                '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml","source_paths":["reads.fastq"]}'
+            )
 
     def test_blank_paths_are_rejected(self):
         for field in ("manifest", "data_dir"):
@@ -88,6 +103,23 @@ class IntentParsingTests(unittest.TestCase):
                 payload[field] = ""
                 with self.assertRaisesRegex(ValueError, field):
                     parse_intent_response(json.dumps(payload))
+
+    def test_blank_source_paths_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "source_paths"):
+            parse_intent_response('{"command":"run","session_id":"s1","source_paths":[""]}')
+
+    def test_non_positive_genome_size_hint_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "genome_size_estimate"):
+            parse_intent_response(
+                '{"command":"run","session_id":"s1","source_paths":["reads.fastq"],"genome_size_estimate":0}'
+            )
+
+    def test_intent_prompt_lists_all_entry_asset_type_hints(self):
+        system_prompt = load_prompt_bundle("intent.parse").system
+
+        for asset_type_hint in get_args(EntryAssetTypeHint):
+            with self.subTest(asset_type_hint=asset_type_hint):
+                self.assertIn(asset_type_hint, system_prompt)
 
     def test_blank_session_id_is_rejected_when_explicit(self):
         with self.assertRaisesRegex(ValueError, "session_id"):

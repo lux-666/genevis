@@ -21,6 +21,11 @@ ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
+HIC_SCAFFOLD_PLAN = "hic_scaffolding.plan"
+HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
+HIC_SCAFFOLD_AGP = "hic_scaffolding.scaffold_agp"
+HIC_REVIEW_BUNDLE = "hic_scaffolding.review_bundle"
+HIC_QC_REPORT = "hic_scaffolding.qc_report"
 
 
 def file_sha256(path: Path) -> str:
@@ -187,6 +192,7 @@ class HiCScaffoldPlan(BaseModel):
     pre_hic_assembly_ref: str
     fallback_assembly_ref: str
     hic_read_refs: list[str] = Field(default_factory=list)
+    hic_alignment_refs: list[str] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)
     expected_outputs: dict[str, str] = Field(default_factory=dict)
     review_required: bool = True

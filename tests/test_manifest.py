@@ -58,6 +58,7 @@ class ManifestSchemaTests(unittest.TestCase):
             "raw_rnaseq_reads",
             "raw_isoseq_or_long_rna_reads",
             "hic_reads_registered",
+            "hic_alignment_bam",
             "assembly_fasta_registered",
         ]
         for t in types:
@@ -94,6 +95,8 @@ class FileInferenceTests(unittest.TestCase):
     def test_detect_format_fasta(self):
         self.assertEqual(_detect_format(Path("x.fa")), "fasta")
         self.assertEqual(_detect_format(Path("x.fasta.gz")), "fasta")
+        self.assertEqual(_detect_format(Path("x.fna")), "fasta")
+        self.assertEqual(_detect_format(Path("x.fna.gz")), "fasta")
 
     def test_detect_format_bam(self):
         self.assertEqual(_detect_format(Path("x.bam")), "bam")
@@ -190,6 +193,18 @@ class ManifestValidationTests(unittest.TestCase):
         )
         report = validate_manifest(manifest, require_existing_files=False)
         self.assertTrue(report["valid"])
+
+    def test_validate_hic_alignment_bam_input(self):
+        manifest = InputManifest(
+            session_id="test-hic-bam",
+            assets=[
+                InputAssetSpec(asset_type="hic_alignment_bam", paths=["hic.bam"], format="bam"),
+            ],
+            target_assembly_level="chromosome",
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertTrue(report["valid"])
+        self.assertIn("hic_alignment_bam", report["inferred"])
 
     def test_infer_asset_properties_combined(self):
         with tempfile.TemporaryDirectory() as tmpdir:
