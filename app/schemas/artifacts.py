@@ -13,6 +13,9 @@ READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_FILTERED_LONG_READS = "read_qc.filtered_long_reads"
 READ_QC_LONG_READS_FOFN = "read_qc.long_reads.fofn"
 READ_QC_FILTERED_LONG_READS_FOFN = "read_qc.filtered_long_reads.fofn"
+GENOME_SURVEY_KMER_DB = "genome_survey.kmer_db"
+GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
+GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 
 
 def file_sha256(path: Path) -> str:
@@ -65,7 +68,7 @@ class GenomeSurveyResult(BaseModel):
 
     session_id: str
     mode: Literal["full", "fallback_low_confidence", "skipped"]
-    status: Literal["planned", "skipped"]
+    status: Literal["planned", "completed", "skipped"]
     confidence: Literal["high", "low", "none"]
     input_asset_refs: list[str] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)

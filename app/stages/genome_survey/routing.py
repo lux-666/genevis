@@ -27,6 +27,31 @@ def route_after_select(state: TopLevelState) -> str:
     return "skip"
 
 
+def route_after_full_plan(state: TopLevelState) -> str:
+    """Route after planning full survey."""
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "local_execution_planned":
+        return "freeze_jellyfish"
+    return "commit"
+
+
+def route_after_run(state: TopLevelState) -> str:
+    """Route after a local attempt run."""
+    return "fail" if _output(state).get("status") == "failed" else "collect"
+
+
+def route_after_collect_jellyfish(state: TopLevelState) -> str:
+    """Route after Jellyfish artifact collection."""
+    return "fail" if _output(state).get("status") == "failed" else "freeze_genomescope2"
+
+
+def route_after_collect_genomescope2(state: TopLevelState) -> str:
+    """Route after GenomeScope2 artifact collection."""
+    return "fail" if _output(state).get("status") == "failed" else "write_result"
+
+
 def route_after_plan(state: TopLevelState) -> str:
     """Route after writing a survey result or skip record."""
     return "fail" if _output(state).get("status") == "failed" else "commit"

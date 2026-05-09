@@ -47,8 +47,9 @@ Completed:
   explicitly requested, writes `long_reads.fofn` or `filtered_long_reads.fofn`,
   records artifacts/ledger events, and commits only compact summaries plus refs to
   graph state.
-- `genome_survey` has a real deterministic contract stage. It chooses full
-  k-mer survey planning when `clean_short_dna_reads` exists, writes a
+- `genome_survey` has a real conditional stage. It chooses full k-mer survey
+  planning when `clean_short_dna_reads` exists, can opt into local Jellyfish +
+  GenomeScope2 execution with explicit `survey_parameters`, writes a
   low-confidence CycloneSEQ fallback record for long-read-only inputs, or writes
   `skip_reason: no_low_error_short_reads` when no usable survey input exists.
 - `assembly` has a real deterministic candidate planning stage. It resolves a
@@ -159,13 +160,13 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from `docs/phases/phase3/05_genome_survey_realization.md` only
-after human approval: realize genome survey for valid short-read inputs while
-keeping ONT/CLR-only fallback non-blocking.
+Continue Phase 3 from `docs/phases/phase3/06_assembly_realization.md` only
+after human approval: realize the first ONT/CLR draft assembly route while
+keeping candidate/fallback planning and review gates intact.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
-downloads, or RemoteRunner before the corresponding human decision is explicit in
-the task docs.
+downloads, genome-size conflict thresholds, or RemoteRunner before the
+corresponding human decision is explicit in the task docs.
 
 ## Immediate Design Decisions Already Made
 
@@ -198,8 +199,9 @@ the task docs.
   `repeat_annotation`, `gene_annotation`, and `function_annotation` have real
   routing. Most stages after read QC are still planning/contract stages rather
   than executable bioinformatics methods.
-- Genome survey descriptors for Jellyfish, Meryl, GenomeScope2, and Smudgeplot
-  are planning placeholders only; there is no execution path for those tools.
+- Genome survey has an opt-in local Jellyfish + GenomeScope2 path for
+  `clean_short_dna_reads`, but Meryl and Smudgeplot remain planning placeholders
+  only. Genome-size conflict review thresholds are intentionally not implemented.
 - Assembly descriptors for Flye, hifiasm, NextDenovo, and Canu are planning
   placeholders only; there is no execution path for those tools. hifiasm is
   registered as an explicit HiFi/non-ONT compatibility route, not an ONT/CLR
