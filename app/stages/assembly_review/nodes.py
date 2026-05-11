@@ -22,12 +22,14 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.schemas.artifacts import (
+    ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
     ArtifactMeta,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
+    AssemblyReviewActionArtifact,
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
@@ -473,15 +475,17 @@ def human_review_gate(state: TopLevelState) -> dict:
         candidates=candidates,
         signals=[ReviewSignal.model_validate(s) for s in signals],
         decisions_allowed=[
+            "pass",
             "accept",
-            "rerun",
             "purge",
+            "polish",
             "continue_low_confidence",
             "stop_human_review",
+            "rerun",
         ],
         notes=[
-            "Thresholds for BUSCO, QUAST, Merqury, and purge_dups "
-            "require human approval before application.",
+            "Thresholds for BUSCO, QUAST, Merqury, and purge_dups require human approval before application.",
+            "Purge and polish actions require explicit action output refs, human approval, and provenance; pre-action assemblies are preserved.",
         ],
     )
 
@@ -530,24 +534,44 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     ar_out = stage_outputs.get("assembly_review", {})
     candidates = ar_out.get("candidates", [])
 
-    # Determine decision
     deterministic_safe = ar_out.get("deterministic_safe", False)
     if deterministic_safe and candidates:
         decision = "accept"
         selected_candidate_id = candidates[0]["candidate_id"]
         rejected_candidates: list[str] = []
         final_assembly_ref = candidates[0].get("final_assembly_ref")
+        pre_action_ref = final_assembly_ref
+        action_type = "pass"
+        action_execution_mode = "none"
+        method_name = candidates[0].get("method_name")
+        evidence_refs: list[str] = []
+        evidence_notes: list[str] = []
     else:
-        # Human decision should be in stage_outputs or active_interrupt
         decision = ar_out.get("decision", "stop_human_review")
         selected_candidate_id = ar_out.get("selected_candidate_id")
         rejected_candidates = ar_out.get("rejected_candidates", [])
         final_assembly_ref = ar_out.get("final_assembly_ref")
+        pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
+        action_type = ar_out.get("action_type", "pass")
+        action_execution_mode = ar_out.get("action_execution_mode", "none")
+        method_name = ar_out.get("action_method_name")
+        evidence_refs = list(ar_out.get("evidence_refs") or [])
+        evidence_notes = list(ar_out.get("evidence_notes") or [])
 
+    final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
     trace = [*state.get("route_trace", []), "assembly_review_stage"]
     next_stage = next_stage_name("assembly_review")
+    action_metadata = {
+        "action_type": action_type,
+        "action_execution_mode": action_execution_mode,
+        "pre_action_assembly_ref": pre_action_ref,
+        "post_action_assembly_ref": final_assembly_ref,
+        "final_assembly_for_scaffolding_or_annotation": final_for_downstream,
+        "method_name": method_name,
+        "evidence_refs": evidence_refs,
+        "evidence_notes": evidence_notes,
+    }
 
-    # Record ledger event
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
     ledger.record_review_decision(
@@ -557,6 +581,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         candidate_id=selected_candidate_id,
         rejected_candidates=rejected_candidates,
         notes=ar_out.get("notes", []),
+        metadata=action_metadata,
     )
 
     decision_artifact = ReviewDecisionArtifact(
@@ -567,6 +592,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         rejected_candidates=rejected_candidates if isinstance(rejected_candidates, list) else list(rejected_candidates),
         final_assembly_ref=final_assembly_ref,
         notes=ar_out.get("notes", []),
+        metadata=action_metadata,
     )
     decision_ref = _write_json_artifact(
         state,
@@ -574,6 +600,29 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         decision_artifact.model_dump(mode="json"),
         artifact_type="assembly_review.decision",
     )
+    action_ref = None
+    if selected_candidate_id and pre_action_ref and final_assembly_ref and final_for_downstream:
+        action_artifact = AssemblyReviewActionArtifact(
+            session_id=state["session_id"],
+            decision=decision,
+            action_type=action_type,
+            candidate_id=selected_candidate_id,
+            pre_action_assembly_ref=pre_action_ref,
+            post_action_assembly_ref=final_assembly_ref,
+            final_assembly_for_scaffolding_or_annotation=final_for_downstream,
+            action_execution_mode=action_execution_mode,
+            method_name=method_name,
+            evidence_refs=evidence_refs,
+            evidence_notes=evidence_notes,
+            notes=ar_out.get("notes", []),
+            metadata={"review_decision_artifact_ref": decision_ref},
+        )
+        action_ref = _write_json_artifact(
+            state,
+            "assembly_review_action.json",
+            action_artifact.model_dump(mode="json"),
+            artifact_type=ASSEMBLY_REVIEW_ACTION,
+        )
 
     update: dict[str, Any] = {
         "current_stage": next_stage,
@@ -581,20 +630,28 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "route_trace": trace,
     }
 
-    # Publish final assembly reference
     if selected_candidate_id:
-        update["stage_outputs"] = {
-            **stage_outputs,
-            "assembly_review": {
-                **ar_out,
-                "status": "completed",
-                "decision": decision,
-                "selected_candidate_id": selected_candidate_id,
-                "rejected_candidates": rejected_candidates,
-                "final_assembly_ref": final_assembly_ref,
-                "review_decision_artifact_ref": decision_ref,
-            },
+        committed_out = {
+            **ar_out,
+            "status": "completed",
+            "decision": decision,
+            "selected_candidate_id": selected_candidate_id,
+            "rejected_candidates": rejected_candidates,
+            "final_assembly_ref": final_assembly_ref,
+            "final_assembly_for_scaffolding_or_annotation": final_for_downstream,
+            "pre_action_assembly_ref": pre_action_ref,
+            "action_type": action_type,
+            "action_execution_mode": action_execution_mode,
+            "review_decision_artifact_ref": decision_ref,
+            "assembly_review_action_artifact_ref": action_ref,
         }
+        if action_type == "purge":
+            committed_out["purged_assembly"] = final_assembly_ref
+        if action_type == "polish":
+            committed_out["polished_assembly"] = final_assembly_ref
+        if method_name:
+            committed_out["action_method_name"] = method_name
+        update["stage_outputs"] = {**stage_outputs, "assembly_review": committed_out}
 
     return update
 
@@ -607,7 +664,7 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
     ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
     candidates = ar_out.get("candidates") or []
     candidates_by_id = {candidate.get("candidate_id"): candidate for candidate in candidates}
-    allowed = {"accept", "purge", "continue_low_confidence", "stop_human_review"}
+    allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review"}
     if request.decision == "rerun":
         raise UnsupportedLifecycleOperationError("rerun is not implemented by review resume")
     if request.decision not in allowed:
@@ -620,11 +677,9 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         raise ResumeValidationError("assembly_review resume requires candidate_id")
     if request.candidate_id not in candidates_by_id:
         raise ResumeValidationError(f"unknown assembly_review candidate_id: {request.candidate_id}")
-    if not request.final_assembly_ref:
-        raise ResumeValidationError("assembly_review resume requires final_assembly_ref")
+
     candidate_final_ref = candidates_by_id[request.candidate_id].get("final_assembly_ref")
-    if candidate_final_ref and request.final_assembly_ref != candidate_final_ref:
-        raise ResumeValidationError("assembly_review final_assembly_ref does not match selected candidate")
+    action_payload = _assembly_review_action_payload(request, candidate_final_ref)
 
     stage_outputs = dict(state.get("stage_outputs") or {})
     stage_outputs["assembly_review"] = {
@@ -632,12 +687,76 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         "decision": request.decision,
         "selected_candidate_id": request.candidate_id,
         "rejected_candidates": request.rejected_candidates,
-        "final_assembly_ref": request.final_assembly_ref,
+        "final_assembly_ref": action_payload["final_assembly_ref"],
+        "final_assembly_for_scaffolding_or_annotation": action_payload["final_assembly_for_scaffolding_or_annotation"],
+        "pre_action_assembly_ref": action_payload["pre_action_assembly_ref"],
+        "action_type": action_payload["action_type"],
+        "action_execution_mode": action_payload["action_execution_mode"],
+        "action_method_name": action_payload.get("action_method_name"),
+        "evidence_refs": action_payload.get("evidence_refs", []),
+        "evidence_notes": action_payload.get("evidence_notes", []),
         "notes": request.notes,
     }
+    if action_payload["action_type"] == "purge":
+        stage_outputs["assembly_review"]["purged_assembly"] = action_payload["final_assembly_ref"]
+    if action_payload["action_type"] == "polish":
+        stage_outputs["assembly_review"]["polished_assembly"] = action_payload["final_assembly_ref"]
     updated_state = {**state, "stage_outputs": stage_outputs, "active_interrupt": None, "supervision_state": "running_stage"}
     commit_update = commit_assembly_review(updated_state)
     return {**commit_update, "active_interrupt": None}
+
+
+def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_final_ref: str | None) -> dict[str, Any]:
+    if request.decision in {"accept", "pass", "continue_low_confidence"}:
+        if not request.final_assembly_ref:
+            raise ResumeValidationError("assembly_review resume requires final_assembly_ref")
+        if candidate_final_ref and request.final_assembly_ref != candidate_final_ref:
+            raise ResumeValidationError("assembly_review final_assembly_ref does not match selected candidate")
+        action_type = "pass_low_confidence" if request.decision == "continue_low_confidence" else "pass"
+        return {
+            "final_assembly_ref": request.final_assembly_ref,
+            "final_assembly_for_scaffolding_or_annotation": request.final_assembly_ref,
+            "pre_action_assembly_ref": request.final_assembly_ref,
+            "action_type": action_type,
+            "action_execution_mode": "none",
+            "evidence_refs": list(request.metadata.get("evidence_refs") or []),
+            "evidence_notes": list(request.metadata.get("evidence_notes") or []),
+        }
+
+    if not candidate_final_ref:
+        raise ResumeValidationError("assembly_review transform action requires selected candidate final_assembly_ref")
+    metadata_output_ref = request.metadata.get("action_output_ref")
+    if metadata_output_ref and request.final_assembly_ref and metadata_output_ref != request.final_assembly_ref:
+        raise ResumeValidationError(f"assembly_review {request.decision} action_output_ref must match final_assembly_ref")
+    action_output_ref = metadata_output_ref or request.final_assembly_ref
+    if not action_output_ref:
+        raise ResumeValidationError(f"assembly_review {request.decision} requires action_output_ref")
+    if action_output_ref == candidate_final_ref:
+        raise ResumeValidationError(f"assembly_review {request.decision} output must differ from pre-action assembly")
+    if not Path(str(action_output_ref)).exists():
+        raise ResumeValidationError(f"assembly_review {request.decision} action output ref must exist")
+    if not (request.metadata.get("human_approved_action") is True or request.metadata.get("approval") == "human"):
+        raise ResumeValidationError(f"assembly_review {request.decision} requires human-approved action metadata")
+    evidence_refs = list(request.metadata.get("evidence_refs") or [])
+    evidence_notes = list(request.metadata.get("evidence_notes") or [])
+    if not evidence_refs and not evidence_notes:
+        raise ResumeValidationError(f"assembly_review {request.decision} requires action evidence metadata")
+    method_name = request.method_name or request.metadata.get("method_name")
+    if not method_name and not request.metadata.get("provenance_ref") and not request.metadata.get("provenance"):
+        raise ResumeValidationError(f"assembly_review {request.decision} requires method or provenance metadata")
+    if request.decision == "polish" and method_name in {"nextpolish_shortread", "pilon_shortread"}:
+        if not request.metadata.get("short_read_evidence_refs") and not request.metadata.get("short_read_evidence_notes"):
+            raise ResumeValidationError("short-read polishing requires explicit short-read evidence")
+    return {
+        "final_assembly_ref": str(action_output_ref),
+        "final_assembly_for_scaffolding_or_annotation": str(action_output_ref),
+        "pre_action_assembly_ref": candidate_final_ref,
+        "action_type": request.decision,
+        "action_execution_mode": "external",
+        "action_method_name": method_name,
+        "evidence_refs": evidence_refs,
+        "evidence_notes": evidence_notes,
+    }
 
 
 def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) -> dict:

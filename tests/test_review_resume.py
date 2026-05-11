@@ -54,10 +54,182 @@ class ReviewResumeTests(unittest.TestCase):
         ar_out = update["stage_outputs"]["assembly_review"]
         self.assertEqual(ar_out["status"], "completed")
         self.assertEqual(ar_out["selected_candidate_id"], "flye")
+        self.assertEqual(ar_out["action_type"], "pass")
+        self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], "work/assembly/flye/draft.fasta")
         self.assertTrue(Path(ar_out["review_decision_artifact_ref"]).exists())
+        self.assertTrue(Path(ar_out["assembly_review_action_artifact_ref"]).exists())
         events = _read_events(state)
         self.assertEqual(events[-1]["event_type"], "review_decision")
         self.assertEqual(events[-1]["candidate_id"], "flye")
+        self.assertEqual(events[-1]["metadata"]["action_type"], "pass")
+
+    def test_resume_assembly_review_pass_advances_to_hic(self):
+        state = _assembly_blocked_state()
+        state["active_interrupt"]["decisions_allowed"] = [*state["active_interrupt"]["decisions_allowed"], "pass"]
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="pass",
+            candidate_id="flye",
+            final_assembly_ref="work/assembly/flye/draft.fasta",
+            notes=["human passed flye through unchanged"],
+        )
+
+        update = resume_review_state(state, request)
+
+        self.assertEqual(update["current_stage"], "hic_scaffolding")
+        ar_out = update["stage_outputs"]["assembly_review"]
+        self.assertEqual(ar_out["decision"], "pass")
+        self.assertEqual(ar_out["action_type"], "pass")
+        self.assertEqual(ar_out["action_execution_mode"], "none")
+        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], "work/assembly/flye/draft.fasta")
+
+    def test_resume_assembly_purge_requires_materialized_output(self):
+        state = _assembly_blocked_state()
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="purge",
+            candidate_id="flye",
+            final_assembly_ref="work/assembly/flye.purged.fasta",
+            method_name="external_purge_dups",
+            metadata={
+                "human_approved_action": True,
+                "evidence_refs": ["assembly_eval_bundle.json"],
+            },
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "must exist"):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_purge_requires_action_evidence_metadata(self):
+        state = _assembly_blocked_state()
+        purged = Path(state["data_dir"]) / "flye.purged.fasta"
+        purged.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="purge",
+            candidate_id="flye",
+            final_assembly_ref=str(purged),
+            method_name="external_purge_dups",
+            notes=["human note alone is not enough provenance"],
+            metadata={"human_approved_action": True},
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "evidence metadata"):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_purge_requires_method_or_provenance_metadata(self):
+        state = _assembly_blocked_state()
+        purged = Path(state["data_dir"]) / "flye.purged.fasta"
+        purged.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="purge",
+            candidate_id="flye",
+            final_assembly_ref=str(purged),
+            metadata={
+                "human_approved_action": True,
+                "evidence_refs": ["assembly_eval_bundle.json"],
+            },
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "method or provenance"):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_rejects_mismatched_action_output_ref(self):
+        state = _assembly_blocked_state()
+        purged = Path(state["data_dir"]) / "flye.purged.fasta"
+        other = Path(state["data_dir"]) / "other.purged.fasta"
+        purged.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        other.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="purge",
+            candidate_id="flye",
+            final_assembly_ref=str(purged),
+            method_name="external_purge_dups",
+            metadata={
+                "human_approved_action": True,
+                "action_output_ref": str(other),
+                "evidence_refs": ["assembly_eval_bundle.json"],
+            },
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "must match"):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_purge_promotes_human_supplied_purged_ref(self):
+        state = _assembly_blocked_state()
+        purged = Path(state["data_dir"]) / "flye.purged.fasta"
+        purged.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="purge",
+            candidate_id="flye",
+            final_assembly_ref=str(purged),
+            method_name="external_purge_dups",
+            notes=["human approved purge after duplicated BUSCO review"],
+            metadata={
+                "human_approved_action": True,
+                "action_output_ref": str(purged),
+                "evidence_refs": ["assembly_eval_bundle.json"],
+            },
+        )
+
+        update = resume_review_state(state, request)
+
+        ar_out = update["stage_outputs"]["assembly_review"]
+        self.assertEqual(update["current_stage"], "hic_scaffolding")
+        self.assertEqual(ar_out["action_type"], "purge")
+        self.assertEqual(ar_out["action_execution_mode"], "external")
+        self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(ar_out["purged_assembly"], str(purged))
+        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], str(purged))
+        action = json.loads(Path(ar_out["assembly_review_action_artifact_ref"]).read_text(encoding="utf-8"))
+        self.assertEqual(action["action_type"], "purge")
+        self.assertEqual(action["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        events = _read_events(state)
+        self.assertEqual(events[-1]["metadata"]["action_type"], "purge")
+        self.assertEqual(events[-1]["metadata"]["post_action_assembly_ref"], str(purged))
+
+    def test_resume_assembly_polish_requires_action_output_ref(self):
+        state = _assembly_blocked_state()
+        state["active_interrupt"]["decisions_allowed"] = [*state["active_interrupt"]["decisions_allowed"], "polish"]
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="polish",
+            candidate_id="flye",
+            metadata={"human_approved_action": True, "evidence_notes": ["reviewed polishing report"]},
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "action_output_ref"):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_short_read_polish_requires_short_read_evidence(self):
+        state = _assembly_blocked_state()
+        state["active_interrupt"]["decisions_allowed"] = [*state["active_interrupt"]["decisions_allowed"], "polish"]
+        polished = Path(state["data_dir"]) / "flye.polished.fasta"
+        polished.write_text(">ctg1\nACGT\n", encoding="utf-8")
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="polish",
+            candidate_id="flye",
+            final_assembly_ref=str(polished),
+            method_name="pilon_shortread",
+            notes=["human approved polish"],
+            metadata={"human_approved_action": True, "evidence_notes": ["polish requested"]},
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "short-read"):
+            resume_review_state(state, request)
 
     def test_resume_assembly_rejects_missing_final_ref_without_mutation(self):
         state = _assembly_blocked_state()
@@ -315,7 +487,7 @@ def _assembly_blocked_state() -> dict:
             {"candidate_id": "canu", "method_name": "assembly.candidate.canu", "final_assembly_ref": "work/assembly/canu/draft.fasta"},
         ],
         "signals": [],
-        "decisions_allowed": ["accept", "purge", "continue_low_confidence", "stop_human_review"],
+        "decisions_allowed": ["pass", "accept", "purge", "polish", "continue_low_confidence", "stop_human_review"],
         "notes": [],
         "blocked_at": datetime.now(timezone.utc).isoformat(),
         "review_request_artifact_ref": str(request_ref),

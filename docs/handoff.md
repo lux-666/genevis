@@ -67,8 +67,10 @@ Completed:
   signals when inputs permit, can run QUAST locally for materialized draft FASTA
   candidates when `stage_outputs.assembly_review.execution_mode == "local"`,
   registers QUAST report artifacts and non-decisional metrics, records review and
-  attempt ledger events, auto-accepts only existing assembly inputs, and blocks
-  assembly-stage candidates for human decision without inventing thresholds.
+  attempt ledger events, auto-accepts only existing assembly inputs, blocks
+  assembly-stage candidates for human decision without inventing thresholds, and
+  records post-review pass/purge/polish action provenance before publishing
+  `final_assembly_for_scaffolding_or_annotation`.
 - `hic_scaffolding` has a real scaffold/skip planning stage plus an explicit
   opt-in local YaHS route. It consumes the reviewed assembly, resolves
   registered Hi-C read/alignment assets, writes explicit skip records when Hi-C
@@ -114,9 +116,9 @@ Not completed:
   Jellyfish/GenomeScope2, Flye, explicit QUAST, explicit YaHS, and explicit
   RepeatMasker slices.
 - RemoteRunner execution is not implemented.
-- Raw Hi-C alignment generation, Juicer/3D-DNA/Juicebox execution, de novo repeat
-  library execution, gene annotation execution, and function annotation execution
-  are not implemented.
+- Local polish/purge action execution, raw Hi-C alignment generation,
+  Juicer/3D-DNA/Juicebox execution, de novo repeat library execution, gene
+  annotation execution, and function annotation execution are not implemented.
 - Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
 ## Read Order
@@ -178,7 +180,7 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from the next approved task after `docs/phases/phase3/09_hic_scaffolding_realization.md`. Do not start repeat/gene/function execution or broader Hi-C alignment/manual-review tooling without explicit human approval.
+Continue Phase 3 from the next approved task after `docs/phases/phase3/10_annotation_realization.md`. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -224,8 +226,10 @@ corresponding human decision is explicit in the task docs.
   executed as automatic fallbacks. hifiasm is registered as an explicit
   HiFi/non-ONT compatibility route, not an ONT/CLR automatic candidate.
 - Assembly review has an opt-in local QUAST route for materialized draft FASTA
-  candidates. BUSCO, Merqury, minimap2-based mapping, purge_dups, and
-  contamination checks remain planning placeholders only.
+  candidates and a post-review action provenance contract for pass/purge/polish
+  promotion. BUSCO, Merqury, minimap2-based mapping, purge_dups,
+  contamination checks, and local polish/purge action execution remain planning
+  placeholders only.
 - Hi-C scaffolding has an opt-in local YaHS route for materialized assembly plus
   Hi-C alignment inputs. Raw Hi-C read alignment, Juicer, 3D-DNA, and Juicebox
   remain planning/manual placeholders only.

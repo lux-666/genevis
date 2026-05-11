@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.schemas.artifacts import ReviewDecisionArtifact
 from app.schemas.descriptors import DescriptorRegistry
 from app.stages.assembly_review.builder import build_stage
 from app.schemas.state import initial_state
@@ -166,13 +167,25 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertEqual(ar_out["status"], "completed")
             self.assertEqual(ar_out["decision"], "accept")
+            self.assertEqual(ar_out["action_type"], "pass")
             self.assertEqual(ar_out["selected_candidate_id"], "existing_assembly")
             self.assertEqual(ar_out["final_assembly_ref"], str(assembly_fasta))
+            self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], str(assembly_fasta))
             decision_ref = Path(ar_out["review_decision_artifact_ref"])
             self.assertTrue(decision_ref.exists())
             decision_payload = json.loads(decision_ref.read_text(encoding="utf-8"))
             self.assertEqual(decision_payload["decision"], "accept")
             self.assertEqual(decision_payload["final_assembly_ref"], str(assembly_fasta))
+            action_ref = Path(ar_out["assembly_review_action_artifact_ref"])
+            self.assertTrue(action_ref.exists())
+            action_payload = json.loads(action_ref.read_text(encoding="utf-8"))
+            self.assertEqual(action_payload["action_type"], "pass")
+            self.assertEqual(action_payload["final_assembly_for_scaffolding_or_annotation"], str(assembly_fasta))
+
+    def test_review_decision_artifact_allows_post_review_actions(self):
+        for decision in ["pass", "polish"]:
+            artifact = ReviewDecisionArtifact(session_id="s1", stage="assembly_review", decision=decision)
+            self.assertEqual(artifact.decision, decision)
 
     def test_no_candidates_fails_terminally(self):
         state = self._build_state(entry_mode="raw_inputs")
@@ -200,6 +213,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
             self.assertIn("blocked_at", result["active_interrupt"])
+            self.assertIn("pass", result["active_interrupt"]["decisions_allowed"])
+            self.assertIn("polish", result["active_interrupt"]["decisions_allowed"])
+            self.assertIn("purge", result["active_interrupt"]["decisions_allowed"])
             # current_stage stays at assembly_review while blocked
             self.assertEqual(result["current_stage"], "assembly_review")
             ar_out = result["stage_outputs"]["assembly_review"]
@@ -611,8 +627,10 @@ class AssemblyReviewSchemaTests(unittest.TestCase):
 
         for decision in [
             "accept",
+            "pass",
             "rerun",
             "purge",
+            "polish",
             "continue_low_confidence",
             "stop_human_review",
         ]:
@@ -630,9 +648,12 @@ class AssemblyReviewSchemaTests(unittest.TestCase):
         payload = ReviewPayload(
             stage="assembly_review",
             reason="test",
-            decisions_allowed=["accept", "rerun", "stop_human_review"],
+            decisions_allowed=["pass", "accept", "purge", "polish", "rerun", "stop_human_review"],
         )
+        self.assertIn("pass", payload.decisions_allowed)
         self.assertIn("accept", payload.decisions_allowed)
+        self.assertIn("purge", payload.decisions_allowed)
+        self.assertIn("polish", payload.decisions_allowed)
         self.assertIn("rerun", payload.decisions_allowed)
         self.assertIn("stop_human_review", payload.decisions_allowed)
 

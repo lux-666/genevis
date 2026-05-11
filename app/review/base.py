@@ -14,15 +14,19 @@ from pydantic import BaseModel, ConfigDict, Field
 ReviewDecision = Literal[
     "pending",
     "accept",
+    "pass",
     "rerun",
     "purge",
+    "polish",
     "continue_low_confidence",
     "stop_human_review",
 ]
 ReviewResumeStage = Literal["assembly_review", "hic_scaffolding"]
 ResumeReviewDecision = Literal[
     "accept",
+    "pass",
     "purge",
+    "polish",
     "continue_low_confidence",
     "stop_human_review",
     "select_method",

@@ -21,6 +21,7 @@ ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
+ASSEMBLY_REVIEW_ACTION = "assembly_review.action"
 HIC_SCAFFOLD_PLAN = "hic_scaffolding.plan"
 HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
 HIC_SCAFFOLD_AGP = "hic_scaffolding.scaffold_agp"
@@ -149,14 +150,35 @@ class ReviewDecisionArtifact(BaseModel):
     stage: str
     decision: Literal[
         "accept",
+        "pass",
         "rerun",
         "purge",
+        "polish",
         "continue_low_confidence",
         "stop_human_review",
     ]
     candidate_id: str | None = None
     rejected_candidates: list[str] = Field(default_factory=list)
     final_assembly_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyReviewActionArtifact(BaseModel):
+    """Post-review assembly action provenance."""
+
+    session_id: str
+    stage: Literal["assembly_review"] = "assembly_review"
+    decision: Literal["accept", "pass", "purge", "polish", "continue_low_confidence"]
+    action_type: Literal["pass", "pass_low_confidence", "purge", "polish"]
+    candidate_id: str
+    pre_action_assembly_ref: str
+    post_action_assembly_ref: str
+    final_assembly_for_scaffolding_or_annotation: str
+    action_execution_mode: Literal["none", "external"]
+    method_name: str | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_notes: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
