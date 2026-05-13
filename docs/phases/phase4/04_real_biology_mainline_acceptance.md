@@ -94,39 +94,47 @@ new method families.
 
 ## Suggested Manual Run Shape
 
-Until task 05 adds a structured parameter entry point, use the Python one-liner
-shape from `03_flye_quast_human_gate.md` and point it at a local manifest:
+Phase 4 task 05 added `gene-agent run --run-config <file>.json`, so the
+real-biology smoke no longer needs a Python one-liner. Write a small
+`run_config.json`:
+
+```json
+{
+  "local_exec": ["read_qc", "assembly", "assembly_review"],
+  "assembly": {
+    "flye_parameters": {
+      "read_type": "nano-raw",
+      "estimated_genome_size": 2000000,
+      "threads": 4
+    }
+  }
+}
+```
+
+Then drive the mainline with:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python - <<'PY'
-from app.graph.builder import build_graph
-from app.schemas.state import initial_state
-
-state = initial_state(
-    session_id="phase4-real-mainline-smoke",
-    input_manifest_ref="<local-manifest-with-raw_long_reads>.yaml",
-    data_dir="data/phase4_real_smoke",
-)
-state["stage_outputs"] = {
-    "read_qc": {"execution_mode": "local"},
-    "assembly": {
-        "execution_mode": "local",
-        "flye_parameters": {
-            "read_type": "nano-raw",
-            "estimated_genome_size": 2000000,
-            "threads": 4,
-        },
-    },
-    "assembly_review": {"execution_mode": "local"},
-}
-
-graph = build_graph()
-result = graph.invoke(state, config={"configurable": {"thread_id": state["session_id"]}})
-print("current_stage:", result.get("current_stage"))
-print("supervision_state:", result.get("supervision_state"))
-print("active_interrupt:", result.get("active_interrupt"))
-PY
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent \
+  gene-agent run \
+    --session-id phase4-real-mainline-smoke \
+    --manifest <local-manifest-with-raw_long_reads>.yaml \
+    --data-dir data/phase4_real_smoke \
+    --run-config run_config.json
 ```
+
+Expected end state when `env_geno_exec` has `seqkit`, `flye`, and
+`quast.py`:
+
+- `supervision_state: blocked_human`
+- `current_stage: assembly_review`
+- `data/artifacts/read_qc/<session>/{seqkit_stats.tsv, read_qc_summary.json, long_reads.fofn}`
+- `data/artifacts/assembly/<session>/flye/draft_assembly.fasta`
+- `data/artifacts/assembly_review/<session>/quast/<candidate>/{report.tsv, quast_summary.json}`
+- `data/artifacts/assembly_review/<session>/assembly_review_request.json`
+
+The Python one-liner shape in
+`03_flye_quast_human_gate.md` is kept only as a reference for
+environments where `--run-config` is unavailable.
 
 ## Verification
 

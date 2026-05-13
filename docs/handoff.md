@@ -150,6 +150,21 @@ Completed:
   `assembly_review.quast_summary`, and threads its ref into the QUAST
   signal metadata (`quast_summary_ref`) and `metric_refs` so the human
   review request payload carries compact, threshold-free metrics.
+- Phase 4 task5 adds a structured run-config surface:
+  `app/schemas/run_config.py` defines `RunConfig` with approved
+  `local_exec` stages and optional `assembly.flye_parameters`
+  (`read_type` restricted to `nano-raw|nano-hq|pacbio-raw`,
+  `estimated_genome_size > 0`, `threads > 0`). `gene-agent run
+  --run-config PATH` loads and validates the JSON file **before**
+  `Ledger.create_session(...)` and graph invocation; missing file,
+  unparseable JSON, unknown stages/fields, or `local_exec=["assembly"]`
+  without `flye_parameters` all exit non-zero without side effects. The
+  CLI unions `--local-exec` and `run_config.local_exec` (CLI-first
+  order preserved via `dict.fromkeys`) and seeds
+  `stage_outputs.assembly.flye_parameters` from the validated model.
+  `gene-agent ask` is untouched — LLM-parsed intents cannot reach Flye
+  parameters. Covered by `tests/test_run_config.py` (schema + loader)
+  and `tests/test_entrypoints.py::RunConfigCLIIntegrationTests`.
 
 Not completed:
 
@@ -221,16 +236,21 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Phase 4 is complete through task 03 in-code. Continue with
-`docs/phases/phase4/04_real_biology_mainline_acceptance.md`: run a
-human-supplied real CycloneSEQ / PacBio FASTQ under `env_geno_exec` and confirm
-the full `inventory → read_qc → assembly → assembly_review` chain produces a
-real `draft_assembly.fasta`, `report.tsv`, `quast_summary.json`, and
-`assembly_review_request.json` and stops at `blocked_human`.
+Phase 4 is complete through task 03 and task 05 in-code. The remaining Phase 4
+work is task 04 (real-biology acceptance) and task 06 (status-doc reconciliation
++ Phase 5 gate).
 
-After task 04, implement
-`docs/phases/phase4/05_structured_local_execution_request.md` if the Python
-one-liner is still the only routine way to pass Flye parameters, then complete
+For task 04, drive a human-supplied real CycloneSEQ / PacBio FASTQ under
+`env_geno_exec` via `gene-agent run --run-config run_config.json` (see
+`docs/phases/phase4/04_real_biology_mainline_acceptance.md` for the exact
+shape). Confirm the full `inventory → read_qc → assembly → assembly_review`
+chain produces a real `draft_assembly.fasta`, `report.tsv`, `quast_summary.json`,
+and `assembly_review_request.json` and stops at `blocked_human`. This pass is
+human-driven by design and requires `seqkit`, `flye`, and `quast.py` installed
+in `env_geno_exec` — `quast.py` is not available on darwin-arm64, so task 04
+cannot fully complete on arm64 hosts.
+
+After task 04 evidence is recorded, complete
 `docs/phases/phase4/06_phase4_status_docs_and_phase5_gate.md` before Phase 5
 starts. Phase 5 (broader method execution) should not start before the real
 Phase 4 smoke is in the review artifact trail.

@@ -1,0 +1,246 @@
+"""Tests for the Phase 4 structured run-config schema."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from app.schemas.run_config import RunConfig, load_run_config
+
+
+class RunConfigSchemaTests(unittest.TestCase):
+    def test_empty_config_is_valid(self):
+        config = RunConfig.model_validate({})
+
+        self.assertEqual(config.local_exec, [])
+        self.assertIsNone(config.assembly)
+
+    def test_valid_config_with_flye_parameters(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["read_qc", "assembly", "assembly_review"],
+                "assembly": {
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 4,
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(config.local_exec, ["read_qc", "assembly", "assembly_review"])
+        assert config.assembly is not None
+        assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.assembly.flye_parameters.read_type, "nano-raw")
+        self.assertEqual(config.assembly.flye_parameters.estimated_genome_size, 2_000_000)
+        self.assertEqual(config.assembly.flye_parameters.threads, 4)
+
+    def test_unknown_stage_in_local_exec_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate({"local_exec": ["assembly", "gene_annotation"]})
+
+        self.assertIn("gene_annotation", str(ctx.exception))
+
+    def test_unknown_top_level_field_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate({"local_exec": ["read_qc"], "stages": ["read_qc"]})
+
+        self.assertIn("stages", str(ctx.exception))
+
+    def test_unknown_assembly_field_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "assembly": {
+                        "flye_parameters": {
+                            "read_type": "nano-raw",
+                            "estimated_genome_size": 2_000_000,
+                            "threads": 4,
+                        },
+                        "canu_parameters": {},
+                    }
+                }
+            )
+
+        self.assertIn("canu_parameters", str(ctx.exception))
+
+    def test_unknown_flye_parameter_field_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "assembly": {
+                        "flye_parameters": {
+                            "read_type": "nano-raw",
+                            "estimated_genome_size": 2_000_000,
+                            "threads": 4,
+                            "min_overlap": 1000,
+                        }
+                    }
+                }
+            )
+
+        self.assertIn("min_overlap", str(ctx.exception))
+
+    def test_local_exec_assembly_without_flye_parameters_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate({"local_exec": ["assembly"]})
+
+        self.assertIn("flye_parameters", str(ctx.exception))
+
+    def test_local_exec_assembly_without_assembly_block_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {"flye_parameters": None},
+                }
+            )
+
+        self.assertIn("flye_parameters", str(ctx.exception))
+
+    def test_invalid_flye_read_type_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "flye_parameters": {
+                            "read_type": "hifi",
+                            "estimated_genome_size": 2_000_000,
+                            "threads": 4,
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("read_type", str(ctx.exception))
+
+    def test_non_positive_genome_size_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "flye_parameters": {
+                            "read_type": "nano-raw",
+                            "estimated_genome_size": 0,
+                            "threads": 4,
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("estimated_genome_size", str(ctx.exception))
+
+    def test_non_positive_threads_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "flye_parameters": {
+                            "read_type": "nano-raw",
+                            "estimated_genome_size": 2_000_000,
+                            "threads": 0,
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("threads", str(ctx.exception))
+
+    def test_flye_parameters_without_local_assembly_is_allowed(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["read_qc"],
+                "assembly": {
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 4,
+                    }
+                },
+            }
+        )
+
+        assert config.assembly is not None
+        assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.assembly.flye_parameters.threads, 4)
+
+
+class RunConfigLoaderTests(unittest.TestCase):
+    def test_load_run_config_reads_valid_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["read_qc", "assembly", "assembly_review"],
+                        "assembly": {
+                            "flye_parameters": {
+                                "read_type": "nano-hq",
+                                "estimated_genome_size": 2_000_000,
+                                "threads": 4,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_run_config(path)
+
+        self.assertEqual(config.local_exec, ["read_qc", "assembly", "assembly_review"])
+        assert config.assembly is not None
+        assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.assembly.flye_parameters.read_type, "nano-hq")
+
+    def test_load_run_config_missing_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                load_run_config(Path(tmp) / "missing.json")
+
+    def test_load_run_config_invalid_json_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_config.json"
+            path.write_text("{not: valid json", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_run_config(path)
+
+        self.assertIn("not valid JSON", str(ctx.exception))
+
+    def test_load_run_config_non_object_top_level_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_config.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_run_config(path)
+
+        self.assertIn("JSON object", str(ctx.exception))
+
+    def test_load_run_config_validation_error_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_config.json"
+            path.write_text(json.dumps({"local_exec": ["assembly"]}), encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                load_run_config(path)
+
+        self.assertIn("flye_parameters", str(ctx.exception))
+
+    def test_load_run_config_directory_path_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "config_dir"
+            directory.mkdir()
+            with self.assertRaises(ValueError) as ctx:
+                load_run_config(directory)
+
+        self.assertIn("not readable", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -16,6 +16,7 @@ from pathlib import Path
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
 from app.graph.builder import build_graph
+from app.schemas.run_config import RunConfig, load_run_config
 from app.schemas.state import initial_state
 
 
@@ -46,6 +47,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "enable multiple stages."
         ),
     )
+    run_parser.add_argument(
+        "--run-config",
+        dest="run_config",
+        default=None,
+        help=(
+            "Path to a JSON run-config file that seeds approved stage_outputs "
+            "fields (local_exec stages and assembly.flye_parameters)."
+        ),
+    )
 
     ask_parser = subparsers.add_parser("ask", help="Start a workflow from a natural-language request")
     ask_parser.add_argument("request_text", help="Natural-language workflow-start request")
@@ -72,6 +82,32 @@ def _run_session(args: argparse.Namespace) -> int:
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
         return 1
 
+    run_config: RunConfig | None = None
+    run_config_path = getattr(args, "run_config", None)
+    if run_config_path:
+        try:
+            run_config = load_run_config(run_config_path)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    cli_local_stages = list(getattr(args, "local_exec", []) or [])
+    config_local_stages = list(run_config.local_exec) if run_config else []
+    local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
+
+    if "assembly" in local_stages and not (
+        run_config
+        and run_config.assembly
+        and run_config.assembly.flye_parameters
+    ):
+        print(
+            "error: local execution of 'assembly' requires "
+            "run_config.assembly.flye_parameters; pass --run-config with "
+            "flye_parameters or remove 'assembly' from --local-exec",
+            file=sys.stderr,
+        )
+        return 1
+
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
     state = initial_state(
@@ -80,13 +116,17 @@ def _run_session(args: argparse.Namespace) -> int:
         data_dir=request.data_dir,
     )
 
-    local_stages = list(dict.fromkeys(getattr(args, "local_exec", []) or []))
+    stage_outputs = dict(state.get("stage_outputs") or {})
     if local_stages:
-        stage_outputs = dict(state.get("stage_outputs") or {})
         for stage_name in local_stages:
             existing = dict(stage_outputs.get(stage_name) or {})
             existing["execution_mode"] = "local"
             stage_outputs[stage_name] = existing
+    if run_config and run_config.assembly and run_config.assembly.flye_parameters:
+        assembly_out = dict(stage_outputs.get("assembly") or {})
+        assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump()
+        stage_outputs["assembly"] = assembly_out
+    if stage_outputs != (state.get("stage_outputs") or {}):
         state["stage_outputs"] = stage_outputs
 
     graph = build_graph()
