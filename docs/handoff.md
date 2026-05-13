@@ -134,6 +134,22 @@ Completed:
   fixtures live under `tests/fixtures/phase4/`; a real-data smoke test
   (`Phase4ReadQCRealSmokeTests`) runs end-to-end when `env_geno_exec` with
   `seqkit` is present and is skipped otherwise.
+- Phase 4 task3 closes the Flye → QUAST → blocked_human mainline:
+  `assembly.freeze_flye_attempt` enforces explicit
+  `flye_parameters.read_type` (one of `nano-raw` / `nano-hq` / `pacbio-raw`),
+  `flye_parameters.estimated_genome_size`, and `flye_parameters.threads`.
+  Missing or invalid params produce
+  `stage_outputs.assembly.status = "blocked_param"` with structured
+  `missing_params` / `invalid_params` lists, no Flye run, no attempt event,
+  no fallback assembler — `blocked_param` is part of the assembly stage's
+  fail set alongside `blocked_env` / `missing_tool`. The validated read
+  type drives `--nano-raw|--nano-hq|--pacbio-raw` and the genome size
+  becomes `--genome-size <bp>`. `assembly_review.collect_quast_artifacts`
+  now writes `quast_summary.json` next to `report.tsv` on every successful
+  QUAST attempt, registers it as artifact type
+  `assembly_review.quast_summary`, and threads its ref into the QUAST
+  signal metadata (`quast_summary_ref`) and `metric_refs` so the human
+  review request payload carries compact, threshold-free metrics.
 
 Not completed:
 
@@ -205,7 +221,14 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 4 from task 03 (`docs/phases/phase4/03_flye_quast_human_gate.md`) — wire `assembly` (Flye) and `assembly_review` (QUAST) frozen attempts to `EnvResolver` with the same blocked_env / missing_tool / blocked_param vocabulary, and prove the mainline smoke through the human gate. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
+Phase 4 is complete through task 03 in-code. The remaining Phase 4 work is a
+real-biology smoke pass: run `gene-agent run --manifest <local CycloneSEQ FASTQ
+with flye_parameters>` under `env_geno_exec` once Flye and QUAST are installed
+there, and confirm the full `inventory → read_qc → assembly → assembly_review`
+chain produces a real `draft_assembly.fasta`, `report.tsv`,
+`quast_summary.json`, and `assembly_review_request.json` and stops at
+`blocked_human`. That pass is human-driven by design; Phase 5 (broader method
+execution) should not start before that smoke is in the review artifact trail.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the

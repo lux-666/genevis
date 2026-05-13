@@ -36,6 +36,13 @@ GENOME_SIZE_REQUIRED = {
 ASSEMBLY_CONTRACT_METHOD = "assembly.candidate_plan"
 FLYE_METHOD = "assembly.candidate.flye"
 
+FLYE_READ_TYPE_FLAGS = {
+    "nano-raw": "--nano-raw",
+    "nano-hq": "--nano-hq",
+    "pacbio-raw": "--pacbio-raw",
+}
+FLYE_REQUIRED_PARAMS = ("read_type", "estimated_genome_size", "threads")
+
 
 def _assembly_output(state: TopLevelState) -> dict[str, Any]:
     return dict((state.get("stage_outputs") or {}).get("assembly", {}))
@@ -285,6 +292,10 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     if descriptor_error:
         return _fail_update(state, descriptor_error)
 
+    params, param_blocked = _flye_parameters(assembly_out)
+    if param_blocked is not None:
+        return _update_assembly_output(state, param_blocked)
+
     read_paths, error = _flye_read_paths(assembly_out.get("input_ref"), assembly_out.get("input_type"))
     if error:
         return _fail_update(state, error)
@@ -310,13 +321,17 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
 
     draft_assembly = artifact_dir / "draft_assembly.fasta"
     script_path = working_dir / "run_flye.sh"
-    threads, thread_error = _flye_threads(assembly_out)
-    if thread_error:
-        return _fail_update(state, thread_error)
+    read_type = params["read_type"]
+    genome_size = params["estimated_genome_size"]
+    threads = params["threads"]
+    read_flag = FLYE_READ_TYPE_FLAGS[read_type]
     reads_arg = " ".join(shlex.quote(str(path)) for path in read_paths)
     script_path.write_text(
         "set -e\n"
-        f"flye --nano-raw {reads_arg} --out-dir {shlex.quote(str(flye_out_dir))} --threads {threads}\n"
+        f"flye {read_flag} {reads_arg}"
+        f" --out-dir {shlex.quote(str(flye_out_dir))}"
+        f" --genome-size {shlex.quote(str(genome_size))}"
+        f" --threads {threads}\n"
         f"test -f {shlex.quote(str(flye_out_dir / 'assembly.fasta'))}\n"
         f"cp {shlex.quote(str(flye_out_dir / 'assembly.fasta'))} {shlex.quote(str(draft_assembly))}\n",
         encoding="utf-8",
@@ -337,7 +352,8 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "input_ref": assembly_out.get("input_ref"),
             "input_type": assembly_out.get("input_type"),
             "read_paths": [str(path) for path in read_paths],
-            "read_profile": "nano-raw",
+            "read_profile": read_type,
+            "estimated_genome_size": genome_size,
             "threads": threads,
             "flye_output_dir": str(flye_out_dir),
             "draft_assembly_path": str(draft_assembly),
@@ -464,7 +480,9 @@ def collect_flye_artifacts(state: TopLevelState) -> dict:
         "attempt_id": attempt.attempt_id,
         "draft_assembly_artifact_ref": str(draft_assembly),
         "draft_assembly_ref_status": "materialized",
-        "read_profile": "nano-raw",
+        "read_profile": attempt.metadata.get("read_profile"),
+        "estimated_genome_size": attempt.metadata.get("estimated_genome_size"),
+        "threads": attempt.metadata.get("threads"),
     }
     bundle = AssemblyCandidateBundle.model_validate(bundle_data)
     bundle_path.write_text(
@@ -558,6 +576,7 @@ def fail_assembly(state: TopLevelState) -> dict:
     default_reason = {
         "blocked_env": "assembly blocked on missing conda environment",
         "missing_tool": "assembly blocked on missing tool",
+        "blocked_param": "assembly blocked on missing Flye parameters",
     }.get(status, "assembly failed")
     return {
         "current_stage": "assembly",
@@ -633,16 +652,95 @@ def _unique_refs(refs: list[str]) -> list[str]:
     return unique
 
 
-def _flye_threads(assembly_out: dict[str, Any]) -> tuple[int, str | None]:
+def _flye_parameters(assembly_out: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Validate the three required Flye parameters before freezing an attempt.
+
+    Returns `(resolved_params, None)` when `flye_parameters.read_type`,
+    `flye_parameters.estimated_genome_size`, and `flye_parameters.threads`
+    are all present and well-formed. Returns `({}, blocked_payload)` with
+    structured `missing_params` / `invalid_params` lists otherwise. Phase 4
+    must not invent defaults or attempt a run when any of these are absent.
+    """
     params = dict(assembly_out.get("flye_parameters") or {})
-    raw_threads = params.get("threads", 1)
-    try:
-        threads = int(raw_threads)
-    except (TypeError, ValueError):
-        return 0, "assembly.flye_parameters.threads must be a positive integer"
-    if threads <= 0:
-        return 0, "assembly.flye_parameters.threads must be a positive integer"
-    return threads, None
+    missing: list[str] = []
+    invalid: list[dict[str, Any]] = []
+
+    read_type = params.get("read_type")
+    if read_type is None or read_type == "":
+        missing.append("flye_parameters.read_type")
+    elif read_type not in FLYE_READ_TYPE_FLAGS:
+        invalid.append({
+            "param": "flye_parameters.read_type",
+            "value": read_type,
+            "accepted": sorted(FLYE_READ_TYPE_FLAGS),
+        })
+
+    raw_genome_size = params.get("estimated_genome_size")
+    genome_size: int | None = None
+    if raw_genome_size is None or raw_genome_size == "":
+        missing.append("flye_parameters.estimated_genome_size")
+    else:
+        try:
+            genome_size = int(raw_genome_size)
+        except (TypeError, ValueError):
+            invalid.append({
+                "param": "flye_parameters.estimated_genome_size",
+                "value": raw_genome_size,
+                "reason": "must be a positive integer",
+            })
+        else:
+            if genome_size <= 0:
+                invalid.append({
+                    "param": "flye_parameters.estimated_genome_size",
+                    "value": raw_genome_size,
+                    "reason": "must be a positive integer",
+                })
+
+    raw_threads = params.get("threads")
+    threads: int | None = None
+    if raw_threads is None or raw_threads == "":
+        missing.append("flye_parameters.threads")
+    else:
+        try:
+            threads = int(raw_threads)
+        except (TypeError, ValueError):
+            invalid.append({
+                "param": "flye_parameters.threads",
+                "value": raw_threads,
+                "reason": "must be a positive integer",
+            })
+        else:
+            if threads <= 0:
+                invalid.append({
+                    "param": "flye_parameters.threads",
+                    "value": raw_threads,
+                    "reason": "must be a positive integer",
+                })
+
+    if missing or invalid:
+        reason_parts = []
+        if missing:
+            reason_parts.append("missing: " + ", ".join(missing))
+        if invalid:
+            reason_parts.append(
+                "invalid: " + ", ".join(item["param"] for item in invalid)
+            )
+        return {}, {
+            "status": "blocked_param",
+            "reason": "flye_parameters incomplete (" + "; ".join(reason_parts) + ")",
+            "missing_params": missing,
+            "invalid_params": invalid,
+            "method_name": FLYE_METHOD,
+        }
+
+    return (
+        {
+            "read_type": read_type,
+            "estimated_genome_size": genome_size,
+            "threads": threads,
+        },
+        None,
+    )
 
 
 def _read_qc_assembly_input_ref(state: TopLevelState) -> str | None:

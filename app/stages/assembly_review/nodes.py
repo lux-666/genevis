@@ -27,6 +27,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
+    ASSEMBLY_REVIEW_QUAST_SUMMARY,
     ArtifactMeta,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
@@ -366,6 +367,32 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
                     )
                 )
                 metric_refs.append(str(report_txt))
+            metrics = _parse_quast_report_tsv(report_tsv)
+            quast_summary_path = Path(attempt.metadata["quast_output_dir"]).parent / "quast_summary.json"
+            quast_summary_payload = {
+                "session_id": session_id,
+                "method_name": QUAST_METHOD,
+                "candidate_id": candidate_id,
+                "attempt_id": attempt.attempt_id,
+                "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
+                "report_tsv_ref": str(report_tsv),
+                "metrics": metrics,
+                "notes": ["thresholds_not_applied_without_human_approval"],
+            }
+            quast_summary_path.write_text(
+                json.dumps(quast_summary_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    quast_summary_path,
+                    stage="assembly_review",
+                    method_name=QUAST_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY,
+                    metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                )
+            )
+            metric_refs.append(str(quast_summary_path))
             for path, artifact_type in [
                 (Path(result["stdout_path"]), "command.stdout"),
                 (Path(result["stderr_path"]), "command.stderr"),
@@ -386,7 +413,8 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             for artifact in artifact_payloads:
                 ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
             artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
-            metadata["metrics"] = _parse_quast_report_tsv(report_tsv)
+            metadata["metrics"] = metrics
+            metadata["quast_summary_ref"] = str(quast_summary_path)
             notes.append("quast_executed_locally")
             signals = _update_quast_signal(signals, candidate_id, "available", metric_refs, notes, metadata)
         else:

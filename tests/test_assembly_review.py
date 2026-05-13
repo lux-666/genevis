@@ -307,6 +307,55 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("artifact_registered", event_types)
             self.assertIn("review_requested", event_types)
 
+    def test_local_quast_success_writes_quast_summary_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "quast_parameters": {"threads": 1},
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            ar_out = result["stage_outputs"]["assembly_review"]
+            quast_signal = next(signal for signal in ar_out["signals"] if signal["signal_name"] == "quast")
+            summary_ref = quast_signal["metadata"].get("quast_summary_ref")
+            self.assertTrue(summary_ref, "QUAST success must expose quast_summary_ref on signal metadata")
+            summary_path = Path(summary_ref)
+            self.assertTrue(summary_path.exists())
+            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary_payload["candidate_id"], "flye_01")
+            self.assertEqual(summary_payload["method_name"], "assembly_review.eval.quast")
+            self.assertEqual(summary_payload["metrics"]["n50"], 8)
+            self.assertEqual(summary_payload["metrics"]["total_length"], 8)
+            self.assertIn(
+                "thresholds_not_applied_without_human_approval",
+                summary_payload["notes"],
+            )
+            # The summary path must also appear on the signal's metric_refs
+            # so review consumers see it alongside the raw report.
+            self.assertIn(str(summary_path), quast_signal["metric_refs"])
+
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn("assembly_review.quast_summary", artifact_types)
+            self.assertIn("assembly_review.quast_report_tsv", artifact_types)
+
     def test_local_quast_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"

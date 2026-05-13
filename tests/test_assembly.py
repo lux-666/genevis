@@ -333,7 +333,11 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {"threads": 0},
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 0,
+                    },
                 }
             }
 
@@ -341,6 +345,10 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "blocked_param")
+            invalid_params = {item["param"] for item in assembly.get("invalid_params") or []}
+            self.assertIn("flye_parameters.threads", invalid_params)
             self.assertIn("flye_parameters.threads", result["last_error"])
             self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
 
@@ -365,7 +373,11 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "flye_parameters": {"threads": 1},
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 1,
+                    },
                 }
             }
 
@@ -422,6 +434,11 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 1,
+                    },
                 },
             }
 
@@ -459,6 +476,11 @@ class AssemblyStageTests(unittest.TestCase):
                     "method_decision": {
                         "primary": "assembly.candidate.flye",
                         "fallback": "assembly.candidate.nextdenovo",
+                    },
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 1,
                     },
                 },
             }
@@ -514,6 +536,151 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "planned")
+
+
+class Phase4FlyeParameterTests(unittest.TestCase):
+    """Phase 4 task03 coverage: Flye must not run without explicit params."""
+
+    def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        path = Path(tmpdir) / "registry.json"
+        path.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    def _state(self, tmpdir: str, registry_ref: str):
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+            data_dir=tmpdir,
+        )
+        state["current_stage"] = "assembly"
+        state["asset_registry_ref"] = registry_ref
+        return state
+
+    def _fake_flye_bin(self, tmpdir: str, *, marker: Path | None = None) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir()
+        flye = bin_dir / "flye"
+        flye.write_text(
+            "#!/bin/sh\n"
+            f"{f'echo flye-called > {marker!s}' if marker else ':'}\n"
+            "outdir=\"\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  if [ \"$1\" = \"--out-dir\" ]; then\n"
+            "    shift\n"
+            "    outdir=\"$1\"\n"
+            "  fi\n"
+            "  shift\n"
+            "done\n"
+            "mkdir -p \"$outdir\"\n"
+            "printf '>contig1\\nACGTACGT\\n' > \"$outdir/assembly.fasta\"\n"
+            "printf 'fake flye log\\n' > \"$outdir/flye.log\"\n"
+            "printf 'fake flye stdout\\n'\n",
+            encoding="utf-8",
+        )
+        flye.chmod(0o755)
+        return bin_dir
+
+    def _local_state_with_flye(self, tmpdir: str, *, flye_parameters: dict | None, marker: Path | None = None) -> dict:
+        clean_reads = Path(tmpdir) / "clean.fastq"
+        clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        fake_bin = self._fake_flye_bin(tmpdir, marker=marker)
+        registry = self._write_registry(
+            tmpdir,
+            assets=[
+                {
+                    "asset_id": "s1:clean_long_reads:clean.fastq",
+                    "asset_type": "clean_long_reads",
+                    "path": str(clean_reads),
+                    "platform": "cycloneseq",
+                }
+            ],
+        )
+        state = self._state(tmpdir, str(registry))
+        assembly_out: dict = {
+            "execution_mode": "local",
+            "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        }
+        if flye_parameters is not None:
+            assembly_out["flye_parameters"] = flye_parameters
+        state["stage_outputs"] = {"assembly": assembly_out}
+        return state
+
+    def test_missing_flye_params_blocks_with_blocked_param_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "flye-called"
+            state = self._local_state_with_flye(tmpdir, flye_parameters=None, marker=marker)
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertFalse(marker.exists())
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "blocked_param")
+            self.assertIn("flye_parameters.read_type", assembly["missing_params"])
+            self.assertIn("flye_parameters.estimated_genome_size", assembly["missing_params"])
+            self.assertIn("flye_parameters.threads", assembly["missing_params"])
+            self.assertEqual(assembly["invalid_params"], [])
+            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+
+    def test_unknown_read_type_is_reported_as_invalid_param(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "flye-called"
+            state = self._local_state_with_flye(
+                tmpdir,
+                flye_parameters={
+                    "read_type": "foo",
+                    "estimated_genome_size": 2_000_000,
+                    "threads": 1,
+                },
+                marker=marker,
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertFalse(marker.exists())
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "blocked_param")
+            invalid_by_param = {item["param"]: item for item in assembly["invalid_params"]}
+            self.assertIn("flye_parameters.read_type", invalid_by_param)
+            self.assertEqual(invalid_by_param["flye_parameters.read_type"]["value"], "foo")
+            self.assertIn("nano-raw", invalid_by_param["flye_parameters.read_type"]["accepted"])
+
+    def test_validated_params_are_passed_to_flye_command_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._local_state_with_flye(
+                tmpdir,
+                flye_parameters={
+                    "read_type": "nano-hq",
+                    "estimated_genome_size": 2_000_000,
+                    "threads": 1,
+                },
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "draft_ready")
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            script_text = flye_script.read_text(encoding="utf-8")
+            self.assertIn("--nano-hq", script_text)
+            self.assertIn("--genome-size 2000000", script_text)
+            self.assertIn("--threads 1", script_text)
+            # pre-commit stage state still holds the rich metadata until commit
+            # strips it; the executed Flye candidate bundle carries execution
+            # provenance.
+            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            self.assertTrue(candidate["metadata"]["execution_enabled"])
+            # The executed bundle metadata must reflect the validated
+            # parameters, not an unrelated default read profile.
+            self.assertEqual(candidate["metadata"]["read_profile"], "nano-hq")
+            self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
+            self.assertEqual(candidate["metadata"]["threads"], 1)
 
 
 if __name__ == "__main__":

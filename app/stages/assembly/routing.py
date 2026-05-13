@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.schemas.state import TopLevelState
 
 
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool"}
+FAIL_STATUSES = {"failed", "blocked_env", "missing_tool", "blocked_param"}
 
 
 def _output(state: TopLevelState) -> dict:
