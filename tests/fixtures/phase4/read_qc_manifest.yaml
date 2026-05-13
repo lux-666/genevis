@@ -1,0 +1,11 @@
+session_id: phase4-readqc-smoke
+sample_id: phase4_smoke
+target_assembly_level: contig
+assets:
+  - asset_type: raw_long_reads
+    paths:
+      - tests/fixtures/phase4/smoke.fastq
+    platform: cycloneseq
+    layout: single
+    format: fastq
+    compression: none

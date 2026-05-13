@@ -10,6 +10,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
@@ -17,6 +18,7 @@ from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS_FOFN,
     READ_QC_LONG_READS_FOFN,
     READ_QC_LONG_READ_STATS,
+    READ_QC_LONG_READ_SUMMARY,
     ArtifactMeta,
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
@@ -25,6 +27,25 @@ from app.schemas.state import TopLevelState
 METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
 LENGTH_FILTER_METHOD_NAME = "read_qc.length_filter.seqkit_seq"
 MAKE_FOFN_METHOD_NAME = "read_qc.make_fofn.local"
+
+
+def _resolve_method_env(
+    read_qc_out: dict[str, Any],
+    method_name: str,
+    *,
+    session_id: str,
+    data_dir: Path,
+    input_manifest_ref: str,
+):
+    """Thin wrapper around the shared env dispatcher, scoped to read_qc."""
+    return resolve_method_env(
+        read_qc_out,
+        stage="read_qc",
+        method_name=method_name,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=input_manifest_ref,
+    )
 
 
 def _read_qc_output(state: TopLevelState) -> dict[str, Any]:
@@ -53,6 +74,13 @@ def _fail_update(state: TopLevelState, reason: str) -> dict:
     return _update_read_qc_output(state, {"status": "failed", "reason": reason})
 
 
+def _blocked_update(state: TopLevelState, status: str, reason: str, extra: dict[str, Any] | None = None) -> dict:
+    payload = {"status": status, "reason": reason}
+    if extra:
+        payload.update(extra)
+    return _update_read_qc_output(state, payload)
+
+
 def enter_read_qc(state: TopLevelState) -> dict:
     """Mark read QC as running."""
     return {"supervision_state": "running_stage"}
@@ -78,7 +106,12 @@ def resolve_raw_long_reads(state: TopLevelState) -> dict:
     asset = assets[0]
     path = Path(asset["path"])
     if not path.exists():
-        return _fail_update(state, f"raw_long_reads path not found: {path}")
+        return _blocked_update(
+            state,
+            "blocked_input",
+            f"raw_long_reads path not found: {path}",
+            {"blocked_input_ref": str(path)},
+        )
 
     return _update_read_qc_output(
         state,
@@ -138,6 +171,16 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = _resolve_method_env(
+        read_qc_out,
+        METHOD_NAME,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_read_qc_output(state, blocked)
+
     attempt_id = f"{session_id}:read_qc:seqkit_stats"
     working_dir = data_dir / "work" / "read_qc" / session_id / "seqkit_stats"
     artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
@@ -154,22 +197,25 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt = FrozenAttemptSpec(
-        attempt_id=attempt_id,
-        session_id=session_id,
-        stage="read_qc",
-        method_name=METHOD_NAME,
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[stats_path],
-        env={str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "session_id": session_id,
+        "stage": "read_qc",
+        "method_name": METHOD_NAME,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [stats_path],
+        "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
+        "metadata": {
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
             "raw_long_reads_path": str(input_path),
             "stats_path": str(stats_path),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_read_qc_output(
         state,
         {
@@ -258,6 +304,32 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             },
         )
     ]
+
+    summary = _parse_seqkit_summary(stats_path)
+    summary_path = stats_path.parent / "read_qc_summary.json"
+    summary_payload = {
+        "session_id": attempt.session_id,
+        "method_name": METHOD_NAME,
+        "input_asset_ref": read_qc_out.get("input_asset_ref"),
+        "raw_long_reads_path": read_qc_out.get("raw_long_reads_path"),
+        "summary": summary,
+    }
+    summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    artifacts.append(
+        ArtifactMeta.from_file(
+            summary_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_SUMMARY,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "format": "json",
+                "tool": "seqkit",
+            },
+        )
+    )
+
     for path, artifact_type in [
         (stdout_path, "command.stdout"),
         (stderr_path, "command.stderr"),
@@ -285,8 +357,9 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
         {
             "status": "completed",
             "stats_artifact_ref": str(stats_path),
+            "summary_artifact_ref": str(summary_path),
             "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
-            "summary": _parse_seqkit_summary(stats_path),
+            "summary": summary,
             "substeps": {
                 **dict(read_qc_out.get("substeps") or {}),
                 "long_read_stats": {
@@ -294,6 +367,7 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
                     "status": "executed",
                     "method_name": METHOD_NAME,
                     "artifact_ref": str(stats_path),
+                    "summary_ref": str(summary_path),
                 },
             },
         },
@@ -351,10 +425,20 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
     if read_qc_out.get("status") != "length_filter_planned":
         return {}
 
-    substep = read_qc_out["substeps"]["length_filter"]
-    min_len = int(substep["thresholds"]["min_len"])
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = _resolve_method_env(
+        read_qc_out,
+        LENGTH_FILTER_METHOD_NAME,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_read_qc_output(state, blocked)
+
+    substep = read_qc_out["substeps"]["length_filter"]
+    min_len = int(substep["thresholds"]["min_len"])
     working_dir = data_dir / "work" / "read_qc" / session_id / "length_filter"
     artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -370,23 +454,26 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:read_qc:length_filter",
-        session_id=session_id,
-        stage="read_qc",
-        method_name=LENGTH_FILTER_METHOD_NAME,
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[filtered_path],
-        env={str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:read_qc:length_filter",
+        "session_id": session_id,
+        "stage": "read_qc",
+        "method_name": LENGTH_FILTER_METHOD_NAME,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [filtered_path],
+        "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
+        "metadata": {
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
             "raw_long_reads_path": str(input_path),
             "filtered_long_reads_path": str(filtered_path),
             "thresholds": {"min_len": min_len},
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
 
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, state.get("input_manifest_ref", ""))
@@ -521,18 +608,23 @@ def commit_read_qc(state: TopLevelState) -> dict:
     committed_keys = [
         "artifact_refs",
         "assembly_input_ref",
+        "blocked_input_ref",
+        "env_target",
         "filtered_long_reads_fofn_ref",
         "filtered_long_reads_ref",
         "format",
         "input_asset_ref",
         "long_reads_fofn_ref",
         "method_name",
+        "missing_tools",
         "package_name",
         "platform",
+        "reason",
         "skip_reason",
         "stats_artifact_ref",
         "substeps",
         "summary",
+        "summary_artifact_ref",
     ]
     committed_read_qc = {key: read_qc_out[key] for key in committed_keys if key in read_qc_out}
     outputs = dict(state.get("stage_outputs") or {})
@@ -546,12 +638,19 @@ def commit_read_qc(state: TopLevelState) -> dict:
 
 
 def fail_read_qc(state: TopLevelState) -> dict:
-    """Stop the workflow on read QC failure."""
+    """Stop the workflow on read QC failure or preflight block."""
     read_qc_out = _read_qc_output(state)
+    status = read_qc_out.get("status", "failed")
+    default_reason = {
+        "blocked_input": "read_qc blocked on missing input",
+        "blocked_env": "read_qc blocked on missing conda environment",
+        "missing_tool": "read_qc blocked on missing tool",
+    }.get(status, "read_qc failed")
+    reason = read_qc_out.get("reason") or default_reason
     return {
         "current_stage": "read_qc",
         "supervision_state": "failed_terminal",
-        "last_error": read_qc_out.get("reason", "read_qc failed"),
+        "last_error": reason,
     }
 
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
@@ -290,6 +291,17 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = resolve_method_env(
+        assembly_out,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_assembly_output(state, blocked)
+
     working_dir = data_dir / "work" / "assembly" / session_id / "flye"
     flye_out_dir = working_dir / "flye_out"
     artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "flye"
@@ -311,17 +323,17 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:assembly:flye",
-        session_id=session_id,
-        stage="assembly",
-        method_name=FLYE_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[draft_assembly],
-        env={str(k): str(v) for k, v in (assembly_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:assembly:flye",
+        "session_id": session_id,
+        "stage": "assembly",
+        "method_name": FLYE_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [draft_assembly],
+        "env": {str(k): str(v) for k, v in (assembly_out.get("env") or {}).items()},
+        "metadata": {
             "input_ref": assembly_out.get("input_ref"),
             "input_type": assembly_out.get("input_type"),
             "read_paths": [str(path) for path in read_paths],
@@ -330,7 +342,9 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "flye_output_dir": str(flye_out_dir),
             "draft_assembly_path": str(draft_assembly),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_assembly_output(
         state,
         {
@@ -538,12 +552,17 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
 
 
 def fail_assembly(state: TopLevelState) -> dict:
-    """Stop workflow on assembly planning failure."""
+    """Stop workflow on assembly planning failure or preflight block."""
     assembly_out = _assembly_output(state)
+    status = assembly_out.get("status", "failed")
+    default_reason = {
+        "blocked_env": "assembly blocked on missing conda environment",
+        "missing_tool": "assembly blocked on missing tool",
+    }.get(status, "assembly failed")
     return {
         "current_stage": "assembly",
         "supervision_state": "failed_terminal",
-        "last_error": assembly_out.get("reason", "assembly failed"),
+        "last_error": assembly_out.get("reason", default_reason),
     }
 
 

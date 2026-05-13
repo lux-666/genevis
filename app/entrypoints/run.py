@@ -27,6 +27,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser.add_argument("--session-id", help="Unique session identifier; generated when omitted")
     run_parser.add_argument("--manifest", required=True, help="Path to input manifest YAML/JSON")
     run_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    run_parser.add_argument(
+        "--local-exec",
+        action="append",
+        default=[],
+        metavar="STAGE",
+        choices=[
+            "read_qc",
+            "genome_survey",
+            "assembly",
+            "assembly_review",
+            "hic_scaffolding",
+            "repeat_annotation",
+        ],
+        help=(
+            "Opt a stage into local execution by seeding "
+            "stage_outputs[STAGE].execution_mode=local. Repeat the flag to "
+            "enable multiple stages."
+        ),
+    )
 
     ask_parser = subparsers.add_parser("ask", help="Start a workflow from a natural-language request")
     ask_parser.add_argument("request_text", help="Natural-language workflow-start request")
@@ -60,6 +79,15 @@ def _run_session(args: argparse.Namespace) -> int:
         input_manifest_ref=str(manifest_path),
         data_dir=request.data_dir,
     )
+
+    local_stages = list(dict.fromkeys(getattr(args, "local_exec", []) or []))
+    if local_stages:
+        stage_outputs = dict(state.get("stage_outputs") or {})
+        for stage_name in local_stages:
+            existing = dict(stage_outputs.get(stage_name) or {})
+            existing["execution_mode"] = "local"
+            stage_outputs[stage_name] = existing
+        state["stage_outputs"] = stage_outputs
 
     graph = build_graph()
     result = graph.invoke(

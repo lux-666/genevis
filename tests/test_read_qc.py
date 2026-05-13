@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,8 +165,15 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             artifact_events = [json.loads(line) for line in artifact_index.read_text().splitlines()]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.long_read_stats", artifact_types)
+            self.assertIn("read_qc.long_read_summary", artifact_types)
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
+
+            summary_ref = Path(result["stage_outputs"]["read_qc"]["summary_artifact_ref"])
+            self.assertTrue(summary_ref.exists())
+            summary_payload = json.loads(summary_ref.read_text(encoding="utf-8"))
+            self.assertEqual(summary_payload["method_name"], "read_qc.long_read_stats.seqkit_stats")
+            self.assertEqual(summary_payload["summary"]["num_seqs"], 1)
 
             ledger_events = [
                 json.loads(line)
@@ -356,6 +365,217 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
             ]
             self.assertIn("attempt_failed", [event["event_type"] for event in ledger_events])
+
+
+class Phase4ReadQCSmokeTests(unittest.TestCase):
+    """Phase 4 task2 coverage: env resolver wiring and structured blocked states."""
+
+    def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        path = Path(tmpdir) / "registry.json"
+        path.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    def _state(self, tmpdir: str, registry_ref: str | None):
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+            data_dir=tmpdir,
+        )
+        state["current_stage"] = "read_qc"
+        state["asset_registry_ref"] = registry_ref
+        return state
+
+    def test_missing_fastq_path_blocks_with_blocked_input_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing.fastq"
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:missing.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(missing),
+                    }
+                ],
+            )
+            graph = build_stage()
+            result = graph.invoke(self._state(tmpdir, str(registry)))
+
+            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "blocked_input")
+            self.assertIn("missing.fastq", result["last_error"])
+
+    def test_missing_conda_env_blocks_with_blocked_env_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            # Empty PATH removes conda binary, which forces env_resolver.preflight
+            # to report blocked_env. Note: no env override is supplied on
+            # stage_outputs.read_qc.env, so the resolver path is taken.
+            state["stage_outputs"] = {"read_qc": {"execution_mode": "local"}}
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = ""
+            try:
+                graph = build_stage()
+                result = graph.invoke(state)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "blocked_env")
+            self.assertIn("conda", result["last_error"])
+            ledger_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+            ]
+            event_types = [event["event_type"] for event in ledger_events]
+            self.assertIn("env_preflight_blocked", event_types)
+
+    def test_missing_tool_in_env_blocks_with_missing_tool_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                    }
+                ],
+            )
+            # Stub conda that reports env ok but tool probe fails.
+            conda_stub_dir = Path(tmpdir) / "conda-stub-bin"
+            conda_stub_dir.mkdir()
+            conda_stub = conda_stub_dir / "conda"
+            conda_stub.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"run\" ]; then\n"
+                "  shift\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    case \"$1\" in\n"
+                "      --live-stream|--no-capture-output) shift ;;\n"
+                "      -n|-p) shift 2 ;;\n"
+                "      *) break ;;\n"
+                "    esac\n"
+                "  done\n"
+                "  # Env probe is `true`; pretend it succeeded.\n"
+                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
+                "  # Tool probe is `sh -c command -v \"$1\" preflight TOOL`.\n"
+                "  exit 1\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            conda_stub.chmod(0o755)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {"read_qc": {"execution_mode": "local"}}
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{conda_stub_dir}{os.pathsep}{old_path}"
+            try:
+                graph = build_stage()
+                result = graph.invoke(state)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "missing_tool")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("seqkit", result["stage_outputs"]["read_qc"]["missing_tools"])
+
+    def test_phase4_fixture_manifest_registers_as_raw_long_reads(self):
+        # Sanity: the committed fixture file exists and is non-empty, so both
+        # tests and a documented smoke command can rely on it.
+        fixture = Path("tests/fixtures/phase4/smoke.fastq")
+        manifest = Path("tests/fixtures/phase4/read_qc_manifest.yaml")
+        self.assertTrue(fixture.exists())
+        self.assertGreater(fixture.stat().st_size, 0)
+        self.assertTrue(manifest.exists())
+        text = manifest.read_text(encoding="utf-8")
+        self.assertIn("raw_long_reads", text)
+        self.assertIn("tests/fixtures/phase4/smoke.fastq", text)
+
+
+def _env_geno_exec_has_seqkit() -> bool:
+    """True if the configured env_geno_exec conda env exposes seqkit."""
+    if shutil.which("conda") is None:
+        return False
+    probe = subprocess.run(
+        [
+            "conda", "run", "--live-stream", "--no-capture-output",
+            "-n", "env_geno_exec", "sh", "-c", 'command -v "$1"',
+            "preflight", "seqkit",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+@unittest.skipUnless(
+    _env_geno_exec_has_seqkit(),
+    "env_geno_exec conda env with seqkit not available; skipping real smoke",
+)
+class Phase4ReadQCRealSmokeTests(unittest.TestCase):
+    """Real-data smoke: committed fixture -> env_geno_exec conda env -> SeqKit.
+
+    Skipped automatically when conda or env_geno_exec is not present so the
+    broader suite stays green on hosts without the bioinformatics env.
+    """
+
+    def test_committed_fixture_smoke_produces_stats_summary_and_fofn(self):
+        from app.entrypoints.run import main as run_main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "phase4-readqc-smoke"
+            argv = [
+                "run",
+                "--session-id", session_id,
+                "--manifest", "tests/fixtures/phase4/read_qc_manifest.yaml",
+                "--data-dir", tmpdir,
+                "--local-exec", "read_qc",
+            ]
+            rc = run_main(argv)
+            self.assertEqual(rc, 0)
+
+            artifact_dir = Path(tmpdir) / "artifacts" / "read_qc" / session_id
+            stats = artifact_dir / "seqkit_stats.tsv"
+            summary = artifact_dir / "read_qc_summary.json"
+            fofn = artifact_dir / "long_reads.fofn"
+            self.assertTrue(stats.exists(), f"seqkit_stats.tsv missing at {stats}")
+            self.assertTrue(summary.exists(), f"read_qc_summary.json missing at {summary}")
+            self.assertTrue(fofn.exists(), f"long_reads.fofn missing at {fofn}")
+
+            # SeqKit TSV header should be intact and we should see three reads.
+            stats_text = stats.read_text(encoding="utf-8")
+            self.assertIn("num_seqs", stats_text)
+            summary_payload = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(summary_payload["summary"]["num_seqs"], 3)
+
+            # FOFN must point to a real, readable path (absolute after
+            # inventory resolution).
+            fofn_lines = [line for line in fofn.read_text(encoding="utf-8").splitlines() if line]
+            self.assertEqual(len(fofn_lines), 1)
+            fofn_path = Path(fofn_lines[0])
+            self.assertTrue(fofn_path.is_absolute(), f"FOFN entry not absolute: {fofn_path}")
+            self.assertTrue(fofn_path.exists(), f"FOFN path does not exist: {fofn_path}")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from app.stages.read_qc.nodes import (
 )
 from app.stages.read_qc.routing import (
     route_after_collect,
+    route_after_freeze,
     route_after_length_filter,
     route_after_make_fofn,
     route_after_plan,
@@ -56,7 +57,11 @@ def build_stage():
         route_after_plan,
         {"freeze": "freeze_seqkit_attempt", "filter": "plan_length_filter", "fail": "fail"},
     )
-    graph.add_edge("freeze_seqkit_attempt", "run_seqkit_stats")
+    graph.add_conditional_edges(
+        "freeze_seqkit_attempt",
+        route_after_freeze,
+        {"run": "run_seqkit_stats", "fail": "fail"},
+    )
     graph.add_conditional_edges(
         "run_seqkit_stats",
         route_after_run,

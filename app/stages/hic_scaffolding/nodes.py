@@ -12,6 +12,7 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest
@@ -184,6 +185,17 @@ def freeze_yahs_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = resolve_method_env(
+        hic_out,
+        stage="hic_scaffolding",
+        method_name=HIC_YAHS_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_hic_output(state, blocked)
+
     safe_id = _safe_path_id(session_id)
     working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "yahs" / safe_id
     artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "yahs" / safe_id
@@ -206,24 +218,26 @@ def freeze_yahs_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:hic_scaffolding:yahs",
-        session_id=session_id,
-        stage="hic_scaffolding",
-        method_name=HIC_YAHS_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[scaffold_fasta],
-        env={str(k): str(v) for k, v in (hic_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:hic_scaffolding:yahs",
+        "session_id": session_id,
+        "stage": "hic_scaffolding",
+        "method_name": HIC_YAHS_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [scaffold_fasta],
+        "env": {str(k): str(v) for k, v in (hic_out.get("env") or {}).items()},
+        "metadata": {
             "pre_hic_assembly_ref": str(assembly_ref),
             "hic_alignment_ref": str(alignment_path),
             "scaffold_fasta": str(scaffold_fasta),
             "scaffold_agp": str(scaffold_agp),
             "out_prefix": str(out_prefix),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_hic_output(
         state,
         {
@@ -609,12 +623,17 @@ def _write_human_hic_skip_record(
 
 
 def fail_hic_scaffolding(state: TopLevelState) -> dict:
-    """Stop on invalid Hi-C scaffolding inputs."""
+    """Stop on invalid Hi-C scaffolding inputs or preflight block."""
     hic_out = _hic_output(state)
+    status = hic_out.get("status", "failed")
+    default_reason = {
+        "blocked_env": "hic_scaffolding blocked on missing conda environment",
+        "missing_tool": "hic_scaffolding blocked on missing tool",
+    }.get(status, "hic_scaffolding failed")
     return {
         "current_stage": "hic_scaffolding",
         "supervision_state": "failed_terminal",
-        "last_error": hic_out.get("reason", "hic_scaffolding failed"),
+        "last_error": hic_out.get("reason", default_reason),
     }
 
 

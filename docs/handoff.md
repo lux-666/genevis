@@ -117,7 +117,23 @@ Completed:
   `missing_tool` without requiring shell activation.
   `FrozenAttemptSpec` now carries optional `conda_bin`, `conda_env`, and
   `conda_prefix`, and `LocalRunner` dispatches through `conda run` when
-  either env field is set. Existing stage nodes have not been rewired yet.
+  either env field is set.
+- Phase 4 task2 wires `read_qc` into the shared env dispatcher
+  (`app/execution/env_dispatch.py`): when the caller does not supply an
+  explicit `stage_outputs.read_qc.env.PATH` bypass, preflight runs before
+  each SeqKit attempt is frozen. Preflight failures set
+  `stage_outputs.read_qc.status` to `blocked_env` or `missing_tool`, emit
+  an `env_preflight_blocked` ledger event, and terminate the stage. A
+  missing raw_long_reads path surfaces as `blocked_input`.
+  `collect_seqkit_artifacts` also writes and registers
+  `read_qc_summary.json` (artifact type `read_qc.long_read_summary`).
+  Inventory now absolutises relative manifest paths against the manifest
+  directory so attempt scripts that chdir into `data/work/...` can reach
+  the real files. CLI `gene-agent run` has a repeatable `--local-exec STAGE`
+  flag that seeds `stage_outputs[STAGE].execution_mode = "local"`. Committed
+  fixtures live under `tests/fixtures/phase4/`; a real-data smoke test
+  (`Phase4ReadQCRealSmokeTests`) runs end-to-end when `env_geno_exec` with
+  `seqkit` is present and is skipped otherwise.
 
 Not completed:
 
@@ -189,7 +205,7 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 4 from task 02 (`docs/phases/phase4/02_real_fastq_read_qc_smoke.md`) — wire `read_qc` frozen attempts to `EnvResolver`, emit `blocked_env` / `missing_tool` state, and prove the SeqKit stats smoke end-to-end. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
+Continue Phase 4 from task 03 (`docs/phases/phase4/03_flye_quast_human_gate.md`) — wire `assembly` (Flye) and `assembly_review` (QUAST) frozen attempts to `EnvResolver` with the same blocked_env / missing_tool / blocked_param vocabulary, and prove the mainline smoke through the human gate. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -254,10 +270,11 @@ corresponding human decision is explicit in the task docs.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
   intentionally remains unimplemented. When a frozen attempt sets
   `conda_env` or `conda_prefix`, `LocalRunner` dispatches through
-  `conda run`; otherwise the legacy shell-based execution is used. Existing
-  stage nodes have not been updated to populate those fields yet, so in
-  practice real local execution still runs in whatever shell env the
-  operator configured unless the stage wiring is updated.
+  `conda run`; otherwise the legacy shell-based execution is used.
+  `read_qc` populates those fields via `EnvResolver` when no PATH bypass is
+  supplied. `assembly`, `assembly_review`, `hic_scaffolding`, and
+  `repeat_annotation` stage nodes have not been rewired yet, so their local
+  execution still trusts whatever shell env the operator configured.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.

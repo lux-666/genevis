@@ -3,47 +3,52 @@
 # override the default fallback. Either `conda_env` (named env) or
 # `conda_prefix` (absolute prefix path) may be set on any entry; both together
 # is rejected at load time.
+#
+# All bioinformatics tools (seqkit, flye, quast.py, yahs, RepeatMasker, ...)
+# are expected to live in a single shared conda env `env_geno_exec`. The
+# `gene_agent` env is reserved for the orchestrator itself and is not a
+# candidate host for tool binaries.
 
 default:
   conda_bin: conda
-  fallback_env: gene_agent
+  fallback_env: env_geno_exec
 
 stages:
   read_qc:
-    conda_env: gene_agent
+    conda_env: env_geno_exec
   genome_survey:
-    conda_env: env_genome_survey
+    conda_env: env_geno_exec
   assembly:
-    conda_env: env_assembly_flye
+    conda_env: env_geno_exec
   assembly_review:
-    conda_env: env_assembly_review
+    conda_env: env_geno_exec
   hic_scaffolding:
-    conda_env: env_hic_yahs
+    conda_env: env_geno_exec
   repeat_annotation:
-    conda_env: env_repeatmasker
+    conda_env: env_geno_exec
 
 methods:
   read_qc.long_read_stats.seqkit_stats:
-    conda_env: gene_agent
+    conda_env: env_geno_exec
     required_tools:
       - seqkit
   read_qc.length_filter.seqkit_seq:
-    conda_env: gene_agent
+    conda_env: env_geno_exec
     required_tools:
       - seqkit
   assembly.candidate.flye:
-    conda_env: env_assembly_flye
+    conda_env: env_geno_exec
     required_tools:
       - flye
   assembly_review.eval.quast:
-    conda_env: env_assembly_review
+    conda_env: env_geno_exec
     required_tools:
       - quast.py
   hic_scaffolding.candidate.yahs:
-    conda_env: env_hic_yahs
+    conda_env: env_geno_exec
     required_tools:
       - yahs
   repeat_annotation.masking.repeatmasker:
-    conda_env: env_repeatmasker
+    conda_env: env_geno_exec
     required_tools:
       - RepeatMasker

@@ -21,6 +21,7 @@ from app.stages.assembly.nodes import (
 from app.stages.assembly.routing import (
     route_after_candidate_set,
     route_after_flye_collect,
+    route_after_flye_freeze,
     route_after_flye_run,
     route_after_plan,
     route_after_resolve,
@@ -66,7 +67,11 @@ def build_stage():
         route_after_plan,
         {"freeze_flye": "freeze_flye_attempt", "commit": "commit", "fail": "fail"},
     )
-    graph.add_edge("freeze_flye_attempt", "run_flye_attempt")
+    graph.add_conditional_edges(
+        "freeze_flye_attempt",
+        route_after_flye_freeze,
+        {"run_flye": "run_flye_attempt", "fail": "fail"},
+    )
     graph.add_conditional_edges(
         "run_flye_attempt",
         route_after_flye_run,

@@ -1,6 +1,6 @@
 # 01 Stage-Specific Conda Env And Local Executor
 
-Task status: partially implemented (environment resolution and LocalRunner conda wrapping only).
+Task status: implemented.
 
 ## Goal
 
@@ -113,9 +113,9 @@ override the default fallback environment.
   through the resolved conda environment.
 - [x] Preserve existing fake-binary tests by allowing test-specific env overrides
   or explicit bypass only in tests.
-- [ ] Update read QC, Flye, QUAST, YaHS, and RepeatMasker frozen attempts to
+- [x] Update read QC, Flye, QUAST, YaHS, and RepeatMasker frozen attempts to
   carry enough method/stage identity for env resolution.
-- [ ] Ensure missing env or missing tool produces blocked state and ledger
+- [x] Ensure missing env or missing tool produces blocked state and ledger
   evidence instead of fake outputs.
 - [x] Keep stdout/stderr/return code artifacts compatible with existing ledger
   and artifact collection.
@@ -150,10 +150,11 @@ git diff --check
 ## Implemented State
 
 - `config/envs.yaml` ships with `default.conda_bin`, `default.fallback_env`,
-  stage-level entries for `read_qc`, `genome_survey`, `assembly`,
-  `assembly_review`, `hic_scaffolding`, `repeat_annotation`, and method-level
-  overrides for the SeqKit stats / SeqKit seq, Flye, QUAST, YaHS, and
-  RepeatMasker routes.
+  and stage / method entries for the real local execution mainline. Every
+  stage and every declared method resolves to the single shared
+  `env_geno_exec` conda env (SeqKit stats / SeqKit seq, Flye, QUAST, YaHS,
+  RepeatMasker). The `gene_agent` env is the orchestrator only; bioinformatics
+  binaries are not installed into it.
 - `app/execution/env_resolver.py` exposes `EnvResolver`, `EnvSpec`,
   `PreflightResult`, and `preflight(...)`. Resolution precedence is
   method > stage > default. Both `conda_env` (named env) and `conda_prefix`
@@ -169,9 +170,22 @@ git diff --check
 - `ExecutionResult` has a structured `status` field (`ok` / `failed` today;
   `blocked_env` / `missing_tool` reserved for future stage wiring) plus a
   `status_detail` string so callers can emit the right ledger/state vocabulary.
-- Stage nodes (`read_qc`, `assembly`, `assembly_review`, `hic_scaffolding`,
-  `repeat_annotation`) are not yet wired to `EnvResolver`. That wiring, and
-  the ledger/state mapping of `blocked_env` / `missing_tool`, is deferred to
-  tasks 02 and 03 so each stage integration can be verified with real-data
-  smoke commands.
+- A shared dispatcher `app/execution/env_dispatch.py` centralises the resolve
+  -> preflight -> blocked-payload-or-spec flow. It also honours a PATH-based
+  test escape hatch (`stage_outputs.<stage>.env.PATH`) so existing fake-binary
+  suites keep running without conda. The `attach_conda_fields` helper merges
+  the resolved `EnvSpec`'s conda bin/env/prefix into each stage's
+  `FrozenAttemptSpec` kwargs before construction.
+- Every stage that freezes a real attempt (`read_qc.freeze_seqkit_attempt`,
+  `read_qc.maybe_run_length_filter`, `assembly.freeze_flye_attempt`,
+  `assembly_review.freeze_quast_attempts`, `hic_scaffolding.freeze_yahs_attempt`,
+  `repeat_annotation.freeze_repeatmasker_attempt`) now calls the shared
+  dispatcher before materialising `FrozenAttemptSpec`. Preflight failures
+  short-circuit into `status = blocked_env | missing_tool`, record an
+  `env_preflight_blocked` ledger event with `env_target` / `missing_tools` /
+  `detail`, and route to the stage's terminal failure edge.
+- Each stage's routing module now recognises `blocked_env` and `missing_tool`
+  alongside `failed` so preflight blocks reach `fail_<stage>` without running
+  the biological command, and each `fail_<stage>` translates those statuses
+  into a human-readable `last_error`.
 

@@ -27,7 +27,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             stage="read_qc",
             method_name="read_qc.long_read_stats.seqkit_stats",
         )
-        self.assertEqual(seqkit_spec.conda_env, "gene_agent")
+        self.assertEqual(seqkit_spec.conda_env, "env_geno_exec")
         self.assertEqual(seqkit_spec.required_tools, ["seqkit"])
         self.assertEqual(seqkit_spec.source, "method")
 
@@ -35,15 +35,29 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             stage="assembly",
             method_name="assembly.candidate.flye",
         )
-        self.assertEqual(flye_spec.conda_env, "env_assembly_flye")
+        self.assertEqual(flye_spec.conda_env, "env_geno_exec")
         self.assertEqual(flye_spec.required_tools, ["flye"])
 
         quast_spec = resolver.resolve(
             stage="assembly_review",
             method_name="assembly_review.eval.quast",
         )
-        self.assertEqual(quast_spec.conda_env, "env_assembly_review")
+        self.assertEqual(quast_spec.conda_env, "env_geno_exec")
         self.assertEqual(quast_spec.required_tools, ["quast.py"])
+
+        yahs_spec = resolver.resolve(
+            stage="hic_scaffolding",
+            method_name="hic_scaffolding.candidate.yahs",
+        )
+        self.assertEqual(yahs_spec.conda_env, "env_geno_exec")
+        self.assertEqual(yahs_spec.required_tools, ["yahs"])
+
+        repeatmasker_spec = resolver.resolve(
+            stage="repeat_annotation",
+            method_name="repeat_annotation.masking.repeatmasker",
+        )
+        self.assertEqual(repeatmasker_spec.conda_env, "env_geno_exec")
+        self.assertEqual(repeatmasker_spec.required_tools, ["RepeatMasker"])
 
     def test_method_override_beats_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

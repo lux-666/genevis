@@ -10,6 +10,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
@@ -244,6 +245,17 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = resolve_method_env(
+        repeat_out,
+        stage="repeat_annotation",
+        method_name=REPEAT_MASKING_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_repeat_output(state, blocked)
+
     safe_id = _safe_path_id(session_id)
     working_dir = data_dir / "work" / "repeat_annotation" / session_id / "repeatmasker" / safe_id
     artifact_dir = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeatmasker" / safe_id
@@ -267,24 +279,26 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:repeat_annotation:repeatmasker",
-        session_id=session_id,
-        stage="repeat_annotation",
-        method_name=REPEAT_MASKING_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[softmasked_genome, repeat_gff3],
-        env={str(k): str(v) for k, v in (repeat_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:repeat_annotation:repeatmasker",
+        "session_id": session_id,
+        "stage": "repeat_annotation",
+        "method_name": REPEAT_MASKING_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [softmasked_genome, repeat_gff3],
+        "env": {str(k): str(v) for k, v in (repeat_out.get("env") or {}).items()},
+        "metadata": {
             "final_assembly_for_annotation": str(assembly_ref),
             "repeat_library_ref": str(library_ref),
             "softmasked_genome": str(softmasked_genome),
             "repeat_annotation_gff3": str(repeat_gff3),
             "hardmasked_genome": str(hardmasked_genome),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_repeat_output(
         state,
         {
@@ -472,12 +486,17 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
 
 
 def fail_repeat_annotation(state: TopLevelState) -> dict:
-    """Stop on invalid repeat annotation inputs or descriptors."""
+    """Stop on invalid repeat annotation inputs, descriptors, or preflight block."""
     repeat_out = _repeat_output(state)
+    status = repeat_out.get("status", "failed")
+    default_reason = {
+        "blocked_env": "repeat_annotation blocked on missing conda environment",
+        "missing_tool": "repeat_annotation blocked on missing tool",
+    }.get(status, "repeat_annotation failed")
     return {
         "current_stage": "repeat_annotation",
         "supervision_state": "failed_terminal",
-        "last_error": repeat_out.get("reason", "repeat_annotation failed"),
+        "last_error": repeat_out.get("reason", default_reason),
     }
 
 

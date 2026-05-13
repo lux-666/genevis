@@ -19,14 +19,46 @@ from app.schemas.state import TopLevelState
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest:
-    """Load an InputManifest from a YAML or JSON file path."""
+    """Load an InputManifest from a YAML or JSON file path.
+
+    Relative asset paths are resolved against the manifest's directory first
+    and cwd second, then stored as absolute paths so downstream attempts that
+    chdir into their working directory can still find the files.
+    """
     path = Path(manifest_ref)
     with path.open("r", encoding="utf-8") as handle:
         if path.suffix == ".json":
             raw = json.load(handle)
         else:
             raw = yaml.safe_load(handle) or {}
+    manifest_dir = path.resolve().parent
+    for asset in raw.get("assets") or []:
+        resolved: list[str] = []
+        for p in asset.get("paths") or []:
+            resolved.append(_absolutize_asset_path(str(p), manifest_dir=manifest_dir))
+        if resolved:
+            asset["paths"] = resolved
     return InputManifest.model_validate(raw)
+
+
+def _absolutize_asset_path(raw_path: str, *, manifest_dir: Path) -> str:
+    """Resolve a manifest-declared path to an absolute filesystem path.
+
+    Absolute paths are left as-is (so provenance keeps the operator's exact
+    spelling, and macOS ``/var/...`` vs ``/private/var/...`` canonicalisation
+    does not surprise downstream consumers). Relative paths are anchored to
+    the manifest directory first, then cwd as a fallback.
+    """
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return str(candidate)
+    manifest_relative = (manifest_dir / candidate).resolve(strict=False)
+    if manifest_relative.exists():
+        return str(manifest_relative)
+    cwd_relative = (Path.cwd() / candidate).resolve(strict=False)
+    if cwd_relative.exists():
+        return str(cwd_relative)
+    return str(manifest_relative)
 
 
 def _build_asset_records(

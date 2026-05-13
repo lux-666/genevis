@@ -19,6 +19,7 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, UnsupportedLifecycleOperationError
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.schemas.artifacts import (
@@ -222,6 +223,17 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
+    env_spec, blocked = resolve_method_env(
+        ar_out,
+        stage="assembly_review",
+        method_name=QUAST_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_assembly_review_output(state, blocked)
+
     attempts = []
     for candidate in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")
@@ -242,24 +254,26 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
             encoding="utf-8",
         )
         script_path.chmod(0o755)
-        attempt = FrozenAttemptSpec(
-            attempt_id=f"{session_id}:assembly_review:quast:{safe_id}",
-            session_id=session_id,
-            stage="assembly_review",
-            method_name=QUAST_METHOD,
-            script_path=script_path,
-            working_dir=working_dir,
-            interpreter="/bin/bash",
-            expected_outputs=[report_tsv],
-            env={str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
-            metadata={
+        attempt_kwargs: dict[str, Any] = {
+            "attempt_id": f"{session_id}:assembly_review:quast:{safe_id}",
+            "session_id": session_id,
+            "stage": "assembly_review",
+            "method_name": QUAST_METHOD,
+            "script_path": script_path,
+            "working_dir": working_dir,
+            "interpreter": "/bin/bash",
+            "expected_outputs": [report_tsv],
+            "env": {str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
+            "metadata": {
                 "candidate_id": candidate_id,
                 "draft_assembly_ref": str(assembly_ref),
                 "quast_output_dir": str(out_dir),
                 "report_tsv": str(report_tsv),
                 "threads": threads,
             },
-        )
+        }
+        attach_conda_fields(env_spec, attempt_kwargs)
+        attempt = FrozenAttemptSpec(**attempt_kwargs)
         attempts.append(attempt.model_dump(mode="json"))
 
     return _update_assembly_review_output(
@@ -808,10 +822,15 @@ def fail_assembly_review(state: TopLevelState) -> dict:
     """Record assembly review failure and stop."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
+    status = ar_out.get("status", "failed")
+    default_reason = {
+        "blocked_env": "assembly_review blocked on missing conda environment",
+        "missing_tool": "assembly_review blocked on missing tool",
+    }.get(status, "assembly_review failed")
     return {
         "current_stage": "assembly_review",
         "supervision_state": "failed_terminal",
-        "last_error": ar_out.get("reason", "assembly_review failed"),
+        "last_error": ar_out.get("reason", default_reason),
     }
 
 
