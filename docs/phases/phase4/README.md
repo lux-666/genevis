@@ -41,17 +41,23 @@ paused at the human review gate.
 1. [Stage-Specific Conda Env And Local Executor](01_stage_specific_conda_env_local_executor.md)
 2. [Real FASTQ Read QC Smoke](02_real_fastq_read_qc_smoke.md)
 3. [Flye, QUAST, And Human Gate Smoke](03_flye_quast_human_gate.md)
+4. [Real Biology Mainline Acceptance](04_real_biology_mainline_acceptance.md)
+5. [Structured Local Execution Request](05_structured_local_execution_request.md)
+6. [Phase 4 Status Docs And Phase 5 Gate](06_phase4_status_docs_and_phase5_gate.md)
 
 ## Current Assumptions
 
-- `gene_agent` conda environment exists and contains `seqkit`.
-- Flye and QUAST may live in separate environments, not necessarily in
-  `gene_agent`.
+- `gene_agent` conda environment exists and contains the Python orchestrator
+  dependencies.
+- Bioinformatics tools are configured through `config/envs.yaml`; the current
+  shared local execution env is `env_geno_exec`.
 - Different methods must not assume one shared activated environment.
 - The implementation should use `conda run -n <env_name> <command>` or an
   explicitly configured conda executable.
 - Missing envs or tools should block with structured state, not silently skip
   and not produce fake outputs.
+- Real-biology Flye acceptance requires a human-supplied FASTQ and explicit
+  Flye parameters.
 
 ## Phase 4 Explicit Non-Goals
 
@@ -95,11 +101,17 @@ Not allowed:
 
 1. Finish task 01 first, because all real package execution depends on method
    environment resolution.
-2. Finish task 02 next, because SeqKit is already available in the current
-   `gene_agent` environment.
+2. Finish task 02 next, because SeqKit is the narrowest real local execution
+   slice and is resolved through the configured execution environment.
 3. Finish task 03 after Flye and QUAST environments are configured.
-4. Only after task 03 is stable should the project consider BUSCO, mapping,
-   purge, Hi-C, repeat, gene, or function annotation execution.
+4. Run task 04 with a human-supplied real FASTQ and record the artifact trail.
+5. Add task 05 if the Python one-liner smoke path is still the only way to pass
+   Flye parameters.
+6. Complete task 06 before Phase 5 starts so future agents do not follow stale
+   status notes.
+7. Only after task 04 succeeds and task 06 is updated should the project
+   consider BUSCO, mapping, purge, Hi-C, repeat, gene, or function annotation
+   execution.
 
 ## Phase 4 Done Criteria
 
@@ -111,6 +123,11 @@ Not allowed:
 - QUAST can evaluate the materialized Flye assembly when its environment exists.
 - The workflow stops at `blocked_human` after QUAST and does not auto-promote
   the draft assembly.
+- A human-supplied real FASTQ run records the Phase 4 artifact trail in
+  `docs/handoff.md`.
+- Routine Phase 4 local execution has a structured way to supply Flye
+  parameters, or the remaining Python one-liner limitation is explicitly
+  documented as the next task.
 - All non-mainline downstream stages remain honest planning, skip, or blocked
   states.
 
@@ -121,4 +138,3 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m un
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 ```
-

@@ -221,14 +221,19 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Phase 4 is complete through task 03 in-code. The remaining Phase 4 work is a
-real-biology smoke pass: run `gene-agent run --manifest <local CycloneSEQ FASTQ
-with flye_parameters>` under `env_geno_exec` once Flye and QUAST are installed
-there, and confirm the full `inventory → read_qc → assembly → assembly_review`
-chain produces a real `draft_assembly.fasta`, `report.tsv`,
-`quast_summary.json`, and `assembly_review_request.json` and stops at
-`blocked_human`. That pass is human-driven by design; Phase 5 (broader method
-execution) should not start before that smoke is in the review artifact trail.
+Phase 4 is complete through task 03 in-code. Continue with
+`docs/phases/phase4/04_real_biology_mainline_acceptance.md`: run a
+human-supplied real CycloneSEQ / PacBio FASTQ under `env_geno_exec` and confirm
+the full `inventory → read_qc → assembly → assembly_review` chain produces a
+real `draft_assembly.fasta`, `report.tsv`, `quast_summary.json`, and
+`assembly_review_request.json` and stops at `blocked_human`.
+
+After task 04, implement
+`docs/phases/phase4/05_structured_local_execution_request.md` if the Python
+one-liner is still the only routine way to pass Flye parameters, then complete
+`docs/phases/phase4/06_phase4_status_docs_and_phase5_gate.md` before Phase 5
+starts. Phase 5 (broader method execution) should not start before the real
+Phase 4 smoke is in the review artifact trail.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
