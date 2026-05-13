@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,8 +12,16 @@ from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 
 
+ExecutionStatus = Literal["ok", "failed", "blocked_env", "missing_tool"]
+
+
 class ExecutionResult(BaseModel):
-    """Direct process result from a frozen attempt."""
+    """Direct process result from a frozen attempt.
+
+    `status` distinguishes real process outcomes (ok / failed) from structured
+    preflight block states (blocked_env / missing_tool) so callers can emit the
+    right ledger and state vocabulary without guessing from return codes.
+    """
 
     attempt_id: str
     success: bool
@@ -20,6 +29,8 @@ class ExecutionResult(BaseModel):
     stdout_path: Path
     stderr_path: Path
     output_paths: list[Path] = Field(default_factory=list)
+    status: ExecutionStatus = "ok"
+    status_detail: str = ""
 
 
 class CollectResult(BaseModel):

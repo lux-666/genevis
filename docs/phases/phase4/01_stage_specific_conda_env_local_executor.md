@@ -1,6 +1,6 @@
 # 01 Stage-Specific Conda Env And Local Executor
 
-Task status: planned.
+Task status: partially implemented (environment resolution and LocalRunner conda wrapping only).
 
 ## Goal
 
@@ -103,21 +103,21 @@ override the default fallback environment.
 
 ## Tasks
 
-- [ ] Add `config/envs.yaml` with stage and method environment mappings.
-- [ ] Implement `app/execution/env_resolver.py` to load `config/envs.yaml`.
-- [ ] Add tests for method-level override, stage-level fallback, and default
+- [x] Add `config/envs.yaml` with stage and method environment mappings.
+- [x] Implement `app/execution/env_resolver.py` to load `config/envs.yaml`.
+- [x] Add tests for method-level override, stage-level fallback, and default
   fallback environment behavior.
-- [ ] Add a preflight helper that runs `conda run -n <env> command -v <tool>`
+- [x] Add a preflight helper that runs `conda run -n <env> command -v <tool>`
   or equivalent without relying on shell activation.
-- [ ] Update `LocalRunner` or add a small wrapper so frozen attempts can execute
+- [x] Update `LocalRunner` or add a small wrapper so frozen attempts can execute
   through the resolved conda environment.
-- [ ] Preserve existing fake-binary tests by allowing test-specific env overrides
+- [x] Preserve existing fake-binary tests by allowing test-specific env overrides
   or explicit bypass only in tests.
 - [ ] Update read QC, Flye, QUAST, YaHS, and RepeatMasker frozen attempts to
   carry enough method/stage identity for env resolution.
 - [ ] Ensure missing env or missing tool produces blocked state and ledger
   evidence instead of fake outputs.
-- [ ] Keep stdout/stderr/return code artifacts compatible with existing ledger
+- [x] Keep stdout/stderr/return code artifacts compatible with existing ledger
   and artifact collection.
 
 ## Acceptance
@@ -146,4 +146,32 @@ git diff --check
 - Whether to use env names only or allow absolute conda prefix paths.
 - Whether missing env should be represented as stage `blocked_env` or terminal
   failure for each method family.
+
+## Implemented State
+
+- `config/envs.yaml` ships with `default.conda_bin`, `default.fallback_env`,
+  stage-level entries for `read_qc`, `genome_survey`, `assembly`,
+  `assembly_review`, `hic_scaffolding`, `repeat_annotation`, and method-level
+  overrides for the SeqKit stats / SeqKit seq, Flye, QUAST, YaHS, and
+  RepeatMasker routes.
+- `app/execution/env_resolver.py` exposes `EnvResolver`, `EnvSpec`,
+  `PreflightResult`, and `preflight(...)`. Resolution precedence is
+  method > stage > default. Both `conda_env` (named env) and `conda_prefix`
+  (absolute prefix) are supported; setting both on one entry is rejected.
+- Preflight uses `conda run --live-stream --no-capture-output -n|-p TARGET`
+  to probe env usability and per-tool presence without shell activation. It
+  returns one of `ok`, `blocked_env`, `missing_tool` with a human-readable
+  `detail` and a `missing_tools` list.
+- `FrozenAttemptSpec` carries optional `conda_bin`, `conda_env`, and
+  `conda_prefix`. `LocalRunner` dispatches through `conda run` when either
+  env field is set, otherwise falls back to the legacy shell-based execution
+  so existing fake-binary stage tests stay green.
+- `ExecutionResult` has a structured `status` field (`ok` / `failed` today;
+  `blocked_env` / `missing_tool` reserved for future stage wiring) plus a
+  `status_detail` string so callers can emit the right ledger/state vocabulary.
+- Stage nodes (`read_qc`, `assembly`, `assembly_review`, `hic_scaffolding`,
+  `repeat_annotation`) are not yet wired to `EnvResolver`. That wiring, and
+  the ledger/state mapping of `blocked_env` / `missing_tool`, is deferred to
+  tasks 02 and 03 so each stage integration can be verified with real-data
+  smoke commands.
 

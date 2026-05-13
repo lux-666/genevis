@@ -109,6 +109,15 @@ Completed:
   substeps, genome_survey full/fallback modes, assembly candidates,
   assembly_review gates, Hi-C skip/scaffold policy, repeat/gene/function
   annotation contracts, artifact boundaries, and human-help triggers.
+- Phase 4 task1 ships the environment resolution layer:
+  `config/envs.yaml` carries stage/method conda env mappings;
+  `app/execution/env_resolver.py` resolves method > stage > default
+  precedence, accepts either `conda_env` names or `conda_prefix` paths, and
+  exposes a `preflight(...)` probe that returns `ok` / `blocked_env` /
+  `missing_tool` without requiring shell activation.
+  `FrozenAttemptSpec` now carries optional `conda_bin`, `conda_env`, and
+  `conda_prefix`, and `LocalRunner` dispatches through `conda run` when
+  either env field is set. Existing stage nodes have not been rewired yet.
 
 Not completed:
 
@@ -180,7 +189,7 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Continue Phase 3 from the next approved task after `docs/phases/phase3/10_annotation_realization.md`. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
+Continue Phase 4 from task 02 (`docs/phases/phase4/02_real_fastq_read_qc_smoke.md`) — wire `read_qc` frozen attempts to `EnvResolver`, emit `blocked_env` / `missing_tool` state, and prove the SeqKit stats smoke end-to-end. Do not start local polish/purge execution, repeat/gene/function execution, or broader Hi-C alignment/manual-review tooling without explicit human approval.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -243,7 +252,12 @@ corresponding human decision is explicit in the task docs.
   KofamScan are planning placeholders only; there is no execution path or
   automatic database download for those tools.
 - `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
-  intentionally remains unimplemented.
+  intentionally remains unimplemented. When a frozen attempt sets
+  `conda_env` or `conda_prefix`, `LocalRunner` dispatches through
+  `conda run`; otherwise the legacy shell-based execution is used. Existing
+  stage nodes have not been updated to populate those fields yet, so in
+  practice real local execution still runs in whatever shell env the
+  operator configured unless the stage wiring is updated.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.

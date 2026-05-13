@@ -1,0 +1,49 @@
+# Stage- and method-specific conda environment mapping for real local
+# execution. Method-level entries override stage-level entries, which in turn
+# override the default fallback. Either `conda_env` (named env) or
+# `conda_prefix` (absolute prefix path) may be set on any entry; both together
+# is rejected at load time.
+
+default:
+  conda_bin: conda
+  fallback_env: gene_agent
+
+stages:
+  read_qc:
+    conda_env: gene_agent
+  genome_survey:
+    conda_env: env_genome_survey
+  assembly:
+    conda_env: env_assembly_flye
+  assembly_review:
+    conda_env: env_assembly_review
+  hic_scaffolding:
+    conda_env: env_hic_yahs
+  repeat_annotation:
+    conda_env: env_repeatmasker
+
+methods:
+  read_qc.long_read_stats.seqkit_stats:
+    conda_env: gene_agent
+    required_tools:
+      - seqkit
+  read_qc.length_filter.seqkit_seq:
+    conda_env: gene_agent
+    required_tools:
+      - seqkit
+  assembly.candidate.flye:
+    conda_env: env_assembly_flye
+    required_tools:
+      - flye
+  assembly_review.eval.quast:
+    conda_env: env_assembly_review
+    required_tools:
+      - quast.py
+  hic_scaffolding.candidate.yahs:
+    conda_env: env_hic_yahs
+    required_tools:
+      - yahs
+  repeat_annotation.masking.repeatmasker:
+    conda_env: env_repeatmasker
+    required_tools:
+      - RepeatMasker

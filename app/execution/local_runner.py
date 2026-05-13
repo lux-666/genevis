@@ -11,7 +11,14 @@ from app.schemas.descriptors import FrozenAttemptSpec
 
 
 class LocalRunner(BaseRunner):
-    """Run a frozen attempt in its declared working directory."""
+    """Run a frozen attempt in its declared working directory.
+
+    When the frozen attempt declares `conda_env` or `conda_prefix`, the command
+    is dispatched through `conda run` so the method sees the configured
+    environment's tools regardless of the outer shell. When neither is set the
+    runner keeps the legacy PATH-driven shell path used by existing stage
+    scripts and fake-binary tests.
+    """
 
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
         spec.working_dir.mkdir(parents=True, exist_ok=True)
@@ -20,8 +27,26 @@ class LocalRunner(BaseRunner):
 
         env = os.environ.copy()
         env.update(spec.env)
+
+        use_conda = bool(spec.conda_env or spec.conda_prefix)
         script_name = spec.script_path.name
-        command = f"{spec.env_setup + ' && ' if spec.env_setup else ''}{spec.interpreter} {script_name}"
+        if use_conda:
+            conda_bin = spec.conda_bin or "conda"
+            target = ["-p", spec.conda_prefix] if spec.conda_prefix else ["-n", spec.conda_env]
+            command: list[str] | str = [
+                conda_bin,
+                "run",
+                "--live-stream",
+                "--no-capture-output",
+                *target,
+                spec.interpreter,
+                script_name,
+            ]
+            shell = False
+        else:
+            command = f"{spec.env_setup + ' && ' if spec.env_setup else ''}{spec.interpreter} {script_name}"
+            shell = True
+
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w",
             encoding="utf-8",
@@ -30,19 +55,21 @@ class LocalRunner(BaseRunner):
                 command,
                 cwd=spec.working_dir,
                 env=env,
-                shell=True,
+                shell=shell,
                 stdout=stdout,
                 stderr=stderr,
                 check=False,
             )
 
+        success = completed.returncode == 0
         return ExecutionResult(
             attempt_id=spec.attempt_id,
-            success=completed.returncode == 0,
+            success=success,
             return_code=completed.returncode,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             output_paths=spec.expected_outputs,
+            status="ok" if success else "failed",
         )
 
     def collect(self, result: ExecutionResult, spec: FrozenAttemptSpec) -> CollectResult:

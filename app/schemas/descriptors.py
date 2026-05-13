@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ResourceHints(BaseModel):
@@ -69,8 +69,17 @@ class FrozenAttemptSpec(BaseModel):
     expected_outputs: list[Path]
     env: dict[str, str] = Field(default_factory=dict)
     env_setup: str = ""
+    conda_bin: str | None = None
+    conda_env: str | None = None
+    conda_prefix: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _conda_env_and_prefix_are_exclusive(self) -> "FrozenAttemptSpec":
+        if self.conda_env and self.conda_prefix:
+            raise ValueError("FrozenAttemptSpec.conda_env and .conda_prefix are mutually exclusive")
+        return self
 
 
 class DescriptorRegistry(BaseModel):
