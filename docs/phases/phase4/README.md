@@ -61,13 +61,21 @@ paused at the human review gate.
 
 ## Phase 4 Explicit Non-Goals
 
-These remain planning, skip, or blocked-reason paths only:
+Original Phase 4 scope. Some of these later received narrow opt-in slices;
+see the "Phase 4 Implementation Status" table below for the current state.
+Broader execution of these method families remains a non-goal for Phase 4
+and is deferred to Phase 5:
 
-- `genome_survey` real execution
-- `hic_scaffolding` real execution
-- `repeat_annotation` real execution
-- `gene_annotation` real execution
-- `function_annotation` real execution
+- `genome_survey` real execution beyond the Jellyfish + GenomeScope2 opt-in
+  slice
+- `hic_scaffolding` real execution beyond the YaHS opt-in slice (no Juicer,
+  3D-DNA, Juicebox, or raw Hi-C alignment)
+- `repeat_annotation` real execution beyond the RepeatMasker opt-in slice
+  for provided libraries (no EDTA, RepeatModeler, TRF, or de novo library
+  generation)
+- `gene_annotation` real execution (planning-only contract)
+- `function_annotation` real execution (planning-only contract; no database
+  downloads)
 - BUSCO
 - Merqury
 - purge_dups
@@ -130,6 +138,54 @@ Not allowed:
   documented as the next task.
 - All non-mainline downstream stages remain honest planning, skip, or blocked
   states.
+
+## Phase 4 Implementation Status
+
+| Slice | Status |
+|-------|--------|
+| `config/envs.yaml`, `EnvResolver`, `env_dispatch`, `conda run` in `LocalRunner` | implemented in code |
+| `FrozenAttemptSpec` conda fields + mutex validator | implemented in code |
+| `read_qc` SeqKit stats / filter / FOFN under `env_geno_exec` | verified by committed fixture `tests/fixtures/phase4/smoke.fastq` |
+| `read_qc` real-data smoke on `env_geno_exec` with `seqkit` installed | opt-in `Phase4ReadQCRealSmokeTests` (skipped when env missing) |
+| `assembly.candidate.flye` strict `flye_parameters` validation + execution | implemented in code; success path verified with a fake `flye` |
+| `assembly_review.eval.quast` + `quast_summary.json` + action provenance | implemented in code; success path verified with a fake `quast.py` |
+| `--local-exec STAGE` + `--run-config PATH` structured entry | implemented in code; validated before `Ledger.create_session(...)` |
+| `env_geno_exec` preflight → `blocked_env` / `missing_tool` before biological commands | implemented in code |
+| Real long-read Flye → QUAST → `blocked_human` acceptance pass | requires human real-data smoke (task 04) |
+| Artifact trail recorded in `docs/handoff.md` for the real-data pass | requires human real-data smoke (task 04) |
+| BUSCO, Merqury, minimap2 coverage, purge_dups, contamination check | deferred (Phase 5+) |
+| NextDenovo, Canu, hifiasm execution | deferred (Phase 5+) |
+| Juicer, 3D-DNA, Juicebox, raw Hi-C alignment | deferred (Phase 5+) |
+| EDTA, RepeatModeler, TRF, de novo repeat library | deferred (Phase 5+) |
+| BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2, StringTie, IsoQuant, GeMoMa | deferred (Phase 5+) |
+| InterProScan, eggNOG-mapper, DIAMOND, KofamScan + DB provenance execution | deferred (Phase 5+) |
+| `RemoteRunner` execution | deferred (Phase 5+) |
+| Durable cross-process resume (sqlite/postgres checkpointer + lifecycle cmds) | deferred (Phase 6) |
+| `genome_survey` env_dispatch wiring for Jellyfish + GenomeScope2 | deferred (acceptable carry into Phase 5) |
+
+`arm64` hosts: `env_geno_exec` currently has no `quast.py` binary for
+arm64, so the real-data acceptance pass for `assembly_review` cannot
+fully complete on arm64. The code path handles this as
+`status: "missing_tool"` with an `env_preflight_blocked` ledger event.
+
+## Phase 5 Entry Gate
+
+Phase 5 (broader method execution: BUSCO, Merqury, Hi-C alignment,
+NextDenovo/Canu, annotation tools, database downloads) **does not start**
+until all of the following are true:
+
+- Task 04 has been executed on human-supplied real long reads under a
+  working `env_geno_exec`.
+- The run produced a real `draft_assembly.fasta`, `report.tsv`,
+  `quast_summary.json`, and `assembly_review_request.json` and stopped at
+  `supervision_state = "blocked_human"`.
+- The session id, artifact refs, and any observed blocked states are
+  recorded in `docs/handoff.md` under a "Phase 4 Real Biology
+  Acceptance Run Record" (or equivalent) section.
+
+Durable cross-process resume is **not** a Phase 4 prerequisite. It is
+tracked under Phase 6 (observability and durable operation) along with
+sqlite/postgres checkpointing and lifecycle commands.
 
 ## Verification Baseline
 

@@ -1,6 +1,6 @@
 # 06 Phase 4 Status Docs And Phase 5 Gate
 
-Task status: planned.
+Task status: implemented.
 
 ## Goal
 
@@ -36,22 +36,22 @@ execution before the Phase 4 real-biology mainline is accepted.
 
 ## Tasks
 
-- [ ] Update `README.md` so "Current Implementation" matches the current
+- [x] Update `README.md` so "Current Implementation" matches the current
   realized local execution slices.
-- [ ] Update `docs/handoff.md` "Next Best Task" to point to task 04 until the
+- [x] Update `docs/handoff.md` "Next Best Task" to point to task 04 until the
   real-biology mainline acceptance pass is complete.
-- [ ] Remove or correct stale risk notes that contradict the Phase 4 env
+- [x] Remove or correct stale risk notes that contradict the Phase 4 env
   dispatcher implementation.
-- [ ] Add a concise Phase 4 status table:
+- [x] Add a concise Phase 4 status table:
   - implemented in code
   - verified by committed fixture
   - requires human real-data smoke
   - deferred
-- [ ] Add a Phase 5 entry gate that requires task 04 evidence in the artifact
+- [x] Add a Phase 5 entry gate that requires task 04 evidence in the artifact
   trail.
-- [ ] Record durable resume as a Phase 6 / lifecycle prerequisite, not a Phase 4
+- [x] Record durable resume as a Phase 6 / lifecycle prerequisite, not a Phase 4
   implementation task.
-- [ ] Run documentation sanity checks.
+- [x] Run documentation sanity checks.
 
 ## Acceptance
 
@@ -65,3 +65,34 @@ execution before the Phase 4 real-biology mainline is accepted.
 ```bash
 git diff --check
 ```
+
+## Implemented State
+
+- `README.md` "Current Implementation" and "Not implemented" blocks now
+  describe the realized Phase 3/4 slices: real `read_qc` / `genome_survey`
+  (Jellyfish+GenomeScope2 opt-in) / `assembly` (Flye opt-in) /
+  `assembly_review` (QUAST opt-in + action provenance) / `hic_scaffolding`
+  (YaHS opt-in) / `repeat_annotation` (RepeatMasker opt-in); planning-only
+  `gene_annotation` and `function_annotation`; shared `EnvResolver` +
+  `env_dispatch` wired into five of six stages (`genome_survey` excepted);
+  and CLI `--local-exec` + `--run-config` structured entry. The "Read First"
+  list now includes Phase 3/4 README so a new agent lands on the current
+  status doc.
+- `docs/phases/phase4/README.md` gained a "Phase 4 Implementation Status"
+  table and a "Phase 5 Entry Gate" section that makes Phase 5 startup
+  contingent on the task 04 artifact trail being recorded in
+  `docs/handoff.md`.
+- `docs/phases/phase_completion_plan.md` Phase 5 now carries an explicit
+  entry-gate note pointing back at `docs/phases/phase4/README.md`, and
+  Phase 6 now restates that durable cross-process resume is a Phase 6
+  deliverable (sqlite/postgres checkpointer + lifecycle commands), not a
+  Phase 4 prerequisite.
+- `docs/handoff.md` status entries now include a Phase 4 task 06 bullet;
+  the stale Known Risk claiming that `assembly` / `assembly_review` /
+  `hic_scaffolding` / `repeat_annotation` had not been rewired through
+  `env_dispatch` was corrected (only `genome_survey` still needs that
+  wiring); the "Files Most Likely To Change In Phase 2" section is
+  replaced by "Files Most Likely To Change In Phase 5"; the Read Order
+  now includes Phase 3 and Phase 4 READMEs.
+- No code files were touched. Task 06 is doc-only by design and by
+  scope.

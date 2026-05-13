@@ -165,6 +165,14 @@ Completed:
   `gene-agent ask` is untouched — LLM-parsed intents cannot reach Flye
   parameters. Covered by `tests/test_run_config.py` (schema + loader)
   and `tests/test_entrypoints.py::RunConfigCLIIntegrationTests`.
+- Phase 4 task6 reconciles README, handoff, Phase 4 README, and
+  `phase_completion_plan.md` so docs no longer disagree with the
+  realized Phase 3/4 state. Adds a Phase 4 status table
+  (implemented-in-code / fixture-verified / requires real-data smoke /
+  deferred) and a Phase 5 entry gate requiring the task 04 artifact
+  trail in `docs/handoff.md` before Phase 5 starts. Records durable
+  cross-process resume as a Phase 6 concern, not a Phase 4
+  deliverable.
 
 Not completed:
 
@@ -200,8 +208,10 @@ Read these files in order:
 17. `docs/phases/phase2/09_gene_annotation.md`
 18. `docs/phases/phase2/10_function_annotation.md`
 19. `docs/phases/phase2/11_phase2_verification_handoff.md`
-20. `docs/phases/phase_completion_plan.md`
-21. This file again
+20. `docs/phases/phase3/README.md`
+21. `docs/phases/phase4/README.md`
+22. `docs/phases/phase_completion_plan.md`
+23. This file again
 
 Use `/Users/a1/Documents/BGIwork/rna_agent` as a reference for patterns only.
 Do not copy single-cell business names into this project.
@@ -236,24 +246,24 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Phase 4 is complete through task 03 and task 05 in-code. The remaining Phase 4
-work is task 04 (real-biology acceptance) and task 06 (status-doc reconciliation
-+ Phase 5 gate).
+Phase 4 is complete in-code (tasks 01, 02, 03, 05, and 06). The only remaining
+Phase 4 deliverable is task 04 (real-biology acceptance), which is human-driven
+by design.
 
 For task 04, drive a human-supplied real CycloneSEQ / PacBio FASTQ under
 `env_geno_exec` via `gene-agent run --run-config run_config.json` (see
 `docs/phases/phase4/04_real_biology_mainline_acceptance.md` for the exact
 shape). Confirm the full `inventory → read_qc → assembly → assembly_review`
 chain produces a real `draft_assembly.fasta`, `report.tsv`, `quast_summary.json`,
-and `assembly_review_request.json` and stops at `blocked_human`. This pass is
-human-driven by design and requires `seqkit`, `flye`, and `quast.py` installed
-in `env_geno_exec` — `quast.py` is not available on darwin-arm64, so task 04
-cannot fully complete on arm64 hosts.
+and `assembly_review_request.json` and stops at `blocked_human`. This pass
+requires `seqkit`, `flye`, and `quast.py` installed in `env_geno_exec` —
+`quast.py` is not available on darwin-arm64, so task 04 cannot fully complete
+on arm64 hosts.
 
-After task 04 evidence is recorded, complete
-`docs/phases/phase4/06_phase4_status_docs_and_phase5_gate.md` before Phase 5
-starts. Phase 5 (broader method execution) should not start before the real
-Phase 4 smoke is in the review artifact trail.
+Record the resulting session id and artifact refs in this file under a
+"Phase 4 Real Biology Acceptance Run Record" section. Phase 5 (broader method
+execution) does not start until that record exists; see
+`docs/phases/phase4/README.md` for the full Phase 5 entry gate.
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the
@@ -319,10 +329,16 @@ corresponding human decision is explicit in the task docs.
   intentionally remains unimplemented. When a frozen attempt sets
   `conda_env` or `conda_prefix`, `LocalRunner` dispatches through
   `conda run`; otherwise the legacy shell-based execution is used.
-  `read_qc` populates those fields via `EnvResolver` when no PATH bypass is
-  supplied. `assembly`, `assembly_review`, `hic_scaffolding`, and
-  `repeat_annotation` stage nodes have not been rewired yet, so their local
-  execution still trusts whatever shell env the operator configured.
+  `read_qc`, `assembly`, `assembly_review`, `hic_scaffolding`, and
+  `repeat_annotation` all freeze attempts through
+  `app.execution.env_dispatch.resolve_method_env` +
+  `attach_conda_fields`, so each method runs inside the configured
+  `env_geno_exec` (or its per-method override) and emits
+  `blocked_env` / `missing_tool` via shared preflight before any
+  biological command runs. `genome_survey` still builds its own
+  attempts directly and has not been rewired through `env_dispatch`
+  yet — Jellyfish + GenomeScope2 local execution currently trusts
+  whatever shell env the operator configured.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
@@ -330,19 +346,24 @@ corresponding human decision is explicit in the task docs.
   verification; tests use temporary fake `seqkit`, `flye`, `quast.py`, and `yahs`
   executables for success paths and cover missing/failing binary behavior.
 
-## Files Most Likely To Change In Phase 2
+## Files Most Likely To Change In Phase 5
 
-- `app/schemas/plan.py`
-- `app/stages/read_qc/nodes.py`
-- `app/stages/read_qc/builder.py`
-- `app/stages/read_qc/routing.py`
-- `app/stages/genome_survey/nodes.py`
-- `app/stages/genome_survey/routing.py`
-- `app/execution/local_runner.py`
-- `app/schemas/commands.py`
-- `app/schemas/artifacts.py`
-- `config/defaults.yaml`
-- `descriptors/packages/` and `descriptors/methods/`
+Phase 5 is gated on the Phase 4 real-biology smoke (see `docs/phases/phase4/README.md`).
+When Phase 5 starts, expect touches in:
+
+- `config/envs.yaml` (method-level entries for new tools)
+- `descriptors/packages/` and `descriptors/methods/` (BUSCO, Merqury,
+  NextDenovo, Canu, Juicer/3D-DNA, EDTA/RepeatModeler/TRF, BRAKER3, Miniprot,
+  HISAT2/StringTie/IsoQuant, GeMoMa, InterProScan, DIAMOND, KofamScan, etc.)
+- `app/stages/assembly_review/` (BUSCO/Merqury/coverage/purge/contamination
+  signal execution beyond QUAST)
+- `app/stages/hic_scaffolding/` (Juicer/3D-DNA/Juicebox execution paths;
+  raw Hi-C alignment)
+- `app/stages/repeat_annotation/` (de novo repeat library execution)
+- `app/stages/gene_annotation/` and `app/stages/function_annotation/` (real
+  execution + database provenance)
+- `app/stages/genome_survey/` (wire through `env_dispatch` when Jellyfish or
+  GenomeScope2 real execution is broadened)
 - new tests under `tests/`
 - docs touched when behavior changes
 

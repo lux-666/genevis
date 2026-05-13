@@ -3,12 +3,16 @@
 Gene Agent is a LangGraph-based workflow scaffold for ONT/CLR long-read genome
 assembly and annotation projects.
 
-The repository has a corrected Phase 1 inventory implementation and the first
-Phase 2 executable slice for CycloneSEQ read QC. The current value is the
-project shape, state contracts, stage contracts, descriptor roots, handoff
-documentation, inventory, SeqKit stats execution boundary, genome survey
-contracts, assembly candidate planning, the assembly review human gate, and
-Hi-C scaffold/skip planning.
+The repository implements the Phase 1 inventory gate, the Phase 2/3 CycloneSEQ
+mainline contract through function annotation, and the Phase 4 real local
+execution slices for the `inventory → read_qc → assembly → assembly_review`
+mainline. Every real executable method on that Phase 4 mainline dispatches
+through a shared conda env (`env_geno_exec`) via `EnvResolver` +
+`env_dispatch` + `LocalRunner`, is opt-in per stage, and produces structured
+blocked states (`blocked_input`, `blocked_param`, `blocked_env`,
+`missing_tool`) rather than faking success. `genome_survey` has opt-in
+Jellyfish + GenomeScope2 execution that still trusts the operator's shell
+environment; wiring it through `env_dispatch` is tracked as Phase 5 carry-over.
 
 ## Biological Backbone
 
@@ -34,62 +38,72 @@ Start here if you are taking over the project:
 6. [docs/stage_contracts.md](docs/stage_contracts.md)
 7. [docs/phases/phase1/phase1.md](docs/phases/phase1/phase1.md)
 8. [docs/phases/phase2/phase2.md](docs/phases/phase2/phase2.md)
-9. [docs/phases/phase2/01_*.md through 11_*.md](docs/phases/phase2/)
-10. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
+9. [docs/phases/phase3/README.md](docs/phases/phase3/README.md)
+10. [docs/phases/phase4/README.md](docs/phases/phase4/README.md)
+11. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
 
 ## Current Implementation
 
 Implemented:
 
-- thin parent graph skeleton
-- real inventory stage and a real `read_qc.long_read_stats` SeqKit stats slice
-- real `genome_survey` full/fallback/skip contract stage
-- real `assembly` candidate planning stage with Flye, hifiasm, NextDenovo, and
-  Canu planning descriptors
-- real `assembly_review` human gate with evaluation/review artifacts and ledger
-  events
-- real `hic_scaffolding` skip/scaffold planning stage with skip artifacts,
-  candidate descriptors, and human blocking when chromosome-level Hi-C
-  scaffolding is requested
-- placeholder downstream domain stage subgraphs after Hi-C scaffolding
-- small `TopLevelState`
-- asset, plan, descriptor, artifact, command, and event schema roots
-- descriptor/config roots, including SeqKit, genome survey, assembly planning,
-  assembly review, and Hi-C scaffolding descriptors
-- phase plan and handoff documentation
-- Phase 1 inventory code for manifest loading, asset registry writing, ledger
-  events, and CLI invocation
-- natural-language `ask` entry that extracts source files/folders and stable
-  hints, materializes an internal manifest, and reuses the structured
-  `run --manifest ...` graph entry path
-- minimal local subprocess runner for frozen attempts
-- SeqKit stats artifact registration and ledger attempt events
+- thin parent graph skeleton with full stage order and terminal-failure routing
+- real `inventory` stage with manifest loading, asset registration, registry
+  JSON artifact, absolutised asset paths, and ledger events
+- real `read_qc` stage with SeqKit stats, optional `seqkit seq` min-length
+  filtering, stable `long_reads.fofn` / `filtered_long_reads.fofn`, and
+  `read_qc_summary.json`
+- real `genome_survey` stage with full Jellyfish + GenomeScope2 opt-in
+  execution, CycloneSEQ-only low-confidence fallback, and explicit skip record
+- real `assembly` stage with deterministic candidate planning, opt-in local
+  Flye execution (strict `flye_parameters` validation → `blocked_param`), and
+  materialized `draft_assembly.fasta`
+- real `assembly_review` stage with opt-in local QUAST, `quast_summary.json`,
+  action-provenance artifacts for pass/purge/polish, and a human gate that
+  does not invent thresholds
+- real `hic_scaffolding` stage with opt-in local YaHS, scaffold/skip policy,
+  pre-Hi-C assembly preservation, and contact-map human review block
+- real `repeat_annotation` stage with opt-in local RepeatMasker for provided
+  libraries and softmasked genome handoff
+- `gene_annotation` and `function_annotation` planning-only contracts with
+  evidence profile routing and database-provenance requirements
+- shared `EnvResolver` + `env_dispatch`: method/stage/default precedence,
+  `conda run` dispatch, and preflight that emits `blocked_env` / `missing_tool`
+  before any biological command runs; wired into `read_qc`, `assembly`,
+  `assembly_review`, `hic_scaffolding`, and `repeat_annotation`
+- CLI `gene-agent run --manifest ... [--local-exec STAGE] [--run-config PATH]`
+  for structured local execution; repeatable `--local-exec` and JSON run-config
+  seed only approved `stage_outputs` fields and are validated before graph
+  invocation
+- CLI `gene-agent ask "..."` natural-language entry that materialises a
+  manifest from source files/folders and reuses the structured `run` path
+- CLI `gene-agent inspect --session-id ...` reads durable ledger/artifact
+  records
+- in-process structured review resume helpers for `assembly_review` and
+  `hic_scaffolding`
+- minimal `LocalRunner` that dispatches through `conda run` when a frozen
+  attempt carries `conda_env` / `conda_prefix`
 
 Not implemented:
 
-- executable bioinformatics method catalog beyond SeqKit stats
-- RemoteRunner execution
-- genome survey tool execution, assembly tool execution, Hi-C scaffolding tool
-  execution, repeat, gene, or function annotation execution
-- complete review interrupt blocking/resume semantics
-- production-grade requested-stage routing; the placeholder `--stages` flag is
-  intentionally not exposed yet
-
-Phase 1 correction notes are documented in
-[docs/phases/phase1/phase1.md](docs/phases/phase1/phase1.md).
-
-Phase 2 CycloneSEQ planning is documented in
-[docs/phases/phase2/phase2.md](docs/phases/phase2/phase2.md). The first
-executable slice, `read_qc.long_read_stats` with SeqKit stats, is implemented;
-the same Phase 2 plan also defines the single-line contracts through function
-annotation.
+- `RemoteRunner` execution
+- genome_survey env_dispatch wiring (Jellyfish/GenomeScope2 local execution
+  still trusts the operator's shell env)
+- executable bioinformatics methods beyond the slices above (BUSCO, Merqury,
+  minimap2 coverage, purge_dups, contamination check; NextDenovo, Canu,
+  hifiasm; Juicer/3D-DNA/Juicebox and raw Hi-C alignment; EDTA, RepeatModeler,
+  TRF, de novo repeat library; BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
+  StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, DIAMOND, KofamScan)
+- requested-stage routing (the `--stages` flag is intentionally not exposed)
+- durable cross-process resume (the graph uses the memory-only LangGraph
+  checkpointer; this is a Phase 6 concern)
+- automatic annotation database downloads
 
 ## Verification
 
 Use the same environment and pycache prefix used during scaffold validation:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest tests.test_manifest tests.test_inventory tests.test_entrypoints tests.test_project_scaffold tests.test_read_qc tests.test_genome_survey tests.test_assembly tests.test_assembly_review tests.test_hic_scaffolding -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
 ```bash

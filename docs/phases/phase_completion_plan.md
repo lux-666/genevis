@@ -149,6 +149,12 @@ Exit criteria:
 
 ## Phase 5: Hi-C, Repeat, Gene, and Function Annotation
 
+**Entry gate (added during Phase 4 task 06):** Phase 5 does not start until the
+Phase 4 real-biology mainline has succeeded on human-supplied real long reads
+and the resulting session id, `draft_assembly.fasta`, `report.tsv`,
+`quast_summary.json`, and `assembly_review_request.json` refs are recorded in
+`docs/handoff.md`. See `docs/phases/phase4/README.md` for the exact criteria.
+
 Goal: complete the downstream annotation backbone with descriptor-driven method families.
 
 Tasks:
@@ -168,7 +174,9 @@ Goal: make runs auditable and resumable for long projects.
 
 Tasks:
 - Add user/developer notebook traces.
-- Add sqlite/postgres checkpointer.
+- Add sqlite/postgres checkpointer. Durable cross-process resume is a Phase 6
+  prerequisite, not a Phase 4 deliverable; the Phase 4 scaffold uses the
+  memory-only LangGraph checkpointer and in-process review resume helpers.
 - Add lifecycle commands: pause, resume, retry, abort, review.
 - Add database version provenance for annotation resources.
 
