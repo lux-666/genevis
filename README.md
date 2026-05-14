@@ -6,13 +6,12 @@ assembly and annotation projects.
 The repository implements the Phase 1 inventory gate, the Phase 2/3 CycloneSEQ
 mainline contract through function annotation, and the Phase 4 real local
 execution slices for the `inventory → read_qc → assembly → assembly_review`
-mainline. Every real executable method on that Phase 4 mainline dispatches
-through a shared conda env (`env_geno_exec`) via `EnvResolver` +
-`env_dispatch` + `LocalRunner`, is opt-in per stage, and produces structured
-blocked states (`blocked_input`, `blocked_param`, `blocked_env`,
-`missing_tool`) rather than faking success. `genome_survey` has opt-in
-Jellyfish + GenomeScope2 execution that still trusts the operator's shell
-environment; wiring it through `env_dispatch` is tracked as Phase 5 carry-over.
+mainline. Every real executable method dispatches through a shared conda env
+(`env_geno_exec`) via `EnvResolver` + `env_dispatch` + `LocalRunner`, is opt-in
+per stage, and produces structured blocked states (`blocked_input`,
+`blocked_param`, `blocked_env`, `missing_tool`) rather than faking success.
+`genome_survey`'s Jellyfish + GenomeScope2 local route is wired through the
+same `env_dispatch` path as of Phase 5 task 01.
 
 ## Biological Backbone
 
@@ -87,8 +86,6 @@ Not implemented:
 
 - in-agent remote execution (intentionally unsupported; see
   [`docs/deployment/mac_dev_server_pull.md`](docs/deployment/mac_dev_server_pull.md))
-- genome_survey env_dispatch wiring (Jellyfish/GenomeScope2 local execution
-  still trusts the operator's shell env)
 - executable bioinformatics methods beyond the slices above (BUSCO, Merqury,
   minimap2 coverage, purge_dups, contamination check; NextDenovo, Canu,
   hifiasm; Juicer/3D-DNA/Juicebox and raw Hi-C alignment; EDTA, RepeatModeler,

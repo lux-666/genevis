@@ -1,6 +1,8 @@
 # 01 Execution Consistency And Server Gate
 
-Task status: planned.
+Task status: implemented in code (2026-05-14). Server-side validation
+(`scripts/server_check.sh` + `scripts/server_test.sh` after `git pull`) is
+still pending and tracked in `docs/handoff.md`.
 
 ## Goal
 
@@ -65,16 +67,16 @@ Mac remains the development and lightweight-test environment.
 
 ## Tasks
 
-- [ ] Review all active references to `RemoteRunner`, remote runner, SSH
+- [x] Review all active references to `RemoteRunner`, remote runner, SSH
   ControlMaster, gateway, and local-to-server command dispatch.
-- [ ] Remove or reword active docs so server execution means "run the same CLI
+- [x] Remove or reword active docs so server execution means "run the same CLI
   on the server checkout after git pull."
-- [ ] Add env config entries for `genome_survey` methods if they are missing or
+- [x] Add env config entries for `genome_survey` methods if they are missing or
   incomplete.
-- [ ] Wire `genome_survey` attempt freezing through the shared env dispatcher.
-- [ ] Add tests for missing `jellyfish` / missing `genomescope2` preflight
+- [x] Wire `genome_survey` attempt freezing through the shared env dispatcher.
+- [x] Add tests for missing `jellyfish` / missing `genomescope2` preflight
   blocks.
-- [ ] Confirm existing tests still cover successful fake-binary genome survey
+- [x] Confirm existing tests still cover successful fake-binary genome survey
   execution.
 - [ ] Run server helper scripts on the server/HPC after `git pull`.
 - [ ] Record the server-side validation result in `docs/handoff.md`.
@@ -89,6 +91,45 @@ Mac remains the development and lightweight-test environment.
 - No active plan tells agents to implement local-agent-controlled remote
   execution.
 - All verification commands pass.
+
+## Implementation Notes
+
+- `config/envs.yaml` gains two method-level entries:
+  `genome_survey.kmer_count.jellyfish` (`required_tools: [jellyfish]`)
+  and `genome_survey.model.genomescope2`
+  (`required_tools: [genomescope.R]`). The probed binary name matches
+  what the freeze script invokes, so preflight rejects an environment
+  where the script alias does not exist.
+- `app/stages/genome_survey/nodes.py` rewires `freeze_jellyfish_attempt`
+  and `freeze_genomescope2_attempt` to call
+  `app.execution.env_dispatch.resolve_method_env(...)` and merge the
+  resolved spec into the `FrozenAttemptSpec` kwargs via
+  `attach_conda_fields(...)`. Both freezes use
+  `app.stages.base.absolute_data_dir(state)` for path composition (same
+  fix already applied to `read_qc` / `assembly`). The bypass branch
+  (`stage_outputs.genome_survey.env.PATH` set) survives because
+  `env_dispatch.has_explicit_path_override` returns `(None, None)` and
+  the existing fake-binary tests keep passing.
+- `app/stages/genome_survey/routing.py` introduces
+  `route_after_freeze` and a shared `FAIL_STATUSES = {"failed",
+  "blocked_env", "missing_tool"}` (mirrors the assembly stage). The
+  builder uses it to short-circuit a preflight block to `fail` before
+  any biological command runs.
+- `commit_genome_survey` retains `env_target` / `missing_tools` /
+  `method_name` / `reason` on the committed payload, and
+  `fail_genome_survey` defaults to a structured reason on
+  `blocked_env` / `missing_tool` (parallels read_qc /
+  repeat_annotation).
+- New tests in
+  `tests.test_genome_survey.GenomeSurveyEnvPreflightTests`:
+  `test_missing_conda_env_blocks_jellyfish_with_blocked_env_status`,
+  `test_missing_jellyfish_in_env_blocks_with_missing_tool_status`,
+  `test_missing_genomescope_after_jellyfish_succeeds_blocks_with_missing_tool`.
+  All three assert no biological binary runs before preflight blocks,
+  and the jellyfish-then-genomescope test additionally proves the
+  per-method preflight order is honored. Existing fixture-PATH tests
+  (`test_local_full_mode_runs_jellyfish_and_genomescope2` and friends)
+  still run because the bypass path is preserved.
 
 ## Verification
 

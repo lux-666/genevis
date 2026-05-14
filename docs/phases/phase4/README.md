@@ -163,7 +163,7 @@ Not allowed:
 | InterProScan, eggNOG-mapper, DIAMOND, KofamScan + DB provenance execution | deferred (Phase 5+) |
 | in-agent remote execution | intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`) |
 | Durable cross-process resume (sqlite/postgres checkpointer + lifecycle cmds) | deferred (Phase 6) |
-| `genome_survey` env_dispatch wiring for Jellyfish + GenomeScope2 | deferred (acceptable carry into Phase 5) |
+| `genome_survey` env_dispatch wiring for Jellyfish + GenomeScope2 | implemented in code (Phase 5 task 01) |
 
 `arm64` hosts: `env_geno_exec` currently has no `quast.py` binary for
 arm64, so the real-data acceptance pass for `assembly_review` cannot

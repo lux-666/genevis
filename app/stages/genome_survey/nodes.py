@@ -9,8 +9,10 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
+from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     GENOME_SURVEY_KMER_DB,
     GENOME_SURVEY_KMER_HIST,
@@ -31,6 +33,8 @@ EXECUTED_FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
     "genome_survey.model.genomescope2",
 ]
+JELLYFISH_METHOD = "genome_survey.kmer_count.jellyfish"
+GENOMESCOPE2_METHOD = "genome_survey.model.genomescope2"
 GENOME_SURVEY_METHOD = "genome_survey.contract"
 NO_LOW_ERROR_SHORT_READS = "no_low_error_short_reads"
 
@@ -190,7 +194,18 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
         return {}
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
+    env_spec, blocked = resolve_method_env(
+        survey_out,
+        stage="genome_survey",
+        method_name=JELLYFISH_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_genome_survey_output(state, blocked)
+
     working_dir = data_dir / "work" / "genome_survey" / session_id / "jellyfish"
     artifact_dir = data_dir / "artifacts" / "genome_survey" / session_id
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -212,23 +227,26 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:genome_survey:jellyfish",
-        session_id=session_id,
-        stage="genome_survey",
-        method_name="genome_survey.kmer_count.jellyfish",
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[kmer_db, kmer_hist],
-        env={str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:genome_survey:jellyfish",
+        "session_id": session_id,
+        "stage": "genome_survey",
+        "method_name": JELLYFISH_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [kmer_db, kmer_hist],
+        "env": {str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
+        "metadata": {
             "input_asset_refs": survey_out.get("clean_short_dna_read_refs", []),
             "kmer_size": params["kmer_size"],
             "kmer_db_path": str(kmer_db),
             "kmer_hist_path": str(kmer_hist),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_genome_survey_output(
         state,
         {
@@ -297,7 +315,18 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
         return {}
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
+    env_spec, blocked = resolve_method_env(
+        survey_out,
+        stage="genome_survey",
+        method_name=GENOMESCOPE2_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_genome_survey_output(state, blocked)
+
     working_dir = data_dir / "work" / "genome_survey" / session_id / "genomescope2"
     artifact_dir = data_dir / "artifacts" / "genome_survey" / session_id / "genomescope2"
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -316,21 +345,24 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt = FrozenAttemptSpec(
-        attempt_id=f"{session_id}:genome_survey:genomescope2",
-        session_id=session_id,
-        stage="genome_survey",
-        method_name="genome_survey.model.genomescope2",
-        script_path=script_path,
-        working_dir=working_dir,
-        interpreter="/bin/bash",
-        expected_outputs=[summary_path],
-        env={str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
-        metadata={
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:genome_survey:genomescope2",
+        "session_id": session_id,
+        "stage": "genome_survey",
+        "method_name": GENOMESCOPE2_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [summary_path],
+        "env": {str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
+        "metadata": {
             "kmer_hist_path": survey_out.get("kmer_hist_path"),
             "summary_path": str(summary_path),
         },
-    )
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
     return _update_genome_survey_output(
         state,
         {
@@ -521,14 +553,18 @@ def commit_genome_survey(state: TopLevelState) -> dict:
         "artifact_refs",
         "candidate_methods",
         "confidence",
+        "env_target",
         "estimates",
         "executed_methods",
         "genomescope2_output_dir_ref",
         "genomescope2_summary_ref",
         "kmer_db_artifact_ref",
         "kmer_hist_artifact_ref",
+        "method_name",
+        "missing_tools",
         "mode",
         "notes",
+        "reason",
         "result_artifact_ref",
         "skip_reason",
         "status",
@@ -546,12 +582,17 @@ def commit_genome_survey(state: TopLevelState) -> dict:
 
 
 def fail_genome_survey(state: TopLevelState) -> dict:
-    """Stop the workflow on genome survey setup failure."""
+    """Stop the workflow on genome survey setup failure or preflight block."""
     survey_out = _genome_survey_output(state)
+    status = survey_out.get("status", "failed")
+    default_reason = {
+        "blocked_env": "genome_survey blocked on missing conda environment",
+        "missing_tool": "genome_survey blocked on missing tool",
+    }.get(status, "genome_survey failed")
     return {
         "current_stage": "genome_survey",
         "supervision_state": "failed_terminal",
-        "last_error": survey_out.get("reason", "genome_survey failed"),
+        "last_error": survey_out.get("reason", default_reason),
     }
 
 

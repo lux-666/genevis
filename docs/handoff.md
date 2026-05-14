@@ -193,6 +193,29 @@ Completed:
   `app/schemas/manifest.py` and `app/schemas/run_config.py`; placeholder
   paths only, no private data). `app/entrypoints/run.py` is intentionally
   untouched.
+- Phase 5 task1 wires `genome_survey` Jellyfish + GenomeScope2 through
+  the shared `env_dispatch` path so it no longer trusts the operator's
+  shell PATH for tool resolution. Adds
+  `genome_survey.kmer_count.jellyfish` and
+  `genome_survey.model.genomescope2` method entries to
+  `config/envs.yaml` with `required_tools: [jellyfish]` /
+  `[genomescope.R]`. Rewrites `freeze_jellyfish_attempt` and
+  `freeze_genomescope2_attempt` to call `resolve_method_env` +
+  `attach_conda_fields` before building each `FrozenAttemptSpec`, uses
+  `app.stages.base.absolute_data_dir(...)` for path composition, and
+  extends genome_survey routing with `route_after_freeze` so a
+  preflight block short-circuits to `fail` before any biological
+  command runs. `commit_genome_survey` now retains
+  `env_target` / `missing_tools` / `method_name` / `reason` on
+  blocked output and `fail_genome_survey` defaults a structured reason
+  for `blocked_env` / `missing_tool` (mirrors the read_qc /
+  repeat_annotation pattern). Existing fixture-based tests that seed
+  `stage_outputs.genome_survey.env.PATH` keep working because
+  `env_dispatch.has_explicit_path_override` still steps aside.
+  Regression tests in
+  `tests.test_genome_survey.GenomeSurveyEnvPreflightTests` cover
+  empty-PATH `blocked_env`, jellyfish `missing_tool`, and the
+  jellyfish-runs-then-genomescope-blocks `missing_tool` path.
 
 Not completed:
 
@@ -449,16 +472,17 @@ execution; the workflow is Mac dev → server `git pull` (see
   (see `docs/deployment/mac_dev_server_pull.md`). When a frozen attempt sets
   `conda_env` or `conda_prefix`, `LocalRunner` dispatches through
   `conda run`; otherwise the legacy shell-based execution is used.
-  `read_qc`, `assembly`, `assembly_review`, `hic_scaffolding`, and
-  `repeat_annotation` all freeze attempts through
+  `read_qc`, `genome_survey`, `assembly`, `assembly_review`,
+  `hic_scaffolding`, and `repeat_annotation` all freeze attempts through
   `app.execution.env_dispatch.resolve_method_env` +
   `attach_conda_fields`, so each method runs inside the configured
   `env_geno_exec` (or its per-method override) and emits
   `blocked_env` / `missing_tool` via shared preflight before any
-  biological command runs. `genome_survey` still builds its own
-  attempts directly and has not been rewired through `env_dispatch`
-  yet — Jellyfish + GenomeScope2 local execution currently trusts
-  whatever shell env the operator configured.
+  biological command runs. `genome_survey` was wired through
+  `env_dispatch` in Phase 5 task 01; the previous shell-PATH bypass is
+  preserved only when the caller explicitly seeds
+  `stage_outputs.genome_survey.env.PATH`, used by the existing
+  fake-binary fixture tests.
 - Review interrupts now have in-process structured resume helpers, but there is no durable cross-process `ResumeInterrupt` flow until a persistent checkpointer is added.
 - Requested-stage routing is not implemented; the CLI flag is intentionally not
   exposed.
@@ -482,8 +506,6 @@ When Phase 5 starts, expect touches in:
 - `app/stages/repeat_annotation/` (de novo repeat library execution)
 - `app/stages/gene_annotation/` and `app/stages/function_annotation/` (real
   execution + database provenance)
-- `app/stages/genome_survey/` (wire through `env_dispatch` when Jellyfish or
-  GenomeScope2 real execution is broadened)
 - new tests under `tests/`
 - docs touched when behavior changes
 

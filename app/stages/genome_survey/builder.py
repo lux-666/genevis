@@ -25,6 +25,7 @@ from app.stages.genome_survey.nodes import (
 from app.stages.genome_survey.routing import (
     route_after_collect_genomescope2,
     route_after_collect_jellyfish,
+    route_after_freeze,
     route_after_full_plan,
     route_after_plan,
     route_after_resolve,
@@ -75,7 +76,11 @@ def build_stage():
         route_after_full_plan,
         {"freeze_jellyfish": "freeze_jellyfish_attempt", "commit": "commit", "fail": "fail"},
     )
-    graph.add_edge("freeze_jellyfish_attempt", "run_jellyfish_attempt")
+    graph.add_conditional_edges(
+        "freeze_jellyfish_attempt",
+        route_after_freeze,
+        {"run": "run_jellyfish_attempt", "fail": "fail"},
+    )
     graph.add_conditional_edges(
         "run_jellyfish_attempt",
         route_after_run,
@@ -86,7 +91,11 @@ def build_stage():
         route_after_collect_jellyfish,
         {"freeze_genomescope2": "freeze_genomescope2_attempt", "fail": "fail"},
     )
-    graph.add_edge("freeze_genomescope2_attempt", "run_genomescope2_attempt")
+    graph.add_conditional_edges(
+        "freeze_genomescope2_attempt",
+        route_after_freeze,
+        {"run": "run_genomescope2_attempt", "fail": "fail"},
+    )
     graph.add_conditional_edges(
         "run_genomescope2_attempt",
         route_after_run,

@@ -46,6 +46,14 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - seqkit
+  genome_survey.kmer_count.jellyfish:
+    conda_env: env_geno_exec
+    required_tools:
+      - jellyfish
+  genome_survey.model.genomescope2:
+    conda_env: env_geno_exec
+    required_tools:
+      - genomescope.R
   assembly.candidate.flye:
     conda_env: env_geno_exec
     required_tools:

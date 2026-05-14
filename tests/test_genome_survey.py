@@ -433,5 +433,229 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertTrue(Path(survey["result_artifact_ref"]).exists())
 
 
+class GenomeSurveyEnvPreflightTests(unittest.TestCase):
+    """Phase 5 task 01: jellyfish/genomescope2 must run through env_dispatch."""
+
+    def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        path = Path(tmpdir) / "registry.json"
+        path.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    def _state(self, tmpdir: str, registry_ref: str):
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+            data_dir=tmpdir,
+        )
+        state["current_stage"] = "genome_survey"
+        state["asset_registry_ref"] = registry_ref
+        return state
+
+    def _short_read_registry(self, tmpdir: str) -> Path:
+        short_reads = Path(tmpdir) / "short.fq"
+        short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        return self._write_registry(
+            tmpdir,
+            assets=[
+                {
+                    "asset_id": "s1:clean_short_dna_reads:short.fq",
+                    "asset_type": "clean_short_dna_reads",
+                    "path": str(short_reads),
+                    "platform": "illumina",
+                }
+            ],
+        )
+
+    def test_missing_conda_env_blocks_jellyfish_with_blocked_env_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = self._short_read_registry(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            # No env.PATH override → env_dispatch resolves and preflights via
+            # config/envs.yaml. Empty PATH removes conda so preflight reports
+            # blocked_env before any jellyfish/genomescope2 command runs.
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "read_length": 150,
+                        "hash_size": "10M",
+                    },
+                }
+            }
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = ""
+            try:
+                result = build_stage().invoke(state)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(result["current_stage"], "genome_survey")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "blocked_env")
+            self.assertEqual(survey["method_name"], "genome_survey.kmer_count.jellyfish")
+            self.assertIn("conda", result["last_error"])
+            ledger_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+            ]
+            event_types = [event["event_type"] for event in ledger_events]
+            self.assertIn("env_preflight_blocked", event_types)
+            self.assertNotIn("attempt_started", event_types)
+
+    def test_missing_jellyfish_in_env_blocks_with_missing_tool_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = self._short_read_registry(tmpdir)
+            # Stub conda that reports env ok but every tool probe fails, so
+            # the first method (jellyfish) blocks before any binary runs.
+            conda_stub_dir = Path(tmpdir) / "conda-stub-bin"
+            conda_stub_dir.mkdir()
+            conda_stub = conda_stub_dir / "conda"
+            conda_stub.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"run\" ]; then\n"
+                "  shift\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    case \"$1\" in\n"
+                "      --live-stream|--no-capture-output) shift ;;\n"
+                "      -n|-p) shift 2 ;;\n"
+                "      *) break ;;\n"
+                "    esac\n"
+                "  done\n"
+                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
+                "  exit 1\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            conda_stub.chmod(0o755)
+
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "read_length": 150,
+                        "hash_size": "10M",
+                    },
+                }
+            }
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{conda_stub_dir}{os.pathsep}{old_path}"
+            try:
+                result = build_stage().invoke(state)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "missing_tool")
+            self.assertEqual(survey["method_name"], "genome_survey.kmer_count.jellyfish")
+            self.assertIn("jellyfish", survey["missing_tools"])
+
+    def test_missing_genomescope_after_jellyfish_succeeds_blocks_with_missing_tool(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_reads = Path(tmpdir) / "short.fq"
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_short_dna_reads:short.fq",
+                        "asset_type": "clean_short_dna_reads",
+                        "path": str(short_reads),
+                        "platform": "illumina",
+                    }
+                ],
+            )
+            # Stub conda that:
+            #   - reports env ok for the env probe (`true`)
+            #   - reports `jellyfish` present but `genomescope.R` missing
+            #   - executes jellyfish itself by writing the expected outputs
+            conda_stub_dir = Path(tmpdir) / "conda-stub-bin"
+            conda_stub_dir.mkdir()
+            conda_stub = conda_stub_dir / "conda"
+            conda_stub.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"run\" ]; then\n"
+                "  shift\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    case \"$1\" in\n"
+                "      --live-stream|--no-capture-output) shift ;;\n"
+                "      -n|-p) shift 2 ;;\n"
+                "      *) break ;;\n"
+                "    esac\n"
+                "  done\n"
+                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
+                "  if [ \"$1\" = \"sh\" ] && [ \"$2\" = \"-c\" ]; then\n"
+                "    # Tool probe: positional $1 is the tool name (5th arg of `sh -c ... preflight TOOL`).\n"
+                "    if [ \"$5\" = \"jellyfish\" ]; then exit 0; fi\n"
+                "    if [ \"$5\" = \"genomescope.R\" ]; then exit 1; fi\n"
+                "    exit 1\n"
+                "  fi\n"
+                "  if [ \"$1\" = \"/bin/bash\" ]; then\n"
+                "    # Execute the script normally so jellyfish counts/histos run.\n"
+                "    exec \"$@\"\n"
+                "  fi\n"
+                "  exit 1\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            conda_stub.chmod(0o755)
+            # Provide a fake jellyfish on PATH because conda passes execution
+            # through to bash, which then needs jellyfish itself.
+            jelly_stub_dir = Path(tmpdir) / "jelly-stub-bin"
+            jelly_stub_dir.mkdir()
+            jellyfish_stub = jelly_stub_dir / "jellyfish"
+            jellyfish_stub.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"count\" ]; then\n"
+                "  while [ \"$1\" != \"-o\" ]; do shift; done\n"
+                "  shift\n"
+                "  printf 'fake-jf\\n' > \"$1\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1\" = \"histo\" ]; then\n"
+                "  printf '1\\t10\\n2\\t5\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            jellyfish_stub.chmod(0o755)
+
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "read_length": 150,
+                        "hash_size": "10M",
+                    },
+                }
+            }
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{conda_stub_dir}{os.pathsep}{jelly_stub_dir}{os.pathsep}{old_path}"
+            )
+            try:
+                result = build_stage().invoke(state)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "missing_tool")
+            self.assertEqual(survey["method_name"], "genome_survey.model.genomescope2")
+            self.assertIn("genomescope.R", survey["missing_tools"])
+
+
 if __name__ == "__main__":
     unittest.main()
