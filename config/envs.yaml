@@ -1,8 +1,16 @@
 # Stage- and method-specific conda environment mapping for real local
 # execution. Method-level entries override stage-level entries, which in turn
-# override the default fallback. Either `conda_env` (named env) or
-# `conda_prefix` (absolute prefix path) may be set on any entry; both together
-# is rejected at load time.
+# override the default fallback.
+#
+# Two mutually exclusive target forms are supported on any entry:
+#   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
+#   conda_prefix: /opt/conda/envs/x   # abs path   → conda run -p /opt/conda/envs/x
+# Using both on the same entry is rejected at load time.
+#
+# The default section likewise accepts either fallback_env or fallback_prefix
+# (not both):
+#   fallback_env: env_geno_exec
+#   fallback_prefix: /opt/conda/envs/env_geno_exec
 #
 # All bioinformatics tools (seqkit, flye, quast.py, yahs, RepeatMasker, ...)
 # are expected to live in a single shared conda env `env_geno_exec`. The
@@ -12,10 +20,12 @@
 default:
   conda_bin: conda
   fallback_env: env_geno_exec
+  # fallback_prefix: /opt/conda/envs/env_geno_exec  # alternative: use abs path
 
 stages:
   read_qc:
     conda_env: env_geno_exec
+    # conda_prefix: /opt/conda/envs/env_geno_exec  # alternative form
   genome_survey:
     conda_env: env_geno_exec
   assembly:
