@@ -61,7 +61,7 @@ Decision artifacts/method roles:
 - [x] Register QUAST report artifacts, command stdout/stderr, updated evaluation bundle, and ledger attempt events.
 - [x] Update candidate-specific QUAST review signals to `available`, `failed`, or `missing` without applying thresholds.
 - [x] Preserve the human review gate for generated assembly candidates even when QUAST metrics are available.
-- [x] Keep BUSCO, Merqury, mapping coverage, purge checks, contamination screening, polishing, purging, and RemoteRunner deferred.
+- [x] Keep BUSCO, Merqury, mapping coverage, purge checks, contamination screening, polishing, and purging deferred. In-agent remote execution is intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`).
 
 ## Implemented State
 

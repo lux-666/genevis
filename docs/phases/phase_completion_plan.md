@@ -119,8 +119,10 @@ Tasks:
   optional approved filtering.
 - Realize genome survey, assembly, assembly review, post-review actions,
   optional Hi-C scaffolding, and downstream annotation in order.
-- Keep `RemoteRunner`, requested-stage routing, and broad method execution out of
-  scope until their semantics are explicit.
+- Keep requested-stage routing and broad method execution out of scope until
+  their semantics are explicit. In-agent remote execution is intentionally
+  unsupported; server-side execution happens after `git pull` (see
+  `docs/deployment/mac_dev_server_pull.md`).
 
 Exit criteria:
 - A natural-language request can start the existing graph path through a validated

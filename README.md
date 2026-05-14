@@ -85,7 +85,8 @@ Implemented:
 
 Not implemented:
 
-- `RemoteRunner` execution
+- in-agent remote execution (intentionally unsupported; see
+  [`docs/deployment/mac_dev_server_pull.md`](docs/deployment/mac_dev_server_pull.md))
 - genome_survey env_dispatch wiring (Jellyfish/GenomeScope2 local execution
   still trusts the operator's shell env)
 - executable bioinformatics methods beyond the slices above (BUSCO, Merqury,

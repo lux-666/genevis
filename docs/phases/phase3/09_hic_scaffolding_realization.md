@@ -48,7 +48,7 @@ Candidate methods/roles:
 - [x] Require a materialized pre-Hi-C assembly plus a materialized Hi-C alignment input for local YaHS; raw Hi-C read alignment remains deferred.
 - [x] Register YaHS scaffold candidate FASTA, optional AGP, review bundle, command stdout/stderr, and ledger attempt events.
 - [x] Preserve the pre-Hi-C assembly as `final_assembly_for_annotation` until human/contact-map review approves promotion.
-- [x] Keep Juicer, 3D-DNA, Juicebox, contact-map scoring, thresholds, and RemoteRunner deferred.
+- [x] Keep Juicer, 3D-DNA, Juicebox, contact-map scoring, and thresholds deferred. In-agent remote execution is intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`).
 
 ## Implemented State
 

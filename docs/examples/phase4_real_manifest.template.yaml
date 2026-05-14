@@ -1,0 +1,23 @@
+# Phase 4 server-side real-data smoke manifest template.
+#
+# Copy this file to a server-local data directory (e.g.
+# `data/phase4_real_smoke/manifest.yaml`) and edit the placeholders. Do not
+# commit the edited copy if it carries private paths or real data locations.
+#
+# Schema reference: app/schemas/manifest.py (InputManifest / InputAssetSpec).
+session_id: phase4-server-smoke-YYYYMMDD-a
+sample_id: phase4_server_smoke
+target_assembly_level: contig
+assets:
+  - asset_type: raw_long_reads
+    # Replace with one or more absolute server-local paths. Inventory
+    # absolutises these against the manifest directory if they are relative.
+    paths:
+      - /ABS/PATH/TO/long_reads.fastq.gz
+    platform: cycloneseq        # one of: cycloneseq, ont, clr, pacbio_hifi
+    layout: single
+    format: fastq               # or: fasta
+    compression: gzip           # or: none
+    metadata:
+      source: <basecaller-or-archive-name>
+      note: replace with server-local data; do not commit private paths

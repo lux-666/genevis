@@ -65,7 +65,7 @@ Deferred mode:
 - `app/stages/genome_survey/nodes.py` now keeps default full mode as a planned contract unless `stage_outputs.genome_survey.execution_mode == "local"` is explicitly set.
 - Local full mode validates existing Jellyfish and GenomeScope2 descriptors, freezes deterministic attempts, runs them through `LocalRunner`, registers k-mer DB, k-mer histogram, GenomeScope2 summary, stdout/stderr, and final result artifacts, then records ledger events.
 - Local execution requires explicit `survey_parameters.kmer_size`, `survey_parameters.read_length`, and `survey_parameters.hash_size`; missing or invalid values fail before external tools are invoked.
-- The only executed full-survey route is Jellyfish + GenomeScope2. Meryl, Smudgeplot, trusted `known_genome_size` skip semantics, genome-size conflict review, RemoteRunner, and broad execution remain deferred.
+- The only executed full-survey route is Jellyfish + GenomeScope2. Meryl, Smudgeplot, trusted `known_genome_size` skip semantics, genome-size conflict review, and broad execution remain deferred. In-agent remote execution is intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`).
 - `commit_genome_survey` now writes a compact stage output, dropping resolved asset payloads, local env, survey parameters, frozen attempts, execution results, and transient tool paths.
 - `tests/test_genome_survey.py` covers default planning, fake-binary local execution, missing local parameters, ONT/CLR local-mode guard behavior, fallback, skip, artifact registration, ledger attempts, and compact committed state.
 

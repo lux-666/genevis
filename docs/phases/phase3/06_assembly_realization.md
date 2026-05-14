@@ -65,7 +65,7 @@ they should not be run together with Flye by default.
 - Executed Flye sets assembly stage status to `draft_ready`; this means a real draft candidate has been produced and routed to review, not that the assembly has been promoted as final.
 - Executed Flye candidate bundles keep their candidate identity and point `expected_outputs.draft_assembly_fasta` at the real FASTA artifact consumed by `assembly_review`.
 - Flye failures record `attempt_failed`, remove the expected draft FASTA if present, and do not automatically run NextDenovo or Canu.
-- NextDenovo, Canu, Raven, hifiasm-ONT default behavior, broad resource scheduling, RemoteRunner, polishing, purging, scaffolding, and annotation execution remain deferred.
+- NextDenovo, Canu, Raven, hifiasm-ONT default behavior, broad resource scheduling, polishing, purging, scaffolding, and annotation execution remain deferred. In-agent remote execution is intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`).
 - `tests/test_assembly.py` covers default non-execution, fake-Flye local success, read-QC FOFN input, failure without fallback execution, hifiasm non-default behavior, artifact/ledger records, and compact committed state.
 - `tests/test_assembly_review.py` verifies that an executed assembly-stage candidate passes a real FASTA ref into the existing human review gate.
 

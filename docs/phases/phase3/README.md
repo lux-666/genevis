@@ -168,8 +168,9 @@ artifacts are produced, and which decisions still require human approval.
 10. Realize repeat, gene, and function annotation in downstream order.
 11. Decide requested-stage routing only after natural entry and resume payloads
    are stable.
-12. Decide `RemoteRunner` semantics separately; do not bundle it with natural
-   entry, resume, or a local method slice.
+12. In-agent remote execution is intentionally unsupported; do not bundle it
+    with natural entry, resume, or a local method slice. Server execution
+    happens after `git pull`; see `docs/deployment/mac_dev_server_pull.md`.
 
 ## Phase 3 Done Criteria
 

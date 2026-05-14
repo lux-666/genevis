@@ -297,7 +297,8 @@ Corrections:
   summaries to describe defaults, conditional candidates, helpers, and
   non-default compatibility routes using existing naming conventions only. No new
   YAML layer, descriptor role field, internal package, NanoPlot descriptor,
-  polishing descriptor, threshold, requested-stage routing, RemoteRunner behavior,
+  polishing descriptor, threshold, requested-stage routing, in-agent remote
+  execution behavior,
   or real execution was added.
 
 ## Minimal-Scope Acceptance
@@ -326,7 +327,8 @@ Corrections:
 - Do not implement real NanoPlot, Flye, NextDenovo, Canu, QUAST, polishing,
   Hi-C, repeat, or gene annotation execution in this task.
 - Do not implement requested-stage routing.
-- Do not implement RemoteRunner.
+- Do not introduce in-agent remote execution (intentionally unsupported; see
+  `docs/deployment/mac_dev_server_pull.md`).
 - Do not add large dependency installation steps.
 - Do not add unapproved biological thresholds.
 

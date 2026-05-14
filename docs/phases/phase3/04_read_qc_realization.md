@@ -56,7 +56,8 @@ part of this task unless the migration is explicitly scoped.
 - Trigger a `length_filter_threshold` human gate only when the user explicitly
   requests filtering but the required threshold/config is missing or ambiguous.
 - Do not start assembly in this task.
-- Do not introduce `RemoteRunner`.
+- Do not introduce in-agent remote execution (intentionally unsupported; see
+  `docs/deployment/mac_dev_server_pull.md`).
 
 ## Expected Outputs
 
@@ -87,7 +88,7 @@ part of this task unless the migration is explicitly scoped.
 
 - `app/stages/read_qc/nodes.py` 的 `commit_read_qc` 在进入 `genome_survey` 前显式构造 committed payload；`assembly_input_ref` 只指向 FOFN，approved filtering 可以保留 `filtered_long_reads_ref` 作为 clean reads artifact ref。
 - `tests/test_read_qc.py` 增加断言，确保最终 graph state 不保留 `raw_long_reads_path`、`frozen_attempt`、`execution_result`、临时 stats 输出路径或 `length_filter_request`。
-- 本任务没有新增 NanoPlot/LongQC descriptor、没有新增过滤阈值默认值、没有启用 RemoteRunner，也没有改变下游 stage 决策。
+- 本任务没有新增 NanoPlot/LongQC descriptor、没有新增过滤阈值默认值、没有启用 in-agent 远程执行（已被明确不支持），也没有改变下游 stage 决策。
 
 ## Acceptance
 

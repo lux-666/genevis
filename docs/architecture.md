@@ -46,7 +46,7 @@ app/
   graph/       parent graph, route controller, checkpoint factory
   stages/      domain subgraphs and method-family routes
   schemas/     state, asset, plan, descriptor, artifact contracts
-  execution/   local/remote runner boundary
+  execution/   local subprocess runner (no in-agent remote execution)
   forge/       context, codegen, validation, freezing
   review/      rule checks and interrupt-backed human gates
   control/     ledger and lifecycle commands
@@ -60,11 +60,20 @@ Module ownership:
 | `graph/` | Parent LangGraph wiring, routing, checkpoint factory | Tool execution, biological method choice |
 | `stages/` | Stage subgraphs, stage planners, method-family routing | Package-level script generation internals |
 | `schemas/` | Cross-module contracts | Side effects |
-| `execution/` | Running frozen attempts and collecting declared outputs | Deciding whether a method is biologically appropriate |
+| `execution/` | Running frozen attempts locally and collecting declared outputs | In-agent remote orchestration (intentionally unsupported; see `docs/deployment/mac_dev_server_pull.md`) |
 | `forge/` | Generating, validating, and freezing attempt scripts | Mutating graph, ledger, lifecycle, or descriptors |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
 | `control/` | Ledger and lifecycle semantics | Starting tools or reading huge data files |
 | `reports/` | Trace and notebook/report rendering | Workflow control decisions |
+
+## Server Execution
+
+Server execution is achieved by running the same `gene-agent` CLI inside the
+server checkout after `git pull`. There is no in-agent remote runner, no SSH
+ControlMaster, and no gateway-driven execution. Mac development handles
+editing, review, and lightweight tests; real bioinformatics runs happen on
+the server. See `docs/deployment/mac_dev_server_pull.md` for the workflow
+contract and `scripts/server_*.sh` for the helper scripts.
 
 ## State Contract
 

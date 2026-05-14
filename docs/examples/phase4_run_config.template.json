@@ -1,0 +1,10 @@
+{
+  "local_exec": ["read_qc", "assembly", "assembly_review"],
+  "assembly": {
+    "flye_parameters": {
+      "read_type": "nano-raw",
+      "estimated_genome_size": 2000000,
+      "threads": 4
+    }
+  }
+}

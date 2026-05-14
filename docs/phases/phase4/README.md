@@ -44,6 +44,7 @@ paused at the human review gate.
 4. [Real Biology Mainline Acceptance](04_real_biology_mainline_acceptance.md)
 5. [Structured Local Execution Request](05_structured_local_execution_request.md)
 6. [Phase 4 Status Docs And Phase 5 Gate](06_phase4_status_docs_and_phase5_gate.md)
+7. [Mac Dev And Server Pull Adaptation](07_mac_dev_server_pull_adaptation.md)
 
 ## Current Assumptions
 
@@ -80,7 +81,8 @@ and is deferred to Phase 5:
 - Merqury
 - purge_dups
 - contamination check
-- RemoteRunner
+- in-agent remote execution (intentionally unsupported; see
+  `docs/deployment/mac_dev_server_pull.md`)
 - requested-stage routing
 - automatic assembly acceptance thresholds
 - automatic fallback assembler execution after Flye failure
@@ -159,7 +161,7 @@ Not allowed:
 | EDTA, RepeatModeler, TRF, de novo repeat library | deferred (Phase 5+) |
 | BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2, StringTie, IsoQuant, GeMoMa | deferred (Phase 5+) |
 | InterProScan, eggNOG-mapper, DIAMOND, KofamScan + DB provenance execution | deferred (Phase 5+) |
-| `RemoteRunner` execution | deferred (Phase 5+) |
+| in-agent remote execution | intentionally unsupported (see `docs/deployment/mac_dev_server_pull.md`) |
 | Durable cross-process resume (sqlite/postgres checkpointer + lifecycle cmds) | deferred (Phase 6) |
 | `genome_survey` env_dispatch wiring for Jellyfish + GenomeScope2 | deferred (acceptable carry into Phase 5) |
 
@@ -167,6 +169,9 @@ Not allowed:
 arm64, so the real-data acceptance pass for `assembly_review` cannot
 fully complete on arm64. The code path handles this as
 `status: "missing_tool"` with an `env_preflight_blocked` ledger event.
+Run the QUAST acceptance pass on the server checkout after `git pull`
+when the local arm64 host lacks `quast.py`; see
+`docs/deployment/mac_dev_server_pull.md`.
 
 ## Phase 5 Entry Gate
 

@@ -173,13 +173,35 @@ Completed:
   trail in `docs/handoff.md` before Phase 5 starts. Records durable
   cross-process resume as a Phase 6 concern, not a Phase 4
   deliverable.
+- Phase 4 task7 retires the abandoned local-agent-controls-server model
+  in favor of a Mac-dev plus server `git pull` workflow. Deletes
+  `app/execution/remote_runner.py` (placeholder, no callers) and
+  `remote/README.md`; rewrites `app/execution/__init__.py` plus active
+  Phase 3/4 docs from "RemoteRunner deferred" to "in-agent remote
+  execution intentionally unsupported". Adds three server-local helper
+  scripts that never install packages: `scripts/server_check.sh`
+  (commit/branch + conda env + `seqkit`/`flye`/`quast.py` probe with
+  actionable failure messages), `scripts/server_test.sh` (mirrors the
+  Mac unittest + compileall + `git diff --check` loop on the server
+  checkout), `scripts/server_phase4_smoke.sh` (validates
+  `--manifest`/`--run-config`/`--session-id`/`--data-dir`, calls
+  `gene-agent run` under `gene_agent`, prints expected Phase 4 artifact
+  paths, forwards the CLI exit code). Adds
+  `docs/deployment/mac_dev_server_pull.md` (workflow contract +
+  acceptance-record checklist), `docs/examples/phase4_real_manifest.template.yaml`
+  and `docs/examples/phase4_run_config.template.json` (validated against
+  `app/schemas/manifest.py` and `app/schemas/run_config.py`; placeholder
+  paths only, no private data). `app/entrypoints/run.py` is intentionally
+  untouched.
 
 Not completed:
 
 - No broad executable bioinformatics method catalog beyond the realized SeqKit,
   Jellyfish/GenomeScope2, Flye, explicit QUAST, explicit YaHS, and explicit
   RepeatMasker slices.
-- RemoteRunner execution is not implemented.
+- In-agent remote execution is intentionally unsupported. Server execution
+  happens after `git pull` on the server checkout; see
+  `docs/deployment/mac_dev_server_pull.md`.
 - Local polish/purge action execution, raw Hi-C alignment generation,
   Juicer/3D-DNA/Juicebox execution, de novo repeat library execution, gene
   annotation execution, and function annotation execution are not implemented.
@@ -360,8 +382,10 @@ acceptance section. Until then the Phase 5 entry gate in
 QUAST no).
 
 Do not implement broad assembly, annotation, requested-stage routing, database
-downloads, genome-size conflict thresholds, or RemoteRunner before the
-corresponding human decision is explicit in the task docs.
+downloads, or genome-size conflict thresholds before the corresponding human
+decision is explicit in the task docs. Do not reintroduce in-agent remote
+execution; the workflow is Mac dev → server `git pull` (see
+`docs/deployment/mac_dev_server_pull.md`).
 
 ## Immediate Design Decisions Already Made
 
@@ -419,8 +443,10 @@ corresponding human decision is explicit in the task docs.
 - Function annotation descriptors for InterProScan, eggNOG-mapper, DIAMOND, and
   KofamScan are planning placeholders only; there is no execution path or
   automatic database download for those tools.
-- `LocalRunner` has only minimal subprocess execution; `RemoteRunner`
-  intentionally remains unimplemented. When a frozen attempt sets
+- `LocalRunner` is the only runner; it runs on whichever machine invokes
+  `gene-agent`. There is no in-agent `RemoteRunner` — server execution is
+  achieved by running the same CLI on the server checkout after `git pull`
+  (see `docs/deployment/mac_dev_server_pull.md`). When a frozen attempt sets
   `conda_env` or `conda_prefix`, `LocalRunner` dispatches through
   `conda run`; otherwise the legacy shell-based execution is used.
   `read_qc`, `assembly`, `assembly_review`, `hic_scaffolding`, and
