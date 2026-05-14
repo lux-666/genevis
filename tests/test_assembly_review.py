@@ -660,6 +660,70 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 {"assembly.candidate.canu": "genome_size_required"},
             )
 
+    def test_relative_data_dir_resolves_to_absolute_paths_in_quast_script(self):
+        # Regression: freeze_quast_attempts embeds data_dir-derived paths into
+        # the generated shell script. When data_dir is relative the runner's
+        # cwd (nested under data_dir) would make those paths resolve to a
+        # non-existent nested location. The script must embed absolute paths.
+        import os
+        from unittest.mock import patch
+        from app.execution.env_resolver import EnvSpec
+        from app.stages.assembly_review.nodes import freeze_quast_attempts
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            draft = tmp / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="s1:assembly.candidate.flye",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            old_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                state = self._build_state(
+                    session_id="s1",
+                    entry_mode="raw_inputs",
+                    data_dir="out",
+                )
+                state["stage_outputs"]["assembly"] = {
+                    "status": "draft_ready",
+                    "selected_candidate_refs": [str(candidate_ref)],
+                }
+                state["stage_outputs"]["assembly_review"] = {
+                    "execution_mode": "local",
+                    "env": {"PATH": "/nonexistent"},
+                    "quast_parameters": {"threads": 1},
+                    "candidates": [
+                        {
+                            "candidate_id": "s1:assembly.candidate.flye",
+                            "method_name": "assembly.candidate.flye",
+                            "status": "planned",
+                            "final_assembly_ref": str(draft),
+                        }
+                    ],
+                }
+                with patch(
+                    "app.stages.assembly_review.nodes._validate_review_methods",
+                    return_value=None,
+                ), patch(
+                    "app.stages.assembly_review.nodes.resolve_method_env",
+                    return_value=(EnvSpec(conda_env="env_geno_exec"), None),
+                ):
+                    result = freeze_quast_attempts(state)
+                attempts = result.get("stage_outputs", {}).get("assembly_review", {}).get("quast_frozen_attempts", [])
+                self.assertTrue(attempts, "expected at least one frozen attempt")
+                script_path = Path(attempts[0]["script_path"])
+                self.assertTrue(script_path.exists(), f"script not found: {script_path}")
+                script_text = script_path.read_text(encoding="utf-8")
+                expected_out_dir = tmp / "out" / "artifacts" / "assembly_review" / "s1" / "quast"
+                self.assertIn(str(expected_out_dir), script_text)
+                self.assertNotIn(" out/artifacts/", script_text)
+            finally:
+                os.chdir(old_cwd)
+
 
 class AssemblyReviewSchemaTests(unittest.TestCase):
     def test_assembly_review_plan_has_no_threshold_defaults(self):

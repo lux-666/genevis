@@ -12,6 +12,7 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
+from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -46,21 +47,6 @@ FLYE_REQUIRED_PARAMS = ("read_type", "estimated_genome_size", "threads")
 
 def _assembly_output(state: TopLevelState) -> dict[str, Any]:
     return dict((state.get("stage_outputs") or {}).get("assembly", {}))
-
-
-def _absolute_data_dir(state: TopLevelState) -> Path:
-    """Return data_dir as an absolute path without canonicalising.
-
-    The runner sets cwd to the attempt working directory, which is itself
-    nested under data_dir. A relative data_dir interpolated into a generated
-    shell script's path argument therefore resolves from inside that workdir
-    and points at a non-existent nested location. `Path.resolve()` is
-    avoided because it canonicalises macOS `/var/folders/...` paths.
-    """
-    raw = Path(state.get("data_dir", "data"))
-    if raw.is_absolute():
-        return raw
-    return (Path.cwd() / raw).absolute()
 
 
 def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
@@ -316,7 +302,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         return _fail_update(state, error)
 
     session_id = state["session_id"]
-    data_dir = _absolute_data_dir(state)
+    data_dir = absolute_data_dir(state)
     env_spec, blocked = resolve_method_env(
         assembly_out,
         stage="assembly",

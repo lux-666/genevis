@@ -22,6 +22,7 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
@@ -223,7 +224,7 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
         return _update_assembly_review_output(state, {"status": "failed", "reason": error})
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     env_spec, blocked = resolve_method_env(
         ar_out,
         stage="assembly_review",

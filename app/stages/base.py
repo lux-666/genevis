@@ -2,8 +2,26 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.graph.routing import next_stage_name
 from app.schemas.state import TopLevelState
+
+
+def absolute_data_dir(state: TopLevelState) -> Path:
+    """Return data_dir as an absolute path without canonicalising.
+
+    The runner sets cwd to the attempt working directory, which is nested
+    under data_dir. A relative data_dir interpolated into a generated shell
+    script therefore resolves from inside that workdir and points at a
+    non-existent nested location. Path.resolve() is avoided because it
+    canonicalises macOS /var/folders/... paths, which breaks tests that
+    build paths under tempfile.TemporaryDirectory().
+    """
+    raw = Path(state.get("data_dir", "data"))
+    if raw.is_absolute():
+        return raw
+    return (Path.cwd() / raw).absolute()
 
 
 def enter_stage(stage: str, state: TopLevelState) -> dict:
