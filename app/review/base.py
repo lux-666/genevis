@@ -7,9 +7,11 @@ inventing policy.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ReviewDecision = Literal[
     "pending",
@@ -72,3 +74,31 @@ class ResumeReviewRequest(BaseModel):
     rejected_candidates: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def load_resume_review_request(path: str | Path) -> ResumeReviewRequest:
+    """Load and validate a JSON decision file.
+
+    Raises ``FileNotFoundError`` when the file is missing and
+    ``ValueError`` when the file is unreadable, not valid JSON, or fails
+    schema validation. The CLI should call this before mutating
+    checkpoint, artifacts, or ledger.
+    """
+
+    decision_path = Path(path)
+    if not decision_path.exists():
+        raise FileNotFoundError(f"decision file not found: {decision_path}")
+    try:
+        text = decision_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"decision file is not readable: {decision_path}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"decision file is not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("decision file must be a JSON object at the top level")
+    try:
+        return ResumeReviewRequest.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(f"decision file failed validation: {exc}") from exc

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.graph.checkpointer import get_checkpointer
+from app.graph.checkpointer import (
+    DEFAULT_CHECKPOINTER_BACKEND,
+    CheckpointerBackend,
+    get_checkpointer,
+)
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.state import TopLevelState
 from app.stages.assembly.builder import build_stage as build_assembly_stage
@@ -18,8 +22,18 @@ from app.stages.read_qc.builder import build_stage as build_read_qc_stage
 from app.stages.repeat_annotation.builder import build_stage as build_repeat_annotation_stage
 
 
-def build_graph(*, checkpointer=None):
-    """Build the thin parent graph."""
+def build_graph(
+    *,
+    checkpointer=None,
+    backend: CheckpointerBackend = DEFAULT_CHECKPOINTER_BACKEND,
+    data_dir: str = "data",
+):
+    """Build the thin parent graph.
+
+    ``checkpointer`` overrides backend resolution when provided (used by
+    tests). ``backend`` and ``data_dir`` are otherwise passed to the
+    factory so a CLI run can choose sqlite or memory persistence.
+    """
     graph = StateGraph(TopLevelState)
 
     graph.add_node("route_controller", route_controller)
@@ -64,4 +78,10 @@ def build_graph(*, checkpointer=None):
     ]:
         graph.add_edge(node_name, "route_controller")
 
-    return graph.compile(checkpointer=checkpointer if checkpointer is not None else get_checkpointer())
+    return graph.compile(
+        checkpointer=(
+            checkpointer
+            if checkpointer is not None
+            else get_checkpointer(backend, data_dir=data_dir)
+        )
+    )

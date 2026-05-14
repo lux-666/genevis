@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _run_ask, _run_inspect, _run_session, generate_session_id
+from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.schemas.entry import EntryRequest
 
 
@@ -165,8 +165,11 @@ class EntrypointTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
-            self.assertIn("checkpoint_persistence: memory_only", stdout)
-            self.assertIn("resume_note: durable cross-process resume is not available yet", stdout)
+            self.assertIn("checkpoint_persistence: memory", stdout)
+            self.assertIn(
+                "resume_note: durable cross-process resume requires --checkpointer sqlite",
+                stdout,
+            )
             self.assertEqual(
                 captured,
                 {
@@ -179,10 +182,10 @@ class EntrypointTests(unittest.TestCase):
             self.assertTrue((root / "data" / "ledger" / "s1" / "session.json").exists())
 
     def test_missing_manifest_returns_before_graph_invocation(self):
-        with patch("app.entrypoints.run.build_graph") as build_graph:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
             code, stdout, stderr = _capture_cli(
                 _run_session,
-                argparse.Namespace(session_id="s1", manifest="missing.yaml", data_dir="data"),
+                argparse.Namespace(session_id="s1", manifest="missing.yaml", data_dir=str(Path(tmp) / "data")),
             )
 
         self.assertEqual(code, 1)
@@ -191,10 +194,10 @@ class EntrypointTests(unittest.TestCase):
         build_graph.assert_not_called()
 
     def test_blank_manifest_is_rejected_before_path_resolution(self):
-        with patch("app.entrypoints.run.build_graph") as build_graph:
+        with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
             code, stdout, stderr = _capture_cli(
                 _run_session,
-                argparse.Namespace(session_id="s1", manifest="", data_dir="data"),
+                argparse.Namespace(session_id="s1", manifest="", data_dir=str(Path(tmp) / "data")),
             )
 
         self.assertEqual(code, 1)
@@ -342,7 +345,7 @@ class EntrypointTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
-            self.assertIn("checkpoint_persistence: memory_only", stdout)
+            self.assertIn("checkpoint_persistence: memory", stdout)
             parse_request.assert_called_once_with(
                 "use manifest",
                 defaults={"session_id": "default", "data_dir": str(root / "default_data")},
@@ -565,13 +568,48 @@ class EntrypointTests(unittest.TestCase):
                 else:
                     os.environ["GENE_AGENT_LLM_MODEL"] = old_model
 
+    def test_main_loads_dotenv_for_resume_subcommand(self):
+        from app.entrypoints.run import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(
+                "GENE_AGENT_DOTENV_RESUME_PROBE=from-dotenv\n",
+                encoding="utf-8",
+            )
+            old = os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE")
+            os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
+            try:
+                with patch("os.getcwd", return_value=str(root)):
+                    # Resume will exit non-zero (no decision file etc.) — we
+                    # only care that .env was loaded before _run_resume runs.
+                    main([
+                        "resume",
+                        "--session-id", "s1",
+                        "--decision-file", str(root / "missing.json"),
+                        "--data-dir", str(root / "data"),
+                        "--checkpointer", "sqlite",
+                    ])
+                self.assertEqual(os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"), "from-dotenv")
+            finally:
+                if old is None:
+                    os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
+                else:
+                    os.environ["GENE_AGENT_DOTENV_RESUME_PROBE"] = old
+
 
 class RunConfigCLIIntegrationTests(unittest.TestCase):
     def _namespace(self, **overrides):
+        # data_dir has no safe default — every test must point it at a
+        # tempfile.TemporaryDirectory() to avoid spilling sqlite
+        # checkpoints into the repo cwd. The base dict therefore
+        # leaves it required; the assertion fails fast if a future
+        # caller forgets to override it.
+        if "data_dir" not in overrides:
+            raise AssertionError("_namespace requires an explicit data_dir override")
         base = dict(
             session_id="s1",
             manifest="manifest.yaml",
-            data_dir="data",
             local_exec=[],
             run_config=None,
         )
@@ -813,6 +851,142 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             build_graph.assert_not_called()
             initial_state.assert_not_called()
             self.assertFalse((root / "data" / "ledger").exists())
+
+
+class ResumeCLITests(unittest.TestCase):
+    def _write_decision(self, path: Path, **overrides) -> Path:
+        payload = {
+            "session_id": "s1",
+            "stage": "assembly_review",
+            "decision": "accept",
+            "candidate_id": "flye",
+            "final_assembly_ref": "draft.fasta",
+            "notes": ["test"],
+        }
+        payload.update(overrides)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_parser_accepts_resume_subcommand(self):
+        args = _parse_args(
+            [
+                "resume",
+                "--session-id", "s1",
+                "--decision-file", "decision.json",
+                "--data-dir", "out",
+            ]
+        )
+        self.assertEqual(args.command, "resume")
+        self.assertEqual(args.session_id, "s1")
+        self.assertEqual(args.decision_file, "decision.json")
+        self.assertEqual(args.data_dir, "out")
+        # Default is None at the parser level; backend resolution falls
+        # through to GENE_AGENT_CHECKPOINTER, then DEFAULT_CHECKPOINTER_BACKEND.
+        self.assertIsNone(args.checkpointer)
+
+    def test_resume_rejects_memory_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = self._write_decision(Path(tmp) / "decision.json")
+            code, stdout, stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id="s1",
+                    decision_file=str(decision),
+                    data_dir=str(Path(tmp) / "data"),
+                    checkpointer="memory",
+                ),
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("durable resume requires --checkpointer sqlite", stderr)
+
+    def test_resume_rejects_decision_session_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = self._write_decision(Path(tmp) / "decision.json", session_id="other")
+            code, stdout, stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id="s1",
+                    decision_file=str(decision),
+                    data_dir=str(Path(tmp) / "data"),
+                    checkpointer="sqlite",
+                ),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("'other'", stderr)
+        self.assertIn("'s1'", stderr)
+
+    def test_resume_rejects_missing_decision_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, stdout, stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id="s1",
+                    decision_file=str(Path(tmp) / "missing.json"),
+                    data_dir=str(Path(tmp) / "data"),
+                    checkpointer="sqlite",
+                ),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("decision file not found", stderr)
+
+    def test_resume_rejects_invalid_decision_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = Path(tmp) / "decision.json"
+            decision.write_text("{not json", encoding="utf-8")
+            code, stdout, stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id="s1",
+                    decision_file=str(decision),
+                    data_dir=str(Path(tmp) / "data"),
+                    checkpointer="sqlite",
+                ),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("not valid JSON", stderr)
+
+    def test_resume_rejects_missing_checkpoint_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = self._write_decision(Path(tmp) / "decision.json")
+            code, stdout, stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id="s1",
+                    decision_file=str(decision),
+                    data_dir=str(Path(tmp) / "data"),
+                    checkpointer="sqlite",
+                ),
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("no durable checkpoint database", stderr)
+        self.assertIn("--data-dir", stderr)
+
+
+class CheckpointerBackendResolutionTests(unittest.TestCase):
+    def test_explicit_arg_wins_over_env_var(self):
+        ns = argparse.Namespace(checkpointer="sqlite")
+        with patch.dict(os.environ, {"GENE_AGENT_CHECKPOINTER": "memory"}):
+            self.assertEqual(_resolve_checkpointer_backend(ns), "sqlite")
+
+    def test_env_var_wins_when_arg_is_none(self):
+        ns = argparse.Namespace(checkpointer=None)
+        with patch.dict(os.environ, {"GENE_AGENT_CHECKPOINTER": "memory"}):
+            self.assertEqual(_resolve_checkpointer_backend(ns), "memory")
+
+    def test_default_when_neither_set(self):
+        ns = argparse.Namespace(checkpointer=None)
+        original = os.environ.pop("GENE_AGENT_CHECKPOINTER", None)
+        try:
+            self.assertEqual(_resolve_checkpointer_backend(ns), "sqlite")
+        finally:
+            if original is not None:
+                os.environ["GENE_AGENT_CHECKPOINTER"] = original
+
+    def test_missing_attr_falls_through(self):
+        ns = argparse.Namespace()
+        with patch.dict(os.environ, {"GENE_AGENT_CHECKPOINTER": "memory"}):
+            self.assertEqual(_resolve_checkpointer_backend(ns), "memory")
 
 
 def _capture_cli(func, *args):

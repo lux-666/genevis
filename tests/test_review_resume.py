@@ -18,7 +18,7 @@ from app.control.lifecycle import (
     inspect_state,
     resume_review_state,
 )
-from app.review.base import ResumeReviewRequest
+from app.review.base import ResumeReviewRequest, load_resume_review_request
 
 
 class ReviewResumeTests(unittest.TestCase):
@@ -446,6 +446,37 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(summary["latest_unresolved_review_request"]["event_type"], "review_requested")
         self.assertEqual(summary["supervision_state"], "blocked_human")
 
+    def test_inspect_session_exposes_decision_requirements_from_artifact(self):
+        # F8: inspect_session reads decisions_allowed/candidate_ids out of
+        # the latest review request artifact JSON so the operator does not
+        # have to open it manually before writing a decision file.
+        state = _assembly_blocked_state()
+
+        summary = inspect_session("s1", state["data_dir"])
+
+        requirements = summary["decision_requirements"]
+        self.assertIsNotNone(requirements)
+        self.assertEqual(requirements["stage"], "assembly_review")
+        self.assertEqual(
+            sorted(requirements["decisions_allowed"]),
+            sorted(["pass", "accept", "purge", "polish", "continue_low_confidence", "stop_human_review"]),
+        )
+        self.assertEqual(sorted(requirements["candidate_ids"]), ["canu", "flye"])
+        self.assertTrue(requirements["requires_structured_resume"])
+
+    def test_inspect_session_decision_requirements_none_when_no_unresolved(self):
+        state = _assembly_blocked_state()
+        # Add a decision after the request → unresolved goes away.
+        from app.control.ledger import Ledger
+
+        Ledger(state["data_dir"]).record_review_decision(
+            "s1", "assembly_review", decision="accept", candidate_id="flye"
+        )
+
+        summary = inspect_session("s1", state["data_dir"])
+
+        self.assertIsNone(summary["decision_requirements"])
+
     def test_inspect_session_uses_latest_review_event_order(self):
         state = _assembly_blocked_state()
         from app.control.ledger import Ledger
@@ -472,6 +503,77 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertTrue(summary["blocked_timeout"]["expired"])
 
 
+class LoadResumeReviewRequestTests(unittest.TestCase):
+    def test_round_trips_valid_decision_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decision.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "stage": "assembly_review",
+                        "decision": "accept",
+                        "candidate_id": "flye",
+                        "final_assembly_ref": "draft.fasta",
+                        "notes": ["operator reviewed QUAST"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = load_resume_review_request(path)
+            self.assertEqual(request.session_id, "s1")
+            self.assertEqual(request.stage, "assembly_review")
+            self.assertEqual(request.decision, "accept")
+            self.assertEqual(request.candidate_id, "flye")
+
+    def test_missing_file_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            load_resume_review_request("/nonexistent/decision.json")
+
+    def test_invalid_json_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decision.json"
+            path.write_text("{bad", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not valid JSON"):
+                load_resume_review_request(path)
+
+    def test_non_object_top_level_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decision.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "JSON object"):
+                load_resume_review_request(path)
+
+    def test_extra_field_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decision.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "stage": "assembly_review",
+                        "decision": "accept",
+                        "candidate_id": "flye",
+                        "final_assembly_ref": "draft.fasta",
+                        "unknown_field": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "validation"):
+                load_resume_review_request(path)
+
+    def test_unknown_decision_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decision.json"
+            path.write_text(
+                json.dumps({"session_id": "s1", "stage": "assembly_review", "decision": "approve"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "validation"):
+                load_resume_review_request(path)
+
+
 def _assembly_blocked_state() -> dict:
     tmp = tempfile.mkdtemp()
     data_dir = Path(tmp) / "data"
@@ -494,6 +596,21 @@ def _assembly_blocked_state() -> dict:
     }
     request_ref.write_text(json.dumps(payload), encoding="utf-8")
     from app.control.ledger import Ledger
+    from app.execution.artifacts import append_artifact_records
+    from app.schemas.artifacts import ArtifactMeta
+
+    append_artifact_records(
+        data_dir,
+        session_id,
+        [
+            ArtifactMeta.from_file(
+                request_ref,
+                stage="assembly_review",
+                method_name="assembly_review.contract",
+                artifact_type="assembly_review.request",
+            )
+        ],
+    )
 
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "manifest.yaml")

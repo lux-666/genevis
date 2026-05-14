@@ -16,6 +16,7 @@ from pathlib import Path
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
 from app.graph.builder import build_graph
+from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
 from app.schemas.run_config import RunConfig, load_run_config
 from app.schemas.state import initial_state
 
@@ -56,6 +57,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "fields (local_exec stages and assembly.flye_parameters)."
         ),
     )
+    run_parser.add_argument(
+        "--checkpointer",
+        choices=["sqlite", "memory"],
+        default=None,
+        help=(
+            "LangGraph checkpoint backend. 'sqlite' (default) persists "
+            "checkpoints under <data_dir>/checkpoints/ so a blocked "
+            "session can be resumed across processes; 'memory' is "
+            "in-process only and intended for tests. Falls back to the "
+            "GENE_AGENT_CHECKPOINTER env var when omitted."
+        ),
+    )
 
     ask_parser = subparsers.add_parser("ask", help="Start a workflow from a natural-language request")
     ask_parser.add_argument("request_text", help="Natural-language workflow-start request")
@@ -65,7 +78,43 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a workflow session from durable records")
     inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
     inspect_parser.add_argument("--data-dir", default="data", help="Output data directory")
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Resume a blocked workflow session from a structured decision file",
+    )
+    resume_parser.add_argument("--session-id", required=True, help="Session identifier to resume")
+    resume_parser.add_argument(
+        "--decision-file",
+        dest="decision_file",
+        required=True,
+        help="Path to a JSON decision file matching ResumeReviewRequest",
+    )
+    resume_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    resume_parser.add_argument(
+        "--checkpointer",
+        choices=["sqlite", "memory"],
+        default=None,
+        help=(
+            "Checkpoint backend; must match what the run used. Falls "
+            "back to GENE_AGENT_CHECKPOINTER env var, then 'sqlite'."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _resolve_checkpointer_backend(args: argparse.Namespace) -> str:
+    """Resolve the checkpoint backend with explicit > env var > default.
+
+    Lets `gene-agent run` and `gene-agent resume` default to durable
+    sqlite for operators while letting the test suite (and any caller
+    that exports ``GENE_AGENT_CHECKPOINTER=memory``) opt out without
+    threading kwargs through every call site.
+    """
+    explicit = getattr(args, "checkpointer", None)
+    if explicit:
+        return explicit
+    return os.environ.get("GENE_AGENT_CHECKPOINTER") or DEFAULT_CHECKPOINTER_BACKEND
 
 
 def _peek_manifest_session_id(manifest_path: Path) -> str | None:
@@ -110,6 +159,8 @@ def _run_session(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: invalid run request: {exc}", file=sys.stderr)
         return 1
+
+    backend = _resolve_checkpointer_backend(args)
 
     manifest_path = Path(request.manifest)
     if not manifest_path.exists():
@@ -186,7 +237,7 @@ def _run_session(args: argparse.Namespace) -> int:
     if stage_outputs != (state.get("stage_outputs") or {}):
         state["stage_outputs"] = stage_outputs
 
-    graph = build_graph()
+    graph = build_graph(backend=backend, data_dir=request.data_dir)
     result = graph.invoke(
         state,
         config={"configurable": {"thread_id": request.session_id}},
@@ -202,8 +253,14 @@ def _run_session(args: argparse.Namespace) -> int:
     print(f"session_id: {request.session_id}")
     print(f"current_stage: {current_stage}")
     print(f"supervision_state: {supervision}")
-    print("checkpoint_persistence: memory_only")
-    print("resume_note: durable cross-process resume is not available yet")
+    print(f"checkpoint_persistence: {backend}")
+    if backend == "sqlite":
+        print(
+            "resume_note: pass --decision-file to `gene-agent resume` to "
+            "continue a blocked session"
+        )
+    else:
+        print("resume_note: durable cross-process resume requires --checkpointer sqlite")
     print(f"route_trace: {route_trace}")
     if active_interrupt:
         print(f"active_interrupt: {active_interrupt}")
@@ -220,7 +277,6 @@ def _run_session(args: argparse.Namespace) -> int:
 
 
 def _run_ask(args: argparse.Namespace) -> int:
-    _load_dotenv_without_override()
     from app.entrypoints.intent import parse_request_with_llm
     from app.entrypoints.manifest_materializer import materialize_entry_manifest
 
@@ -270,6 +326,17 @@ def _run_inspect(args: argparse.Namespace) -> int:
         print(f"latest_review_request: {summary['latest_review_request']}")
     if summary.get("latest_review_request_artifact"):
         print(f"latest_review_request_artifact: {summary['latest_review_request_artifact']}")
+    requirements = summary.get("decision_requirements")
+    if requirements:
+        # Surface the structured decision contract so operators can author
+        # a decision file without opening the request artifact themselves.
+        print(f"decision_requirements.stage: {requirements.get('stage')}")
+        decisions_allowed = requirements.get("decisions_allowed") or []
+        print(f"decision_requirements.decisions_allowed: {decisions_allowed}")
+        if requirements.get("candidate_ids"):
+            print(f"decision_requirements.candidate_ids: {requirements['candidate_ids']}")
+        if requirements.get("candidate_methods"):
+            print(f"decision_requirements.candidate_methods: {requirements['candidate_methods']}")
     if summary.get("latest_review_decision"):
         print(f"latest_review_decision: {summary['latest_review_decision']}")
     if summary.get("error"):
@@ -297,15 +364,180 @@ def _candidate_dotenv_paths() -> list[Path]:
     return list(dict.fromkeys([cwd / ".env", repo_root / ".env"]))
 
 
+def _run_resume(args: argparse.Namespace) -> int:
+    from app.control.lifecycle import (
+        DurableResumeUnavailableError,
+        ResumeValidationError,
+        UnsupportedLifecycleOperationError,
+        resume_review_state,
+    )
+    from app.review.base import load_resume_review_request
+
+    backend = _resolve_checkpointer_backend(args)
+    if backend != "sqlite":
+        print(
+            "error: durable resume requires --checkpointer sqlite; "
+            "memory checkpoints do not survive between processes",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        decision = load_resume_review_request(args.decision_file)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if decision.session_id != args.session_id:
+        print(
+            "error: decision session_id "
+            f"{decision.session_id!r} does not match CLI --session-id "
+            f"{args.session_id!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The downstream `resume_review_state` re-checks that
+    # state.session_id == decision.session_id. That is intentional
+    # defense-in-depth: the helper is also called directly by the
+    # in-process resume tests in `tests/test_review_resume.py`, where
+    # this CLI guard does not run. Keep both checks in place.
+
+    from app.graph.checkpointer import checkpoint_db_path
+
+    db_path = checkpoint_db_path(args.data_dir)
+    if not db_path.exists():
+        print(
+            f"error: no durable checkpoint database at {db_path}; "
+            "check that --data-dir matches the original gene-agent run, "
+            "or run the workflow with --checkpointer sqlite before resuming",
+            file=sys.stderr,
+        )
+        return 1
+
+    graph = build_graph(backend=backend, data_dir=args.data_dir)
+    config = {"configurable": {"thread_id": args.session_id}}
+    snapshot = graph.get_state(config)
+    # New LangGraph versions can return a default snapshot rather than
+    # None when the thread is missing, so cross-check session_id too —
+    # this is the only reliable signal that the checkpoint actually
+    # belongs to the session being resumed.
+    if (
+        snapshot is None
+        or not snapshot.values
+        or snapshot.values.get("session_id") != args.session_id
+    ):
+        print(
+            f"error: no checkpoint found for session_id {args.session_id!r} "
+            f"in {db_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    state = snapshot.values
+
+    ledger = Ledger(args.data_dir)
+    resume_event_payload = {
+        "source": "cli",
+        "checkpointer": backend,
+        "data_dir": str(args.data_dir),
+        "decision_file_ref": str(args.decision_file),
+        "decision": {
+            "stage": decision.stage,
+            "decision": decision.decision,
+            "candidate_id": decision.candidate_id,
+            "method_name": decision.method_name,
+        },
+    }
+    # Record resume_started before any state mutation so the audit
+    # trail captures the operator's intent even if validation, the
+    # state update, or the downstream invoke fails.
+    ledger.record_event(args.session_id, "resume_started", resume_event_payload)
+
+    try:
+        update = resume_review_state(state, decision)
+    except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+        ledger.record_event(
+            args.session_id,
+            "resume_failed",
+            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        print(f"error: resume rejected: {exc}", file=sys.stderr)
+        return 1
+    except UnsupportedLifecycleOperationError as exc:
+        ledger.record_event(
+            args.session_id,
+            "resume_failed",
+            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    graph.update_state(config, update)
+    try:
+        result = graph.invoke(None, config=config)
+    except Exception as exc:
+        ledger.record_event(
+            args.session_id,
+            "resume_failed",
+            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        # Match the other subcommands: surface the failure as a CLI
+        # error line and a non-zero exit code rather than letting a
+        # traceback leak to the operator's terminal. The underlying
+        # exception is still recorded in the ledger.
+        print(f"error: resume invoke failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    current_stage = result.get("current_stage", "unknown")
+    supervision = result.get("supervision_state", "unknown")
+    route_trace = result.get("route_trace", [])
+    active_interrupt = result.get("active_interrupt")
+
+    ledger.record_event(
+        args.session_id,
+        "resume_completed",
+        {
+            **resume_event_payload,
+            "current_stage": current_stage,
+            "supervision_state": supervision,
+            "route_trace": route_trace,
+        },
+    )
+
+    print(f"session_id: {args.session_id}")
+    print(f"current_stage: {current_stage}")
+    print(f"supervision_state: {supervision}")
+    print(f"checkpoint_persistence: {backend}")
+    print(f"route_trace: {route_trace}")
+    if active_interrupt:
+        print(f"active_interrupt: {active_interrupt}")
+
+    if supervision == "failed_terminal":
+        print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
     args = _parse_args(argv)
+    # Load .env once at the entry point so every subcommand (run, ask,
+    # inspect, resume) sees the same secrets without re-implementing the
+    # loader in each branch. setdefault semantics mean already-exported
+    # environment variables still win.
+    _load_dotenv_without_override()
     if args.command == "run":
         return _run_session(args)
     if args.command == "ask":
         return _run_ask(args)
     if args.command == "inspect":
         return _run_inspect(args)
+    if args.command == "resume":
+        return _run_resume(args)
     _parse_args(["--help"])
     return 0
 

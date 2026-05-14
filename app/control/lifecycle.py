@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,13 @@ def inspect_state(
     blocked_timeout_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Return a compact non-mutating summary of an in-memory workflow state."""
+    """Return a compact non-mutating summary of an in-memory workflow state.
+
+    Persistence facts (``checkpoint_persistence`` /
+    ``durable_resume_available``) are intentionally absent here — they
+    are properties of the LangGraph checkpoint backend, not of the
+    in-memory state dict. Use :func:`inspect_session` for those.
+    """
 
     snapshot = deepcopy(state)
     active_interrupt = snapshot.get("active_interrupt")
@@ -47,8 +54,6 @@ def inspect_state(
         "stage_statuses": _stage_statuses(snapshot),
         "latest_artifact_refs": _latest_artifact_refs(snapshot),
         "decision_requirements": _decision_requirements(active_interrupt),
-        "checkpoint_persistence": "memory_only",
-        "durable_resume_available": False,
     }
     timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
     if timeout:
@@ -63,7 +68,9 @@ def inspect_session(
     blocked_timeout_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Inspect durable ledger/artifact records without claiming checkpoint resume."""
+    """Inspect durable ledger/artifact records and durable checkpoint state."""
+
+    from app.graph.checkpointer import checkpoint_db_path
 
     ledger = Ledger(data_dir)
     session = ledger.read_session(session_id)
@@ -84,12 +91,18 @@ def inspect_session(
     elif session:
         supervision_state = "running_or_completed_unknown"
 
+    db_path = checkpoint_db_path(data_dir)
+    durable_available = db_path.exists()
+    checkpoint_persistence = "sqlite" if durable_available else "memory_only"
+
+    decision_requirements = _decision_requirements_from_artifact(latest_request_artifact) if latest_unresolved_review_request else None
+
     summary: dict[str, Any] = {
         "session_id": session_id,
         "session": session,
         "supervision_state": supervision_state,
-        "checkpoint_persistence": "memory_only",
-        "durable_resume_available": False,
+        "checkpoint_persistence": checkpoint_persistence,
+        "durable_resume_available": durable_available,
         "ledger_event_count": len(events),
         "latest_events": events[-5:],
         "latest_review_request": latest_review_request,
@@ -98,6 +111,7 @@ def inspect_session(
         "latest_unresolved_review_request": latest_unresolved_review_request,
         "latest_review_request_artifact": latest_request_artifact,
         "latest_review_decision_artifact": latest_decision_artifact,
+        "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
     }
     if latest_unresolved_review_request and blocked_timeout_seconds is not None:
@@ -288,3 +302,57 @@ def _latest_artifact_by_suffix(artifacts: list[dict[str, Any]], suffix: str) -> 
         if artifact_type.endswith(suffix):
             return artifact
     return None
+
+
+def _decision_requirements_from_artifact(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Reconstruct decision requirements from a review request artifact.
+
+    Reads ``decisions_allowed`` / ``candidates`` / ``candidate_methods``
+    out of the JSON file pointed to by the artifact metadata so the
+    durable inspect path can tell an operator which decisions the gate
+    accepts without their having to open the artifact themselves.
+    Falls back to ``None`` if the file is missing or unreadable; the
+    inspect summary already exposes the artifact ref so the operator
+    can recover manually.
+
+    N4 contract note: this function reads ``artifact["file_path"]``
+    directly from the dict produced by ``ArtifactMeta.model_dump`` (see
+    ``app/schemas/artifacts.py::ArtifactMeta``). If that field is ever
+    renamed (e.g. to ``path``), this function will silently start
+    returning ``None`` and the resume CLI will lose its decisions_allowed
+    hint without test failure. Update this lookup, the test fixture in
+    ``tests/test_review_resume.py::_assembly_blocked_state`` (which
+    registers the artifact via ``ArtifactMeta.from_file``), and the
+    F8 test in ``tests/test_review_resume.py`` together.
+    """
+    if not artifact:
+        return None
+    file_path = artifact.get("file_path")
+    if not file_path:
+        return None
+    path = Path(str(file_path))
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    stage = payload.get("stage")
+    requirements: dict[str, Any] = {
+        "stage": stage,
+        "decisions_allowed": list(payload.get("decisions_allowed") or []),
+        "requires_structured_resume": True,
+    }
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        requirements["candidate_ids"] = [
+            c.get("candidate_id")
+            for c in candidates
+            if isinstance(c, dict) and c.get("candidate_id") is not None
+        ]
+    candidate_methods = payload.get("candidate_methods")
+    if isinstance(candidate_methods, list):
+        requirements["candidate_methods"] = list(candidate_methods)
+    return requirements
