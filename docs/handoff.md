@@ -185,6 +185,102 @@ Not completed:
   annotation execution, and function annotation execution are not implemented.
 - Durable cross-process graph resume is not implemented because the scaffold still uses a memory-only LangGraph checkpointer. In-process review resume helpers exist for `assembly_review` and `hic_scaffolding`, and CLI `inspect` can read durable ledger/artifact records.
 
+## Phase 4 Real Biology Acceptance Run Record
+
+This section pins the first real-biology smoke that satisfies Phase 4 task 04
+for the Flye mainline. QUAST was intentionally skipped on this arm64 host
+(`quast.py` is not installed in `env_geno_exec`) by keeping
+`assembly_review` on its default planning path rather than opting it into
+local execution. The chain therefore advances through real `read_qc` and
+real `assembly.candidate.flye` and pauses at the `assembly_review`
+human gate without QUAST metrics.
+
+Run parameters:
+
+- host: `darwin-arm64`, `env_geno_exec` has `seqkit` and `flye` 2.9.6; no
+  `quast.py`
+- session id (CLI): `phase4-real-bht-20260513-a`
+- manifest: `data/phase4_real_smoke/manifest.yaml`
+- run config: `data/phase4_real_smoke/run_config.json`
+  - `local_exec = ["read_qc", "assembly"]` (assembly_review omitted to
+    skip QUAST)
+  - `flye_parameters = { read_type: "nano-raw", estimated_genome_size:
+    5_000_000, threads: 4 }`
+- input: `data/test/bht.Nanopore.pass.first500.fa`
+  (500 CycloneSEQ/Nanopore reads, 1,492,367 bp, avg 2,984.7 bp, min 71,
+  max 8,571, N50 4,510; basecaller output packaged as FASTA)
+- data dir: `data/phase4_real_smoke/out`
+
+Observed outcome:
+
+- `route_trace`: `inventory_stage → read_qc_stage → genome_survey_stage →
+  assembly_stage`
+- `current_stage`: `assembly_review`
+- `supervision_state`: `blocked_human`
+- `active_interrupt.reason`:
+  `assembly_review_human_decision_required`
+- `assembly.candidate.flye` status: `executed`
+- draft assembly: 3 contigs, 15,263 bp total, min 3,161, avg 5,087.7,
+  max 6,102 bp (as expected for far-sub-1× coverage against a 5 Mbp
+  prior; biology is honest, not inflated)
+
+Artifact trail (all under
+`data/phase4_real_smoke/out/artifacts/` and recorded in
+`<data_dir>/artifacts/<session>/artifacts.jsonl`):
+
+- `asset_registry/phase4-real-bht-20260513/registry.json`
+- `read_qc/phase4-real-bht-20260513-a/seqkit_stats.tsv`
+- `read_qc/phase4-real-bht-20260513-a/read_qc_summary.json`
+- `read_qc/phase4-real-bht-20260513-a/long_reads.fofn`
+- `assembly/phase4-real-bht-20260513-a/candidates/flye_candidate.json`
+- `assembly/phase4-real-bht-20260513-a/flye/draft_assembly.fasta`
+- `assembly_review/phase4-real-bht-20260513-a/assembly_eval_bundle.planned.json`
+- `assembly_review/phase4-real-bht-20260513-a/assembly_review_request.json`
+- Flye `flye.log` registered as an artifact under
+  `assembly:assembly.candidate.flye:flye.log`
+
+Findings surfaced by this pass:
+
+- **Medium (resolved 2026-05-14).** When `--data-dir` was a relative
+  path, `read_qc` emitted `run_seqkit_stats.sh` with a relative
+  `> <data_dir>/artifacts/...` redirect target, but the runner sets cwd
+  to `<data_dir>/work/...`, so the redirect resolved to a non-existent
+  nested path and the script failed. Fixed by absolutising `data_dir` at
+  the entry of `freeze_seqkit_attempt` and `freeze_length_filter_attempt`
+  (and the parallel Flye script builder) via a small `_absolute_data_dir`
+  helper that does **not** call `Path.resolve()` (which would canonicalise
+  macOS `/var/folders/...` and break tempdir-based tests). Regression
+  test: `tests.test_read_qc.Phase4ReadQCSmokeTests
+  ::test_relative_data_dir_resolves_to_absolute_paths_in_generated_script`.
+- **Low (resolved 2026-05-14).** `manifest.yaml::session_id` and CLI
+  `--session-id` could disagree, so the asset registry landed under one
+  id while every other stage wrote under the other (this run had a
+  registry under `.../phase4-real-bht-20260513/` while everything else
+  was under `.../phase4-real-bht-20260513-a/`). Fixed in
+  `app/entrypoints/run.py::_run_session`: when CLI omits
+  `--session-id`, the manifest's `session_id` is now adopted; when both
+  are supplied and disagree, the run fails before
+  `Ledger.create_session(...)` with a clear message. Regression tests:
+  `tests.test_entrypoints.EntrypointTests
+  ::test_cli_session_id_mismatch_with_manifest_is_rejected_before_ledger`,
+  `::test_cli_session_id_matching_manifest_is_accepted`,
+  `::test_structured_run_uses_manifest_session_id_when_cli_omits_it`.
+- **High (resolved 2026-05-14).** The first cut of the Low fix above
+  used `EntryRequest.model_copy(update={"session_id": ...})`, which in
+  Pydantic v2 does not re-run field validators. A manifest carrying
+  `session_id: ../escape` would therefore be adopted unchecked and
+  composed into `data_dir/ledger/<session_id>` — a path-traversal risk.
+  Fixed by reconstructing `EntryRequest(...)` instead of `model_copy`,
+  so `_validate_session_id` (already at `app/schemas/entry.py:50`) runs
+  for both the manifest-adopted and the auto-generated branches.
+  Regression test: `tests.test_entrypoints.EntrypointTests
+  ::test_path_escape_session_id_in_manifest_is_rejected_when_cli_omits_it`.
+- **Info (arm64).** `env_geno_exec` has no `quast.py` for arm64, so
+  `assembly_review` local execution would surface
+  `status = "missing_tool"` with an `env_preflight_blocked` ledger
+  event. This was not exercised in this run because
+  `assembly_review` was deliberately kept on the planning path.
+
 ## Read Order
 
 Read these files in order:
@@ -246,24 +342,22 @@ bytecode cache writes may try to use `~/Library/Caches`, which is not writable.
 
 ## Next Best Task
 
-Phase 4 is complete in-code (tasks 01, 02, 03, 05, and 06). The only remaining
-Phase 4 deliverable is task 04 (real-biology acceptance), which is human-driven
-by design.
+Phase 4 is complete in-code (tasks 01, 02, 03, 05, and 06). Task 04 has its
+first real-biology acceptance record for the Flye mainline under
+`data/test/bht.Nanopore.pass.first500.fa`; QUAST was skipped because this
+arm64 host lacks `quast.py` in `env_geno_exec`. See "Phase 4 Real Biology
+Acceptance Run Record" above for session id, manifest/run-config paths,
+artifact refs, and the three follow-up findings (two small real bugs + one
+arm64 environment note) surfaced by the run.
 
-For task 04, drive a human-supplied real CycloneSEQ / PacBio FASTQ under
-`env_geno_exec` via `gene-agent run --run-config run_config.json` (see
-`docs/phases/phase4/04_real_biology_mainline_acceptance.md` for the exact
-shape). Confirm the full `inventory → read_qc → assembly → assembly_review`
-chain produces a real `draft_assembly.fasta`, `report.tsv`, `quast_summary.json`,
-and `assembly_review_request.json` and stops at `blocked_human`. This pass
-requires `seqkit`, `flye`, and `quast.py` installed in `env_geno_exec` —
-`quast.py` is not available on darwin-arm64, so task 04 cannot fully complete
-on arm64 hosts.
-
-Record the resulting session id and artifact refs in this file under a
-"Phase 4 Real Biology Acceptance Run Record" section. Phase 5 (broader method
-execution) does not start until that record exists; see
-`docs/phases/phase4/README.md` for the full Phase 5 entry gate.
+The remaining Phase 4 acceptance work is a second task 04 pass on a host
+where `env_geno_exec` has all three of `seqkit`, `flye`, and `quast.py`.
+That pass should opt `assembly_review` into local execution (add
+`"assembly_review"` to `run_config.local_exec`), produce `report.tsv` and
+`quast_summary.json`, and record the QUAST artifact refs in the same
+acceptance section. Until then the Phase 5 entry gate in
+`docs/phases/phase4/README.md` is partially satisfied (Flye mainline yes;
+QUAST no).
 
 Do not implement broad assembly, annotation, requested-stage routing, database
 downloads, genome-size conflict thresholds, or RemoteRunner before the

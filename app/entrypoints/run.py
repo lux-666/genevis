@@ -68,18 +68,75 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _peek_manifest_session_id(manifest_path: Path) -> str | None:
+    """Return the manifest's top-level session_id field, or None.
+
+    Used for an early-fail cross-check against the CLI --session-id. Full
+    manifest validation still runs later in the inventory stage; this peek
+    must not throw on malformed input.
+    """
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    suffix = manifest_path.suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        import yaml
+
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return None
+    elif suffix == ".json":
+        import json
+
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def _run_session(args: argparse.Namespace) -> int:
     try:
         request = EntryRequest(session_id=args.session_id, manifest=args.manifest, data_dir=args.data_dir)
     except ValueError as exc:
         print(f"error: invalid run request: {exc}", file=sys.stderr)
         return 1
-    if request.session_id is None:
-        request = request.model_copy(update={"session_id": generate_session_id(request.data_dir)})
 
     manifest_path = Path(request.manifest)
     if not manifest_path.exists():
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
+        return 1
+
+    manifest_session_id = _peek_manifest_session_id(manifest_path)
+    if request.session_id is None:
+        adopted = manifest_session_id or generate_session_id(request.data_dir)
+        try:
+            request = EntryRequest(
+                session_id=adopted,
+                manifest=request.manifest,
+                data_dir=request.data_dir,
+            )
+        except ValueError as exc:
+            print(f"error: invalid run request: {exc}", file=sys.stderr)
+            return 1
+    elif manifest_session_id is not None and manifest_session_id != request.session_id:
+        print(
+            "error: manifest session_id "
+            f"{manifest_session_id!r} does not match CLI --session-id "
+            f"{request.session_id!r}; the asset registry would land under "
+            "the manifest id while every other stage would write under the "
+            "CLI id. Make them match (drop one, or align the values).",
+            file=sys.stderr,
+        )
         return 1
 
     run_config: RunConfig | None = None

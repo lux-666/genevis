@@ -48,6 +48,21 @@ def _assembly_output(state: TopLevelState) -> dict[str, Any]:
     return dict((state.get("stage_outputs") or {}).get("assembly", {}))
 
 
+def _absolute_data_dir(state: TopLevelState) -> Path:
+    """Return data_dir as an absolute path without canonicalising.
+
+    The runner sets cwd to the attempt working directory, which is itself
+    nested under data_dir. A relative data_dir interpolated into a generated
+    shell script's path argument therefore resolves from inside that workdir
+    and points at a non-existent nested location. `Path.resolve()` is
+    avoided because it canonicalises macOS `/var/folders/...` paths.
+    """
+    raw = Path(state.get("data_dir", "data"))
+    if raw.is_absolute():
+        return raw
+    return (Path.cwd() / raw).absolute()
+
+
 def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly"] = {**_assembly_output(state), **payload}
@@ -301,7 +316,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         return _fail_update(state, error)
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = _absolute_data_dir(state)
     env_spec, blocked = resolve_method_env(
         assembly_out,
         stage="assembly",

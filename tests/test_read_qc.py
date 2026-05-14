@@ -511,6 +511,71 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         self.assertIn("raw_long_reads", text)
         self.assertIn("tests/fixtures/phase4/smoke.fastq", text)
 
+    def test_relative_data_dir_resolves_to_absolute_paths_in_generated_script(self):
+        # Regression: when --data-dir is relative, the generated seqkit_stats
+        # script writes its TSV to data_dir/artifacts/.../seqkit_stats.tsv.
+        # The runner sets cwd to data_dir/work/.../seqkit_stats, so a raw
+        # relative redirect target lands at a non-existent nested path. The
+        # script must therefore embed an absolute artifact path.
+        from app.stages.read_qc.nodes import freeze_seqkit_attempt
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fq = tmp / "BGI_CycloneSEQ_sample.fastq.gz"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                        "platform": "cycloneseq",
+                        "format": "fastq",
+                    }
+                ],
+            )
+
+            old_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                state = {
+                    "session_id": "s1",
+                    "data_dir": "out",
+                    "stage_outputs": {
+                        "read_qc": {
+                            "status": "planned",
+                            "execution_mode": "local",
+                            "raw_long_reads_path": str(fq),
+                            "input_asset_ref": "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz",
+                            "substeps": {
+                                "long_read_stats": {
+                                    "name": "long_read_stats",
+                                    "status": "planned",
+                                    "method_name": "read_qc.long_read_stats.seqkit_stats",
+                                }
+                            },
+                            # PATH bypass keeps env_dispatch happy without
+                            # actually running anything.
+                            "env": {"PATH": "/nonexistent"},
+                        }
+                    },
+                }
+                freeze_seqkit_attempt(state)
+                script_path = tmp / "out/work/read_qc/s1/seqkit_stats/run_seqkit_stats.sh"
+                self.assertTrue(script_path.exists())
+                script_text = script_path.read_text(encoding="utf-8")
+                expected_artifact = tmp / "out/artifacts/read_qc/s1/seqkit_stats.tsv"
+                self.assertIn(str(expected_artifact), script_text)
+                # And the script must NOT carry the bare relative form
+                # that would resolve from the runner's cwd.
+                self.assertNotIn(
+                    " > out/artifacts/read_qc/s1/seqkit_stats.tsv",
+                    script_text,
+                )
+            finally:
+                os.chdir(old_cwd)
+
 
 def _env_geno_exec_has_seqkit() -> bool:
     """True if the configured env_geno_exec conda env exposes seqkit."""

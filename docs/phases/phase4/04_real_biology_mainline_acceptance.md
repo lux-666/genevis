@@ -1,6 +1,16 @@
 # 04 Real Biology Mainline Acceptance
 
-Task status: planned.
+Task status: partially implemented. First real-biology acceptance pass was
+run on `data/test/bht.Nanopore.pass.first500.fa` (500 Nanopore reads
+packaged as FASTA, 1.49 Mbp total) against `env_geno_exec` on
+darwin-arm64. `read_qc → assembly.candidate.flye` executed with real
+binaries and stopped at the `assembly_review` human gate as
+`supervision_state = "blocked_human"`. QUAST was skipped because this
+host has no `quast.py` for arm64. Full run record, artifact refs, and
+follow-up findings live under the "Phase 4 Real Biology Acceptance Run
+Record" section in `docs/handoff.md`. A second acceptance pass on a
+host with `quast.py` is still pending to close the QUAST half of the
+gate.
 
 ## Goal
 

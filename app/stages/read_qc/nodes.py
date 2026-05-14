@@ -52,6 +52,25 @@ def _read_qc_output(state: TopLevelState) -> dict[str, Any]:
     return dict((state.get("stage_outputs") or {}).get("read_qc", {}))
 
 
+def _absolute_data_dir(state: TopLevelState) -> Path:
+    """Return data_dir as an absolute path without canonicalising.
+
+    The runner sets cwd to the attempt working directory, which is itself
+    nested under data_dir. A relative data_dir interpolated into a generated
+    shell script's redirect target therefore resolves from inside that
+    workdir and points at a non-existent nested location. Pinning data_dir
+    to absolute here keeps the generated scripts self-contained.
+
+    `Path.resolve()` is avoided because it canonicalises macOS
+    `/var/folders/...` to `/private/var/folders/...`, which breaks tests
+    that build paths under `tempfile.TemporaryDirectory()`.
+    """
+    raw = Path(state.get("data_dir", "data"))
+    if raw.is_absolute():
+        return raw
+    return (Path.cwd() / raw).absolute()
+
+
 def _update_read_qc_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
     outputs = dict(state.get("stage_outputs") or {})
     outputs["read_qc"] = {**_read_qc_output(state), **payload}
@@ -170,7 +189,7 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
         return {}
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = _absolute_data_dir(state)
     env_spec, blocked = _resolve_method_env(
         read_qc_out,
         METHOD_NAME,
@@ -426,7 +445,7 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         return {}
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = _absolute_data_dir(state)
     env_spec, blocked = _resolve_method_env(
         read_qc_out,
         LENGTH_FILTER_METHOD_NAME,

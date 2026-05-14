@@ -87,7 +87,7 @@ class EntrypointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            manifest.write_text("assets: []\n", encoding="utf-8")
             graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
             captured = {}
 
@@ -109,6 +109,32 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(captured["session_id"], "gene-20260508-000001")
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "gene-20260508-000001"}})
             self.assertTrue((root / "data" / "ledger" / "gene-20260508-000001" / "session.json").exists())
+
+    def test_structured_run_uses_manifest_session_id_when_cli_omits_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ), patch("app.entrypoints.run.generate_session_id") as gen_id:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    argparse.Namespace(session_id=None, manifest=str(manifest), data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(captured["session_id"], "s1")
+            self.assertIn("session_id: s1", stdout)
+            gen_id.assert_not_called()
 
     def test_structured_run_invokes_graph_without_llm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,6 +218,87 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("session_id", stderr)
             self.assertFalse((root / "data" / "ledger").exists())
             build_graph.assert_not_called()
+
+    def test_cli_session_id_mismatch_with_manifest_is_rejected_before_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: from-manifest\nassets: []\n", encoding="utf-8")
+            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
+                "app.entrypoints.run.initial_state"
+            ) as initial_state:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    argparse.Namespace(
+                        session_id="from-cli",
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("from-manifest", stderr)
+            self.assertIn("from-cli", stderr)
+            build_graph.assert_not_called()
+            initial_state.assert_not_called()
+            self.assertFalse((root / "data" / "ledger").exists())
+
+    def test_cli_session_id_matching_manifest_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: agreed\nassets: []\n", encoding="utf-8")
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    argparse.Namespace(
+                        session_id="agreed",
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(captured["session_id"], "agreed")
+
+    def test_path_escape_session_id_in_manifest_is_rejected_when_cli_omits_it(self):
+        # Adopting manifest session_id must run through EntryRequest's
+        # _validate_session_id field validator (model_copy alone would skip
+        # it). A path-shaped value like '../escape' would otherwise be used
+        # to compose data_dir/ledger/<session_id>.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: ../escape\nassets: []\n", encoding="utf-8")
+            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
+                "app.entrypoints.run.initial_state"
+            ) as initial_state:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    argparse.Namespace(
+                        session_id=None,
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("session_id", stderr)
+            build_graph.assert_not_called()
+            initial_state.assert_not_called()
+            self.assertFalse((root / "data" / "ledger").exists())
 
     def test_ask_generates_default_session_id_for_parser_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
