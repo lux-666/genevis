@@ -1,8 +1,8 @@
 # 01 Execution Consistency And Server Gate
 
-Task status: implemented in code (2026-05-14). Server-side validation
-(`scripts/server_check.sh` + `scripts/server_test.sh` after `git pull`) is
-still pending and tracked in `docs/handoff.md`.
+Task status: implemented in code (2026-05-14). Two server-side checkboxes
+remain open and **block all later Phase 5 tasks** — see the unchecked items
+under "Tasks" below. Track the result in `docs/handoff.md`.
 
 ## Goal
 

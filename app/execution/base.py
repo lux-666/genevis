@@ -41,7 +41,12 @@ class CollectResult(BaseModel):
 
 
 class BaseRunner(ABC):
-    """Common local/remote runner interface."""
+    """Local subprocess runner interface.
+
+    In-agent remote execution is intentionally unsupported; server runs
+    happen by invoking the same CLI on the server checkout after `git pull`
+    (see ``docs/deployment/mac_dev_server_pull.md``).
+    """
 
     @abstractmethod
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:

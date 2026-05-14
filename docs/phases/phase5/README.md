@@ -36,6 +36,12 @@ complete and the server/HPC can run the Phase 4 validation workflow after
 The preferred acceptance host for real QUAST is the server/HPC, not a Mac arm64
 machine that lacks `quast.py`.
 
+Phase 5 **task 01 itself ships in code**, but its two server-side checkboxes
+(run `scripts/server_check.sh` + `scripts/server_test.sh` after `git pull`,
+record the result in `docs/handoff.md`) gate every later Phase 5 task. Do not
+start task 02 (durable resume) or task 03 (RepeatMasker backbone) before those
+two boxes are checked.
+
 ## Initial Task Order
 
 1. [Execution Consistency And Server Gate](01_execution_consistency_and_server_gate.md)
