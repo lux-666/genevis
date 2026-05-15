@@ -188,6 +188,39 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertIn("attempt_started", [event["event_type"] for event in events])
             self.assertIn("attempt_succeeded", [event["event_type"] for event in events])
 
+    def test_local_repeatmasker_handles_relative_data_dir_from_runner_workdir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            assembly = root / "final.fa"
+            library = root / "trusted_repeats.fa"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            library.write_text(">repeat1\nACAC\n", encoding="utf-8")
+            bin_dir = self._fake_repeatmasker_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[{"asset_id": "s1:repeat_library:trusted", "asset_type": "repeat_library", "path": str(library)}],
+            )
+            data_dir = root / "out"
+            state = self._state(tmpdir, str(registry))
+            state["data_dir"] = os.path.relpath(data_dir, Path.cwd())
+            state["stage_outputs"] = {
+                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "repeat_annotation": {
+                    "execution_mode": "local",
+                    "primary_method": "repeat_annotation.masking.repeatmasker",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "gene_annotation")
+            repeat = result["stage_outputs"]["repeat_annotation"]
+            self.assertEqual(repeat["status"], "completed")
+            self.assertTrue(Path(repeat["softmasked_genome_ref"]).exists())
+            self.assertTrue(Path(repeat["repeat_annotation_gff3_ref"]).exists())
+            self.assertTrue(Path(repeat["softmasked_genome_ref"]).is_absolute())
+
     def test_local_repeatmasker_failure_stops_before_gene_annotation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"

@@ -13,6 +13,7 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
+from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
     REPEAT_ANNOTATION_GFF3,
@@ -123,7 +124,7 @@ def plan_repeat_library(state: TopLevelState) -> dict:
     if missing:
         return _fail_update(state, f"repeat_annotation descriptors missing: {missing}")
 
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     library_ref = data_dir / "work" / "repeat_annotation" / session_id / "repeat_library.fa"
     return _update_repeat_output(
@@ -152,7 +153,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
     if REPEAT_MASKING_METHOD not in registry.methods:
         return _fail_update(state, f"repeat_annotation descriptors missing: ['{REPEAT_MASKING_METHOD}']")
 
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
     work_dir = data_dir / "work" / "repeat_annotation" / session_id
@@ -244,7 +245,7 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
         return _fail_update(state, f"RepeatMasker local execution repeat library not found: {library_ref}")
 
     session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     env_spec, blocked = resolve_method_env(
         repeat_out,
         stage="repeat_annotation",
@@ -350,7 +351,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
 
     attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
     result = dict(repeat_out.get("repeatmasker_execution_result") or {})
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     artifacts: list[ArtifactMeta] = []
     for path, artifact_type in [
@@ -422,7 +423,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
 def commit_repeat_annotation(state: TopLevelState) -> dict:
     """Publish the repeat annotation bundle and advance to gene annotation."""
     repeat_out = _repeat_output(state)
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -505,7 +506,7 @@ def _register_repeatmasker_log_artifacts(
     attempt: FrozenAttemptSpec,
     result: dict[str, Any],
 ) -> list[str]:
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     artifacts: list[ArtifactMeta] = []
     for path, artifact_type in [
