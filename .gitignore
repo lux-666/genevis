@@ -16,7 +16,6 @@ reports/
 
 app/entrypoints/workflow.ipynb
 docs/beginner_mainline_guide.md
-config/envs copy.yaml
 
 *.egg-info/
 dist/
