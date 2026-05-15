@@ -949,18 +949,22 @@ class ResumeCLITests(unittest.TestCase):
     def test_resume_rejects_missing_checkpoint_db(self):
         with tempfile.TemporaryDirectory() as tmp:
             decision = self._write_decision(Path(tmp) / "decision.json")
+            data_dir = Path(tmp) / "data"
             code, stdout, stderr = _capture_cli(
                 _run_resume,
                 argparse.Namespace(
                     session_id="s1",
                     decision_file=str(decision),
-                    data_dir=str(Path(tmp) / "data"),
+                    data_dir=str(data_dir),
                     checkpointer="sqlite",
                 ),
             )
         self.assertEqual(code, 1)
         self.assertIn("no durable checkpoint database", stderr)
         self.assertIn("--data-dir", stderr)
+        self.assertFalse(data_dir.exists())
+        self.assertFalse((data_dir / "checkpoints").exists())
+        self.assertFalse((data_dir / "ledger").exists())
 
 
 class CheckpointerBackendResolutionTests(unittest.TestCase):

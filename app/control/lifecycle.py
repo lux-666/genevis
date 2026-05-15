@@ -11,6 +11,7 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.state import TopLevelState
 
 
@@ -304,7 +305,9 @@ def _latest_artifact_by_suffix(artifacts: list[dict[str, Any]], suffix: str) -> 
     return None
 
 
-def _decision_requirements_from_artifact(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+def _decision_requirements_from_artifact(
+    artifact: ArtifactMeta | dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Reconstruct decision requirements from a review request artifact.
 
     Reads ``decisions_allowed`` / ``candidates`` / ``candidate_methods``
@@ -315,22 +318,15 @@ def _decision_requirements_from_artifact(artifact: dict[str, Any] | None) -> dic
     inspect summary already exposes the artifact ref so the operator
     can recover manually.
 
-    N4 contract note: this function reads ``artifact["file_path"]``
-    directly from the dict produced by ``ArtifactMeta.model_dump`` (see
-    ``app/schemas/artifacts.py::ArtifactMeta``). If that field is ever
-    renamed (e.g. to ``path``), this function will silently start
-    returning ``None`` and the resume CLI will lose its decisions_allowed
-    hint without test failure. Update this lookup, the test fixture in
-    ``tests/test_review_resume.py::_assembly_blocked_state`` (which
-    registers the artifact via ``ArtifactMeta.from_file``), and the
-    F8 test in ``tests/test_review_resume.py`` together.
+    The artifact record is validated through ``ArtifactMeta`` before
+    reading ``file_path``. That keeps the durable inspect path tied to
+    the same metadata schema used by artifact registration instead of
+    silently drifting if the serialized key changes.
     """
     if not artifact:
         return None
-    file_path = artifact.get("file_path")
-    if not file_path:
-        return None
-    path = Path(str(file_path))
+    meta = artifact if isinstance(artifact, ArtifactMeta) else ArtifactMeta.model_validate(artifact)
+    path = Path(meta.file_path)
     if not path.exists():
         return None
     try:

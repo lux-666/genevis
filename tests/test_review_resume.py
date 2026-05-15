@@ -14,11 +14,13 @@ from pydantic import ValidationError
 from app.control.lifecycle import (
     ResumeValidationError,
     UnsupportedLifecycleOperationError,
+    _decision_requirements_from_artifact,
     inspect_session,
     inspect_state,
     resume_review_state,
 )
 from app.review.base import ResumeReviewRequest, load_resume_review_request
+from app.schemas.artifacts import ArtifactMeta
 
 
 class ReviewResumeTests(unittest.TestCase):
@@ -463,6 +465,41 @@ class ReviewResumeTests(unittest.TestCase):
         )
         self.assertEqual(sorted(requirements["candidate_ids"]), ["canu", "flye"])
         self.assertTrue(requirements["requires_structured_resume"])
+
+    def test_decision_requirements_uses_artifact_meta_file_path_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "assembly_review_request.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "stage": "assembly_review",
+                        "decisions_allowed": ["accept", "stop_human_review"],
+                        "candidates": [
+                            {"candidate_id": "flye"},
+                            {"candidate_id": "canu"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            artifact_record = ArtifactMeta.from_file(
+                path,
+                stage="assembly_review",
+                method_name="assembly_review.contract",
+                artifact_type="assembly_review.request",
+            ).model_dump(mode="json")
+
+            self.assertIn("file_path", artifact_record)
+            requirements = _decision_requirements_from_artifact(artifact_record)
+
+            self.assertIsNotNone(requirements)
+            self.assertEqual(requirements["stage"], "assembly_review")
+            self.assertEqual(
+                sorted(requirements["decisions_allowed"]),
+                ["accept", "stop_human_review"],
+            )
+            self.assertEqual(sorted(requirements["candidate_ids"]), ["canu", "flye"])
 
     def test_inspect_session_decision_requirements_none_when_no_unresolved(self):
         state = _assembly_blocked_state()
