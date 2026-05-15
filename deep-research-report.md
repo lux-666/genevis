@@ -152,7 +152,7 @@ NanoPlot / FastQC 主要是 CPU + I/O；Filtlong 是流式处理，内存较轻�
 **关键参数示例**  
 `jellyfish count -C -m 21 -s 1000000000 -t 32 reads.fq.gz -o reads.jf`  
 `jellyfish histo reads.jf > reads.histo`  
-`genomescope.R reads.histo 21 150 outdir`  
+`genomescope2 -i reads.histo -o outdir -k 21`  
 
 k 值通常从 21 开始；GenomeScope 官方还建议始终使用 canonical k-mers。citeturn35search0turn35search1turn22search2
 

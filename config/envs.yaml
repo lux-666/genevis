@@ -53,7 +53,7 @@ methods:
   genome_survey.model.genomescope2:
     conda_env: env_geno_exec
     required_tools:
-      - genomescope.R
+      - genomescope2
   assembly.candidate.flye:
     conda_env: env_geno_exec
     required_tools:

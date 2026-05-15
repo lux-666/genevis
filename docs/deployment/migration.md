@@ -75,7 +75,7 @@ the descriptors for tools whose stages are still planning-only. Channels:
 |---|---|---|
 | seqkit ≥ 2.0 | `seqkit` | `read_qc` |
 | jellyfish ≥ 2.3 | `jellyfish` | `genome_survey` |
-| genomescope2 ≥ 2.0 | `genomescope.R` | `genome_survey` |
+| genomescope2 ≥ 2.0 | `genomescope2` | `genome_survey` |
 | flye ≥ 2.9 | `flye` | `assembly` |
 | quast ≥ 5.2 | `quast.py` | `assembly_review` |
 | yahs ≥ 1.2 | `yahs` | `hic_scaffolding` |
@@ -89,9 +89,9 @@ conda install -n env_geno_exec -c bioconda -c conda-forge -y \
 
 Notes:
 
-- The `genomescope2` conda package installs an R wrapper exposed as
-  `genomescope.R`, not a binary literally named `genomescope2`.
-  `config/envs.yaml` lists `genomescope.R` as the required tool to match.
+- The Bioconda `genomescope2` package exposes the command-line entrypoint as
+  `genomescope2`. `config/envs.yaml` lists `genomescope2` as the required
+  tool to match the generated attempt script.
 - `RepeatMasker` ships without a default repeat library on conda.
   Configure its library separately if you opt into the local
   `repeat_annotation` route; the workflow already requires explicitly

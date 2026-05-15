@@ -97,7 +97,7 @@ Mac remains the development and lightweight-test environment.
 - `config/envs.yaml` gains two method-level entries:
   `genome_survey.kmer_count.jellyfish` (`required_tools: [jellyfish]`)
   and `genome_survey.model.genomescope2`
-  (`required_tools: [genomescope.R]`). The probed binary name matches
+  (`required_tools: [genomescope2]`). The probed binary name matches
   what the freeze script invokes, so preflight rejects an environment
   where the script alias does not exist.
 - `app/stages/genome_survey/nodes.py` rewires `freeze_jellyfish_attempt`

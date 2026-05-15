@@ -11,6 +11,7 @@ from pathlib import Path
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.genome_survey.builder import build_stage
+from app.stages.genome_survey.nodes import _parse_genomescope_summary
 
 
 class GenomeSurveyDescriptorTests(unittest.TestCase):
@@ -58,7 +59,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir()
         jellyfish = bin_dir / "jellyfish"
-        genomescope = bin_dir / "genomescope.R"
+        genomescope = bin_dir / "genomescope2"
         if fail_if_called:
             script = "#!/bin/sh\necho called > \"$GENOME_SURVEY_CALLED\"\nexit 99\n"
             jellyfish.write_text(script, encoding="utf-8")
@@ -86,9 +87,11 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             genomescope.write_text(
                 "#!/bin/sh\n"
-                "outdir=\"$4\"\n"
+                "while [ \"$1\" != \"-o\" ]; do shift; done\n"
+                "shift\n"
+                "outdir=\"$1\"\n"
                 "mkdir -p \"$outdir\"\n"
-                f"printf '{summary}' > \"$outdir/summary.tsv\"\n",
+                f"printf '{summary}' > \"$outdir/summary.txt\"\n",
                 encoding="utf-8",
             )
         jellyfish.chmod(0o755)
@@ -269,6 +272,24 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("genomescope2_heterozygosity_unparsed", survey["notes"])
             self.assertIn("genomescope2_repeat_fraction_unparsed", survey["notes"])
             self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
+
+    def test_parse_genomescope2_summary_table(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = Path(tmpdir) / "summary.txt"
+            summary.write_text(
+                "property\tmin\tmax\n"
+                "Genome Haploid Length\t12,345\t12,300\t12,400\n"
+                "Genome Repeat Length\t2,469\t2,400\t2,500\n"
+                "Heterozygosity\t0.001\t0.0009\t0.0011\n",
+                encoding="utf-8",
+            )
+
+            estimates, notes = _parse_genomescope_summary(summary)
+
+            self.assertEqual(estimates["genome_size"], 12345)
+            self.assertEqual(estimates["heterozygosity"], 0.001)
+            self.assertEqual(estimates["repeat_fraction"], 2469 / 12345)
+            self.assertEqual(notes, [])
 
     def test_local_mode_with_long_reads_only_does_not_run_kmer_tools(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -575,7 +596,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             )
             # Stub conda that:
             #   - reports env ok for the env probe (`true`)
-            #   - reports `jellyfish` present but `genomescope.R` missing
+            #   - reports `jellyfish` present but `genomescope2` missing
             #   - executes jellyfish itself by writing the expected outputs
             conda_stub_dir = Path(tmpdir) / "conda-stub-bin"
             conda_stub_dir.mkdir()
@@ -595,7 +616,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                 "  if [ \"$1\" = \"sh\" ] && [ \"$2\" = \"-c\" ]; then\n"
                 "    # Tool probe: positional $1 is the tool name (5th arg of `sh -c ... preflight TOOL`).\n"
                 "    if [ \"$5\" = \"jellyfish\" ]; then exit 0; fi\n"
-                "    if [ \"$5\" = \"genomescope.R\" ]; then exit 1; fi\n"
+                "    if [ \"$5\" = \"genomescope2\" ]; then exit 1; fi\n"
                 "    exit 1\n"
                 "  fi\n"
                 "  if [ \"$1\" = \"/bin/bash\" ]; then\n"
@@ -654,7 +675,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "missing_tool")
             self.assertEqual(survey["method_name"], "genome_survey.model.genomescope2")
-            self.assertIn("genomescope.R", survey["missing_tools"])
+            self.assertIn("genomescope2", survey["missing_tools"])
 
 
 if __name__ == "__main__":

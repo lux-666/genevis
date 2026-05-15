@@ -11,7 +11,7 @@ set -euo pipefail
 
 ORCHESTRATOR_ENV="gene_agent"
 EXEC_ENV="env_geno_exec"
-EXEC_TOOLS=("seqkit" "flye" "quast.py" "jellyfish" "genomescope.R")
+EXEC_TOOLS=("seqkit" "flye" "quast.py" "jellyfish" "genomescope2")
 
 fail() {
   printf 'error: %s\n' "$1" >&2

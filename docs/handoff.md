@@ -129,7 +129,7 @@ The active blocker is server/HPC validation. Run these on a host where
 artifact refs here.
 
 Task 1 / Phase 4 server gate requires `seqkit`, `flye`, `quast.py`,
-`jellyfish`, and `genomescope.R`:
+`jellyfish`, and `genomescope2`:
 
 ```bash
 git pull

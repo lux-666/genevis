@@ -3,7 +3,7 @@ version_constraint: ">=2.0"
 language: cli
 install_channel: conda
 entry_patterns:
-  - "genomescope.R {histogram_tsv} {kmer_size} {read_length} {output_dir}"
+  - "genomescope2 -i {histogram_tsv} -o {output_dir} -k {kmer_size}"
 help_summary: "GenomeScope2 model fitting for low-error short-read k-mer histograms."
 known_pitfalls:
   - "Model confidence depends on low-error short-read k-mer spectra and fit quality."

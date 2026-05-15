@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -333,13 +334,13 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     params = dict(survey_out["survey_parameters"])
-    summary_path = artifact_dir / "summary.tsv"
+    summary_path = artifact_dir / "summary.txt"
     script_path = working_dir / "run_genomescope2.sh"
     script_path.write_text(
         "set -e\n"
         f"mkdir -p {shlex.quote(str(artifact_dir))}\n"
-        f"genomescope.R {shlex.quote(str(Path(survey_out['kmer_hist_path'])))} "
-        f"{int(params['kmer_size'])} {int(params['read_length'])} {shlex.quote(str(artifact_dir))}\n"
+        f"genomescope2 -i {shlex.quote(str(Path(survey_out['kmer_hist_path'])))} "
+        f"-o {shlex.quote(str(artifact_dir))} -k {int(params['kmer_size'])}\n"
         f"test -f {shlex.quote(str(summary_path))}\n",
         encoding="utf-8",
     )
@@ -758,14 +759,36 @@ def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:
     }
     notes: list[str] = []
     parsed = False
+    repeat_length: float | None = None
     for line in path.read_text(encoding="utf-8").splitlines():
-        parts = line.replace("=", "\t").split("\t")
-        if len(parts) < 2:
+        line_text = line.strip()
+        parts = [part for part in re.split(r"\t+| {2,}|=", line_text) if part]
+        if len(parts) >= 2:
+            key = parts[0].strip().lower()
+            value = parts[1].strip().replace(",", "")
+        else:
+            lower_line = line_text.lower()
+            values = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?", line_text)
+            if not values:
+                continue
+            value = values[0].replace(",", "")
+            if "genome haploid length" in lower_line:
+                key = "genome haploid length"
+            elif "genome repeat length" in lower_line:
+                key = "genome repeat length"
+            elif "heterozygosity" in lower_line:
+                key = "heterozygosity"
+            else:
+                continue
+        if key == "property":
             continue
-        key = parts[0].strip().lower()
-        value = parts[1].strip().replace(",", "")
         try:
-            if key in {"genome_size", "genome size", "haploid_length"}:
+            if key in {
+                "genome_size",
+                "genome size",
+                "haploid_length",
+                "genome haploid length",
+            }:
                 estimates["genome_size"] = int(float(value))
                 parsed = True
             elif key in {"heterozygosity", "het"}:
@@ -774,9 +797,15 @@ def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:
             elif key in {"repeat_fraction", "repeat", "repetitiveness"}:
                 estimates["repeat_fraction"] = float(value)
                 parsed = True
+            elif key == "genome repeat length":
+                repeat_length = float(value)
+                parsed = True
         except ValueError:
             normalized = key.replace(" ", "_")
             notes.append(f"genomescope2_{normalized}_unparsed")
+    genome_size = estimates.get("genome_size")
+    if estimates["repeat_fraction"] is None and repeat_length is not None and genome_size:
+        estimates["repeat_fraction"] = repeat_length / float(genome_size)
     if not parsed:
         notes.append("genomescope2_estimates_unparsed")
     return estimates, notes
