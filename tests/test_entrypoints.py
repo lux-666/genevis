@@ -194,6 +194,44 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("error: manifest not found", stderr)
         build_graph.assert_not_called()
 
+    def test_missing_manifest_asset_path_reports_inventory_validation_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing = root / "missing.fastq"
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "session_id: s1",
+                        "assets:",
+                        "  - asset_type: raw_long_reads",
+                        f"    paths: [{missing}]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            code, stdout, stderr = _capture_cli(
+                _run_session,
+                argparse.Namespace(
+                    session_id="s1",
+                    manifest=str(manifest),
+                    data_dir=str(root / "data"),
+                    local_exec=[],
+                    run_config=None,
+                    checkpointer="memory",
+                ),
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("current_stage: inventory", stdout)
+        self.assertIn("supervision_state: failed_terminal", stdout)
+        self.assertIn("inventory validation failed", stderr)
+        self.assertIn("raw_long_reads: missing files", stderr)
+        self.assertIn(str(missing), stderr)
+        self.assertNotIn("missing asset_registry_ref", stderr)
+
     def test_blank_manifest_is_rejected_before_path_resolution(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
             code, stdout, stderr = _capture_cli(

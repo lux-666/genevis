@@ -23,6 +23,8 @@ def route_from_inventory(state: TopLevelState) -> str:
         return "fail"
 
     if status == "validated":
+        if not inventory_out.get("valid"):
+            return "fail"
         warnings = inventory_out.get("warnings", [])
         if warnings:
             return "review"

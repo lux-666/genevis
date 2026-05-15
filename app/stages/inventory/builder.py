@@ -35,9 +35,15 @@ def _review_gate(state: TopLevelState) -> dict:
 def _fail_inventory(state: TopLevelState) -> dict:
     """Record inventory failure and stop."""
     inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    errors = [str(error) for error in inventory_out.get("errors", [])]
+    if errors:
+        reason = "inventory validation failed: " + "; ".join(errors)
+    else:
+        reason = inventory_out.get("reason", "inventory failed")
     return {
+        "current_stage": "inventory",
         "supervision_state": "failed_terminal",
-        "last_error": inventory_out.get("reason", "inventory failed"),
+        "last_error": reason,
     }
 
 

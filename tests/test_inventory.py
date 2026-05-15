@@ -41,6 +41,33 @@ class InventoryStageTests(unittest.TestCase):
             result = graph.invoke(state)
             self.assertEqual(result["supervision_state"], "failed_terminal")
 
+    def test_inventory_fails_before_read_qc_when_asset_path_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing.fastq"
+            manifest = {
+                "session_id": "s1",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(missing)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+
+            self.assertEqual(result["current_stage"], "inventory")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIsNone(result.get("asset_registry_ref"))
+            self.assertEqual(result["stage_outputs"]["inventory"]["status"], "validated")
+            self.assertFalse(result["stage_outputs"]["inventory"]["valid"])
+            self.assertIn("inventory validation failed", result["last_error"])
+            self.assertIn("raw_long_reads: missing files", result["last_error"])
+            self.assertIn(str(missing), result["last_error"])
+
     def test_inventory_succeeds_with_valid_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "ont.fq"
@@ -134,11 +161,15 @@ class InventoryStageTests(unittest.TestCase):
 
     def test_inventory_triggers_review_for_ambiguous_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            genomic = Path(tmpdir) / "a.fq"
+            transcript = Path(tmpdir) / "b.fq"
+            genomic.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            transcript.write_text("@r2\nACGT\n+\n!!!!\n", encoding="utf-8")
             manifest = {
                 "session_id": "s3",
                 "assets": [
-                    {"asset_type": "raw_long_reads", "paths": ["a.fq"]},
-                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": ["b.fq"]},
+                    {"asset_type": "raw_long_reads", "paths": [str(genomic)]},
+                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": [str(transcript)]},
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
