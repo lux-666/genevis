@@ -153,9 +153,12 @@ Until that pass is recorded:
   partially open** — task 01 is implemented in code, but the gate's
   "server/HPC can run the Phase 4 validation workflow after `git pull`"
   clause is unverified.
-- Do not start Phase 5 task 02 (durable resume) or task 03
-  (RepeatMasker backbone) before the server pass lands; they assume
-  the server-side path actually works.
+- Do not start Phase 5 task 03 (RepeatMasker backbone) before the
+  server pass lands; it assumes the server-side path actually works.
+  Task 02 (durable resume) is implemented; its server-side smoke is
+  documented in
+  `docs/phases/phase5/02_human_gate_and_durable_resume_minimum.md` and
+  should be exercised on the server alongside the Phase 4 mainline.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
@@ -199,9 +202,26 @@ server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
 - `LocalRunner` is the only runner. When a frozen attempt sets
   `conda_env` or `conda_prefix`, it dispatches through `conda run`;
   otherwise the legacy shell path is used.
-- Review interrupts have in-process structured resume helpers but no
-  durable cross-process `ResumeInterrupt` flow until a persistent
-  checkpointer lands (Phase 6).
+- Review interrupts have both in-process structured resume helpers and
+  a durable cross-process flow. Phase 5 task 02 wired LangGraph's
+  `SqliteSaver` into `app/graph/checkpointer.py`; the default backend
+  is selected by `_resolve_checkpointer_backend(args)` with priority
+  explicit `--checkpointer` flag > `GENE_AGENT_CHECKPOINTER` env var >
+  `"sqlite"`. The checkpoint database lives at
+  `<data_dir>/checkpoints/checkpoints.sqlite` and a session blocked at
+  `assembly_review` or `hic_scaffolding` can be resumed across processes
+  with `gene-agent resume --session-id <id> --decision-file <path>
+  --data-dir <dir>`. The resume CLI loads `.env` (`main` entry),
+  records `resume_started` / `resume_completed` / `resume_failed`
+  ledger events around the in-process resume helper, and rejects
+  `--checkpointer memory`. `gene-agent inspect` reports
+  `decision_requirements` (stage / decisions_allowed / candidate_ids)
+  reconstructed from the latest review request artifact. The decision
+  file must validate against `app.review.base.ResumeReviewRequest`.
+  `tests/__init__.py` sets `GENE_AGENT_CHECKPOINTER=memory` for the
+  test suite, which means all unittest invocations need `-t .` so the
+  package init runs (every script and doc in this repo already does
+  this).
 - Requested-stage routing is not implemented; the CLI flag is
   intentionally not exposed.
 - SeqKit, Flye, QUAST, and YaHS are not installed in the local Mac
@@ -213,11 +233,13 @@ server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
   `repeat_annotation`. When Phase 5 task 02 / task 03 need server-side
   smoke coverage they should add their own scripts rather than
   overload this one.
-- `app.control.lifecycle.inspect_session()` (and `inspect_state()`)
-  hard-code `"checkpoint_persistence": "memory_only"` and
-  `"durable_resume_available": False`. That is correct today because
-  the graph uses the memory-only LangGraph checkpointer; both fields
-  must be revisited when Phase 5 task 02 lands a durable backend.
+- `app.control.lifecycle.inspect_session()` reports
+  `"checkpoint_persistence": "sqlite"` and
+  `"durable_resume_available": True` when the sqlite db exists for
+  `<data_dir>/checkpoints/checkpoints.sqlite`, else stays on
+  `memory_only` / `False`. `inspect_state()` (in-memory introspection)
+  intentionally does not carry those fields — persistence is a
+  property of the checkpoint backend, not of the in-memory state.
 
 For per-stage planning vs. execution status (which methods are wired,
 which are descriptor-only), read the top-level `README.md` "Current

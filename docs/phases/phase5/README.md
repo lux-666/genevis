@@ -47,6 +47,7 @@ two boxes are checked.
 1. [Execution Consistency And Server Gate](01_execution_consistency_and_server_gate.md)
 2. [Human Gate And Durable Resume Minimum](02_human_gate_and_durable_resume_minimum.md)
 3. [Existing Assembly To RepeatMasker Backbone](03_existing_assembly_repeatmasker_backbone.md)
+4. [Review Policy: Strict / Auto Modes And LLM Recommendation](04_review_policy.md)
 
 ## Phase 5 Guardrails
 
@@ -82,7 +83,7 @@ safe to run, inspect, and resume.
 ## Verification Baseline
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -t . -p 'test*.py' -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 ```

@@ -39,7 +39,7 @@ Not tracked in git:
 
 ```bash
 git status --short
-PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v
+PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m unittest discover -s tests -t . -p 'test*.py' -v
 PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent python -m compileall app tests
 git diff --check
 git add ...
@@ -64,6 +64,56 @@ bash scripts/server_phase4_smoke.sh \
 ```
 
 The server owns real data paths and generated output.
+
+### Block-And-Resume Loop
+
+`gene-agent run` defaults to `--checkpointer sqlite`, which persists the
+parent graph state under `<data_dir>/checkpoints/checkpoints.sqlite`.
+When a session blocks at a human gate (today: `assembly_review` and
+`hic_scaffolding`), the operator can exit the process, write a
+structured decision file, and resume:
+
+```bash
+# Initial run, blocks at assembly_review
+gene-agent run \
+  --manifest data/phase4_real_smoke/manifest.yaml \
+  --run-config data/phase4_real_smoke/run_config.json \
+  --session-id phase5-resume-smoke \
+  --data-dir data/phase4_real_smoke/out \
+  --local-exec read_qc --local-exec assembly --local-exec assembly_review
+# Output: supervision_state: blocked_human, checkpoint_persistence: sqlite
+
+# Inspect to confirm the gate and the candidate the human is reviewing
+gene-agent inspect \
+  --session-id phase5-resume-smoke \
+  --data-dir data/phase4_real_smoke/out
+# Look for: durable_resume_available: true,
+#           latest_review_request_artifact: <…assembly_review_request.json>
+
+# Operator authors a decision file matching ResumeReviewRequest
+cat > data/phase4_real_smoke/decision.json <<'EOF'
+{
+  "session_id": "phase5-resume-smoke",
+  "stage": "assembly_review",
+  "decision": "accept",
+  "candidate_id": "<from inspect>",
+  "final_assembly_ref": "<draft_assembly path from artifact registry>",
+  "notes": ["server-side QUAST smoke approved"]
+}
+EOF
+
+# Resume
+gene-agent resume \
+  --session-id phase5-resume-smoke \
+  --decision-file data/phase4_real_smoke/decision.json \
+  --data-dir data/phase4_real_smoke/out
+# Output: current_stage advances past assembly_review;
+#         ledger gains a review_decision event.
+```
+
+The resume CLI rejects mismatched `session_id`, missing or invalid
+decision files, missing checkpoint database, and missing thread before
+mutating any state.
 
 ## Environment Expectations
 

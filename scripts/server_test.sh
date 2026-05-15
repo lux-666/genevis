@@ -18,7 +18,7 @@ fi
 
 echo "== unittest =="
 PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \
-  python -m unittest discover -s tests -p 'test*.py' -v
+  python -m unittest discover -s tests -t . -p 'test*.py' -v
 
 echo "== compileall =="
 PYTHONPYCACHEPREFIX="${PYCACHE_PREFIX}" conda run -n "${ORCHESTRATOR_ENV}" \

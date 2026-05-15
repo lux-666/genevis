@@ -41,6 +41,14 @@ if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'import sys; print(sys.version
 fi
 ok "${ORCHESTRATOR_ENV} runs python"
 
+# Phase 5/02 made sqlite the default checkpoint backend, so the
+# orchestrator env must carry langgraph-checkpoint-sqlite. Without it,
+# `gene-agent run` fails with ImportError on the very first invocation.
+if ! conda run -n "${ORCHESTRATOR_ENV}" python -c 'from langgraph.checkpoint.sqlite import SqliteSaver' >/dev/null 2>&1; then
+  fail "conda env '${ORCHESTRATOR_ENV}' is missing langgraph-checkpoint-sqlite; run 'pip install -e .' inside that env (see docs/deployment/migration.md)"
+fi
+ok "${ORCHESTRATOR_ENV} has langgraph-checkpoint-sqlite"
+
 if ! conda env list | awk '{print $1}' | grep -qx "${EXEC_ENV}"; then
   fail "conda env '${EXEC_ENV}' not found; create it with the bioinformatics tool stack before running Phase 4"
 fi
