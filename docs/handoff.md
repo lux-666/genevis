@@ -9,7 +9,8 @@ files. For the doc map, read `docs/README.md`.
 ## Current Status
 
 Phases 0–3 and Phase 4 in-code (tasks 01, 02, 03, 05, 06, 07) are complete.
-Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code.
+Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code
+and has server/HPC validation evidence.
 Phase 5 task 03 is implemented in Mac-side code/tests for the existing
 assembly -> RepeatMasker backbone; its server/HPC smoke is still pending.
 
@@ -83,6 +84,57 @@ escape in adopted manifest session id) plus an arm64 `quast.py`
 environment note. Diagnoses and regression tests are in git log around
 2026-05-14 — do not re-document here.
 
+## Phase 4 Server/HPC QUAST Gate Run Record
+
+Server/HPC validation that closes the Phase 5 task 01 server gate.
+
+Run parameters:
+
+- host: `task-p18z19700n0076dcs-south1-cocsckda-7bf85588f4-mj48h`
+  under `/data/work/genevis`
+- session id: `phase4-real-bht-20260515-e`
+- manifest: `data/phase4_real_smoke/manifest.yaml`
+- run config: `data/phase4_real_smoke/run_config.json`
+  - `local_exec` includes `assembly_review`, so QUAST ran through
+    `env_dispatch` / `LocalRunner` on the server
+- data dir: `data/phase4_real_smoke/out`
+- checkpoint backend: `sqlite`
+
+Observed initial smoke outcome:
+
+- `current_stage`: `assembly_review`
+- `supervision_state`: `blocked_human`
+- `route_trace`: `inventory_stage -> read_qc_stage -> genome_survey_stage ->
+  assembly_stage`
+- `assembly.candidate.flye` status: `executed`
+- QUAST signal status: `available`
+- QUAST metrics: `contig_count=3`, `largest_contig=6675`,
+  `total_length=15971`, `gc_percent=51.0`, `n50=6135`, `l50=2`
+
+Confirmed QUAST artifact refs:
+
+- `/data/work/genevis/data/phase4_real_smoke/out/artifacts/assembly_review/phase4-real-bht-20260515-e/quast/phase4-real-bht-20260515-e_assembly.candidate.flye/quast_out/report.tsv`
+- `/data/work/genevis/data/phase4_real_smoke/out/artifacts/assembly_review/phase4-real-bht-20260515-e/quast/phase4-real-bht-20260515-e_assembly.candidate.flye/quast_out/report.txt`
+- `/data/work/genevis/data/phase4_real_smoke/out/artifacts/assembly_review/phase4-real-bht-20260515-e/quast/phase4-real-bht-20260515-e_assembly.candidate.flye/quast_summary.json`
+- `data/phase4_real_smoke/out/artifacts/assembly_review/phase4-real-bht-20260515-e/assembly_review_request.json`
+
+Resume smoke:
+
+- command used `gene-agent resume --session-id phase4-real-bht-20260515-e
+  --decision-file data/phase4_real_smoke/decision.json --data-dir
+  data/phase4_real_smoke/out`
+- resumed route:
+  `inventory_stage -> read_qc_stage -> genome_survey_stage -> assembly_stage
+  -> assembly_review_stage -> hic_scaffolding_stage ->
+  repeat_annotation_stage -> gene_annotation_stage`
+- final `current_stage`: `function_annotation`
+- final `supervision_state`: `failed_terminal`
+- expected error: `missing database_provenance for function_annotation`
+
+This is the intended downstream stop for the current workflow: Phase 4
+server execution and durable resume work, and function annotation still
+requires explicit database provenance before terminal completion.
+
 ## Read Order
 
 Read these in order before non-trivial work:
@@ -124,32 +176,9 @@ done
 
 ## Next Best Task
 
-The active blocker is server/HPC validation. Run these on a host where
-`env_geno_exec` has the relevant real tools, then record the outcomes and
-artifact refs here.
-
-Task 1 / Phase 4 server gate requires `seqkit`, `flye`, `quast.py`,
-`jellyfish`, and `genomescope2`:
-
-```bash
-git pull
-bash scripts/server_check.sh
-bash scripts/server_test.sh
-bash scripts/server_phase4_smoke.sh \
-  --manifest    data/phase4_real_smoke/manifest.yaml \
-  --run-config  data/phase4_real_smoke/run_config.json \
-  --session-id  phase4-server-smoke-YYYYMMDD-a \
-  --data-dir    data/phase4_real_smoke/out
-```
-
-The smoke run config should add `"assembly_review"` to
-`run_config.local_exec` so QUAST runs and produces `report.tsv` plus
-`quast_summary.json`. Append the resulting QUAST artifact refs to the
-"Phase 4 Real Biology Acceptance Run Record" above and check the two
-remaining boxes in
-`docs/phases/phase5/01_execution_consistency_and_server_gate.md`
-("Run server helper scripts on the server/HPC after git pull",
-"Record the server-side validation result in docs/handoff.md").
+The active blocker is Phase 5 task 03 server/HPC validation. The Phase 4
+server gate is closed by session `phase4-real-bht-20260515-e`; do not rerun
+that smoke unless the environment or execution path changes.
 
 Phase 5 task 03 RepeatMasker backbone validation requires `RepeatMasker`
 available through the configured execution env and prepared inputs matching
@@ -174,16 +203,8 @@ checks that `gene_bundle.genome_input_ref` equals
 the artifact index, and the repeat bundle records `status: executed` with a
 provided repeat library.
 
-Until the server passes are recorded:
-
-- The Phase 5 entry gate in `docs/phases/phase5/README.md` is **only
-  partially open** — task 01 is implemented in code, but the gate's
-  "server/HPC can run the Phase 4 validation workflow after `git pull`"
-  clause is unverified.
-- Do not mark Phase 5 task 03 accepted from Mac fake-binary tests alone.
-  Task 02 (durable resume) is implemented; its server-side smoke is documented in
-  `docs/phases/phase5/02_human_gate_and_durable_resume_minimum.md` and
-  should be exercised on the server alongside the Phase 4 mainline.
+Until the Phase 5 task 03 server pass is recorded, do not mark the
+RepeatMasker backbone accepted from Mac fake-binary tests alone.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

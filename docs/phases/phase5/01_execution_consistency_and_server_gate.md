@@ -1,8 +1,8 @@
 # 01 Execution Consistency And Server Gate
 
-Task status: implemented in code (2026-05-14). Two server-side checkboxes
-remain open and **block all later Phase 5 tasks** — see the unchecked items
-under "Tasks" below. Track the result in `docs/handoff.md`.
+Task status: accepted with server/HPC validation (2026-05-15). The
+server-side evidence is recorded in `docs/handoff.md` under
+"Phase 4 Server/HPC QUAST Gate Run Record".
 
 ## Goal
 
@@ -78,8 +78,8 @@ Mac remains the development and lightweight-test environment.
   blocks.
 - [x] Confirm existing tests still cover successful fake-binary genome survey
   execution.
-- [ ] Run server helper scripts on the server/HPC after `git pull`.
-- [ ] Record the server-side validation result in `docs/handoff.md`.
+- [x] Run server helper scripts on the server/HPC after `git pull`.
+- [x] Record the server-side validation result in `docs/handoff.md`.
 
 ## Acceptance
 
@@ -146,3 +146,19 @@ Server-side:
 bash scripts/server_check.sh
 bash scripts/server_test.sh
 ```
+
+Server acceptance record:
+
+- session id: `phase4-real-bht-20260515-e`
+- run: `bash scripts/server_phase4_smoke.sh --manifest
+  data/phase4_real_smoke/manifest.yaml --run-config
+  data/phase4_real_smoke/run_config.json --session-id
+  phase4-real-bht-20260515-e --data-dir data/phase4_real_smoke/out`
+- result: blocked at `assembly_review` as expected, with
+  `assembly.candidate.flye` executed and QUAST signal `available`
+- confirmed QUAST refs: `quast_out/report.tsv`, `quast_out/report.txt`,
+  and `quast_summary.json` under
+  `data/phase4_real_smoke/out/artifacts/assembly_review/phase4-real-bht-20260515-e/quast/`
+- durable resume continued past assembly review and stopped at
+  `function_annotation` with the expected
+  `missing database_provenance for function_annotation` failure
