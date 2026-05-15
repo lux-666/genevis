@@ -41,6 +41,10 @@ Start here if you are taking over the project:
 10. [docs/phases/phase4/README.md](docs/phases/phase4/README.md)
 11. [docs/phases/phase_completion_plan.md](docs/phases/phase_completion_plan.md)
 
+If you are setting this project up on a new machine, also read
+[docs/deployment/migration.md](docs/deployment/migration.md) for the conda
+env / install checklist.
+
 ## Current Implementation
 
 Implemented:

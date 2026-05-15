@@ -230,6 +230,12 @@ def _run_session(args: argparse.Namespace) -> int:
             existing = dict(stage_outputs.get(stage_name) or {})
             existing["execution_mode"] = "local"
             stage_outputs[stage_name] = existing
+    if "repeat_annotation" in local_stages:
+        repeat_out = dict(stage_outputs.get("repeat_annotation") or {})
+        repeat_out.setdefault(
+            "primary_method", "repeat_annotation.masking.repeatmasker"
+        )
+        stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly and run_config.assembly.flye_parameters:
         assembly_out = dict(stage_outputs.get("assembly") or {})
         assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump()

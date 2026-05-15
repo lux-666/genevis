@@ -1,41 +1,48 @@
 # Documentation Map
 
-This directory is the coordination layer for Gene Agent. Treat it as part of
-the system, not a side note.
+Coordination layer for Gene Agent. Treat as part of the system, not a
+side note.
 
 ## Start Here
 
 If you are taking over:
 
-1. `handoff.md` tells you the current state and next best task.
-2. `governance.md` tells you how to act as the coordinator.
-3. `architecture.md` tells you the system boundaries.
-4. `stage_contracts.md` tells you what each biological stage must do.
-5. `descriptor_spec.md` tells you how method/package descriptors work.
-6. `phases/phase1/phase1.md` gives the current Phase 1 critique and task order.
-7. `phases/phase2/phase2.md` gives the current CycloneSEQ Phase 2 design.
-8. `phases/phase2/01_*.md` through `11_*.md` give detailed Phase 2 handoffs.
-9. `phases/phase3/README.md` gives the next natural-entry and review/resume plan.
-10. `phases/phase_completion_plan.md` remains the long-range roadmap.
+1. `handoff.md` — current state, next best task, verification, risks.
+2. `governance.md` — coordinator responsibilities, source-of-truth order,
+   boundary rules.
+3. `architecture.md` — parent graph, modules, state categories.
+4. `stage_contracts.md` — stable inputs / outputs / planning rules per
+   biological stage.
+5. `descriptor_spec.md` — descriptor registry, package and method
+   descriptors.
+6. `phases/phase_completion_plan.md` — long-range roadmap, with pointers
+   into per-phase folders for history.
+7. The phase folder relevant to the current work
+   (`phases/phase1/` … `phases/phase5/`).
+
+If you are setting this project up on a new host, read
+`deployment/migration.md` for the conda env / install checklist.
 
 ## Document Roles
 
-| File | Purpose |
+| File / Folder | Purpose |
 |---|---|
-| `handoff.md` | Current status, next task, verification commands, known risks |
+| `handoff.md` | Current status, next task, verification, known risks, stop conditions |
 | `governance.md` | Coordinator responsibilities, source-of-truth order, boundary rules |
 | `architecture.md` | Parent graph, modules, state categories, extension rule |
 | `stage_contracts.md` | Stable inputs, outputs, planning rules, and review triggers per stage |
 | `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
-| `phases/phase1/phase1.md` | Current Phase 1 critique, summary, and task order |
-| `phases/phase1/task*.md` | Focused executable task handoffs |
-| `phases/phase2/phase2.md` | CycloneSEQ single-line implementation plan and first SeqKit vertical slice |
-| `phases/phase2/01_*.md` through `11_*.md` | Phase 2 stage-by-stage implementation handoffs with human-help triggers |
-| `phases/phase3/README.md` | Natural-language entry, review resume, and next execution-slice plan |
-| `phases/phase_completion_plan.md` | Phase-by-phase implementation roadmap |
+| `deployment/mac_dev_server_pull.md` | Mac-dev / server `git pull` workflow contract |
+| `deployment/migration.md` | New-host setup checklist (conda envs, installs, paths) |
+| `examples/` | Manifest and run-config templates |
+| `phases/phase_completion_plan.md` | Long-range roadmap |
+| `phases/phaseN/` | Per-phase retrospectives and numbered task handoffs |
+| `archive/` | Original biology source documents (kept for reference) |
 
 ## Update Rule
 
-When code behavior changes, update the closest matching document in the same
-work session. If the next agent needs different instructions, update
-`handoff.md` before stopping.
+When code behavior changes, update the closest matching document in the
+same work session. If the next agent needs different instructions,
+update `handoff.md` before stopping. Avoid restating in `handoff.md`
+what already lives in `README.md`, `stage_contracts.md`, or a phase doc
+— prefer one source of truth and a pointer.

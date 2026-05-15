@@ -1,188 +1,62 @@
 # Phase Completion Plan
 
-This is the long-range implementation roadmap. `docs/handoff.md` records current
-status and the next best task. `docs/stage_contracts.md` defines stage behavior.
-Operational phase/task handoffs live under `docs/phases/phase*/`.
+Long-range implementation roadmap. `docs/handoff.md` records current
+status and the next best task. `docs/stage_contracts.md` defines stage
+behavior. Operational phase/task handoffs live under `docs/phases/phase*/`.
 
-## Phase 0: Scaffold and Contracts
+## Completed Phases
 
-Goal: establish the repository shape, state contracts, stage names, descriptor roots, and documentation.
+Each completed phase has its own retrospective and per-task records under
+`docs/phases/`. Read the phase folder when you need history; do not
+restate it here.
 
-Exit criteria:
-- `app/`, `config/`, `descriptors/`, `docs/`, and `tests/` roots exist.
-- `TopLevelState` stores only small control fields and references.
-- Stage order matches the ONT/CLR workflow.
-- Structure tests pass.
+- **Phase 0 — Scaffold and Contracts.** Repository shape, `TopLevelState`
+  contract, stage order, descriptor roots, structure tests.
+- **Phase 1 — Parent Graph and Inventory MVP.**
+  `docs/phases/phase1/phase1.md`. Real manifest → asset registry → ledger,
+  inventory routing for success / review / existing-assembly / failure.
+- **Phase 2 — CycloneSEQ Contracts and First Method Slice.**
+  `docs/phases/phase2/phase2.md` plus `01_*.md` … `11_*.md`. Full
+  CycloneSEQ contract through function annotation, with the SeqKit stats
+  vertical slice as the first executable method.
+- **Phase 3 — Natural Entry, Review Resume, and Real Execution.**
+  `docs/phases/phase3/README.md`. `gene-agent ask` natural-language entry,
+  in-process review resume helpers, and stage-by-stage realization.
+- **Phase 4 — Real Local Assembly Mainline.**
+  `docs/phases/phase4/README.md`. Per-stage conda env (`config/envs.yaml`
+  + `EnvResolver` + `env_dispatch`), real Flye / QUAST mainline, structured
+  `--run-config`, server `git pull` adaptation, real-data acceptance run
+  recorded in `docs/handoff.md`.
 
-Current state: Phase 0 is structurally complete.
+## Phase 5: Workflow Hardening And Downstream Backbone
 
-## Phase 1: Parent Graph and Inventory MVP
+Tasks in `docs/phases/phase5/`:
 
-Goal: run the parent graph through inventory with a real input manifest and asset registry output.
+1. Execution consistency and server gate (Phase 5 task 01 wired
+   `genome_survey` through `env_dispatch`; server-side validation pass
+   is the open work — see `docs/handoff.md`).
+2. Human gate and durable resume minimum.
+3. Existing assembly to RepeatMasker backbone.
 
-Current state: Phase 1 inventory corrections are documented in
-`docs/phases/phase1/phase1.md`.
-
-Tasks:
-- Add manifest tests first:
-  - raw ONT/CLR reads
-  - short DNA reads
-  - RNA-seq reads
-  - Iso-seq or long RNA reads
-  - Hi-C reads
-  - existing assembly
-  - ambiguous long-read vs long-RNA inputs
-- Implement manifest schema and validation.
-- Implement file existence, extension/format, size, compression, sample ID, and
-  platform metadata checks.
-- Implement deferred checksum status for huge files.
-- Write asset registry JSON artifact.
-- Write ledger session and asset registration events.
-- Add CLI `gene-agent run --session-id ... --manifest ...`.
-- Replace inventory placeholder routing with real success/failure/review paths.
-
-Exit criteria:
-- A manifest-only run registers assets and advances to `read_qc`.
-- Ambiguous long-read vs long-RNA inputs stop with a clear review requirement.
-- Existing assembly inputs can skip read QC, survey, and assembly planning later.
-- Tests prove `TopLevelState` stores only references to registry artifacts.
-
-Files likely touched:
-
-- `app/schemas/assets.py`
-- `app/schemas/state.py`
-- `app/stages/inventory/`
-- `app/control/ledger.py`
-- `app/entrypoints/run.py`
-- `tests/`
-- `docs/handoff.md`
-
-## Phase 2: CycloneSEQ Contracts And First Method Slice
-
-Goal: design the full CycloneSEQ FASTQ / FASTQ.gz genome assembly and annotation
-workflow, then run one narrow real method path first:
-`read_qc.long_read_stats -> SeqKit stats`.
-
-Current state: Phase 2 design tasks are documented in
-`docs/phases/phase2/phase2.md`.
-
-Tasks:
-- Define the CycloneSEQ stage contract for:
-  - inventory
-  - read_qc
-  - genome_survey
-  - assembly
-  - assembly_review
-  - hic_scaffolding
-  - repeat_annotation
-  - gene_annotation
-  - function_annotation
-- Define read QC substeps:
-  - long-read stats with SeqKit stats, NanoPlot, or pyfastx
-  - length filtering with seqkit seq, Filtlong, fastplong, or chopper
-  - FOFN generation for stable assembly input
-- Define genome_survey full mode with short DNA reads and fallback mode with
-  CycloneSEQ-only long reads.
-- Define assembly candidate set: Flye, NextDenovo, and Canu for ONT/CLR automatic planning, with hifiasm kept as an explicit HiFi/non-ONT compatibility route.
-- Define assembly_review gates with QUAST, BUSCO, Merqury, read mapping
-  coverage, purge_dups_check, and contamination_check.
-- Define Hi-C skip/scaffold policy, repeat annotation, gene annotation, and
-  function annotation contracts.
-- Add descriptors and FrozenAttemptSpec support for the first SeqKit stats path.
-- Keep unclear thresholds, resume payloads, requested-stage semantics, and tool
-  candidate changes as human-decision points.
-
-Exit criteria:
-- CycloneSEQ FASTQ / FASTQ.gz inputs are documented as `raw_long_reads`.
-- The full stage/method/artifact contract is documented with checkbox handoffs.
-- The first executable slice can be implemented without touching assembly,
-  annotation, remote execution, or automatic retry.
-- Coding assistants are explicitly told to ask the human before inventing
-  thresholds, requested-stage semantics, resume payloads, or broad candidate-set
-  changes.
-
-## Phase 3: Natural Entry, Review Resume, and Real Execution
-
-Goal: make the coordinator usable from natural language, resume human review gates,
-and then realize the biological mainline one stage at a time from read QC
-onward.
-
-Current state: Phase 3 planning is documented in `docs/phases/phase3/README.md`.
-
-Tasks:
-- Add a natural-language entry parser that produces the existing structured CLI /
-  `initial_state(...)` contract without becoming a second workflow engine.
-- Add session status/inspect plus human review/resume semantics for
-  `assembly_review` and `hic_scaffolding`, with structured decisions, artifacts,
-  and ledger events.
-- Realize read QC first: stats, stable FOFN handoff, optional report, and
-  optional approved filtering.
-- Realize genome survey, assembly, assembly review, post-review actions,
-  optional Hi-C scaffolding, and downstream annotation in order.
-- Keep requested-stage routing and broad method execution out of scope until
-  their semantics are explicit. In-agent remote execution is intentionally
-  unsupported; server-side execution happens after `git pull` (see
-  `docs/deployment/mac_dev_server_pull.md`).
-
-Exit criteria:
-- A natural-language request can start the existing graph path through a validated
-  structured request.
-- A user can inspect a session by `session_id` and see current stage,
-  supervision state, active interrupt, and latest artifact refs.
-- A blocked review state can resume with a validated decision and auditable
-  record without restarting from `initial_state(...)`.
-- Each stage realization follows descriptors, frozen attempts, runner boundary,
-  artifact collection, and ledger events without duplicating YAML/config roles.
-
-## Phase 4: Assembly Review Gate
-
-Goal: evaluate assembly and pause for human decisions before polish/purge actions.
-
-Tasks:
-- Add QUAST/BUSCO/Merqury descriptors and review rules.
-- Add interrupt-backed `assembly_review` gate.
-- Add conditional planning for NextPolish SGS/LGS, purge_dups, and Redundans.
-- Preserve rejected candidates with provenance.
-
-Exit criteria:
-- Review metrics produce an approval/skip/action request.
-- Resume continues with selected polish/purge actions.
-- Rejected polish or purge candidates remain traceable in ledger/artifacts.
-
-## Phase 5: Hi-C, Repeat, Gene, and Function Annotation
-
-**Entry gate (added during Phase 4 task 06):** Phase 5 does not start until the
-Phase 4 real-biology mainline has succeeded on human-supplied real long reads
-and the resulting session id, `draft_assembly.fasta`, `report.tsv`,
-`quast_summary.json`, and `assembly_review_request.json` refs are recorded in
-`docs/handoff.md`. See `docs/phases/phase4/README.md` for the exact criteria.
-
-Goal: complete the downstream annotation backbone with descriptor-driven method families.
-
-Tasks:
-- Add Hi-C scaffolding descriptors and Juicebox manual review bundle.
-- Add RepeatModeler/RepeatMasker/TRF method families.
-- Add AUGUSTUS, GeMoMa, Miniprot, HISAT2/StringTie, IsoQuant, and optional EVM/ANNEVO paths.
-- Add InterProScan, DIAMOND, and KofamScan function annotation.
-
-Exit criteria:
-- Existing assembly inputs can enter repeat/gene/function annotation without rerunning assembly.
-- Predicted proteins produce at least one function annotation table.
-- Database versions and snapshots are recorded in provenance.
+Phase 5 is gated on the Phase 4 real-data acceptance pass (Flye + QUAST)
+being recorded in `docs/handoff.md` before broader tool execution starts.
+Deferred items live in `docs/phases/phase5/README.md`; do not duplicate
+that catalog here.
 
 ## Phase 6: Observability and Durable Operation
 
 Goal: make runs auditable and resumable for long projects.
 
 Tasks:
-- Add user/developer notebook traces.
-- Add sqlite/postgres checkpointer. Durable cross-process resume is a Phase 6
-  prerequisite, not a Phase 4 deliverable; the Phase 4 scaffold uses the
-  memory-only LangGraph checkpointer and in-process review resume helpers.
-- Add lifecycle commands: pause, resume, retry, abort, review.
-- Add database version provenance for annotation resources.
+
+- User/developer notebook traces.
+- sqlite/postgres checkpointer for cross-process resume.
+- Lifecycle commands: pause, resume, retry, abort, review.
+- Database version provenance for annotation resources.
 
 Exit criteria:
-- A stopped session resumes from checkpoint and ledger state without duplicate side effects.
-- User-facing reports explain what was run, what was skipped, and what requires
-  human attention.
+
+- A stopped session resumes from checkpoint and ledger state without
+  duplicate side effects.
+- User-facing reports explain what was run, what was skipped, and what
+  requires human attention.

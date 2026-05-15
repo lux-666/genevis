@@ -29,6 +29,7 @@ _READ_TYPES: set[AssetType] = {
     "hic_reads_registered",
     "hic_alignment_bam",
     "assembly_fasta_registered",
+    "repeat_library",
 }
 
 
