@@ -1,0 +1,15 @@
+session_id: phase5-existing-asm-YYYYMMDD-a
+sample_id: sample-existing-assembly
+target_assembly_level: contig
+assets:
+  - asset_type: assembly_fasta_registered
+    paths:
+      - /path/to/existing_assembly.fasta
+    metadata:
+      source: operator_provided_existing_assembly
+  - asset_type: repeat_library
+    paths:
+      - /path/to/provided_repeat_library.fasta
+    metadata:
+      source: operator_provided
+      trusted: true

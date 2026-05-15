@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from app.execution.env_resolver import PreflightResult
 from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.schemas.entry import EntryRequest
 
@@ -706,6 +707,39 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             for stage in ("read_qc", "assembly_review"):
                 self.assertEqual(stage_outputs[stage]["execution_mode"], "local")
 
+    def test_run_config_repeat_annotation_seeds_repeatmasker_method(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps({"local_exec": ["repeat_annotation"]}),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            repeat = graph.invocations[0][0]["stage_outputs"]["repeat_annotation"]
+            self.assertEqual(repeat["execution_mode"], "local")
+            self.assertEqual(repeat["primary_method"], "repeat_annotation.masking.repeatmasker")
+
     def test_missing_run_config_file_fails_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -851,6 +885,174 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             build_graph.assert_not_called()
             initial_state.assert_not_called()
             self.assertFalse((root / "data" / "ledger").exists())
+
+
+class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
+    def _fake_repeatmasker_bin(self, root: Path, *, fail: bool = False) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "RepeatMasker"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib\n"
+            "import sys\n"
+            "if " + repr(fail) + ":\n"
+            "    print('fake RepeatMasker failed', file=sys.stderr)\n"
+            "    sys.exit(9)\n"
+            "assembly = pathlib.Path(sys.argv[-1])\n"
+            "assembly.with_name(assembly.name + '.masked').write_text('>ctg1\\nacgtacgt\\n', encoding='utf-8')\n"
+            "assembly.with_name(assembly.name + '.out.gff').write_text('##gff-version 3\\nctg1\\tRepeatMasker\\trepeat_region\\t1\\t8\\t.\\t+\\t.\\tID=repeat1\\n', encoding='utf-8')\n"
+            "print('fake RepeatMasker ok')\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return bin_dir
+
+    def _write_existing_assembly_inputs(self, root: Path, *, session_id: str = "phase5-e2e") -> tuple[Path, Path, Path]:
+        assembly = root / "existing_assembly.fa"
+        library = root / "trusted_repeats.fa"
+        assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        library.write_text(">repeat1\nACAC\n", encoding="utf-8")
+        manifest = root / "manifest.yaml"
+        manifest.write_text(
+            "\n".join(
+                [
+                    f"session_id: {session_id}",
+                    "sample_id: test-sample",
+                    "assets:",
+                    "  - asset_type: assembly_fasta_registered",
+                    f"    paths: [{assembly}]",
+                    "  - asset_type: repeat_library",
+                    f"    paths: [{library}]",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run_config = root / "run_config.json"
+        run_config.write_text(
+            json.dumps({"local_exec": ["repeat_annotation"]}),
+            encoding="utf-8",
+        )
+        return manifest, run_config, root / "out"
+
+    def _run_args(self, *, session_id: str, manifest: Path, run_config: Path, data_dir: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            session_id=session_id,
+            manifest=str(manifest),
+            data_dir=str(data_dir),
+            local_exec=[],
+            run_config=str(run_config),
+            checkpointer="memory",
+        )
+
+    def test_existing_assembly_repeatmasker_backbone_reaches_function_provenance_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-e2e"
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            bin_dir = self._fake_repeatmasker_bin(root)
+            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
+                "app.stages.repeat_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ):
+                code, stdout, stderr = _capture_cli(_run_session, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("current_stage: function_annotation", stdout)
+            self.assertIn("supervision_state: failed_terminal", stdout)
+            self.assertIn("database_provenance", stderr)
+
+            repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
+            gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            function_bundle = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            self.assertTrue(repeat_bundle.exists())
+            self.assertTrue(gene_bundle.exists())
+            self.assertFalse(function_bundle.exists())
+
+            repeat = json.loads(repeat_bundle.read_text(encoding="utf-8"))
+            gene = json.loads(gene_bundle.read_text(encoding="utf-8"))
+            self.assertEqual(repeat["status"], "executed")
+            self.assertEqual(repeat["repeat_library_source"], "provided")
+            self.assertTrue(Path(repeat["softmasked_genome_ref"]).exists())
+            self.assertTrue(Path(repeat["repeat_annotation_gff3_ref"]).exists())
+            self.assertEqual(gene["genome_input_ref"], repeat["softmasked_genome_ref"])
+            self.assertEqual(gene["genome_input_source"], "softmasked_genome")
+
+            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
+            self.assertIn("repeat_annotation.gff3", artifact_types)
+            self.assertIn("gene_annotation.bundle", artifact_types)
+
+    def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-preflight-block"
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+
+            with patch(
+                "app.execution.env_dispatch.preflight",
+                return_value=PreflightResult(
+                    status="missing_tool",
+                    env_target="env_geno_exec",
+                    missing_tools=["RepeatMasker"],
+                    detail="missing tools in env_geno_exec: RepeatMasker",
+                ),
+            ) as preflight:
+                code, stdout, stderr = _capture_cli(_run_session, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("current_stage: repeat_annotation", stdout)
+            self.assertIn("supervision_state: failed_terminal", stdout)
+            self.assertIn("RepeatMasker", stderr)
+            preflight.assert_called_once()
+
+            repeat_work = data_dir / "work" / "repeat_annotation" / session_id / "repeatmasker"
+            gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            self.assertFalse(repeat_work.exists())
+            self.assertFalse(gene_bundle.exists())
+            events_path = data_dir / "ledger" / session_id / "events.jsonl"
+            events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+            blocks = [event for event in events if event["event_type"] == "env_preflight_blocked"]
+            self.assertEqual(len(blocks), 1)
+            self.assertEqual(blocks[0]["method_name"], "repeat_annotation.masking.repeatmasker")
+            self.assertEqual(blocks[0]["missing_tools"], ["RepeatMasker"])
+
+    def test_repeatmasker_failure_stops_before_gene_annotation_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-repeatmasker-fails"
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            bin_dir = self._fake_repeatmasker_bin(root, fail=True)
+            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
+                "app.stages.repeat_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ):
+                code, stdout, stderr = _capture_cli(_run_session, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("current_stage: repeat_annotation", stdout)
+            self.assertIn("supervision_state: failed_terminal", stdout)
+            self.assertIn("fake RepeatMasker failed", stderr)
+            repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
+            gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            self.assertFalse(repeat_bundle.exists())
+            self.assertFalse(gene_bundle.exists())
+            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("command.stderr", artifact_types)
 
 
 class ResumeCLITests(unittest.TestCase):

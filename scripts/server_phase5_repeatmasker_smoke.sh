@@ -117,6 +117,57 @@ if [[ -f "${function_bundle}" ]]; then
   exit 1
 fi
 
+artifact_index="${DATA_DIR}/artifacts/${SESSION_ID}/artifacts.jsonl"
+conda run -n "${ORCHESTRATOR_ENV}" python - \
+  "${repeat_bundle}" \
+  "${gene_bundle}" \
+  "${function_bundle}" \
+  "${artifact_index}" \
+  "${softmasked}" \
+  "${repeat_gff}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repeat_bundle, gene_bundle, function_bundle, artifact_index, softmasked, repeat_gff = [
+    Path(arg) for arg in sys.argv[1:]
+]
+
+repeat = json.loads(repeat_bundle.read_text(encoding="utf-8"))
+gene = json.loads(gene_bundle.read_text(encoding="utf-8"))
+
+checks = [
+    (repeat.get("status") == "executed", "repeat bundle status is not executed"),
+    (repeat.get("repeat_library_source") == "provided", "repeat library source is not provided"),
+    (repeat.get("softmasked_genome_ref") == str(softmasked), "repeat softmasked ref does not match file"),
+    (repeat.get("repeat_annotation_gff3_ref") == str(repeat_gff), "repeat GFF3 ref does not match file"),
+    (gene.get("genome_input_source") == "softmasked_genome", "gene input source is not softmasked_genome"),
+    (
+        gene.get("genome_input_ref") == repeat.get("softmasked_genome_ref"),
+        "gene genome_input_ref does not match repeat softmasked_genome_ref",
+    ),
+    (not function_bundle.exists(), "function bundle exists despite missing provenance"),
+    (artifact_index.exists(), "artifact index is missing"),
+]
+for ok, message in checks:
+    if not ok:
+        raise SystemExit(f"error: {message}")
+
+artifact_types = {
+    json.loads(line).get("artifact_type")
+    for line in artifact_index.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+}
+required = {
+    "repeat_annotation.softmasked_genome",
+    "repeat_annotation.gff3",
+    "gene_annotation.bundle",
+}
+missing = sorted(required - artifact_types)
+if missing:
+    raise SystemExit(f"error: artifact index missing types: {missing}")
+PY
+
 cat <<EOF
 
 == Phase 5 RepeatMasker smoke reached expected provenance gate ==

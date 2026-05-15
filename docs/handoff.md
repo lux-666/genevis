@@ -9,7 +9,9 @@ files. For the doc map, read `docs/README.md`.
 ## Current Status
 
 Phases 0–3 and Phase 4 in-code (tasks 01, 02, 03, 05, 06, 07) are complete.
-Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete.
+Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code.
+Phase 5 task 03 is implemented in Mac-side code/tests for the existing
+assembly -> RepeatMasker backbone; its server/HPC smoke is still pending.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -122,10 +124,12 @@ done
 
 ## Next Best Task
 
-The active blocker is one server-side validation pass that closes
-**both** the Phase 4 QUAST gap and the Phase 5 task 01 server-side
-validation row. On a host where `env_geno_exec` has all of `seqkit`,
-`flye`, `quast.py`, `jellyfish`, and `genomescope.R`:
+The active blocker is server/HPC validation. Run these on a host where
+`env_geno_exec` has the relevant real tools, then record the outcomes and
+artifact refs here.
+
+Task 1 / Phase 4 server gate requires `seqkit`, `flye`, `quast.py`,
+`jellyfish`, and `genomescope.R`:
 
 ```bash
 git pull
@@ -147,16 +151,37 @@ remaining boxes in
 ("Run server helper scripts on the server/HPC after git pull",
 "Record the server-side validation result in docs/handoff.md").
 
-Until that pass is recorded:
+Phase 5 task 03 RepeatMasker backbone validation requires `RepeatMasker`
+available through the configured execution env and prepared inputs matching
+`docs/examples/phase5_existing_assembly_repeatmasker_manifest.template.yaml`
+plus `docs/examples/phase5_repeatmasker_run_config.template.json`:
+
+```bash
+bash scripts/server_phase5_repeatmasker_smoke.sh \
+  --manifest    data/phase5_existing_asm_smoke/manifest.yaml \
+  --run-config  data/phase5_existing_asm_smoke/run_config.json \
+  --session-id  phase5-existing-asm-YYYYMMDD-a \
+  --data-dir    data/phase5_existing_asm_smoke/out
+```
+
+Expected task 03 outcome: CLI exits 1 at
+`current_stage: function_annotation` with
+`supervision_state: failed_terminal` and an error mentioning database
+provenance; RepeatMasker softmasked FASTA, repeat GFF3, and gene planning
+bundle exist; no function annotation bundle exists. The server smoke also
+checks that `gene_bundle.genome_input_ref` equals
+`repeat_bundle.softmasked_genome_ref`, required artifact types are present in
+the artifact index, and the repeat bundle records `status: executed` with a
+provided repeat library.
+
+Until the server passes are recorded:
 
 - The Phase 5 entry gate in `docs/phases/phase5/README.md` is **only
   partially open** — task 01 is implemented in code, but the gate's
   "server/HPC can run the Phase 4 validation workflow after `git pull`"
   clause is unverified.
-- Do not start Phase 5 task 03 (RepeatMasker backbone) before the
-  server pass lands; it assumes the server-side path actually works.
-  Task 02 (durable resume) is implemented; its server-side smoke is
-  documented in
+- Do not mark Phase 5 task 03 accepted from Mac fake-binary tests alone.
+  Task 02 (durable resume) is implemented; its server-side smoke is documented in
   `docs/phases/phase5/02_human_gate_and_durable_resume_minimum.md` and
   should be exercised on the server alongside the Phase 4 mainline.
 
