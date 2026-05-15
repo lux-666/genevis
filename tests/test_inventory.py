@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from app.stages.inventory.builder import build_stage
+from app.stages.inventory.nodes import commit_inventory
 from app.schemas.state import initial_state
 import yaml
 
@@ -179,6 +180,32 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["skip_reasons"]["assembly"], "existing_assembly_input")
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
             self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
+
+    def test_commit_inventory_preserves_registered_asset_state(self):
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="manifest.yaml",
+            data_dir="data",
+        )
+        state["asset_registry_ref"] = "data/artifacts/asset_registry/s1/registry.json"
+        state["stage_outputs"] = {
+            "inventory": {
+                "status": "completed",
+                "registered_assets": ["s1:raw_long_reads:ont.fq"],
+            }
+        }
+
+        result = commit_inventory(state)
+
+        self.assertEqual(result["current_stage"], "read_qc")
+        self.assertEqual(
+            result["asset_registry_ref"],
+            "data/artifacts/asset_registry/s1/registry.json",
+        )
+        self.assertEqual(
+            result["stage_outputs"]["inventory"]["registered_assets"],
+            ["s1:raw_long_reads:ont.fq"],
+        )
 
     def test_inventory_writes_ledger_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:

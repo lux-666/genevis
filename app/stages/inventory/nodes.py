@@ -224,7 +224,10 @@ def commit_inventory(state: TopLevelState) -> dict:
         "current_stage": next_stage,
         "supervision_state": "completed" if next_stage == "done" else "running_stage",
         "route_trace": trace,
+        "stage_outputs": state.get("stage_outputs") or {},
     }
+    if state.get("asset_registry_ref"):
+        update["asset_registry_ref"] = state["asset_registry_ref"]
     if inventory_out.get("entry_mode") == "existing_assembly":
         update["skip_reasons"] = {
             **(state.get("skip_reasons") or {}),
