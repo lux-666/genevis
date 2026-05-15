@@ -117,6 +117,11 @@ def _resolve_checkpointer_backend(args: argparse.Namespace) -> str:
     return os.environ.get("GENE_AGENT_CHECKPOINTER") or DEFAULT_CHECKPOINTER_BACKEND
 
 
+def _resolve_data_dir(data_dir: str) -> str:
+    """Resolve CLI data_dir once so generated stage scripts get stable roots."""
+    return str(Path(data_dir).expanduser().resolve(strict=False))
+
+
 def _peek_manifest_session_id(manifest_path: Path) -> str | None:
     """Return the manifest's top-level session_id field, or None.
 
@@ -161,6 +166,7 @@ def _run_session(args: argparse.Namespace) -> int:
         return 1
 
     backend = _resolve_checkpointer_backend(args)
+    data_dir = _resolve_data_dir(request.data_dir)
 
     manifest_path = Path(request.manifest)
     if not manifest_path.exists():
@@ -169,12 +175,12 @@ def _run_session(args: argparse.Namespace) -> int:
 
     manifest_session_id = _peek_manifest_session_id(manifest_path)
     if request.session_id is None:
-        adopted = manifest_session_id or generate_session_id(request.data_dir)
+        adopted = manifest_session_id or generate_session_id(data_dir)
         try:
             request = EntryRequest(
                 session_id=adopted,
                 manifest=request.manifest,
-                data_dir=request.data_dir,
+                data_dir=data_dir,
             )
         except ValueError as exc:
             print(f"error: invalid run request: {exc}", file=sys.stderr)
@@ -189,6 +195,16 @@ def _run_session(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    else:
+        try:
+            request = EntryRequest(
+                session_id=request.session_id,
+                manifest=request.manifest,
+                data_dir=data_dir,
+            )
+        except ValueError as exc:
+            print(f"error: invalid run request: {exc}", file=sys.stderr)
+            return 1
 
     run_config: RunConfig | None = None
     run_config_path = getattr(args, "run_config", None)

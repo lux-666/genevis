@@ -11,8 +11,8 @@ files. For the doc map, read `docs/README.md`.
 Phases 0–3 and Phase 4 in-code (tasks 01, 02, 03, 05, 06, 07) are complete.
 Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code
 and has server/HPC validation evidence.
-Phase 5 task 03 is implemented in Mac-side code/tests for the existing
-assembly -> RepeatMasker backbone; its server/HPC smoke is still pending.
+Phase 5 task 03 is implemented and server/HPC validated for the existing
+assembly -> RepeatMasker backbone.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -135,6 +135,78 @@ This is the intended downstream stop for the current workflow: Phase 4
 server execution and durable resume work, and function annotation still
 requires explicit database provenance before terminal completion.
 
+## Phase 5 Existing Assembly RepeatMasker Server Run Record
+
+Server/HPC validation that closes Phase 5 task 03.
+
+Run parameters:
+
+- host: `task-p18z19700n0076dcs-south1-cocsckda-7bf85588f4-mj48h`
+  under `/data/work/genevis`
+- session id: `phase5-existing-asm-20260515-e`
+- manifest: `/data/work/genevis/data/phase5_existing_asm_smoke/manifest.yaml`
+- run config: `/data/work/genevis/data/phase5_existing_asm_smoke/run_config.json`
+  - `local_exec = ["repeat_annotation"]`
+- data dir: `/data/work/genevis/data/phase5_existing_asm_smoke/out`
+- checkpoint backend: `sqlite`
+
+Inputs:
+
+- existing assembly:
+  `/data/work/genevis/data/phase4_real_smoke/out/artifacts/assembly/phase4-real-bht-20260515-e/flye/draft_assembly.fasta`
+- provided repeat library:
+  `/data/work/genevis/data/phase5_existing_asm_smoke/provided_repeat_library.fa`
+
+Observed outcome:
+
+- `current_stage`: `function_annotation`
+- `supervision_state`: `failed_terminal`
+- expected error: `missing database_provenance for function_annotation`
+- `route_trace`: `inventory_stage -> assembly_review_stage ->
+  hic_scaffolding_stage -> repeat_annotation_stage ->
+  gene_annotation_stage`
+- smoke script reached:
+  `== Phase 5 RepeatMasker smoke reached expected provenance gate ==`
+
+Confirmed artifact refs:
+
+- `/data/work/genevis/data/phase5_existing_asm_smoke/out/artifacts/repeat_annotation/phase5-existing-asm-20260515-e/repeat_annotation_bundle.json`
+- `/data/work/genevis/data/phase5_existing_asm_smoke/out/artifacts/repeat_annotation/phase5-existing-asm-20260515-e/repeatmasker/phase5-existing-asm-20260515-e/softmasked_genome.fasta`
+- `/data/work/genevis/data/phase5_existing_asm_smoke/out/artifacts/repeat_annotation/phase5-existing-asm-20260515-e/repeatmasker/phase5-existing-asm-20260515-e/repeat_annotation.gff3`
+- `/data/work/genevis/data/phase5_existing_asm_smoke/out/artifacts/gene_annotation/phase5-existing-asm-20260515-e/gene_annotation_bundle.json`
+- `/data/work/genevis/data/phase5_existing_asm_smoke/out/artifacts/asset_registry/phase5-existing-asm-20260515-e/registry.json`
+
+This is the intended Phase 5 task 03 terminal condition: RepeatMasker and
+gene planning are real/recorded, while function annotation refuses to
+complete without explicit database provenance.
+
+## Cloud Test Conventions
+
+For server/HPC command snippets, prefer the explicit environment prefix:
+
+```bash
+conda run -p /data/work/conda_envs/gene_agent python <script>.py
+```
+
+Run smoke/server scripts with absolute paths for `--manifest`,
+`--run-config`, and especially `--data-dir`. Relative data dirs can be
+captured into generated shell scripts and later reinterpreted from a
+runner work directory. The RepeatMasker failure on 2026-05-15 was this
+class of bug.
+
+Preferred Phase 5 smoke form:
+
+```bash
+bash scripts/server_phase5_repeatmasker_smoke.sh \
+  --manifest    /data/work/genevis/data/phase5_existing_asm_smoke/manifest.yaml \
+  --run-config  /data/work/genevis/data/phase5_existing_asm_smoke/run_config.json \
+  --session-id  phase5-existing-asm-20260515-e \
+  --data-dir    /data/work/genevis/data/phase5_existing_asm_smoke/out
+```
+
+Avoid relying on relative `--data-dir` values such as
+`data/phase5_existing_asm_smoke/out` in cloud tests.
+
 ## Read Order
 
 Read these in order before non-trivial work:
@@ -176,35 +248,11 @@ done
 
 ## Next Best Task
 
-The active blocker is Phase 5 task 03 server/HPC validation. The Phase 4
-server gate is closed by session `phase4-real-bht-20260515-e`; do not rerun
-that smoke unless the environment or execution path changes.
-
-Phase 5 task 03 RepeatMasker backbone validation requires `RepeatMasker`
-available through the configured execution env and prepared inputs matching
-`docs/examples/phase5_existing_assembly_repeatmasker_manifest.template.yaml`
-plus `docs/examples/phase5_repeatmasker_run_config.template.json`:
-
-```bash
-bash scripts/server_phase5_repeatmasker_smoke.sh \
-  --manifest    data/phase5_existing_asm_smoke/manifest.yaml \
-  --run-config  data/phase5_existing_asm_smoke/run_config.json \
-  --session-id  phase5-existing-asm-YYYYMMDD-a \
-  --data-dir    data/phase5_existing_asm_smoke/out
-```
-
-Expected task 03 outcome: CLI exits 1 at
-`current_stage: function_annotation` with
-`supervision_state: failed_terminal` and an error mentioning database
-provenance; RepeatMasker softmasked FASTA, repeat GFF3, and gene planning
-bundle exist; no function annotation bundle exists. The server smoke also
-checks that `gene_bundle.genome_input_ref` equals
-`repeat_bundle.softmasked_genome_ref`, required artifact types are present in
-the artifact index, and the repeat bundle records `status: executed` with a
-provided repeat library.
-
-Until the Phase 5 task 03 server pass is recorded, do not mark the
-RepeatMasker backbone accepted from Mac fake-binary tests alone.
+Phase 4 server QUAST/resume validation and Phase 5 task 03 RepeatMasker
+server validation are both recorded. The next best task is to choose the
+next Phase 5 acceptance target explicitly before implementation, likely
+database provenance handling for `function_annotation` or the next
+stage-specific server gate.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

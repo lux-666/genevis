@@ -1,6 +1,6 @@
 # 03 Existing Assembly To RepeatMasker Backbone
 
-Task status: implemented in Mac-side code/tests; server/HPC validation pending.
+Task status: implemented and server/HPC validated.
 
 ## Goal
 
@@ -84,7 +84,7 @@ or assembly.
 - [x] Add tests for existing assembly entry, RepeatMasker success/failure,
   downstream handoff, and provenance gate. Failure is covered by both
   stage-level tests and a CLI fake-binary failure E2E.
-- [ ] Record server-side smoke results in `docs/handoff.md`.
+- [x] Record server-side smoke results in `docs/handoff.md`.
 
 ## Implementation Notes
 
@@ -113,27 +113,41 @@ or assembly.
     artifacts
   - `function_annotation` stops at the missing `database_provenance` gate
 
-## Pending HPC Validation
+## Server/HPC Validation
 
-Run after `git pull` on the server/HPC checkout:
+Validated on the server/HPC checkout with session
+`phase5-existing-asm-20260515-e`. The smoke reached the intended
+`function_annotation` database provenance gate after producing real
+RepeatMasker and gene-planning artifacts.
+
+Use absolute paths for cloud smoke commands:
 
 ```bash
 bash scripts/server_check.sh
 bash scripts/server_test.sh
 bash scripts/server_phase4_smoke.sh \
-  --manifest    data/phase4_real_smoke/manifest.yaml \
-  --run-config  data/phase4_real_smoke/run_config.json \
+  --manifest    /data/work/genevis/data/phase4_real_smoke/manifest.yaml \
+  --run-config  /data/work/genevis/data/phase4_real_smoke/run_config.json \
   --session-id  phase4-server-smoke-YYYYMMDD-a \
-  --data-dir    data/phase4_real_smoke/out
+  --data-dir    /data/work/genevis/data/phase4_real_smoke/out
 bash scripts/server_phase5_repeatmasker_smoke.sh \
-  --manifest    data/phase5_existing_asm_smoke/manifest.yaml \
-  --run-config  data/phase5_existing_asm_smoke/run_config.json \
-  --session-id  phase5-existing-asm-YYYYMMDD-a \
-  --data-dir    data/phase5_existing_asm_smoke/out
+  --manifest    /data/work/genevis/data/phase5_existing_asm_smoke/manifest.yaml \
+  --run-config  /data/work/genevis/data/phase5_existing_asm_smoke/run_config.json \
+  --session-id  phase5-existing-asm-20260515-e \
+  --data-dir    /data/work/genevis/data/phase5_existing_asm_smoke/out
 ```
 
-Record real artifact refs and command outcomes in `docs/handoff.md` before
-marking server-side acceptance complete.
+For ad hoc Python checks on the server, prefer:
+
+```bash
+conda run -p /data/work/conda_envs/gene_agent python <script>.py
+```
+
+Avoid relative `--data-dir` values in cloud tests. A relative data dir can
+be embedded into generated method scripts and then interpreted from the
+runner work directory.
+
+Recorded refs and command outcomes live in `docs/handoff.md`.
 
 ## Acceptance
 

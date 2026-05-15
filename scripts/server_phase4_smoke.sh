@@ -65,6 +65,17 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
+abs_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)  printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+
+MANIFEST="$(abs_path "${MANIFEST}")"
+RUN_CONFIG="$(abs_path "${RUN_CONFIG}")"
+DATA_DIR="$(abs_path "${DATA_DIR}")"
+
 echo "== gene-agent run =="
 set +e
 conda run -n "${ORCHESTRATOR_ENV}" gene-agent run \

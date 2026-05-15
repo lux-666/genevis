@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.execution.env_resolver import PreflightResult
-from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.schemas.entry import EntryRequest
 
 
@@ -176,11 +176,50 @@ class EntrypointTests(unittest.TestCase):
                 {
                     "session_id": "s1",
                     "input_manifest_ref": str(manifest),
-                    "data_dir": str(root / "data"),
+                    "data_dir": _resolve_data_dir(str(root / "data")),
                 },
             )
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
             self.assertTrue((root / "data" / "ledger" / "s1" / "session.json").exists())
+
+    def test_structured_run_resolves_relative_data_dir_before_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+            old_cwd = Path.cwd()
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            try:
+                os.chdir(root)
+                expected = _resolve_data_dir("out")
+                with patch("app.entrypoints.run.build_graph", return_value=graph) as build_graph, patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ):
+                    code, _stdout, stderr = _capture_cli(
+                        _run_session,
+                        argparse.Namespace(
+                            session_id="s1",
+                            manifest=str(manifest),
+                            data_dir="out",
+                            local_exec=[],
+                            run_config=None,
+                            checkpointer="memory",
+                        ),
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(captured["data_dir"], expected)
+            build_graph.assert_called_once_with(backend="memory", data_dir=expected)
+            self.assertTrue((root / "out" / "ledger" / "s1" / "session.json").exists())
 
     def test_missing_manifest_returns_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
@@ -391,7 +430,7 @@ class EntrypointTests(unittest.TestCase):
             )
             self.assertEqual(captured["session_id"], "s1")
             self.assertEqual(captured["input_manifest_ref"], str(manifest))
-            self.assertEqual(captured["data_dir"], str(root / "data"))
+            self.assertEqual(captured["data_dir"], _resolve_data_dir(str(root / "data")))
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
 
     def test_ask_materializes_fasta_source_path_manifest_before_run(self):
