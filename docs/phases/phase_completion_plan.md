@@ -33,10 +33,11 @@ restate it here.
 Tasks in `docs/phases/phase5/`:
 
 1. Execution consistency and server gate (Phase 5 task 01 wired
-   `genome_survey` through `env_dispatch`; server-side validation pass
-   is the open work — see `docs/handoff.md`).
+   `genome_survey` through `env_dispatch`; server-side validation is
+   recorded in `docs/handoff.md`).
 2. Human gate and durable resume minimum.
 3. Existing assembly to RepeatMasker backbone.
+4. Review policy: strict / auto modes and LLM recommendation.
 
 Phase 5 is gated on the Phase 4 real-data acceptance pass (Flye + QUAST)
 being recorded in `docs/handoff.md` before broader tool execution starts.
