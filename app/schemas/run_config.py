@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from app.schemas.artifacts import FunctionDatabaseProvenance
 
 LocalExecStage = Literal[
     "read_qc",
@@ -28,6 +30,36 @@ LocalExecStage = Literal[
 ]
 
 FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw"]
+ReviewPolicyMode = Literal["strict", "auto"]
+ReviewPolicyStage = Literal["assembly_review", "hic_scaffolding"]
+
+
+class StageReviewPolicyConfig(BaseModel):
+    """Per-stage review policy override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ReviewPolicyMode | None = None
+    max_blocked_seconds: int | None = Field(default=None, ge=0)
+
+
+class ReviewPolicyConfig(StageReviewPolicyConfig):
+    """Run-level review policy defaults plus optional stage overrides."""
+
+    mode: ReviewPolicyMode = "strict"
+    stages: dict[ReviewPolicyStage, StageReviewPolicyConfig] = Field(default_factory=dict)
+
+    def effective_for_stage(self, stage: ReviewPolicyStage) -> dict[str, Any]:
+        payload: dict[str, Any] = {"mode": self.mode}
+        if self.max_blocked_seconds is not None:
+            payload["max_blocked_seconds"] = self.max_blocked_seconds
+        override = self.stages.get(stage)
+        if override:
+            if override.mode is not None:
+                payload["mode"] = override.mode
+            if override.max_blocked_seconds is not None:
+                payload["max_blocked_seconds"] = override.max_blocked_seconds
+        return payload
 
 
 class FlyeRunParameters(BaseModel):
@@ -48,6 +80,14 @@ class AssemblyRunConfig(BaseModel):
     flye_parameters: FlyeRunParameters | None = None
 
 
+class FunctionAnnotationRunConfig(BaseModel):
+    """Run-config block for function annotation — carries database provenance for smoke fixtures."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    database_provenance: list[FunctionDatabaseProvenance] | None = None
+
+
 class RunConfig(BaseModel):
     """Phase 4 run-config consumed by `gene-agent run --run-config`."""
 
@@ -55,6 +95,8 @@ class RunConfig(BaseModel):
 
     local_exec: list[LocalExecStage] = Field(default_factory=list)
     assembly: AssemblyRunConfig | None = None
+    function_annotation: FunctionAnnotationRunConfig | None = None
+    review_policy: ReviewPolicyConfig | None = None
 
     @model_validator(mode="after")
     def _require_flye_params_when_assembly_local(self) -> "RunConfig":

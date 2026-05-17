@@ -162,18 +162,27 @@ class Ledger:
         reason: str,
         signals: list[dict[str, Any]] | None = None,
         candidates: list[dict[str, Any]] | None = None,
+        review_request_artifact_ref: str | None = None,
+        auto_decidable: bool | None = None,
+        policy_mode: str | None = None,
+        pending_human_confirmation: bool | None = None,
     ) -> None:
         """Append a review-requested event."""
-        self.record_event(
-            session_id,
-            "review_requested",
-            {
-                "stage": stage,
-                "reason": reason,
-                "signals": signals or [],
-                "candidates": candidates or [],
-            },
-        )
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "reason": reason,
+            "signals": signals or [],
+            "candidates": candidates or [],
+        }
+        if review_request_artifact_ref is not None:
+            payload["review_request_artifact_ref"] = review_request_artifact_ref
+        if auto_decidable is not None:
+            payload["auto_decidable"] = auto_decidable
+        if policy_mode is not None:
+            payload["policy_mode"] = policy_mode
+        if pending_human_confirmation is not None:
+            payload["pending_human_confirmation"] = pending_human_confirmation
+        self.record_event(session_id, "review_requested", payload)
 
     def record_review_decision(
         self,
@@ -187,6 +196,8 @@ class Ledger:
         method_name: str | None = None,
         artifact_ref: str | None = None,
         metadata: dict[str, Any] | None = None,
+        decided_by: str = "human",
+        rationale_artifact_ref: str | None = None,
     ) -> None:
         """Append a review-decision event."""
         self.record_event(
@@ -200,6 +211,8 @@ class Ledger:
                 "notes": notes or [],
                 "method_name": method_name,
                 "artifact_ref": artifact_ref,
+                "decided_by": decided_by,
+                "rationale_artifact_ref": rationale_artifact_ref,
                 "metadata": metadata or {},
             },
         )

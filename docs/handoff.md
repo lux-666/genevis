@@ -12,7 +12,9 @@ Phases 0–3 and Phase 4 in-code (tasks 01, 02, 03, 05, 06, 07) are complete.
 Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code
 and has server/HPC validation evidence.
 Phase 5 task 03 is implemented and server/HPC validated for the existing
-assembly -> RepeatMasker backbone.
+assembly -> RepeatMasker backbone. Phase 5 task 04 review policy is implemented
+locally; server smoke should use an auto-mode fixture with database provenance
+so the final review report is emitted on the normal successful terminal path.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -179,6 +181,39 @@ Confirmed artifact refs:
 This is the intended Phase 5 task 03 terminal condition: RepeatMasker and
 gene planning are real/recorded, while function annotation refuses to
 complete without explicit database provenance.
+
+## Phase 5 Review Policy Run Record
+
+Phase 5 task 04 added strict/auto review policy support. The local test fixture
+records final reports at:
+
+- `artifacts/final_report/<session>/review_decision_report.json`
+
+Server acceptance is pending and split into two narrow smokes:
+
+- `scripts/server_phase5_auto_review_smoke.sh` validates the deterministic
+  `auto_rule` path and the final report. It uses the existing-assembly fixture
+  (`data/phase5_auto_review/`), patches the runtime
+  `<data_dir>/work/gene_annotation/<session_id>/proteins.fa` into
+  `function_annotation.database_provenance.input_proteins_ref`, and asserts the
+  workflow reaches `commit_function_annotation` and writes
+  `review_decision_report.json` with at least one `auto_rule` decision. It does
+  NOT validate LLM provisional review — `deterministic_safe` bypasses
+  `human_review_gate`.
+- `scripts/server_phase5_llm_review_smoke.sh` validates LLM provisional review.
+  It uses the raw-inputs fixture (`data/phase5_llm_review/`), runs Flye + QUAST
+  locally so eval signals become `available`, and asserts the
+  `assembly_review.review_recommendation` artifact and an
+  `auto_decision_committed` event with `decided_by="llm_provisional"`. The run
+  blocks at `hic_scaffolding` because Hi-C is `auto_decidable=false` in auto
+  mode; that blocked state is the expected terminal condition for this smoke.
+  Requires `GENE_AGENT_LLM_API_KEY` exported.
+
+Once each smoke is executed on the HPC host, record session id, exit code, and
+the relevant artifact refs (final report, recommendation artifact, function
+bundle) here. The existing function-provenance failure smoke is not
+final-report evidence — failed-terminal paths intentionally do not write that
+artifact in task 04.
 
 ## Cloud Test Conventions
 

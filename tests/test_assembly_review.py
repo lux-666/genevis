@@ -15,6 +15,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.schemas.artifacts import ReviewDecisionArtifact
 from app.schemas.descriptors import DescriptorRegistry
@@ -574,6 +575,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(len(decision_events), 1)
             self.assertEqual(decision_events[0]["decision"], "accept")
             self.assertEqual(decision_events[0]["candidate_id"], "existing_assembly")
+            self.assertEqual(decision_events[0]["decided_by"], "auto_rule")
 
     def test_human_gate_writes_review_requested_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -597,8 +599,144 @@ class AssemblyReviewStageTests(unittest.TestCase):
             request_events = [e for e in events if e["event_type"] == "review_requested"]
             self.assertEqual(len(request_events), 1)
             self.assertEqual(request_events[0]["stage"], "assembly_review")
+            self.assertFalse(request_events[0]["auto_decidable"])
+            self.assertEqual(request_events[0]["policy_mode"], "strict")
+            self.assertIn("review_request_artifact_ref", request_events[0])
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertTrue(Path(ar_out["review_request_artifact_ref"]).exists())
+
+    def test_auto_policy_recommender_failure_falls_back_to_blocked_human(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
+            with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=True), \
+                 patch("app.stages.assembly_review.nodes.recommend_review_decision", side_effect=ValueError("bad llm")):
+                result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertIsNotNone(result.get("active_interrupt"))
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()]
+            self.assertIn("auto_recommendation_failed", [event["event_type"] for event in events])
+
+    def test_pending_contamination_signal_does_not_disable_auto_decidable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
+            ar_out = {
+                "candidates": [{"candidate_id": "flye_01"}],
+                "signals": [
+                    {
+                        "signal_name": "quast",
+                        "candidate_id": "flye_01",
+                        "status": "available",
+                        "metric_refs": ["/tmp/quast/report.tsv"],
+                    },
+                    {
+                        "signal_name": "contamination_check",
+                        "candidate_id": "flye_01",
+                        "status": "pending",
+                        "metric_refs": [],
+                    },
+                ],
+            }
+            from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
+            self.assertTrue(_assembly_review_auto_decidable(ar_out))
+
+    def test_auto_decidable_false_when_no_available_eval_signal(self):
+        from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
+
+        ar_out_pending = {
+            "candidates": [{"candidate_id": "flye_01"}],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "pending", "metric_refs": []},
+            ],
+        }
+        ar_out_no_metrics = {
+            "candidates": [{"candidate_id": "flye_01"}],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": []},
+            ],
+        }
+        ar_out_no_candidates = {
+            "candidates": [],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/x.tsv"]},
+            ],
+        }
+        ar_out_contam = {
+            "candidates": [{"candidate_id": "flye_01"}],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/q.tsv"]},
+                {"signal_name": "contamination_check", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/c.tsv"]},
+            ],
+        }
+        self.assertFalse(_assembly_review_auto_decidable(ar_out_pending))
+        self.assertFalse(_assembly_review_auto_decidable(ar_out_no_metrics))
+        self.assertFalse(_assembly_review_auto_decidable(ar_out_no_candidates))
+        self.assertFalse(_assembly_review_auto_decidable(ar_out_contam))
+
+    def test_auto_decidable_false_does_not_call_recommender(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
+            with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=False), \
+                 patch("app.stages.assembly_review.nodes.recommend_review_decision") as mock_rec:
+                result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertFalse(result["active_interrupt"]["auto_decidable"])
+            self.assertTrue(result["active_interrupt"]["pending_human_confirmation"])
+            mock_rec.assert_not_called()
+
+    def test_auto_resume_validation_failure_falls_back_to_blocked_human(self):
+        from app.review.base import ResumeReviewRequest
+        from app.control.lifecycle import ResumeValidationError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
+            rec = ResumeReviewRequest(
+                session_id="test-session",
+                stage="assembly_review",
+                decision="accept",
+                candidate_id="flye_01",
+                decided_by="llm_provisional",
+                rationale_artifact_ref="/tmp/rationale.json",
+            )
+            with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=True), \
+                 patch("app.stages.assembly_review.nodes.recommend_review_decision", return_value=rec), \
+                 patch("app.control.lifecycle.resume_review_state", side_effect=ResumeValidationError("synthetic")):
+                result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()]
+            failed_events = [e for e in events if e["event_type"] == "auto_recommendation_failed"]
+            self.assertEqual(len(failed_events), 1)
+            self.assertEqual(failed_events[0]["error_type"], "ResumeValidationError")
 
     def test_assembly_stage_executed_candidate_ref_points_to_real_fasta(self):
         with tempfile.TemporaryDirectory() as tmpdir:

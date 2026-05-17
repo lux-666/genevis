@@ -11,6 +11,7 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
+from app.review.records import counts_by_origin, decision_records
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.state import TopLevelState
 
@@ -79,6 +80,8 @@ def inspect_session(
     artifacts = read_artifact_records(data_dir, session_id)
     latest_review_request = _latest_event(events, "review_requested")
     latest_review_decision = _latest_event(events, "review_decision")
+    review_decisions = decision_records(events)
+    decisions_by_origin = counts_by_origin(review_decisions)
     latest_review_lifecycle_event = _latest_review_lifecycle_event(events)
     latest_unresolved_review_request = latest_review_lifecycle_event if latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_requested" else None
     latest_request_artifact = _latest_artifact_by_suffix(artifacts, ".request")
@@ -108,6 +111,8 @@ def inspect_session(
         "latest_events": events[-5:],
         "latest_review_request": latest_review_request,
         "latest_review_decision": latest_review_decision,
+        "review_decisions": review_decisions,
+        "decisions_by_origin": decisions_by_origin,
         "latest_review_lifecycle_event": latest_review_lifecycle_event,
         "latest_unresolved_review_request": latest_unresolved_review_request,
         "latest_review_request_artifact": latest_request_artifact,
@@ -228,20 +233,37 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
         return None
     stage = active_interrupt.get("stage")
     if stage == "assembly_review":
-        return {
-            "stage": stage,
-            "decisions_allowed": active_interrupt.get("decisions_allowed", []),
-            "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
-            "requires_structured_resume": True,
-        }
+        return _with_review_policy_requirements(
+            active_interrupt,
+            {
+                "stage": stage,
+                "decisions_allowed": active_interrupt.get("decisions_allowed", []),
+                "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
+                "requires_structured_resume": True,
+            },
+        )
     if stage == "hic_scaffolding":
-        return {
-            "stage": stage,
-            "decisions_allowed": active_interrupt.get("decisions_allowed", ["select_method", "skip", "stop_human_review"]),
-            "candidate_methods": active_interrupt.get("candidate_methods", []),
-            "requires_structured_resume": True,
-        }
-    return {"stage": stage, "requires_structured_resume": True}
+        return _with_review_policy_requirements(
+            active_interrupt,
+            {
+                "stage": stage,
+                "decisions_allowed": active_interrupt.get("decisions_allowed", ["select_method", "skip", "stop_human_review"]),
+                "candidate_methods": active_interrupt.get("candidate_methods", []),
+                "requires_structured_resume": True,
+            },
+        )
+    return _with_review_policy_requirements(active_interrupt, {"stage": stage, "requires_structured_resume": True})
+
+
+def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(requirements)
+    for key in ("auto_decidable", "pending_human_confirmation", "review_request_artifact_ref"):
+        if key in active_interrupt:
+            enriched[key] = active_interrupt.get(key)
+    policy = active_interrupt.get("review_policy")
+    if isinstance(policy, dict) and policy.get("mode"):
+        enriched["review_policy.mode"] = policy.get("mode")
+    return enriched
 
 
 def _blocked_timeout_status(
@@ -351,4 +373,18 @@ def _decision_requirements_from_artifact(
     candidate_methods = payload.get("candidate_methods")
     if isinstance(candidate_methods, list):
         requirements["candidate_methods"] = list(candidate_methods)
+    for key in ("auto_decidable", "pending_human_confirmation", "review_request_artifact_ref"):
+        if key in payload:
+            requirements[key] = payload.get(key)
+    policy = payload.get("review_policy")
+    if isinstance(policy, dict) and policy.get("mode"):
+        requirements["review_policy.mode"] = policy.get("mode")
     return requirements
+
+
+def _review_decisions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return decision_records(events)
+
+
+def _decisions_by_origin(decisions: list[dict[str, Any]]) -> dict[str, int]:
+    return counts_by_origin(decisions)

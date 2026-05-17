@@ -24,6 +24,32 @@ from app.schemas.artifacts import ArtifactMeta
 
 
 class ReviewResumeTests(unittest.TestCase):
+    def test_non_human_resume_requires_rationale_artifact_ref(self):
+        with self.assertRaises(ValidationError) as ctx:
+            ResumeReviewRequest(
+                session_id="s1",
+                stage="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="work/assembly/flye/draft.fasta",
+                decided_by="llm_provisional",
+            )
+
+        self.assertIn("rationale_artifact_ref", str(ctx.exception))
+
+    def test_llm_provisional_resume_request_is_valid_with_rationale(self):
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="accept",
+            candidate_id="flye",
+            final_assembly_ref="work/assembly/flye/draft.fasta",
+            decided_by="llm_provisional",
+            rationale_artifact_ref="artifacts/assembly_review/recommendation.json",
+        )
+
+        self.assertEqual(request.decided_by, "llm_provisional")
+
     def test_inspect_blocked_assembly_state_is_non_mutating(self):
         state = _assembly_blocked_state()
         before = copy.deepcopy(state)

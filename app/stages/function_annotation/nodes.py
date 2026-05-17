@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
+from app.reports.review_report import write_final_review_report
 from app.schemas.artifacts import (
     ArtifactMeta,
     FunctionAnnotationBundle,
@@ -211,6 +212,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         },
     )
     append_artifact_records(data_dir, session_id, [artifact])
+    final_report_ref = write_final_review_report(data_dir, session_id)
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["function_annotation"] = {
@@ -222,7 +224,8 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         "pfam_interpro_table_ref": expected_outputs["pfam_interpro_table"],
         "annotated_gene_models_gff3_ref": expected_outputs.get("annotated_gene_models_gff3"),
         "bundle_artifact_ref": str(bundle_ref),
-        "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path)],
+        "final_review_report_artifact_ref": final_report_ref,
+        "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path), final_report_ref],
     }
     return {
         "stage_outputs": outputs,

@@ -78,6 +78,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a workflow session from durable records")
     inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
     inspect_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    inspect_parser.add_argument("--filter", action="append", default=[], help="Filter inspect output, currently supports decided_by=<origin>")
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -91,6 +92,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to a JSON decision file matching ResumeReviewRequest",
     )
     resume_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    resume_parser.add_argument(
+        "--max-blocked-seconds",
+        type=float,
+        default=None,
+        help="Reject/convert a blocked resume if the gate has been blocked for at least this many seconds",
+    )
     resume_parser.add_argument(
         "--checkpointer",
         choices=["sqlite", "memory"],
@@ -256,6 +263,17 @@ def _run_session(args: argparse.Namespace) -> int:
         assembly_out = dict(stage_outputs.get("assembly") or {})
         assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump()
         stage_outputs["assembly"] = assembly_out
+    if run_config and run_config.review_policy:
+        for review_stage in ["assembly_review", "hic_scaffolding"]:
+            stage_out = dict(stage_outputs.get(review_stage) or {})
+            stage_out["review_policy"] = run_config.review_policy.effective_for_stage(review_stage)
+            stage_outputs[review_stage] = stage_out
+    if run_config and run_config.function_annotation and run_config.function_annotation.database_provenance:
+        fn_out = dict(stage_outputs.get("function_annotation") or {})
+        fn_out["database_provenance"] = [
+            p.model_dump(mode="json") for p in run_config.function_annotation.database_provenance
+        ]
+        stage_outputs["function_annotation"] = fn_out
     if stage_outputs != (state.get("stage_outputs") or {}):
         state["stage_outputs"] = stage_outputs
 
@@ -339,11 +357,15 @@ def generate_session_id(data_dir: str | Path = "data", *, now: datetime | None =
 def _run_inspect(args: argparse.Namespace) -> int:
     from app.control.lifecycle import inspect_session
 
+    filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
+    if filters is None:
+        return 1
     summary = inspect_session(args.session_id, args.data_dir)
     print(f"session_id: {summary['session_id']}")
     print(f"supervision_state: {summary['supervision_state']}")
     print(f"checkpoint_persistence: {summary['checkpoint_persistence']}")
     print(f"durable_resume_available: {str(summary['durable_resume_available']).lower()}")
+    print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):
         print(f"latest_review_request: {summary['latest_review_request']}")
     if summary.get("latest_review_request_artifact"):
@@ -361,10 +383,34 @@ def _run_inspect(args: argparse.Namespace) -> int:
             print(f"decision_requirements.candidate_methods: {requirements['candidate_methods']}")
     if summary.get("latest_review_decision"):
         print(f"latest_review_decision: {summary['latest_review_decision']}")
+    review_decisions = _filter_review_decisions(summary.get("review_decisions") or [], filters)
+    if filters:
+        print(f"review_decisions: {review_decisions}")
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return 1
     return 0
+
+
+def _parse_inspect_filters(raw_filters: list[str]) -> dict[str, str] | None:
+    parsed: dict[str, str] = {}
+    for raw_filter in raw_filters:
+        if "=" not in raw_filter:
+            print(f"error: unsupported inspect filter {raw_filter!r}; expected key=value", file=sys.stderr)
+            return None
+        key, value = raw_filter.split("=", 1)
+        if key != "decided_by":
+            print(f"error: unsupported inspect filter key {key!r}; only decided_by is supported", file=sys.stderr)
+            return None
+        parsed[key] = value
+    return parsed
+
+
+def _filter_review_decisions(decisions: list[dict], filters: dict[str, str]) -> list[dict]:
+    decided_by = filters.get("decided_by")
+    if not decided_by:
+        return decisions
+    return [decision for decision in decisions if decision.get("decided_by") == decided_by]
 
 
 def _load_dotenv_without_override() -> None:
@@ -467,11 +513,14 @@ def _run_resume(args: argparse.Namespace) -> int:
         "checkpointer": backend,
         "data_dir": str(args.data_dir),
         "decision_file_ref": str(args.decision_file),
+        "max_blocked_seconds": getattr(args, "max_blocked_seconds", None),
         "decision": {
             "stage": decision.stage,
             "decision": decision.decision,
             "candidate_id": decision.candidate_id,
             "method_name": decision.method_name,
+            "decided_by": decision.decided_by,
+            "rationale_artifact_ref": decision.rationale_artifact_ref,
         },
     }
     # Record resume_started before any state mutation so the audit
@@ -480,7 +529,7 @@ def _run_resume(args: argparse.Namespace) -> int:
     ledger.record_event(args.session_id, "resume_started", resume_event_payload)
 
     try:
-        update = resume_review_state(state, decision)
+        update = resume_review_state(state, decision, blocked_timeout_seconds=getattr(args, "max_blocked_seconds", None))
     except (ResumeValidationError, DurableResumeUnavailableError) as exc:
         ledger.record_event(
             args.session_id,

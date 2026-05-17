@@ -15,7 +15,8 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
-from app.review.base import ResumeReviewRequest
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.policy import evaluate
 from app.schemas.artifacts import (
     HIC_QC_REPORT,
     HIC_REVIEW_BUNDLE,
@@ -448,13 +449,73 @@ def commit_hic_scaffolding(state: TopLevelState) -> dict:
 def block_hic_scaffolding(state: TopLevelState) -> dict:
     """Pause for human Hi-C scaffolding method/contact-map decision."""
     hic_out = _hic_output(state)
+    payload = ReviewPayload(
+        stage="hic_scaffolding",
+        reason="hic_scaffolding_human_decision_required",
+        candidates=[{"method_name": method} for method in hic_out.get("candidate_methods", [])],
+        decisions_allowed=["select_method", "skip", "stop_human_review"],
+        notes=hic_out.get("notes", []),
+        auto_decidable=False,
+    )
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    request_ref = out_dir / "hic_scaffolding_review_request.json"
+    request_ref.write_text(json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        request_ref,
+        stage="hic_scaffolding",
+        method_name=HIC_CONTRACT_METHOD,
+        artifact_type="hic_scaffolding.request",
+        metadata={"auto_decidable": False},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    outcome = evaluate("hic_scaffolding", payload, hic_out.get("review_policy"))
+    pending_confirmation = outcome.action == "BLOCK_PENDING_CONFIRM"
+    Ledger(data_dir).record_review_requested(
+        session_id,
+        "hic_scaffolding",
+        reason="hic_scaffolding_human_decision_required",
+        candidates=payload.candidates,
+        review_request_artifact_ref=str(request_ref),
+        auto_decidable=False,
+        policy_mode=outcome.mode,
+        pending_human_confirmation=pending_confirmation,
+    )
+    if outcome.action == "BLOCK_WITH_TIMEOUT":
+        Ledger(data_dir).record_event(
+            session_id,
+            "blocked_with_timeout",
+            {
+                "stage": "hic_scaffolding",
+                "max_blocked_seconds": outcome.max_blocked_seconds,
+                "review_request_artifact_ref": str(request_ref),
+                "policy_mode": outcome.mode,
+            },
+        )
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["hic_scaffolding"] = {
+        **hic_out,
+        "status": "blocked_human",
+        "review_request_artifact_ref": str(request_ref),
+        "review_policy_outcome": outcome.model_dump(mode="json"),
+        "auto_decidable": False,
+        "pending_human_confirmation": pending_confirmation,
+    }
     return {
         "current_stage": "hic_scaffolding",
         "supervision_state": "blocked_human",
+        "stage_outputs": outputs,
         "active_interrupt": {
             "stage": "hic_scaffolding",
             "reason": "hic_scaffolding_human_decision_required",
             "candidate_methods": hic_out.get("candidate_methods", []),
+            "decisions_allowed": payload.decisions_allowed,
+            "auto_decidable": False,
+            "pending_human_confirmation": pending_confirmation,
+            "review_policy": hic_out.get("review_policy") or {"mode": outcome.mode},
+            "review_request_artifact_ref": str(request_ref),
             "scaffold_plan_ref": hic_out.get("scaffold_plan_ref"),
             "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
             "final_assembly_for_annotation": hic_out.get("final_assembly_for_annotation"),
@@ -554,6 +615,8 @@ def _commit_hic_resume_decision(
         method_name=request.method_name,
         artifact_ref=str(artifact.file_path),
         metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
     )
 
     outputs = dict(state.get("stage_outputs") or {})
@@ -566,6 +629,8 @@ def _commit_hic_resume_decision(
         "final_assembly_for_annotation": final_assembly_for_annotation,
         "review_decision_artifact_ref": str(artifact.file_path),
         "notes": notes,
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
     }
     if skip_record_ref:
         outputs["hic_scaffolding"]["skip_record_ref"] = skip_record_ref

@@ -22,6 +22,8 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.review.policy import evaluate
+from app.review.recommender import RecommendationError, recommend_review_decision
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_ACTION,
@@ -530,17 +532,7 @@ def human_review_gate(state: TopLevelState) -> dict:
             "Thresholds for BUSCO, QUAST, Merqury, and purge_dups require human approval before application.",
             "Purge and polish actions require explicit action output refs, human approval, and provenance; pre-action assemblies are preserved.",
         ],
-    )
-
-    # Record ledger event
-    data_dir = state.get("data_dir", "data")
-    ledger = Ledger(data_dir)
-    ledger.record_review_requested(
-        state["session_id"],
-        "assembly_review",
-        reason="assembly_review_human_decision_required",
-        signals=[s.model_dump(mode="json") for s in payload.signals],
-        candidates=candidates,
+        auto_decidable=_assembly_review_auto_decidable(ar_out),
     )
 
     request_ref = _write_json_artifact(
@@ -549,20 +541,92 @@ def human_review_gate(state: TopLevelState) -> dict:
         payload.model_dump(mode="json"),
         artifact_type="assembly_review.request",
     )
+    outcome = evaluate("assembly_review", payload, ar_out.get("review_policy"))
+    pending_confirmation = outcome.action == "BLOCK_PENDING_CONFIRM"
+    data_dir = state.get("data_dir", "data")
+    ledger = Ledger(data_dir)
+    ledger.record_review_requested(
+        state["session_id"],
+        "assembly_review",
+        reason="assembly_review_human_decision_required",
+        signals=[s.model_dump(mode="json") for s in payload.signals],
+        candidates=candidates,
+        review_request_artifact_ref=request_ref,
+        auto_decidable=payload.auto_decidable,
+        policy_mode=outcome.mode,
+        pending_human_confirmation=pending_confirmation,
+    )
+
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = {
         **ar_out,
         "status": "blocked_human",
         "review_request_artifact_ref": request_ref,
+        "review_policy_outcome": outcome.model_dump(mode="json"),
+        "auto_decidable": payload.auto_decidable,
+        "pending_human_confirmation": pending_confirmation,
     }
     interrupt = payload.model_dump(mode="json")
     interrupt["blocked_at"] = datetime.now(timezone.utc).isoformat()
     interrupt["review_request_artifact_ref"] = request_ref
-    return {
+    interrupt["review_policy"] = ar_out.get("review_policy") or {"mode": outcome.mode}
+    interrupt["pending_human_confirmation"] = pending_confirmation
+    blocked_update = {
         "active_interrupt": interrupt,
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
     }
+    if outcome.action == "BLOCK_WITH_TIMEOUT":
+        ledger.record_event(
+            state["session_id"],
+            "blocked_with_timeout",
+            {
+                "stage": "assembly_review",
+                "max_blocked_seconds": outcome.max_blocked_seconds,
+                "review_request_artifact_ref": request_ref,
+                "policy_mode": outcome.mode,
+            },
+        )
+    if outcome.action != "AUTO_DECIDE_NOW":
+        return blocked_update
+
+    try:
+        recommendation = recommend_review_decision(
+            session_id=state["session_id"],
+            stage="assembly_review",
+            request=payload,
+            data_dir=data_dir,
+        )
+        from app.control.lifecycle import resume_review_state
+
+        auto_update = resume_review_state({**state, **blocked_update}, recommendation)
+    except (RecommendationError, ResumeValidationError, ValueError) as exc:
+        ledger.record_event(
+            state["session_id"],
+            "auto_recommendation_failed",
+            {
+                "stage": "assembly_review",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "review_request_artifact_ref": request_ref,
+                "policy_mode": outcome.mode,
+            },
+        )
+        return blocked_update
+    ledger.record_event(
+        state["session_id"],
+        "auto_decision_committed",
+        {
+            "stage": "assembly_review",
+            "decision": recommendation.decision,
+            "candidate_id": recommendation.candidate_id,
+            "decided_by": recommendation.decided_by,
+            "rationale_artifact_ref": recommendation.rationale_artifact_ref,
+            "review_request_artifact_ref": request_ref,
+            "policy_mode": outcome.mode,
+        },
+    )
+    return auto_update
 
 
 def commit_assembly_review(state: TopLevelState) -> dict:
@@ -604,6 +668,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
     trace = [*state.get("route_trace", []), "assembly_review_stage"]
     next_stage = next_stage_name("assembly_review")
+    decided_by = ar_out.get("decided_by") or ("auto_rule" if deterministic_safe else "human")
+    rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
     action_metadata = {
         "action_type": action_type,
         "action_execution_mode": action_execution_mode,
@@ -613,6 +679,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "method_name": method_name,
         "evidence_refs": evidence_refs,
         "evidence_notes": evidence_notes,
+        "decided_by": decided_by,
+        "rationale_artifact_ref": rationale_artifact_ref,
     }
 
     data_dir = state.get("data_dir", "data")
@@ -625,6 +693,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         rejected_candidates=rejected_candidates,
         notes=ar_out.get("notes", []),
         metadata=action_metadata,
+        decided_by=decided_by,
+        rationale_artifact_ref=rationale_artifact_ref,
     )
 
     decision_artifact = ReviewDecisionArtifact(
@@ -687,6 +757,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             "action_execution_mode": action_execution_mode,
             "review_decision_artifact_ref": decision_ref,
             "assembly_review_action_artifact_ref": action_ref,
+            "decided_by": decided_by,
+            "rationale_artifact_ref": rationale_artifact_ref,
         }
         if action_type == "purge":
             committed_out["purged_assembly"] = final_assembly_ref
@@ -739,6 +811,8 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         "evidence_refs": action_payload.get("evidence_refs", []),
         "evidence_notes": action_payload.get("evidence_notes", []),
         "notes": request.notes,
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
     }
     if action_payload["action_type"] == "purge":
         stage_outputs["assembly_review"]["purged_assembly"] = action_payload["final_assembly_ref"]
@@ -814,6 +888,8 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         rejected_candidates=request.rejected_candidates,
         notes=request.notes,
         metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
     )
     decision_artifact = ReviewDecisionArtifact(
         session_id=state["session_id"],
@@ -837,6 +913,8 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         "decision": "stop_human_review",
         "review_decision_artifact_ref": decision_ref,
         "notes": request.notes,
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
     }
     return {
         "current_stage": "assembly_review",
@@ -898,6 +976,30 @@ def _update_assembly_review_output(state: TopLevelState, payload: dict[str, Any]
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly_review"] = {**dict(outputs.get("assembly_review") or {}), **payload}
     return {"stage_outputs": outputs}
+
+
+_EVAL_SIGNAL_NAMES = {"quast", "busco", "merqury", "mapping_coverage"}
+
+
+def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
+    candidates = ar_out.get("candidates") or []
+    if not any(isinstance(c, dict) and c.get("candidate_id") for c in candidates):
+        return False
+
+    signals = [s for s in (ar_out.get("signals") or []) if isinstance(s, dict)]
+    for signal in signals:
+        if signal.get("signal_name") != "contamination_check":
+            continue
+        if signal.get("status") == "available" and signal.get("metric_refs"):
+            return False
+
+    has_eval_evidence = any(
+        signal.get("signal_name") in _EVAL_SIGNAL_NAMES
+        and signal.get("status") == "available"
+        and signal.get("metric_refs")
+        for signal in signals
+    )
+    return has_eval_evidence
 
 
 def _local_quast_enabled(ar_out: dict[str, Any]) -> bool:

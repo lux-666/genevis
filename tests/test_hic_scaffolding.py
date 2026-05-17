@@ -305,7 +305,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIn("execution_deferred_to_method_specific_task", hic["notes"])
             self.assertNotIn("selected_method_name", hic)
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events[-1]["event_type"], "review_requested")
+            self.assertFalse(events[-1]["auto_decidable"])
 
     def test_local_yahs_without_alignment_blocks_without_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -338,7 +340,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIn("alignment_required_before_yahs", hic["notes"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events[-1]["event_type"], "review_requested")
+            self.assertFalse(events[-1]["auto_decidable"])
 
     def test_local_yahs_failure_registers_logs_and_preserves_fallback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -414,7 +418,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(hic["status"], "blocked_human")
             self.assertNotIn("selected_method_name", hic)
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events[-1]["event_type"], "review_requested")
+            self.assertFalse(events[-1]["auto_decidable"])
 
 
 if __name__ == "__main__":
