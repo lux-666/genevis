@@ -66,7 +66,37 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertTrue(artifact_payload["prompt_path"].endswith("review/assembly_review/recommend.md"))
             self.assertEqual(artifact_payload["decisions_allowed"], ["accept", "stop_human_review"])
             self.assertIn("review_request", artifact_payload)
+            self.assertIn("raw_recommendation", artifact_payload)
+            self.assertIn("recommendation", artifact_payload)
             self.assertIn("rationale_text", artifact_payload)
+
+    def test_recommender_normalizes_common_llm_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["stop_human_review"])
+            chat = _FakeChat(
+                json.dumps(
+                    {
+                        "decision": "stop_human_review",
+                        "notes": "Only QUAST is available; keep a human in the loop.",
+                    }
+                )
+            )
+
+            decision = recommend_review_decision(
+                session_id="s1",
+                stage="assembly_review",
+                request=request,
+                data_dir=tmp,
+                chat_model=chat,
+            )
+
+            self.assertEqual(decision.session_id, "s1")
+            self.assertEqual(decision.stage, "assembly_review")
+            self.assertEqual(decision.notes, ["Only QUAST is available; keep a human in the loop."])
+            artifact_payload = json.loads(Path(decision.rationale_artifact_ref or "").read_text(encoding="utf-8"))
+            self.assertNotIn("session_id", artifact_payload["raw_recommendation"])
+            self.assertEqual(artifact_payload["recommendation"]["session_id"], "s1")
+            self.assertEqual(artifact_payload["recommendation"]["stage"], "assembly_review")
 
     def test_recommender_handles_llm_invocation_exception(self):
         class _RaisingChat:

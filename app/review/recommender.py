@@ -48,7 +48,8 @@ def recommend_review_decision(
         _messages(session_id=session_id, stage=stage, request=request, prompt=prompt),
     )
     raw = _parse_json(raw_text)
-    draft = RecommendationDraft.model_validate(raw)
+    normalized = _normalize_recommendation(raw, session_id=session_id, stage=stage)
+    draft = RecommendationDraft.model_validate(normalized)
     if draft.session_id != session_id:
         raise RecommendationError("recommendation session_id does not match review request")
     if draft.stage != stage:
@@ -67,7 +68,8 @@ def recommend_review_decision(
             "prompt_path": str((PROMPT_ROOT / "review" / stage / "recommend.md").resolve()),
             "decisions_allowed": list(request.decisions_allowed),
             "review_request": request.model_dump(mode="json"),
-            "recommendation": raw,
+            "raw_recommendation": raw,
+            "recommendation": normalized,
             "rationale_text": raw_text,
         },
     )
@@ -125,6 +127,18 @@ def _invoke_model(chat_model: Any, messages: list[dict[str, str]]) -> str:
     if not isinstance(content, str) or not content.strip():
         raise RecommendationError("review recommendation LLM returned empty content")
     return content.strip()
+
+
+def _normalize_recommendation(raw: dict[str, Any], *, session_id: str, stage: str) -> dict[str, Any]:
+    normalized = dict(raw)
+    normalized.setdefault("session_id", session_id)
+    normalized.setdefault("stage", stage)
+    if isinstance(normalized.get("notes"), str):
+        normalized["notes"] = [normalized["notes"]]
+    if "rationale" in normalized and "notes" not in normalized:
+        rationale = normalized.pop("rationale")
+        normalized["notes"] = [rationale] if isinstance(rationale, str) else rationale
+    return normalized
 
 
 def _parse_json(text: str) -> dict[str, Any]:
