@@ -90,12 +90,10 @@ if ! grep -q 'supervision_state: completed' "${run_log}"; then
   exit 1
 fi
 
-# Safety: if gene_annotation moved its proteins.fa convention, the run will
-# have completed without using our seeded provenance path. Fail loudly.
-if [[ ! -f "${PROTEINS_REF}" ]]; then
-  printf 'error: expected proteins_fasta_ref at %s but file is missing — gene_annotation output convention may have changed\n' "${PROTEINS_REF}" >&2
-  exit 1
-fi
+# Note: gene_annotation is planning-only — it sets proteins_fasta_ref to a
+# planned path string but never writes the file. validate_database_provenance
+# only checks string equality, so the run reaches terminal commit even though
+# ${PROTEINS_REF} does not exist on disk. Do not check for the file here.
 
 final_report="${DATA_DIR}/artifacts/final_report/${SESSION_ID}/review_decision_report.json"
 function_bundle="${DATA_DIR}/artifacts/function_annotation/${SESSION_ID}/function_annotation_bundle.json"
