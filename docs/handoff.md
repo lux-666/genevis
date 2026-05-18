@@ -13,8 +13,8 @@ Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code
 and has server/HPC validation evidence.
 Phase 5 task 03 is implemented and server/HPC validated for the existing
 assembly -> RepeatMasker backbone. Phase 5 task 04 review policy is implemented
-locally; server smoke should use an auto-mode fixture with database provenance
-so the final review report is emitted on the normal successful terminal path.
+and server/HPC validated with separate deterministic `auto_rule` final-report
+and LLM provisional recommendation smokes.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -184,36 +184,44 @@ complete without explicit database provenance.
 
 ## Phase 5 Review Policy Run Record
 
-Phase 5 task 04 added strict/auto review policy support. The local test fixture
-records final reports at:
+Phase 5 task 04 strict/auto review policy support is implemented and server/HPC
+validated with two narrow smokes under `/data/work/genevis`.
 
-- `artifacts/final_report/<session>/review_decision_report.json`
+Deterministic `auto_rule` + final-report smoke:
 
-Server acceptance is pending and split into two narrow smokes:
+- script: `scripts/server_phase5_auto_review_smoke.sh`
+- session id: `phase5-auto-review-20260517-a`
+- data dir: `/data/work/genevis/data/phase5_auto_review/out`
+- observed terminal state: `current_stage=done`, `supervision_state=completed`
+- final report:
+  `/data/work/genevis/data/phase5_auto_review/out/artifacts/final_report/phase5-auto-review-20260517-a/review_decision_report.json`
+- function bundle:
+  `/data/work/genevis/data/phase5_auto_review/out/artifacts/function_annotation/phase5-auto-review-20260517-a/function_annotation_bundle.json`
+- scope: validates deterministic existing-assembly `auto_rule` decision and
+  terminal final-report generation. It does not validate LLM provisional review
+  because `deterministic_safe` bypasses `human_review_gate`.
 
-- `scripts/server_phase5_auto_review_smoke.sh` validates the deterministic
-  `auto_rule` path and the final report. It uses the existing-assembly fixture
-  (`data/phase5_auto_review/`), patches the runtime
-  `<data_dir>/work/gene_annotation/<session_id>/proteins.fa` into
-  `function_annotation.database_provenance.input_proteins_ref`, and asserts the
-  workflow reaches `commit_function_annotation` and writes
-  `review_decision_report.json` with at least one `auto_rule` decision. It does
-  NOT validate LLM provisional review — `deterministic_safe` bypasses
-  `human_review_gate`.
-- `scripts/server_phase5_llm_review_smoke.sh` validates LLM provisional review.
-  It uses the raw-inputs fixture (`data/phase5_llm_review/`), runs Flye + QUAST
-  locally so eval signals become `available`, and asserts the
-  `assembly_review.review_recommendation` artifact and an
-  `auto_decision_committed` event with `decided_by="llm_provisional"`. The run
-  blocks at `hic_scaffolding` because Hi-C is `auto_decidable=false` in auto
-  mode; that blocked state is the expected terminal condition for this smoke.
-  Requires `GENE_AGENT_LLM_API_KEY` exported.
+LLM provisional review smoke:
 
-Once each smoke is executed on the HPC host, record session id, exit code, and
-the relevant artifact refs (final report, recommendation artifact, function
-bundle) here. The existing function-provenance failure smoke is not
-final-report evidence — failed-terminal paths intentionally do not write that
-artifact in task 04.
+- script: `scripts/server_phase5_llm_review_smoke.sh`
+- session id: `phase5-llm-review-20260518-e`
+- data dir: `/data/work/genevis/data/phase5_llm_review/out`
+- recommendation artifact:
+  `/data/work/genevis/data/phase5_llm_review/out/artifacts/assembly_review/phase5-llm-review-20260518-e/assembly_review_review_recommendation.json`
+- ledger:
+  `/data/work/genevis/data/phase5_llm_review/out/ledger/phase5-llm-review-20260518-e/events.jsonl`
+- observed accepted outcome: LLM provisional decision was recorded with
+  `decided_by="llm_provisional"`; with only QUAST available and BUSCO /
+  contamination checks pending, the conservative prompt may validly choose
+  `stop_human_review`, which stops at `assembly_review` as `failed_terminal`
+  while still proving the audited LLM recommendation/resume path.
+- scope: validates `assembly_review.review_recommendation` artifact metadata
+  (`prompt_bundle`, `prompt_paths`, raw and normalized recommendation) plus an
+  `auto_decision_committed` ledger event with `decided_by="llm_provisional"`.
+
+The existing function-provenance failure smoke remains useful regression
+coverage but is not final-report evidence — failed-terminal paths intentionally
+do not write the final report artifact in task 04.
 
 ## Cloud Test Conventions
 
@@ -283,11 +291,11 @@ done
 
 ## Next Best Task
 
-Phase 4 server QUAST/resume validation and Phase 5 task 03 RepeatMasker
-server validation are both recorded. The next best task is to choose the
-next Phase 5 acceptance target explicitly before implementation, likely
-database provenance handling for `function_annotation` or the next
-stage-specific server gate.
+Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker and
+task 04 review-policy server validations are recorded. The next best task is
+to choose the next Phase 5 acceptance target explicitly before implementation,
+likely database provenance handling for `function_annotation` beyond smoke
+seeding, or the next stage-specific server gate.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

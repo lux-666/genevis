@@ -1,10 +1,9 @@
 # 04 Review Policy: Strict / Auto Modes And LLM Recommendation
 
-Task status: implemented locally; full test suite passing (325/325). Server
-acceptance for the auto-mode final-report path is pending — the server smoke
-script `scripts/server_phase5_auto_review_smoke.sh` is prepared but has not
-been executed on the HPC host yet. Depends on Phase 5 task 02 (durable
-resume) being complete — it is. Does not require Phase 6.
+Task status: implemented and server/HPC validated. The deterministic
+`auto_rule` + final-report smoke and the LLM provisional review smoke have both
+passed on the server under `/data/work/genevis`. Depends on Phase 5 task 02
+(durable resume) being complete — it is. Does not require Phase 6.
 
 ## Goal
 
@@ -152,40 +151,40 @@ the source of truth; do not hardcode the list in the policy module.
 
 ## Tasks
 
-- [ ] Add `review_policy` block to `app/schemas/run_config.py` with
+- [x] Add `review_policy` block to `app/schemas/run_config.py` with
   validation (mode enum, non-negative timeout, stage override schema).
-- [ ] Add `decided_by` and `rationale_artifact_ref` fields to
+- [x] Add `decided_by` and `rationale_artifact_ref` fields to
   `ResumeReviewRequest`. Make `rationale_artifact_ref` required when
   `decided_by != "human"`.
-- [ ] Add `auto_decidable: bool` to the review request payload contract
+- [x] Add `auto_decidable: bool` to the review request payload contract
   in `app/review/base.py`. Default `true` until a stage opts out.
-- [ ] Add an `app/review/policy.py` module with a single function
+- [x] Add an `app/review/policy.py` module with a single function
   `evaluate(stage, request, run_config) -> PolicyOutcome`. Pure
   function; no I/O; no LLM calls.
-- [ ] Add an `app/llm/prompt_bundles/prompts/review/<stage>/recommend.md`
-  template per stage that has a review gate. The prompt receives the
-  review request payload and returns JSON that maps onto a
-  `ResumeReviewRequest`.
-- [ ] Add an `app/review/recommender.py` that calls the LLM, validates
+- [x] Add the `review.assembly_review_recommend` prompt bundle
+  (`app/llm/prompt_bundles/prompts/review/assembly_review_recommend_system.md`
+  and `_user.md`). The prompt receives the review request payload and returns
+  JSON that maps onto a `ResumeReviewRequest`.
+- [x] Add an `app/review/recommender.py` that calls the LLM, validates
   the output as a `ResumeReviewRequest`, and writes the recommendation
   artifact (`<stage>_review_recommendation.json`).
-- [ ] Wire policy + recommender into the existing `request_review`
+- [x] Wire policy + recommender into the existing `request_review`
   node for `assembly_review` and `hic_scaffolding`. The node consults
   the policy first, then the recommender if the policy says
   `AUTO_DECIDE_NOW`, then either commits the synthetic resume request
   or sets `active_interrupt` exactly as today.
-- [ ] Add `--max-blocked-seconds` to `gene-agent resume` (the task 02
+- [x] Add `--max-blocked-seconds` to `gene-agent resume` (the task 02
   future-work item). The flag forwards directly into
   `resume_review_state(blocked_timeout_seconds=...)`.
-- [ ] Extend `gene-agent inspect` to print
+- [x] Extend `gene-agent inspect` to print
   `decisions_by_origin: { human: N, llm_provisional: M, auto_rule: K }`
   and to accept `--filter decided_by=llm_provisional` to list only
   those decisions.
-- [ ] Add a `final_report` artifact at workflow termination
+- [x] Add a `final_report` artifact at workflow termination
   (`gene_annotation` / `function_annotation` final commit) that lists
   every recorded decision in the session, grouped by `decided_by`. The
   list of `BLOCK_PENDING_CONFIRM` checkpoints comes first.
-- [ ] Tests:
+- [x] Tests:
   - run-config schema accepts strict / auto / per-stage overrides;
     rejects unknown modes.
   - policy returns `AUTO_DECIDE_NOW` for an auto-decidable
@@ -200,7 +199,7 @@ the source of truth; do not hardcode the list in the policy module.
   - end-to-end auto-mode run on the existing fake-binary fixtures
     advances `assembly_review` to a downstream stage without an
     operator typing `gene-agent resume`.
-- [ ] Update `docs/handoff.md` with one example auto-mode session id
+- [x] Update `docs/handoff.md` with one example auto-mode session id
   and the location of its final report artifact.
 
 ## Implementation Notes
@@ -210,7 +209,7 @@ the source of truth; do not hardcode the list in the policy module.
 - `ReviewPayload` carries `auto_decidable`, and `ResumeReviewRequest` carries `decided_by` plus `rationale_artifact_ref` for non-human decisions.
 - **`llm_provisional` is policy-gated auto-review, not a bypass.** When `policy.evaluate(...)` returns `AUTO_DECIDE_NOW`, the recommender produces a `ResumeReviewRequest` with `decided_by="llm_provisional"`, the review module synthesizes the resume, calls the existing `resume_review_state(...)` pipeline, and the graph advances. The LLM never writes ledger events directly; review code records `auto_decision_committed` with the rationale artifact ref. The human gate is preserved structurally — the policy decides whether to invoke it; the LLM recommends a decision within `decisions_allowed` only when policy says auto.
 - `_assembly_review_auto_decidable` requires (a) at least one candidate with a `candidate_id`, (b) at least one eval signal in `{quast, busco, merqury, mapping_coverage}` with `status="available"` and non-empty `metric_refs`, and (c) no `contamination_check` signal in `available` status with metric_refs. A pending contamination_check signal is not evidence and does not flip the gate. With all signals pending, `auto_decidable` is `False` and the workflow blocks for human confirmation even in `auto` mode.
-- The recommender writes its rationale artifact with `model`, `prompt_path`, `decisions_allowed`, the full `review_request`, the parsed `recommendation` JSON, and the raw `rationale_text`. Every auto decision is reproducible from this artifact plus the review request.
+- The recommender writes its rationale artifact with `model`, `prompt_bundle`, `prompt_paths`, `decisions_allowed`, the full `review_request`, `raw_recommendation`, normalized `recommendation`, and raw `rationale_text`. Every auto decision is reproducible from this artifact plus the review request.
 - `assembly_review` attempts an LLM provisional recommendation only when `outcome.action == AUTO_DECIDE_NOW`. Recommendation/validation failures (invalid JSON, disallowed decision, LLM exception, synthetic resume validation failure) fail safe back to `blocked_human` and record `auto_recommendation_failed` with `error_type` and `error` fields. The review request artifact remains available for a human operator.
 - `hic_scaffolding` writes a review request with `auto_decidable=False`; auto mode records pending human confirmation and never calls the recommender.
 - `review_requested` and `review_decision` ledger events are self-describing with request refs, policy/provenance fields, and `decided_by` where applicable.
@@ -266,9 +265,10 @@ bash scripts/server_phase5_auto_review_smoke.sh \
   --data-dir    /abs/path/to/data/phase5_auto_review/out
 
 # Scope B — LLM provisional review at the assembly_review human gate.
-# Validates: auto_decision_committed event with decided_by=llm_provisional,
-# assembly_review.review_recommendation artifact, run blocks at hic_scaffolding
-# (Hi-C is auto_decidable=false in auto mode).
+# Validates: auto_decision_committed event with decided_by=llm_provisional
+# and assembly_review.review_recommendation artifact. Two accepted outcomes:
+#   A) advancing decision -> later blocked at hic_scaffolding;
+#   B) conservative stop_human_review -> failed_terminal at assembly_review.
 # Requires: GENE_AGENT_LLM_API_KEY exported, Flye + QUAST in env_geno_exec.
 bash scripts/server_phase5_llm_review_smoke.sh \
   --manifest    /abs/path/to/data/phase5_llm_review/manifest.yaml \
@@ -280,24 +280,20 @@ bash scripts/server_phase5_llm_review_smoke.sh \
 The `phase5_auto_review` template `run_config.json` seeds
 `function_annotation.database_provenance` with a placeholder
 `__REPLACE_WITH_PROTEINS_FASTA_REF__`. The smoke script substitutes
-`<data_dir>/work/gene_annotation/<session_id>/proteins.fa` and the post-run
-check fails loudly if `gene_annotation` ever changes that output convention.
+`<data_dir>/work/gene_annotation/<session_id>/proteins.fa`; this is a planned
+path string, not a required on-disk protein FASTA, because gene annotation is
+currently planning-only.
 
-Both scripts are prepared but server execution is pending. HPC acceptance for
-task 04 requires running each on the server and recording the session id,
-exit code, and the relevant artifact refs in `docs/handoff.md`.
+Both scripts have been run on the server. Recorded evidence lives in
+`docs/handoff.md` under "Phase 5 Review Policy Run Record".
 
-## Open Questions Left For Implementation
+## Decisions Closed During Implementation
 
-- Whether `mode: auto` on a checkpoint with no descriptor entry should
-  default to `auto_decidable: true` or `false`. Recommendation: default
-  `true` (most checkpoints are recoverable from the artifact trail);
-  the descriptor opts specific gates *out*.
-- Whether the LLM recommendation should be allowed to choose
-  `stop_human_review` (i.e. recommend that a human take over). Probably
-  yes — it is an honest recommendation in low-confidence cases and
-  makes the system fail safer. The CLI then surfaces this exactly like
-  a `BLOCK_PENDING_CONFIRM` outcome.
-- Whether `final_report` belongs in `app/reports/` or as a stage-level
-  commit artifact. `app/reports/` is currently empty; this task is a
-  reasonable first user.
+- `mode: auto` relies on the stage-filled `auto_decidable` value; the policy
+  module does not infer biological readiness. Assembly review now requires at
+  least one available eval signal with metric refs, and Hi-C explicitly opts out.
+- The LLM may recommend `stop_human_review`. That is a valid fail-safe outcome
+  for partial evidence and is accepted by the LLM provisional smoke when the
+  recommendation artifact and `llm_provisional` ledger events are present.
+- `final_report` lives in `app/reports/` and is written from the normal
+  successful `function_annotation` terminal path.
