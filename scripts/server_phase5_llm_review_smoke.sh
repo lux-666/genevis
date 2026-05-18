@@ -5,20 +5,22 @@
 #   - raw_inputs entry with review_policy.mode=auto reaches `human_review_gate`,
 #     calls the recommender, writes an `assembly_review.review_recommendation`
 #     artifact, applies the synthetic resume, records `auto_decision_committed`
-#     with `decided_by="llm_provisional"`, and advances past assembly_review.
-#   - The workflow then blocks at `hic_scaffolding` because Hi-C is
-#     `auto_decidable=false` in auto mode. That blocked state is the expected
-#     terminal condition for this smoke; reaching it proves the LLM provisional
-#     review path is functional.
+#     with `decided_by="llm_provisional"`, and records an assembly_review
+#     `review_decision` with a rationale artifact ref.
+#   - Because the prompt is conservative, two terminal states are valid:
+#       A) LLM recommends an advancing decision and the workflow later blocks at
+#          hic_scaffolding (`auto_decidable=false`).
+#       B) LLM recommends `stop_human_review` because evidence is partial; the
+#          workflow stops at assembly_review with `failed_terminal`.
+#     Both prove the LLM provisional path is functional; B is expected when only
+#     QUAST is available while BUSCO/contamination_check are pending.
 #
 # REQUIRES:
 #   - GENE_AGENT_LLM_API_KEY exported in the environment (or .env loaded by run.py).
 #   - assembly local execution (Flye) and QUAST in env_geno_exec on the host.
 #
 # WHAT THIS DOES NOT VALIDATE:
-#   - Final review report artifact. That requires reaching the
-#     function_annotation terminal commit, which auto mode cannot reach without
-#     a human Hi-C decision. Run server_phase5_auto_review_smoke.sh for that.
+#   - Final review report artifact. Run server_phase5_auto_review_smoke.sh for that.
 #
 # Usage:
 #   bash scripts/server_phase5_llm_review_smoke.sh \
@@ -82,16 +84,6 @@ conda run -n "${ORCHESTRATOR_ENV}" gene-agent run \
 status=${PIPESTATUS[0]}
 set -e
 
-# Expected: blocked_human at hic_scaffolding (Hi-C is auto_decidable=false in auto mode).
-if ! grep -q 'current_stage: hic_scaffolding' "${run_log}"; then
-  printf 'error: run did not reach hic_scaffolding; see %s\n' "${run_log}" >&2
-  exit 1
-fi
-if ! grep -q 'supervision_state: blocked_human' "${run_log}"; then
-  printf 'error: run did not stop as blocked_human at Hi-C; see %s\n' "${run_log}" >&2
-  exit 1
-fi
-
 events_path="${DATA_DIR}/ledger/${SESSION_ID}/events.jsonl"
 ensure_file ledger "${events_path}"
 
@@ -101,7 +93,7 @@ ensure_file recommendation-artifact "${recommendation_artifact}"
 # Validate ledger evidence: auto_decision_committed with llm_provisional, and
 # the assembly_review review_decision event has decided_by=llm_provisional.
 conda run -n "${ORCHESTRATOR_ENV}" python - <<PY
-import json, sys, pathlib
+import json, pathlib, sys
 
 events = [json.loads(line) for line in pathlib.Path("${events_path}").read_text().splitlines() if line.strip()]
 auto_committed = [
@@ -127,22 +119,36 @@ for e in ar_decisions:
         sys.exit("error: assembly_review review_decision missing rationale_artifact_ref")
 
 rec = json.loads(pathlib.Path("${recommendation_artifact}").read_text())
-for field in ("model", "prompt_path", "decisions_allowed", "review_request", "recommendation"):
+for field in ("model", "prompt_bundle", "prompt_paths", "decisions_allowed", "review_request", "raw_recommendation", "recommendation"):
     if field not in rec:
         sys.exit(f"error: recommendation artifact missing field: {field}")
+if "system" not in rec["prompt_paths"] or "user" not in rec["prompt_paths"]:
+    sys.exit("error: recommendation artifact prompt_paths missing system/user")
 
+decision = ar_decisions[-1].get("decision")
 print(f"auto_decision_committed events: {len(auto_committed)}")
 print(f"review_decision events (assembly_review): {len(ar_decisions)}")
+print(f"assembly_review decision: {decision}")
 print(f"recommendation artifact model: {rec.get('model')}")
 PY
 
+if grep -q 'current_stage: hic_scaffolding' "${run_log}" && grep -q 'supervision_state: blocked_human' "${run_log}"; then
+  terminal_note="advanced past assembly_review and blocked at hic_scaffolding"
+elif grep -q 'current_stage: assembly_review' "${run_log}" && grep -q 'supervision_state: failed_terminal' "${run_log}" && grep -q 'stopped by human review decision' "${run_log}"; then
+  terminal_note="LLM conservatively chose stop_human_review at assembly_review"
+else
+  printf 'error: run reached an unexpected terminal state; see %s\n' "${run_log}" >&2
+  exit 1
+fi
+
 cat <<EOF
 
-== Phase 5 LLM-provisional review smoke reached expected blocked-at-hic state ==
-run_log:                ${run_log}
+== Phase 5 LLM-provisional review smoke reached expected state ==
+result:                  ${terminal_note}
+run_log:                 ${run_log}
 recommendation_artifact: ${recommendation_artifact}
 ledger:                  ${events_path}
 
-Record session_id, the recommendation artifact ref, and the
+Record session_id, result, recommendation artifact ref, and the
 auto_decision_committed event timestamp in docs/handoff.md.
 EOF
