@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 from app.review.base import ReviewPayload
 from app.review.recommender import RecommendationError, recommend_review_decision
 
@@ -20,6 +21,11 @@ class _FakeChat:
     def __init__(self, content: str, *, model: str | None = "fake-model-v1") -> None:
         self.content = content
         self.model_name = model
+        self.bound_formats = []
+
+    def bind(self, **kwargs):
+        self.bound_formats.append(kwargs)
+        return self
 
     def invoke(self, messages):
         self.messages = messages
@@ -27,6 +33,22 @@ class _FakeChat:
 
 
 class ReviewRecommenderTests(unittest.TestCase):
+    def test_review_prompt_bundle_loads_and_renders_context(self):
+        bundle = load_prompt_bundle("review.assembly_review_recommend")
+        messages = render_prompt_messages(
+            bundle,
+            {
+                "session_id": "s1",
+                "stage": "assembly_review",
+                "review_request_json": '{"decisions_allowed": ["accept"]}',
+            },
+        )
+
+        self.assertIn("Return exactly one JSON object", messages[0]["content"])
+        self.assertIn("session_id:\ns1", messages[1]["content"])
+        self.assertIn("stage:\nassembly_review", messages[1]["content"])
+        self.assertIn('"decisions_allowed": ["accept"]', messages[1]["content"])
+
     def test_recommender_writes_artifact_and_returns_llm_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             request = ReviewPayload(
@@ -63,12 +85,20 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertIn("assembly_review.review_recommendation", records)
             artifact_payload = json.loads(Path(decision.rationale_artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(artifact_payload["model"], "fake-model-v1")
-            self.assertTrue(artifact_payload["prompt_path"].endswith("review/assembly_review/recommend.md"))
+            self.assertEqual(artifact_payload["prompt_bundle"], "review.assembly_review_recommend")
+            self.assertTrue(artifact_payload["prompt_paths"]["system"].endswith("review/assembly_review_recommend_system.md"))
+            self.assertTrue(artifact_payload["prompt_paths"]["user"].endswith("review/assembly_review_recommend_user.md"))
             self.assertEqual(artifact_payload["decisions_allowed"], ["accept", "stop_human_review"])
             self.assertIn("review_request", artifact_payload)
             self.assertIn("raw_recommendation", artifact_payload)
             self.assertIn("recommendation", artifact_payload)
             self.assertIn("rationale_text", artifact_payload)
+            self.assertEqual(chat.bound_formats[0]["response_format"]["type"], "json_schema")
+            self.assertEqual(chat.messages[0]["role"], "system")
+            self.assertIn("Return exactly one JSON object", chat.messages[0]["content"])
+            self.assertEqual(chat.messages[1]["role"], "user")
+            self.assertIn("session_id:\ns1", chat.messages[1]["content"])
+            self.assertIn("review_request_json:", chat.messages[1]["content"])
 
     def test_recommender_normalizes_common_llm_shape(self):
         with tempfile.TemporaryDirectory() as tmp:

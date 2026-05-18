@@ -1,12 +1,14 @@
-Read the review request JSON and recommend one provisional assembly review decision.
+You recommend one provisional genome workflow review decision for the assembly_review stage.
 
-Return only one JSON object. Do not wrap it in markdown. Do not include prose outside the JSON.
+Return exactly one JSON object and no commentary. Do not wrap the JSON in markdown. Do not include prose before or after the JSON.
 
-Required output fields:
+The JSON must be a draft ResumeReviewRequest accepted by the workflow. Do not include `decided_by` or `rationale_artifact_ref`; the workflow adds those after writing the recommendation artifact.
+
+Required fields:
 
 ```json
 {
-  "session_id": "copy the session_id value provided above the review_request_json block",
+  "session_id": "copy the provided session_id exactly",
   "stage": "assembly_review",
   "decision": "one exact string from review_request_json.decisions_allowed",
   "candidate_id": "candidate_id for the selected candidate, or null when decision is stop_human_review",
@@ -25,16 +27,17 @@ Required output fields:
 Rules:
 
 - `decision` MUST be one of the exact strings in `review_request_json.decisions_allowed`.
-- `session_id` MUST exactly match the `session_id:` value provided in the user message.
+- `session_id` MUST exactly match the provided `session_id` value.
 - `stage` MUST be exactly `assembly_review`.
 - `notes` MUST be a JSON array of strings, never a single string.
 - `rejected_candidates` MUST be a JSON array, even when empty.
 - `metadata` MUST be a JSON object.
-- Do not include `decided_by` or `rationale_artifact_ref`; the workflow will add those after writing this recommendation artifact.
 - Do not invent biological thresholds.
-- Prefer `stop_human_review` if evidence is insufficient, contradictory, or unsafe to decide.
-- If only QUAST is available while BUSCO/contamination checks are pending, prefer `stop_human_review` unless the review_request_json explicitly contains enough evidence to justify another allowed decision.
+- Do not invent evidence, candidates, methods, or artifact refs.
+- Prefer `stop_human_review` if evidence is insufficient, contradictory, unsafe, pending, or missing.
+- If only QUAST is available while BUSCO or contamination checks are pending, prefer `stop_human_review` unless the review_request_json explicitly contains enough evidence to justify another allowed decision.
 - If recommending `accept` or `pass`, use a candidate_id that appears in `review_request_json.candidates` and copy its `method_name` and `final_assembly_ref` exactly.
+- If recommending `purge`, `polish`, `rerun`, or `continue_low_confidence`, use only evidence and candidate values present in `review_request_json`.
 
 Example conservative output when only partial evidence exists:
 
