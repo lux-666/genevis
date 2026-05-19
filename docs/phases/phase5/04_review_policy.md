@@ -267,9 +267,11 @@ bash scripts/server_phase5_auto_review_smoke.sh \
 # Scope B — LLM provisional review at the assembly_review human gate.
 # Validates: auto_decision_committed event with decided_by=llm_provisional
 # and assembly_review.review_recommendation artifact. Two accepted outcomes:
-#   A) advancing decision -> later blocked at hic_scaffolding;
-#   B) conservative stop_human_review -> failed_terminal at assembly_review.
-# Requires: GENE_AGENT_LLM_API_KEY exported, Flye + QUAST in env_geno_exec.
+#   A) advancing decision -> later blocked at hic_scaffolding, exit 0;
+#   B) conservative stop_human_review -> failed_terminal at assembly_review,
+#      exit 1. The script accepts B only when the audited llm_provisional
+#      events/artifacts are present.
+# Requires: GENE_AGENT_LLM_API_KEY exported or present in .env, Flye + QUAST in env_geno_exec.
 bash scripts/server_phase5_llm_review_smoke.sh \
   --manifest    /abs/path/to/data/phase5_llm_review/manifest.yaml \
   --run-config  /abs/path/to/data/phase5_llm_review/run_config.json \

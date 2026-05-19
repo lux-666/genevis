@@ -193,6 +193,7 @@ Deterministic `auto_rule` + final-report smoke:
 - session id: `phase5-auto-review-20260517-a`
 - data dir: `/data/work/genevis/data/phase5_auto_review/out`
 - observed terminal state: `current_stage=done`, `supervision_state=completed`
+- expected/observed exit code: `0`
 - final report:
   `/data/work/genevis/data/phase5_auto_review/out/artifacts/final_report/phase5-auto-review-20260517-a/review_decision_report.json`
 - function bundle:
@@ -212,9 +213,11 @@ LLM provisional review smoke:
   `/data/work/genevis/data/phase5_llm_review/out/ledger/phase5-llm-review-20260518-e/events.jsonl`
 - observed accepted outcome: LLM provisional decision was recorded with
   `decided_by="llm_provisional"`; with only QUAST available and BUSCO /
-  contamination checks pending, the conservative prompt may validly choose
-  `stop_human_review`, which stops at `assembly_review` as `failed_terminal`
-  while still proving the audited LLM recommendation/resume path.
+  contamination checks pending, the conservative prompt validly chose
+  `stop_human_review`, which stopped at `assembly_review` as `failed_terminal`.
+- expected/observed exit code: `1` for this accepted conservative-stop outcome
+  (the LLM smoke accepts this only when the recommendation artifact and
+  `llm_provisional` ledger events are present).
 - scope: validates `assembly_review.review_recommendation` artifact metadata
   (`prompt_bundle`, `prompt_paths`, raw and normalized recommendation) plus an
   `auto_decision_committed` ledger event with `decided_by="llm_provisional"`.

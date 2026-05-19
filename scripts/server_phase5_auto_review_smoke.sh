@@ -54,10 +54,10 @@ DATA_DIR="$(abs_path "${DATA_DIR}")"
 
 mkdir -p "${DATA_DIR}"
 
-# gene_annotation planning writes proteins_fasta_ref to this path. The
-# database_provenance.input_proteins_ref must match it exactly. If the
-# upstream output convention changes, the post-run path check below will fail
-# loudly rather than silently masking the mismatch.
+# gene_annotation planning sets proteins_fasta_ref to this path string. The
+# database_provenance.input_proteins_ref must match it exactly; the smoke
+# validates the committed bundle fields rather than requiring the planned FASTA
+# to exist on disk.
 PROTEINS_REF="${DATA_DIR}/work/gene_annotation/${SESSION_ID}/proteins.fa"
 
 RUN_CONFIG="${DATA_DIR}/run_config_patched.json"
@@ -103,7 +103,8 @@ for path in "${final_report}" "${function_bundle}"; do
 done
 
 # Validate this smoke's specific claim: at least one decision is decided_by=auto_rule
-# (the deterministic existing-assembly accept).
+# (the deterministic existing-assembly accept), and the seeded provenance matched
+# the planning-only proteins_fasta_ref string used by function_annotation.
 conda run -n "${ORCHESTRATOR_ENV}" python - <<PY
 import json, sys
 report = json.loads(open("${final_report}").read())
@@ -114,7 +115,19 @@ origins = report.get("decisions_by_origin", {})
 auto_rule_count = origins.get("auto_rule", 0)
 if auto_rule_count < 1:
     sys.exit(f"error: expected at least 1 auto_rule decision, got {origins}")
+if report.get("pending_human_confirmations"):
+    sys.exit(f"error: deterministic final-report smoke should not have pending confirmations: {report.get('pending_human_confirmations')}")
+bundle = json.loads(open("${function_bundle}").read())
+if bundle.get("proteins_fasta_ref") != "${PROTEINS_REF}":
+    sys.exit(f"error: function bundle proteins_fasta_ref mismatch: {bundle.get('proteins_fasta_ref')!r}")
+provenance = bundle.get("database_provenance") or []
+if not provenance:
+    sys.exit("error: function bundle missing database_provenance")
+for index, record in enumerate(provenance):
+    if record.get("input_proteins_ref") != "${PROTEINS_REF}":
+        sys.exit(f"error: provenance[{index}].input_proteins_ref mismatch: {record.get('input_proteins_ref')!r}")
 print(f"decisions: {len(decisions)}, by_origin: {origins}")
+print(f"proteins_fasta_ref: {bundle.get('proteins_fasta_ref')}")
 PY
 
 cat <<EOF

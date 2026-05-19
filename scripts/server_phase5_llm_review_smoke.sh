@@ -16,8 +16,16 @@
 #     QUAST is available while BUSCO/contamination_check are pending.
 #
 # REQUIRES:
-#   - GENE_AGENT_LLM_API_KEY exported in the environment (or .env loaded by run.py).
+#   - GENE_AGENT_LLM_API_KEY exported in the environment or available from .env
+#     loaded by run.py.
 #   - assembly local execution (Flye) and QUAST in env_geno_exec on the host.
+#
+# EXPECTED EXIT CODES:
+#   - 0 when the LLM chooses an advancing decision and the graph blocks later at
+#     hic_scaffolding.
+#   - 1 when the LLM conservatively chooses stop_human_review and the graph
+#     fails terminally at assembly_review. This is accepted only when the audited
+#     llm_provisional events/artifacts are present.
 #
 # WHAT THIS DOES NOT VALIDATE:
 #   - Final review report artifact. Run server_phase5_auto_review_smoke.sh for that.
@@ -36,7 +44,7 @@ RUN_CONFIG="data/phase5_llm_review/run_config.json"
 SESSION_ID=""
 DATA_DIR="data/phase5_llm_review/out"
 
-usage() { sed -n '2,28p' "$0" >&2; }
+usage() { sed -n '2,36p' "$0" >&2; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,9 +62,11 @@ require --run-config  "${RUN_CONFIG}" || { usage; exit 1; }
 require --session-id  "${SESSION_ID}" || { usage; exit 1; }
 require --data-dir    "${DATA_DIR}"   || { usage; exit 1; }
 
-if [[ -z "${GENE_AGENT_LLM_API_KEY:-}" ]]; then
-  printf 'error: GENE_AGENT_LLM_API_KEY must be exported for this smoke\n' >&2
-  exit 1
+# The CLI loads .env itself, so an exported key is not mandatory here. Warn when
+# neither shell nor local .env appears to provide one; the run will fail later if
+# LLM config is truly missing.
+if [[ -z "${GENE_AGENT_LLM_API_KEY:-}" ]] && ! grep -qs '^GENE_AGENT_LLM_API_KEY=' .env 2>/dev/null; then
+  printf 'warning: GENE_AGENT_LLM_API_KEY is not exported and .env does not appear to define it\n' >&2
 fi
 
 ensure_file manifest    "${MANIFEST}"
@@ -133,11 +143,19 @@ print(f"recommendation artifact model: {rec.get('model')}")
 PY
 
 if grep -q 'current_stage: hic_scaffolding' "${run_log}" && grep -q 'supervision_state: blocked_human' "${run_log}"; then
+  if [[ "${status}" -ne 0 ]]; then
+    printf 'error: hic_scaffolding blocked_human outcome should exit 0, got %s; see %s\n' "${status}" "${run_log}" >&2
+    exit 1
+  fi
   terminal_note="advanced past assembly_review and blocked at hic_scaffolding"
 elif grep -q 'current_stage: assembly_review' "${run_log}" && grep -q 'supervision_state: failed_terminal' "${run_log}" && grep -q 'stopped by human review decision' "${run_log}"; then
+  if [[ "${status}" -ne 1 ]]; then
+    printf 'error: stop_human_review failed_terminal outcome should exit 1, got %s; see %s\n' "${status}" "${run_log}" >&2
+    exit 1
+  fi
   terminal_note="LLM conservatively chose stop_human_review at assembly_review"
 else
-  printf 'error: run reached an unexpected terminal state; see %s\n' "${run_log}" >&2
+  printf 'error: run reached an unexpected terminal state or exit code %s; see %s\n' "${status}" "${run_log}" >&2
   exit 1
 fi
 
