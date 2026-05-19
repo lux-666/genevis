@@ -211,6 +211,57 @@ class InventoryStageTests(unittest.TestCase):
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
             self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
 
+    def test_inventory_existing_assembly_with_provided_gene_annotation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fa = Path(tmpdir) / "asm.fa"
+            gff3 = Path(tmpdir) / "genes.gff3"
+            proteins = Path(tmpdir) / "proteins.fa"
+            transcripts = Path(tmpdir) / "transcripts.fa"
+            fa.write_text(">ctg1\nACGTACGT\n")
+            gff3.write_text("##gff-version 3\nctg1\tsrc\tgene\t1\t8\t.\t+\t.\tID=g1\n")
+            proteins.write_text(">p1\nMKT\n")
+            transcripts.write_text(">t1\nAUG\n")
+            manifest = {
+                "session_id": "s4-annotation",
+                "assets": [
+                    {"asset_type": "assembly_fasta_registered", "paths": [str(fa)]},
+                    {"asset_type": "gene_models", "paths": [str(gff3)]},
+                    {"asset_type": "predicted_proteins", "paths": [str(proteins)]},
+                    {"asset_type": "transcripts_fasta", "paths": [str(transcripts)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(session_id="s4-annotation", input_manifest_ref=str(path), data_dir=tmpdir)
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            assets = {asset["asset_type"]: asset for asset in registry["assets"]}
+            self.assertEqual(assets["gene_models"]["format"], "gff3")
+            self.assertEqual(assets["predicted_proteins"]["format"], "fasta")
+            self.assertEqual(assets["transcripts_fasta"]["format"], "fasta")
+
+    def test_inventory_rejects_missing_provided_annotation_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "asm.fa"
+            assembly.write_text(">ctg1\nACGT\n")
+            missing = Path(tmpdir) / "missing_proteins.fa"
+            manifest = {
+                "session_id": "s4-missing-annotation",
+                "assets": [
+                    {"asset_type": "assembly_fasta_registered", "paths": [str(assembly)]},
+                    {"asset_type": "predicted_proteins", "paths": [str(missing)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(session_id="s4-missing-annotation", input_manifest_ref=str(path), data_dir=tmpdir)
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "inventory")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("predicted_proteins", result["last_error"])
+            self.assertIn(str(missing), result["last_error"])
+
     def test_inventory_writes_ledger_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "ont.fq"

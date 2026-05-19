@@ -1276,6 +1276,102 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("command.stderr", artifact_types)
 
 
+class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
+    def _write_provided_annotation_inputs(
+        self, root: Path, *, session_id: str = "phase5-provided-ann-e2e"
+    ) -> tuple[Path, Path, Path]:
+        assembly = root / "existing_assembly.fa"
+        gene_models = root / "gene_models.gff3"
+        proteins = root / "predicted_proteins.fasta"
+        transcripts = root / "transcripts.fa"
+        assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        gene_models.write_text("##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n", encoding="utf-8")
+        proteins.write_text(">prot1\nMACGT\n", encoding="utf-8")
+        transcripts.write_text(">tx1\nACGTACGT\n", encoding="utf-8")
+        manifest = root / "manifest.yaml"
+        manifest.write_text(
+            "\n".join(
+                [
+                    f"session_id: {session_id}",
+                    "sample_id: test-sample",
+                    "assets:",
+                    "  - asset_type: assembly_fasta_registered",
+                    f"    paths: [{assembly}]",
+                    "  - asset_type: gene_models",
+                    f"    paths: [{gene_models}]",
+                    "  - asset_type: predicted_proteins",
+                    f"    paths: [{proteins}]",
+                    "  - asset_type: transcripts_fasta",
+                    f"    paths: [{transcripts}]",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        run_config = root / "run_config.json"
+        run_config.write_text(json.dumps({"local_exec": []}), encoding="utf-8")
+        return manifest, run_config, root / "out"
+
+    def _run_args(self, *, session_id: str, manifest: Path, run_config: Path, data_dir: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            session_id=session_id,
+            manifest=str(manifest),
+            data_dir=str(data_dir),
+            local_exec=[],
+            run_config=str(run_config),
+            checkpointer="memory",
+        )
+
+    def test_existing_assembly_provided_annotation_reaches_function_provenance_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-provided-ann-e2e"
+            manifest, run_config, data_dir = self._write_provided_annotation_inputs(root, session_id=session_id)
+            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+
+            code, stdout, stderr = _capture_cli(_run_session, args)
+
+            self.assertEqual(code, 1)
+            self.assertIn("current_stage: function_annotation", stdout)
+            self.assertIn("supervision_state: failed_terminal", stdout)
+            self.assertIn("database_provenance", stderr)
+
+            gene_bundle_path = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            self.assertTrue(gene_bundle_path.exists())
+            self.assertFalse(function_bundle_path.exists())
+
+            gene = json.loads(gene_bundle_path.read_text(encoding="utf-8"))
+            self.assertEqual(gene["status"], "adopted_existing_annotation")
+            self.assertEqual(gene["evidence_profile"], "provided_annotation")
+            self.assertEqual(gene["candidate_methods"], [])
+
+            # refs must point to the actual manifest-provided files, not work-path placeholders
+            gene_models_file = root / "gene_models.gff3"
+            proteins_file = root / "predicted_proteins.fasta"
+            transcripts_file = root / "transcripts.fa"
+            self.assertEqual(gene["genes_gff3_ref"], str(gene_models_file))
+            self.assertEqual(gene["predicted_proteins_ref"], str(proteins_file))
+            self.assertEqual(gene["transcripts_fasta_ref"], str(transcripts_file))
+
+            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("gene_annotation.provided_gene_models", artifact_types)
+            self.assertIn("gene_annotation.provided_predicted_proteins", artifact_types)
+            self.assertIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+            self.assertIn("gene_annotation.bundle", artifact_types)
+            self.assertIn("operator_report.failed_terminal", artifact_types)
+
+            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
+            report = json.loads(operator_report.read_text(encoding="utf-8"))
+            self.assertEqual(report["current_stage"], "function_annotation")
+            self.assertEqual(report["next_action"]["kind"], "provenance_required")
+            self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
+
+
 class ResumeCLITests(unittest.TestCase):
     def _write_decision(self, path: Path, **overrides) -> Path:
         payload = {

@@ -16,7 +16,9 @@ assembly -> RepeatMasker backbone. Phase 5 task 04 review policy is implemented
 and server/HPC validated with separate deterministic `auto_rule` final-report
 and LLM provisional recommendation smokes. Phase 5 task 05 operator usability is
 implemented in code/docs with inspect JSON, next-action output, decision-template
-generation, and blocked/failed operator report artifacts.
+generation, and blocked/failed operator report artifacts. Phase 5 task 06
+provided gene annotation adoption is implemented in code and tests; server/HPC
+smoke is pending.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -297,12 +299,15 @@ done
 ## Next Best Task
 
 Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker,
-task 04 review-policy server validations, and task 05 operator usability code/docs
-are recorded. The next best task is Phase 5 task 06, provided gene annotation
-adoption. The approved remaining Phase 5 order is:
+task 04 review-policy server validations, task 05 operator usability code/docs,
+and task 06 provided gene annotation adoption code/tests are recorded. The next
+best task is Phase 5 task 07, assembly review evidence expansion with BUSCO
+first. The approved remaining Phase 5 order is:
 
-1. task 06 — provided gene annotation adoption
-2. task 07 — function annotation provenance completion
+1. task 07 — assembly review evidence expansion, BUSCO first
+2. task 08 — assembly parameter loop and candidate comparison
+3. task 09 — assembly review visual report and human selection
+4. task 10 — function annotation provenance completion
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

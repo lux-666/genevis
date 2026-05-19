@@ -50,7 +50,10 @@ provenance gate.
 4. [Review Policy: Strict / Auto Modes And LLM Recommendation](04_review_policy.md)
 5. [Operator Usability Pack](05_operator_usability_pack.md)
 6. [Provided Gene Annotation Adoption](06_provided_gene_annotation_adoption.md)
-7. [Function Annotation Provenance Completion](07_function_annotation_provenance_completion.md)
+7. [Assembly Review Evidence Expansion, BUSCO First](07_assembly_review_busco_evidence.md)
+8. [Assembly Parameter Loop And Candidate Comparison](08_assembly_parameter_loop.md)
+9. [Assembly Review Visual Report And Human Selection](09_assembly_review_visual_report.md)
+10. [Function Annotation Provenance Completion](10_function_annotation_provenance_completion.md)
 
 ## Phase 5 Guardrails
 
@@ -70,7 +73,7 @@ provenance gate.
 
 These are intentionally not the first Phase 5 work items:
 
-- BUSCO / Merqury / minimap2 coverage expansion
+- Merqury / minimap2 coverage expansion
 - NextDenovo / Canu / hifiasm execution
 - polish / purge execution
 - raw Hi-C alignment, Juicer, 3D-DNA, Juicebox automation

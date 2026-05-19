@@ -39,7 +39,7 @@ def build_stage():
     graph.add_conditional_edges(
         "resolve_gene_annotation_inputs",
         route_after_resolve,
-        {"profile": "select_evidence_profile", "fail": "fail"},
+        {"profile": "select_evidence_profile", "commit": "commit", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "select_evidence_profile",

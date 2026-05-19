@@ -67,20 +67,59 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
     )
     protein_refs = _asset_paths(state, {"reference_proteins"})
     repeat_ref = _repeat_annotation_ref(state)
-    return _update_gene_output(
-        state,
-        {
-            "status": "resolved",
-            "genome_input_ref": genome_ref,
-            "genome_input_source": genome_source,
-            "unmasked_fallback_reason": fallback_reason,
-            "repeat_annotation_ref": repeat_ref,
-            "rnaseq_read_refs": rnaseq_refs,
-            "long_rna_read_refs": long_rna_refs,
-            "protein_evidence_refs": protein_refs,
-            "lineage_or_species_hints": _lineage_or_species_hints(state),
-        },
-    )
+    base_payload = {
+        "genome_input_ref": genome_ref,
+        "genome_input_source": genome_source,
+        "unmasked_fallback_reason": fallback_reason,
+        "repeat_annotation_ref": repeat_ref,
+        "rnaseq_read_refs": rnaseq_refs,
+        "long_rna_read_refs": long_rna_refs,
+        "protein_evidence_refs": protein_refs,
+        "lineage_or_species_hints": _lineage_or_species_hints(state),
+    }
+    provided = _provided_gene_annotation_refs(state)
+    if any(provided.values()):
+        missing = []
+        if not provided.get("gene_models_ref"):
+            missing.append("gene_models")
+        if not provided.get("predicted_proteins_ref"):
+            missing.append("predicted_proteins")
+        if missing:
+            return _fail_update(
+                state,
+                f"provided gene_annotation assets require {', '.join(missing)}",
+            )
+        review_triggers = _provided_annotation_review_triggers(
+            {
+                **base_payload,
+                "transcripts_fasta_ref": provided.get("transcripts_fasta_ref"),
+            }
+        )
+        return _update_gene_output(
+            state,
+            {
+                **base_payload,
+                "status": "provided_annotation_resolved",
+                "gene_models_ref": provided["gene_models_ref"],
+                "gene_models": provided["gene_models_ref"],
+                "genes_gff3_ref": provided["gene_models_ref"],
+                "predicted_proteins_ref": provided["predicted_proteins_ref"],
+                "predicted_proteins": provided["predicted_proteins_ref"],
+                "proteins_fasta_ref": provided["predicted_proteins_ref"],
+                "transcripts_fasta_ref": provided.get("transcripts_fasta_ref"),
+                "evidence_profile": "provided_annotation",
+                "candidate_methods": [],
+                "helper_methods": [],
+                "method_selection_required": False,
+                "review_required": bool(review_triggers),
+                "review_triggers": review_triggers,
+                "notes": [
+                    "operator_provided_gene_annotation_adopted",
+                    "gene_prediction_execution_not_requested",
+                ],
+            },
+        )
+    return _update_gene_output(state, {**base_payload, "status": "resolved"})
 
 
 def select_evidence_profile(state: TopLevelState) -> dict:
@@ -220,6 +259,13 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
 def commit_gene_annotation(state: TopLevelState) -> dict:
     """Publish the gene annotation bundle and advance to function annotation."""
     gene_out = _gene_output(state)
+    if gene_out.get("status") == "provided_annotation_resolved":
+        return _commit_adopted_gene_annotation(state)
+    return _commit_planned_gene_annotation(state)
+
+
+def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
@@ -287,6 +333,102 @@ def commit_gene_annotation(state: TopLevelState) -> dict:
     }
 
 
+def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    review_triggers = list(gene_out.get("review_triggers") or [])
+    bundle = GeneAnnotationBundle(
+        session_id=session_id,
+        status="adopted_existing_annotation",
+        genome_input_ref=gene_out["genome_input_ref"],
+        genome_input_source=gene_out["genome_input_source"],
+        genes_gff3_ref=gene_out["genes_gff3_ref"],
+        transcripts_fasta_ref=gene_out.get("transcripts_fasta_ref"),
+        predicted_proteins_ref=gene_out["predicted_proteins_ref"],
+        evidence_report_ref=None,
+        repeat_annotation_ref=gene_out.get("repeat_annotation_ref"),
+        evidence_profile="provided_annotation",
+        candidate_methods=[],
+        helper_methods=[],
+        review_required=bool(review_triggers),
+        review_triggers=review_triggers,
+        plan_artifact_ref=None,
+        notes=gene_out.get("notes", []),
+        metadata={
+            "execution_enabled": False,
+            "adoption_mode": "provided_gene_annotation",
+            "source": "manifest",
+        },
+    )
+    bundle_ref = out_dir / "gene_annotation_bundle.json"
+    bundle_ref.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifacts = [
+        ArtifactMeta.from_file(
+            Path(gene_out["genes_gff3_ref"]),
+            stage="gene_annotation",
+            method_name=GENE_CONTRACT_METHOD,
+            artifact_type="gene_annotation.provided_gene_models",
+            metadata={"adoption_mode": "provided_gene_annotation"},
+        ),
+        ArtifactMeta.from_file(
+            Path(gene_out["predicted_proteins_ref"]),
+            stage="gene_annotation",
+            method_name=GENE_CONTRACT_METHOD,
+            artifact_type="gene_annotation.provided_predicted_proteins",
+            metadata={"adoption_mode": "provided_gene_annotation"},
+        ),
+    ]
+    if gene_out.get("transcripts_fasta_ref"):
+        artifacts.append(
+            ArtifactMeta.from_file(
+                Path(gene_out["transcripts_fasta_ref"]),
+                stage="gene_annotation",
+                method_name=GENE_CONTRACT_METHOD,
+                artifact_type="gene_annotation.provided_transcripts_fasta",
+                metadata={"adoption_mode": "provided_gene_annotation"},
+            )
+        )
+    bundle_artifact = ArtifactMeta.from_file(
+        bundle_ref,
+        stage="gene_annotation",
+        method_name=GENE_CONTRACT_METHOD,
+        artifact_type="gene_annotation.bundle",
+        metadata={
+            "evidence_profile": "provided_annotation",
+            "genome_input_source": gene_out["genome_input_source"],
+            "execution_enabled": False,
+            "adoption_mode": "provided_gene_annotation",
+            "review_required": bool(review_triggers),
+        },
+    )
+    artifacts.append(bundle_artifact)
+    append_artifact_records(data_dir, session_id, artifacts)
+
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["gene_annotation"] = {
+        **gene_out,
+        "status": "completed",
+        "bundle_status": "adopted_existing_annotation",
+        "method_selection_required": False,
+        "evidence_report_ref": None,
+        "bundle_artifact_ref": str(bundle_ref),
+        "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
+    }
+    trace = [*state.get("route_trace", []), "gene_annotation_stage"]
+    return {
+        "stage_outputs": outputs,
+        "current_stage": next_stage_name("gene_annotation"),
+        "supervision_state": "running_stage",
+        "route_trace": trace,
+    }
+
+
 def fail_gene_annotation(state: TopLevelState) -> dict:
     """Stop workflow on invalid gene annotation inputs or descriptors."""
     gene_out = _gene_output(state)
@@ -340,7 +482,7 @@ def _final_assembly_for_annotation(state: TopLevelState) -> str | None:
     return None
 
 
-def _asset_paths(state: TopLevelState, asset_types: set[str]) -> list[str]:
+def _registry_assets(state: TopLevelState, asset_types: set[str]) -> list[dict[str, Any]]:
     registry_ref = state.get("asset_registry_ref")
     if not registry_ref:
         return []
@@ -348,7 +490,39 @@ def _asset_paths(state: TopLevelState, asset_types: set[str]) -> list[str]:
     if not registry_path.exists():
         return []
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    return [str(asset.get("path")) for asset in registry.get("assets", []) if asset.get("asset_type") in asset_types and asset.get("path")]
+    return [
+        asset
+        for asset in registry.get("assets", [])
+        if asset.get("asset_type") in asset_types and asset.get("path")
+    ]
+
+
+def _asset_paths(state: TopLevelState, asset_types: set[str]) -> list[str]:
+    return [str(asset.get("path")) for asset in _registry_assets(state, asset_types)]
+
+
+def _first_asset_path(state: TopLevelState, asset_type: str) -> str | None:
+    assets = _registry_assets(state, {asset_type})
+    if len(assets) > 1:
+        raise ValueError(f"adoption asset {asset_type!r} has {len(assets)} registry entries; manifest validation should have rejected this")
+    return str(assets[0]["path"]) if assets else None
+
+
+def _provided_gene_annotation_refs(state: TopLevelState) -> dict[str, str | None]:
+    return {
+        "gene_models_ref": _first_asset_path(state, "gene_models"),
+        "predicted_proteins_ref": _first_asset_path(state, "predicted_proteins"),
+        "transcripts_fasta_ref": _first_asset_path(state, "transcripts_fasta"),
+    }
+
+
+def _provided_annotation_review_triggers(gene_out: dict[str, Any]) -> list[str]:
+    triggers: list[str] = []
+    if gene_out.get("genome_input_source") == "final_assembly_for_annotation":
+        triggers.append("unmasked_genome_fallback_requires_review")
+    if gene_out.get("rnaseq_read_refs") or gene_out.get("long_rna_read_refs") or gene_out.get("protein_evidence_refs"):
+        triggers.append("provided_annotation_with_additional_evidence_review")
+    return triggers
 
 
 def _lineage_or_species_hints(state: TopLevelState) -> dict[str, Any]:

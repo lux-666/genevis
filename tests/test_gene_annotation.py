@@ -68,6 +68,23 @@ class GeneAnnotationStageTests(unittest.TestCase):
         }
         return state
 
+    def _provided_annotation_assets(self, tmpdir: str, *, transcripts: bool = True, extra: list[dict] | None = None) -> tuple[list[dict], Path, Path, Path | None]:
+        genes = Path(tmpdir) / "provided_genes.gff3"
+        proteins = Path(tmpdir) / "provided_proteins.fa"
+        transcript_ref = Path(tmpdir) / "provided_transcripts.fa" if transcripts else None
+        genes.write_text("##gff-version 3\nctg1\tsrc\tgene\t1\t4\t.\t+\t.\tID=g1\n", encoding="utf-8")
+        proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+        assets = [
+            {"asset_id": "s1:gene_models:provided", "asset_type": "gene_models", "path": str(genes)},
+            {"asset_id": "s1:predicted_proteins:provided", "asset_type": "predicted_proteins", "path": str(proteins)},
+        ]
+        if transcript_ref:
+            transcript_ref.write_text(">t1\nAUG\n", encoding="utf-8")
+            assets.append({"asset_id": "s1:transcripts_fasta:provided", "asset_type": "transcripts_fasta", "path": str(transcript_ref)})
+        if extra:
+            assets.extend(extra)
+        return assets, genes, proteins, transcript_ref
+
     def test_missing_softmasked_genome_without_explicit_fallback_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
@@ -96,6 +113,86 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertTrue(Path(gene["bundle_artifact_ref"]).exists())
             plan = json.loads(Path(gene["plan_artifact_ref"]).read_text(encoding="utf-8"))
             self.assertFalse(plan["metadata"]["execution_enabled"])
+
+    def test_provided_gene_annotation_adopts_real_artifacts_without_planned_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets, genes, proteins, transcripts = self._provided_annotation_assets(tmpdir)
+            registry = self._write_registry(tmpdir, assets=assets)
+            result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+
+            self.assertEqual(result["current_stage"], "function_annotation")
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["status"], "completed")
+            self.assertEqual(gene["bundle_status"], "adopted_existing_annotation")
+            self.assertEqual(gene["genes_gff3_ref"], str(genes))
+            self.assertEqual(gene["gene_models"], str(genes))
+            self.assertEqual(gene["predicted_proteins_ref"], str(proteins))
+            self.assertEqual(gene["predicted_proteins"], str(proteins))
+            self.assertEqual(gene["proteins_fasta_ref"], str(proteins))
+            self.assertEqual(gene["transcripts_fasta_ref"], str(transcripts))
+            self.assertFalse(gene["method_selection_required"])
+            self.assertEqual(gene["candidate_methods"], [])
+            self.assertNotIn("expected_outputs", gene)
+            bundle = json.loads(Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(bundle["status"], "adopted_existing_annotation")
+            self.assertEqual(bundle["predicted_proteins_ref"], str(proteins))
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("gene_annotation.provided_gene_models", artifact_types)
+            self.assertIn("gene_annotation.provided_predicted_proteins", artifact_types)
+            self.assertIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+
+    def test_provided_gene_annotation_without_transcripts_is_valid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assets, _genes, proteins, _transcripts = self._provided_annotation_assets(tmpdir, transcripts=False)
+            registry = self._write_registry(tmpdir, assets=assets)
+            result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["bundle_status"], "adopted_existing_annotation")
+            self.assertIsNone(gene.get("transcripts_fasta_ref"))
+            self.assertEqual(gene["proteins_fasta_ref"], str(proteins))
+            bundle = json.loads(Path(gene["bundle_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertIsNone(bundle["transcripts_fasta_ref"])
+
+    def test_incomplete_provided_gene_annotation_assets_fail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            genes = Path(tmpdir) / "provided_genes.gff3"
+            proteins = Path(tmpdir) / "provided_proteins.fa"
+            transcripts = Path(tmpdir) / "provided_transcripts.fa"
+            genes.write_text("##gff-version 3\n", encoding="utf-8")
+            proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            transcripts.write_text(">t1\nAUG\n", encoding="utf-8")
+            cases = [
+                ([{"asset_id": "genes", "asset_type": "gene_models", "path": str(genes)}], "predicted_proteins"),
+                ([{"asset_id": "proteins", "asset_type": "predicted_proteins", "path": str(proteins)}], "gene_models"),
+                ([{"asset_id": "transcripts", "asset_type": "transcripts_fasta", "path": str(transcripts)}], "gene_models"),
+            ]
+            for assets, expected_missing in cases:
+                with self.subTest(expected_missing=expected_missing):
+                    registry = self._write_registry(tmpdir, assets=assets)
+                    result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+                    self.assertEqual(result["supervision_state"], "failed_terminal")
+                    self.assertIn(expected_missing, result["last_error"])
+
+    def test_provided_gene_annotation_with_extra_evidence_records_review_trigger_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rnaseq = Path(tmpdir) / "rna.fq"
+            rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            assets, _genes, _proteins, _transcripts = self._provided_annotation_assets(
+                tmpdir,
+                extra=[{"asset_id": "s1:raw_rnaseq_reads:rna", "asset_type": "raw_rnaseq_reads", "path": str(rnaseq)}],
+            )
+            registry = self._write_registry(tmpdir, assets=assets)
+            result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
+
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertTrue(gene["review_required"])
+            self.assertIn("provided_annotation_with_additional_evidence_review", gene["review_triggers"])
+            self.assertNotIn("merge_policy", gene)
+            self.assertNotIn("primary_method", gene)
 
     def test_rnaseq_evidence_adds_hisat2_stringtie_and_evidence_aware_candidates(self):
         with tempfile.TemporaryDirectory() as tmpdir:

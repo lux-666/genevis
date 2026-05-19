@@ -60,6 +60,10 @@ class ManifestSchemaTests(unittest.TestCase):
             "hic_reads_registered",
             "hic_alignment_bam",
             "assembly_fasta_registered",
+            "repeat_library",
+            "gene_models",
+            "predicted_proteins",
+            "transcripts_fasta",
         ]
         for t in types:
             with self.subTest(asset_type=t):
@@ -100,6 +104,16 @@ class FileInferenceTests(unittest.TestCase):
 
     def test_detect_format_bam(self):
         self.assertEqual(_detect_format(Path("x.bam")), "bam")
+
+    def test_detect_format_gene_annotation_formats(self):
+        self.assertEqual(_detect_format(Path("genes.gff3")), "gff3")
+        self.assertEqual(_detect_format(Path("genes.gff3.gz")), "gff3")
+        self.assertEqual(_detect_format(Path("genes.gff")), "gff")
+        self.assertEqual(_detect_format(Path("genes.gtf")), "gtf")
+
+    def test_detect_format_faa_is_fasta(self):
+        self.assertEqual(_detect_format(Path("proteins.faa")), "fasta")
+        self.assertEqual(_detect_format(Path("proteins.faa.gz")), "fasta")
 
     def test_detect_format_unknown(self):
         self.assertEqual(_detect_format(Path("x.txt")), "unknown")
@@ -205,6 +219,95 @@ class ManifestValidationTests(unittest.TestCase):
         report = validate_manifest(manifest, require_existing_files=False)
         self.assertTrue(report["valid"])
         self.assertIn("hic_alignment_bam", report["inferred"])
+
+    def test_validate_provided_gene_annotation_assets(self):
+        manifest = InputManifest(
+            session_id="test-provided-annotation",
+            assets=[
+                InputAssetSpec(asset_type="assembly_fasta_registered", paths=["asm.fa"]),
+                InputAssetSpec(asset_type="gene_models", paths=["genes.gff3"]),
+                InputAssetSpec(asset_type="predicted_proteins", paths=["proteins.fa"]),
+                InputAssetSpec(asset_type="transcripts_fasta", paths=["transcripts.fa"]),
+            ],
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["inferred"]["gene_models"]["inferred_format"], "gff3")
+        self.assertEqual(report["inferred"]["predicted_proteins"]["inferred_format"], "fasta")
+        self.assertEqual(report["inferred"]["transcripts_fasta"]["inferred_format"], "fasta")
+
+    def test_validate_rejects_wrong_provided_annotation_formats(self):
+        manifest = InputManifest(
+            session_id="test-bad-provided-annotation",
+            assets=[
+                InputAssetSpec(asset_type="gene_models", paths=["genes.bam"]),
+                InputAssetSpec(asset_type="predicted_proteins", paths=["proteins.fq"]),
+                InputAssetSpec(asset_type="transcripts_fasta", paths=["transcripts.gtf"]),
+            ],
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("gene_models" in error and "GFF" in error for error in report["errors"]))
+        self.assertTrue(any("predicted_proteins" in error and "FASTA" in error for error in report["errors"]))
+        self.assertTrue(any("transcripts_fasta" in error and "FASTA" in error for error in report["errors"]))
+
+    def test_validate_rejects_unknown_format_for_existing_annotation_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            genes = Path(tmpdir) / "genes.weird"
+            proteins = Path(tmpdir) / "proteins.notfasta"
+            genes.write_text("##gff-version 3\n")
+            proteins.write_text(">p1\nMKT\n")
+            manifest = InputManifest(
+                session_id="test-unknown-format",
+                assets=[
+                    InputAssetSpec(asset_type="gene_models", paths=[str(genes)]),
+                    InputAssetSpec(asset_type="predicted_proteins", paths=[str(proteins)]),
+                ],
+            )
+            report = validate_manifest(manifest, require_existing_files=False)
+            self.assertFalse(report["valid"])
+            self.assertTrue(any("gene_models" in e and "GFF" in e for e in report["errors"]))
+            self.assertTrue(any("predicted_proteins" in e and "FASTA" in e for e in report["errors"]))
+
+    def test_validate_unknown_format_nonexistent_annotation_files_is_error(self):
+        manifest = InputManifest(
+            session_id="test-unknown-format-missing",
+            assets=[
+                InputAssetSpec(asset_type="gene_models", paths=["genes.weird"]),
+                InputAssetSpec(asset_type="predicted_proteins", paths=["proteins.notfasta"]),
+            ],
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("gene_models" in e and "GFF" in e for e in report["errors"]))
+        self.assertTrue(any("predicted_proteins" in e and "FASTA" in e for e in report["errors"]))
+
+    def test_validate_rejects_duplicate_adoption_asset_entries(self):
+        manifest = InputManifest(
+            session_id="test-duplicate-adoption",
+            assets=[
+                InputAssetSpec(asset_type="gene_models", paths=["a.gff3"]),
+                InputAssetSpec(asset_type="gene_models", paths=["b.gff3"]),
+                InputAssetSpec(asset_type="predicted_proteins", paths=["p.faa"]),
+            ],
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("gene_models" in e and "exactly once" in e for e in report["errors"]))
+
+
+    def test_validate_rejects_multi_path_adoption_assets(self):
+        manifest = InputManifest(
+            session_id="test-multi-path",
+            assets=[
+                InputAssetSpec(asset_type="gene_models", paths=["a.gff3", "b.gff3"]),
+                InputAssetSpec(asset_type="predicted_proteins", paths=["p1.faa", "p2.faa"]),
+            ],
+        )
+        report = validate_manifest(manifest, require_existing_files=False)
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("gene_models" in e and "exactly one path" in e for e in report["errors"]))
+        self.assertTrue(any("predicted_proteins" in e and "exactly one path" in e for e in report["errors"]))
 
     def test_infer_asset_properties_combined(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,0 +1,25 @@
+session_id: phase5-provided-ann-YYYYMMDD-a
+sample_id: sample-existing-assembly
+target_assembly_level: contig
+assets:
+  - asset_type: assembly_fasta_registered
+    paths:
+      - /path/to/existing_assembly.fasta
+    metadata:
+      source: operator_provided_existing_assembly
+  - asset_type: gene_models
+    paths:
+      - /path/to/gene_models.gff3
+    metadata:
+      source: operator_provided
+  - asset_type: predicted_proteins
+    paths:
+      - /path/to/predicted_proteins.faa
+    metadata:
+      source: operator_provided
+  # optional: include if you have transcript sequences
+  - asset_type: transcripts_fasta
+    paths:
+      - /path/to/transcripts.fa
+    metadata:
+      source: operator_provided

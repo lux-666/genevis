@@ -281,6 +281,8 @@ Planning rules:
 
 Purpose: generate gene models, transcripts, and predicted proteins.
 
+### Planning path (no provided annotation assets)
+
 Inputs:
 
 - required by default: `softmasked_genome`
@@ -293,10 +295,9 @@ Inputs:
 
 Outputs:
 
-- `gene_models`
-- `transcripts.fa`
-- `predicted_proteins`
-- evidence report
+- `GeneAnnotationBundle` with `status="planned"`, `evidence_profile` one of
+  `no_evidence / rnaseq / long_rna / protein / mixed_evidence`
+- `candidate_methods` and `helper_methods` populated; `method_selection_required=True`
 
 Planning rules:
 
@@ -314,6 +315,36 @@ Review triggers:
 - RNA and homology evidence conflict
 - predicted gene count is far outside expected range
 - EVM fails or drops major evidence classes
+
+### Adoption path (provided annotation assets present)
+
+Inputs:
+
+- required: `gene_models` (GFF3/GFF/GTF) from manifest
+- required: `predicted_proteins` (FASTA) from manifest
+- optional: `transcripts_fasta` (FASTA) from manifest
+- genome ref resolved identically to planning path (softmasked preferred)
+
+Outputs:
+
+- `GeneAnnotationBundle` with `status="adopted_existing_annotation"`,
+  `evidence_profile="provided_annotation"`
+- `genes_gff3_ref`, `predicted_proteins_ref`, `transcripts_fasta_ref` point to
+  the actual manifest-provided files (not work-path placeholders)
+- `candidate_methods=[]`, `helper_methods=[]`, `method_selection_required=False`
+- Artifact records: `gene_annotation.provided_gene_models`,
+  `gene_annotation.provided_predicted_proteins`,
+  optionally `gene_annotation.provided_transcripts_fasta`,
+  `gene_annotation.bundle`
+
+Non-goals for adoption path:
+
+- Does not run BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2, StringTie,
+  IsoQuant, or GeMoMa.
+- Does not infer proteins from GFF3.
+- Does not merge provided annotation with additional evidence.
+- Evidence conflicts are recorded as review triggers only; they do not block
+  adoption or alter the adopted refs.
 
 ## 9. Function Annotation
 

@@ -1,6 +1,6 @@
 # 06 Provided Gene Annotation Adoption
 
-Task status: planned.
+Task status: implemented. Server/HPC smoke pending.
 
 ## Goal
 
@@ -53,15 +53,15 @@ softmasked genome or final assembly
 
 ## Tasks
 
-- [ ] Define manifest asset aliases and validation rules for provided gene
+- [x] Define manifest asset aliases and validation rules for provided gene
   annotation files.
-- [ ] Add or update examples for existing assembly + provided annotation entry.
-- [ ] Implement a `gene_annotation` adoption branch that writes a compact bundle
+- [x] Add or update examples for existing assembly + provided annotation entry.
+- [x] Implement a `gene_annotation` adoption branch that writes a compact bundle
   and artifact refs.
-- [ ] Keep planning-only behavior unchanged when provided annotation assets are
+- [x] Keep planning-only behavior unchanged when provided annotation assets are
   absent.
-- [ ] Pass adopted proteins to `function_annotation`.
-- [ ] Add tests for successful adoption, missing protein ref, invalid/missing
+- [x] Pass adopted proteins to `function_annotation`.
+- [x] Add tests for successful adoption, missing protein ref, invalid/missing
   files, and downstream provenance gate.
 - [ ] Add a server/HPC smoke that reaches the function provenance gate through
   adopted gene annotation assets.
@@ -73,6 +73,34 @@ softmasked genome or final assembly
 - Adopted annotation outputs are real registered artifacts, not planned paths.
 - `function_annotation` receives a real `predicted_proteins` ref.
 - The workflow still refuses terminal completion without database provenance.
+
+## Implementation Notes
+
+- `AssetType` and `_ACCEPTED_MANIFEST_ASSET_TYPES` extended with `gene_models`,
+  `predicted_proteins`, `transcripts_fasta`.
+- `_detect_format` and `validate_manifest` handle `.gff3`/`.gff`/`.gtf` and
+  enforce format rules: gene_models must be GFF/GFF3/GTF; predicted_proteins and
+  transcripts_fasta must be FASTA.
+- `inventory/nodes.py:_entry_mode` treats the three annotation asset types as
+  supporting assets (same as `repeat_library`), so `assembly_fasta_registered` +
+  annotation assets still routes to `existing_assembly` / `assembly_review`.
+- `gene_annotation/nodes.py:resolve_gene_annotation_inputs` detects provided
+  annotation assets after genome resolution. If both `gene_models` and
+  `predicted_proteins` are present it returns `status="provided_annotation_resolved"`
+  with real file refs and `candidate_methods=[]`. Partial sets fail with a clear
+  message naming the missing required asset.
+- `route_after_resolve` short-circuits `provided_annotation_resolved` directly to
+  `commit`, bypassing evidence profiling and method planning.
+- `_commit_adopted_gene_annotation` registers `gene_annotation.provided_gene_models`,
+  `gene_annotation.provided_predicted_proteins`, optionally
+  `gene_annotation.provided_transcripts_fasta`, and `gene_annotation.bundle` with
+  `status="adopted_existing_annotation"` and `evidence_profile="provided_annotation"`.
+- `GeneAnnotationBundle` schema extended: `status` includes
+  `"adopted_existing_annotation"`, `evidence_profile` includes
+  `"provided_annotation"`, `transcripts_fasta_ref` and `evidence_report_ref` are
+  optional.
+- Example manifest: `docs/examples/phase5_existing_assembly_provided_annotation_manifest.template.yaml`.
+- Smoke script: `scripts/server_phase5_provided_annotation_smoke.sh`.
 
 ## Verification
 

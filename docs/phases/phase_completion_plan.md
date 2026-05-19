@@ -41,14 +41,18 @@ Tasks in `docs/phases/phase5/`:
 5. Operator usability pack: inspect JSON, next-action projection, decision
    templates, and blocked/failed operator report artifacts.
 6. Provided gene annotation adoption.
-7. Function annotation provenance completion.
+7. Assembly review evidence expansion, BUSCO first.
+8. Assembly parameter loop and candidate comparison.
+9. Assembly review visual report and human selection.
+10. Function annotation provenance completion.
 
 Phase 5 is gated on the Phase 4 real-data acceptance pass (Flye + QUAST)
 being recorded in `docs/handoff.md` before broader tool execution starts.
-The remaining Phase 5 order intentionally prioritizes operator usability and
-provided/adopted annotation completion before broader tool execution. Deferred
-items live in `docs/phases/phase5/README.md`; do not duplicate that catalog
-here.
+The remaining Phase 5 order intentionally prioritizes operator usability,
+assembly-review evidence, controlled assembly rerun loops, visual human review,
+and provided/adopted annotation completion before broader tool execution.
+Deferred items live in `docs/phases/phase5/README.md`; do not duplicate that
+catalog here.
 
 ## Phase 6: Observability and Durable Operation
 

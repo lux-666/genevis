@@ -297,15 +297,15 @@ class GeneAnnotationBundle(BaseModel):
     """Gene annotation bundle consumed by downstream function annotation."""
 
     session_id: str
-    status: Literal["planned"]
+    status: Literal["planned", "adopted_existing_annotation"]
     genome_input_ref: str
     genome_input_source: Literal["softmasked_genome", "final_assembly_for_annotation"]
     genes_gff3_ref: str
-    transcripts_fasta_ref: str
+    transcripts_fasta_ref: str | None = None
     predicted_proteins_ref: str
-    evidence_report_ref: str
+    evidence_report_ref: str | None = None
     repeat_annotation_ref: str | None = None
-    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"]
+    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence", "provided_annotation"]
     candidate_methods: list[str] = Field(default_factory=list)
     helper_methods: list[str] = Field(default_factory=list)
     review_required: bool = False

@@ -11,7 +11,12 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving gene annotation inputs."""
-    return "fail" if _output(state).get("status") == "failed" else "profile"
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "provided_annotation_resolved":
+        return "commit"
+    return "profile"
 
 
 def route_after_evidence_profile(state: TopLevelState) -> str:

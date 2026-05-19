@@ -18,10 +18,10 @@ from app.schemas.assets import AssetType
 
 Platform = Literal["cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown"]
 Layout = Literal["single", "paired", "unknown"]
-Format = Literal["fastq", "fasta", "bam", "cram", "hic", "assembly", "unknown"]
+Format = Literal["fastq", "fasta", "bam", "cram", "hic", "assembly", "gff3", "gff", "gtf", "unknown"]
 Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
 
-_READ_TYPES: set[AssetType] = {
+_ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "raw_long_reads",
     "raw_short_dna_reads",
     "raw_rnaseq_reads",
@@ -30,6 +30,9 @@ _READ_TYPES: set[AssetType] = {
     "hic_alignment_bam",
     "assembly_fasta_registered",
     "repeat_library",
+    "gene_models",
+    "predicted_proteins",
+    "transcripts_fasta",
 }
 
 
@@ -48,8 +51,8 @@ class InputAssetSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_asset_type(self):
-        if self.asset_type not in _READ_TYPES:
-            raise ValueError(f"asset_type must be one of {_READ_TYPES}, got {self.asset_type!r}")
+        if self.asset_type not in _ACCEPTED_MANIFEST_ASSET_TYPES:
+            raise ValueError(f"asset_type must be one of {_ACCEPTED_MANIFEST_ASSET_TYPES}, got {self.asset_type!r}")
         return self
 
 
@@ -94,11 +97,19 @@ def _detect_format(path: Path) -> Format:
         name.endswith(".fasta")
         or name.endswith(".fa")
         or name.endswith(".fna")
+        or name.endswith(".faa")
         or name.endswith(".fasta.gz")
         or name.endswith(".fa.gz")
         or name.endswith(".fna.gz")
+        or name.endswith(".faa.gz")
     ):
         return "fasta"
+    if name.endswith(".gff3") or name.endswith(".gff3.gz"):
+        return "gff3"
+    if name.endswith(".gff") or name.endswith(".gff.gz"):
+        return "gff"
+    if name.endswith(".gtf") or name.endswith(".gtf.gz"):
+        return "gtf"
     if name.endswith(".bam"):
         return "bam"
     if name.endswith(".cram"):
@@ -196,6 +207,15 @@ def validate_manifest(manifest: InputManifest, *, require_existing_files: bool =
     if not manifest.assets:
         errors.append("manifest must declare at least one asset")
 
+    _adoption_types = {"gene_models", "predicted_proteins", "transcripts_fasta"}
+    seen_adoption: dict[str, int] = {}
+    for spec in manifest.assets:
+        if spec.asset_type in _adoption_types:
+            seen_adoption[spec.asset_type] = seen_adoption.get(spec.asset_type, 0) + 1
+    for atype, count in seen_adoption.items():
+        if count > 1:
+            errors.append(f"{atype}: adoption assets must appear exactly once, got {count} entries")
+
     for spec in manifest.assets:
         props = _infer_asset_properties(spec)
         inferred[spec.asset_type] = props
@@ -205,6 +225,14 @@ def validate_manifest(manifest: InputManifest, *, require_existing_files: bool =
 
         if props["paths_exist"] and props["inferred_format"] == "unknown":
             warnings.append(f"{spec.asset_type}: could not infer format from {spec.paths}")
+
+        inferred_format = props.get("inferred_format")
+        if spec.asset_type == "gene_models" and inferred_format not in {"gff3", "gff", "gtf"}:
+            errors.append(f"{spec.asset_type}: expected GFF/GFF3/GTF, got {inferred_format}")
+        if spec.asset_type in {"predicted_proteins", "transcripts_fasta"} and inferred_format != "fasta":
+            errors.append(f"{spec.asset_type}: expected FASTA, got {inferred_format}")
+        if spec.asset_type in {"gene_models", "predicted_proteins", "transcripts_fasta"} and len(spec.paths) > 1:
+            errors.append(f"{spec.asset_type}: adoption assets must have exactly one path, got {len(spec.paths)}")
 
         if spec.asset_type == "raw_long_reads" and props["inferred_platform"] == "unknown":
             warnings.append(f"{spec.asset_type}: platform unknown for {spec.paths}")

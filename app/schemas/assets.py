@@ -29,6 +29,7 @@ AssetType = Literal[
     "softmasked_genome",
     "gene_models",
     "predicted_proteins",
+    "transcripts_fasta",
     "function_annotation",
 ]
 

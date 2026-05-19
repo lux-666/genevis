@@ -100,7 +100,8 @@ def _build_asset_records(
 def _entry_mode(manifest: InputManifest) -> str:
     """Return the entry mode implied by manifest assets."""
     asset_types = {asset.asset_type for asset in manifest.assets}
-    non_supporting = asset_types - {"repeat_library"}
+    supporting = {"repeat_library", "gene_models", "predicted_proteins", "transcripts_fasta"}
+    non_supporting = asset_types - supporting
     if non_supporting == {"assembly_fasta_registered"}:
         return "existing_assembly"
     return "raw_inputs"
