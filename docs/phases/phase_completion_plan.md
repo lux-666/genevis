@@ -38,11 +38,17 @@ Tasks in `docs/phases/phase5/`:
 2. Human gate and durable resume minimum.
 3. Existing assembly to RepeatMasker backbone.
 4. Review policy: strict / auto modes and LLM recommendation.
+5. Operator usability pack: inspect JSON, next-action projection, decision
+   templates, and blocked/failed operator report artifacts.
+6. Provided gene annotation adoption.
+7. Function annotation provenance completion.
 
 Phase 5 is gated on the Phase 4 real-data acceptance pass (Flye + QUAST)
 being recorded in `docs/handoff.md` before broader tool execution starts.
-Deferred items live in `docs/phases/phase5/README.md`; do not duplicate
-that catalog here.
+The remaining Phase 5 order intentionally prioritizes operator usability and
+provided/adopted annotation completion before broader tool execution. Deferred
+items live in `docs/phases/phase5/README.md`; do not duplicate that catalog
+here.
 
 ## Phase 6: Observability and Durable Operation
 
@@ -51,9 +57,11 @@ Goal: make runs auditable and resumable for long projects.
 Tasks:
 
 - User/developer notebook traces.
-- sqlite/postgres checkpointer for cross-process resume.
-- Lifecycle commands: pause, resume, retry, abort, review.
-- Database version provenance for annotation resources.
+- Hardening beyond the current sqlite resume minimum, including optional
+  postgres/backend work if long-running deployments require it.
+- Lifecycle commands beyond the current structured review resume path, such as
+  pause, retry, abort, or rebuild, once their semantics are explicitly scoped.
+- Database version provenance completion for annotation resources.
 
 Exit criteria:
 

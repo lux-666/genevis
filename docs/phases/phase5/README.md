@@ -48,6 +48,9 @@ provenance gate.
 2. [Human Gate And Durable Resume Minimum](02_human_gate_and_durable_resume_minimum.md)
 3. [Existing Assembly To RepeatMasker Backbone](03_existing_assembly_repeatmasker_backbone.md)
 4. [Review Policy: Strict / Auto Modes And LLM Recommendation](04_review_policy.md)
+5. [Operator Usability Pack](05_operator_usability_pack.md)
+6. [Provided Gene Annotation Adoption](06_provided_gene_annotation_adoption.md)
+7. [Function Annotation Provenance Completion](07_function_annotation_provenance_completion.md)
 
 ## Phase 5 Guardrails
 
@@ -77,8 +80,9 @@ These are intentionally not the first Phase 5 work items:
 - InterProScan / eggNOG-mapper / DIAMOND / KofamScan execution
 - automatic annotation database downloads
 
-Those should be added only after the first three Phase 5 tasks make the workflow
-safe to run, inspect, and resume.
+Those should be added only after Phase 5 has made the workflow safe to run,
+inspect, resume, and complete through honest user-provided annotation and
+database provenance paths.
 
 ## Verification Baseline
 

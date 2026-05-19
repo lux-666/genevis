@@ -13,8 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from app.execution.artifacts import append_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.entry import EntryRequest
 
 
@@ -26,6 +28,39 @@ class _FakeGraph:
     def invoke(self, state, config):
         self.invocations.append((state, config))
         return self.result
+
+
+def _write_assembly_review_request(data_dir: Path, session_id: str) -> Path:
+    request_dir = data_dir / "artifacts" / "assembly_review" / session_id
+    request_dir.mkdir(parents=True, exist_ok=True)
+    request_ref = request_dir / "assembly_review_request.json"
+    request_ref.write_text(
+        json.dumps(
+            {
+                "stage": "assembly_review",
+                "reason": "needs_review",
+                "candidates": [{"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}],
+                "signals": [],
+                "decisions_allowed": ["accept", "stop_human_review"],
+                "auto_decidable": False,
+                "review_request_artifact_ref": str(request_ref),
+            }
+        ),
+        encoding="utf-8",
+    )
+    append_artifact_records(
+        data_dir,
+        session_id,
+        [
+            ArtifactMeta.from_file(
+                request_ref,
+                stage="assembly_review",
+                method_name="assembly_review.contract",
+                artifact_type="assembly_review.request",
+            )
+        ],
+    )
+    return request_ref
 
 
 class EntrypointTests(unittest.TestCase):
@@ -59,6 +94,21 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(args.command, "inspect")
         self.assertEqual(args.session_id, "s1")
         self.assertEqual(args.data_dir, "out")
+
+    def test_inspect_args_accept_json_and_template_flags(self):
+        args = _parse_args([
+            "inspect",
+            "--session-id",
+            "s1",
+            "--data-dir",
+            "out",
+            "--json",
+            "--write-decision-template",
+            "decision.json",
+        ])
+
+        self.assertTrue(args.json)
+        self.assertEqual(args.write_decision_template, "decision.json")
 
     def test_run_args_can_omit_session_id(self):
         args = _parse_args(["run", "--manifest", "manifest.yaml"])
@@ -601,6 +651,19 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("durable_resume_available: false", stdout)
         self.assertIn("session_not_found", stderr)
 
+    def test_inspect_missing_session_json_returns_machine_readable_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="missing", data_dir=str(Path(tmp) / "data"), json=True),
+            )
+
+        self.assertEqual(code, 1)
+        summary = json.loads(stdout)
+        self.assertEqual(summary["error"], "session_not_found")
+        self.assertEqual(summary["next_action"]["kind"], "inspect_unavailable")
+        self.assertIn("session_not_found", stderr)
+
     def test_inspect_existing_session_prints_memory_only_limitation(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
@@ -619,6 +682,68 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("supervision_state: blocked_human", stdout)
         self.assertIn("durable_resume_available: false", stdout)
         self.assertIn("latest_review_request", stdout)
+
+    def test_inspect_blocked_review_prints_next_action_and_writes_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            request_ref = _write_assembly_review_request(data_dir, "s1")
+            from app.control.ledger import Ledger
+
+            ledger = Ledger(data_dir)
+            ledger.create_session("s1", "manifest.yaml")
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="needs_review",
+                review_request_artifact_ref=str(request_ref),
+            )
+            template_path = Path(tmp) / "decision.json"
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(
+                    session_id="s1",
+                    data_dir=str(data_dir),
+                    write_decision_template=str(template_path),
+                ),
+            )
+            template = json.loads(template_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIn("next_action.kind: review_decision_required", stdout)
+            self.assertIn("--write-decision-template", stdout)
+            self.assertIn("gene-agent resume", stdout)
+            self.assertEqual(template["session_id"], "s1")
+            self.assertEqual(template["stage"], "assembly_review")
+            self.assertEqual(template["decision"], "accept")
+            self.assertEqual(template["candidate_id"], "flye")
+            self.assertEqual(template["final_assembly_ref"], "draft.fasta")
+            self.assertEqual(template["decided_by"], "human")
+
+    def test_inspect_json_includes_review_next_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            request_ref = _write_assembly_review_request(data_dir, "s1")
+            from app.control.ledger import Ledger
+
+            ledger = Ledger(data_dir)
+            ledger.create_session("s1", "manifest.yaml")
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="needs_review",
+                review_request_artifact_ref=str(request_ref),
+            )
+            code, stdout, stderr = _capture_cli(
+                _run_inspect,
+                argparse.Namespace(session_id="s1", data_dir=str(data_dir), json=True),
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        summary = json.loads(stdout)
+        self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
+        self.assertIn("gene-agent resume", summary["next_action"]["resume_command"])
 
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1066,6 +1191,14 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
             self.assertIn("repeat_annotation.gff3", artifact_types)
             self.assertIn("gene_annotation.bundle", artifact_types)
+            self.assertIn("operator_report.failed_terminal", artifact_types)
+
+            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
+            report = json.loads(operator_report.read_text(encoding="utf-8"))
+            self.assertEqual(report["current_stage"], "function_annotation")
+            self.assertEqual(report["next_action"]["kind"], "provenance_required")
+            self.assertIn("database_provenance", report["last_error"])
+            self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1101,6 +1234,17 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertEqual(len(blocks), 1)
             self.assertEqual(blocks[0]["method_name"], "repeat_annotation.masking.repeatmasker")
             self.assertEqual(blocks[0]["missing_tools"], ["RepeatMasker"])
+            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("operator_report.failed_terminal", artifact_types)
+            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
+            report = json.loads(operator_report.read_text(encoding="utf-8"))
+            self.assertEqual(report["next_action"]["kind"], "missing_tool")
+            self.assertEqual(report["next_action"]["missing_tools"], ["RepeatMasker"])
+            self.assertEqual(report["next_action"]["env_target"], "env_geno_exec")
 
     def test_repeatmasker_failure_stops_before_gene_annotation_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:

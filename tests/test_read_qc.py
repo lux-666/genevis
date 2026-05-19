@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.lifecycle import inspect_session
+from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.read_qc.builder import build_stage
@@ -109,6 +111,40 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("raw_long_reads", result["last_error"])
+
+    def test_parent_graph_missing_raw_read_writes_operator_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            missing = Path(tmpdir) / "missing.fastq"
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:missing.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(missing),
+                    }
+                ],
+            )
+            state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=str(data_dir))
+            state["current_stage"] = "read_qc"
+            state["asset_registry_ref"] = str(registry)
+
+            result = build_graph(backend="memory", data_dir=str(data_dir)).invoke(
+                state,
+                config={"configurable": {"thread_id": "s1"}},
+            )
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            report_ref = data_dir / "artifacts" / "operator_report" / "s1" / "failed_terminal_report.json"
+            report = json.loads(report_ref.read_text(encoding="utf-8"))
+            self.assertEqual(report["next_action"]["kind"], "missing_input")
+            self.assertEqual(report["next_action"]["blocked_input_ref"], str(missing))
+            summary = inspect_session("s1", data_dir)
+            self.assertEqual(summary["next_action"]["kind"], "missing_input")
+            artifact_index = data_dir / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(artifact_types.count("operator_report.failed_terminal"), 1)
 
     def test_seqkit_stats_success_writes_artifacts_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:

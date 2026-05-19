@@ -14,7 +14,9 @@ and has server/HPC validation evidence.
 Phase 5 task 03 is implemented and server/HPC validated for the existing
 assembly -> RepeatMasker backbone. Phase 5 task 04 review policy is implemented
 and server/HPC validated with separate deterministic `auto_rule` final-report
-and LLM provisional recommendation smokes.
+and LLM provisional recommendation smokes. Phase 5 task 05 operator usability is
+implemented in code/docs with inspect JSON, next-action output, decision-template
+generation, and blocked/failed operator report artifacts.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -294,17 +296,28 @@ done
 
 ## Next Best Task
 
-Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker and
-task 04 review-policy server validations are recorded. The next best task is
-to choose the next Phase 5 acceptance target explicitly before implementation,
-likely database provenance handling for `function_annotation` beyond smoke
-seeding, or the next stage-specific server gate.
+Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker,
+task 04 review-policy server validations, and task 05 operator usability code/docs
+are recorded. The next best task is Phase 5 task 06, provided gene annotation
+adoption. The approved remaining Phase 5 order is:
+
+1. task 06 — provided gene annotation adoption
+2. task 07 — function annotation provenance completion
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
 corresponding human decision is explicit in the task docs. Do not
 reintroduce in-agent remote execution; the workflow is Mac dev →
 server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
+
+Operator workflow for blocked review gates:
+
+```bash
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --json
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --write-decision-template /absolute/path/to/decision.json
+gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --decision-file /absolute/path/to/decision.json --checkpointer sqlite
+```
 
 ## Immediate Design Decisions Already Made
 
@@ -355,9 +368,14 @@ server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
   records `resume_started` / `resume_completed` / `resume_failed`
   ledger events around the in-process resume helper, and rejects
   `--checkpointer memory`. `gene-agent inspect` reports
-  `decision_requirements` (stage / decisions_allowed / candidate_ids)
-  reconstructed from the latest review request artifact. The decision
-  file must validate against `app.review.base.ResumeReviewRequest`.
+  `decision_requirements` (stage / decisions_allowed / candidate_ids),
+  supports `--json`, prints `next_action.*`, and can write a validated
+  decision-file template with `--write-decision-template <path>`.
+  Blocked and failed-terminal runs write `operator_report.blocked_human`
+  or `operator_report.failed_terminal` artifacts; provenance failures
+  surface the required `function_annotation.database_provenance` fields.
+  The decision file must validate against
+  `app.review.base.ResumeReviewRequest`.
   `tests/__init__.py` sets `GENE_AGENT_CHECKPOINTER=memory` for the
   test suite, which means all unittest invocations need `-t .` so the
   package init runs (every script and doc in this repo already does

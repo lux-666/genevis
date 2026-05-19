@@ -70,7 +70,7 @@ def inspect_session(
     blocked_timeout_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Inspect durable ledger/artifact records and durable checkpoint state."""
+    """Inspect durable ledger/artifact records and checkpoint availability."""
 
     from app.graph.checkpointer import checkpoint_db_path
 
@@ -80,16 +80,30 @@ def inspect_session(
     artifacts = read_artifact_records(data_dir, session_id)
     latest_review_request = _latest_event(events, "review_requested")
     latest_review_decision = _latest_event(events, "review_decision")
+    latest_env_preflight_block = _latest_event(events, "env_preflight_blocked")
     review_decisions = decision_records(events)
     decisions_by_origin = counts_by_origin(review_decisions)
     latest_review_lifecycle_event = _latest_review_lifecycle_event(events)
     latest_unresolved_review_request = latest_review_lifecycle_event if latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_requested" else None
     latest_request_artifact = _latest_artifact_by_suffix(artifacts, ".request")
     latest_decision_artifact = _latest_artifact_by_suffix(artifacts, ".decision")
+    latest_failed_report = _latest_artifact_by_type(artifacts, "operator_report.failed_terminal")
+    latest_blocked_report = _latest_artifact_by_type(artifacts, "operator_report.blocked_human")
+    latest_final_report = _latest_artifact_by_type(artifacts, "final_report.review_decisions")
+    latest_function_bundle = _latest_artifact_by_type(artifacts, "function_annotation.bundle")
+    latest_operator_report = _latest_artifact_by_types(
+        artifacts,
+        {"operator_report.failed_terminal", "operator_report.blocked_human"},
+    )
+    latest_operator_report_payload = _read_json_artifact(latest_operator_report)
 
     supervision_state = "unknown"
     if latest_unresolved_review_request:
         supervision_state = "blocked_human"
+    elif latest_final_report or latest_function_bundle:
+        supervision_state = "completed"
+    elif latest_failed_report:
+        supervision_state = "failed_terminal"
     elif latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_decision":
         supervision_state = "review_decision_recorded"
     elif session:
@@ -111,12 +125,20 @@ def inspect_session(
         "latest_events": events[-5:],
         "latest_review_request": latest_review_request,
         "latest_review_decision": latest_review_decision,
+        "latest_env_preflight_block": latest_env_preflight_block,
         "review_decisions": review_decisions,
         "decisions_by_origin": decisions_by_origin,
         "latest_review_lifecycle_event": latest_review_lifecycle_event,
         "latest_unresolved_review_request": latest_unresolved_review_request,
         "latest_review_request_artifact": latest_request_artifact,
         "latest_review_decision_artifact": latest_decision_artifact,
+        "latest_operator_report": latest_operator_report,
+        "latest_failed_operator_report": latest_failed_report,
+        "latest_blocked_operator_report": latest_blocked_report,
+        "latest_operator_report_payload": latest_operator_report_payload,
+        "latest_final_report": latest_final_report,
+        "latest_function_annotation_bundle": latest_function_bundle,
+        "latest_relevant_artifacts": _latest_relevant_artifacts(artifacts),
         "decision_requirements": decision_requirements,
         "artifact_count": len(artifacts),
     }
@@ -128,6 +150,7 @@ def inspect_session(
         )
     if not session:
         summary["error"] = "session_not_found"
+    summary["next_action"] = build_next_action(summary, data_dir=data_dir)
     return summary
 
 
@@ -239,6 +262,7 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
                 "stage": stage,
                 "decisions_allowed": active_interrupt.get("decisions_allowed", []),
                 "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
+                "candidate_final_assembly_refs": _candidate_final_assembly_refs(active_interrupt.get("candidates", [])),
                 "requires_structured_resume": True,
             },
         )
@@ -253,6 +277,20 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
             },
         )
     return _with_review_policy_requirements(active_interrupt, {"stage": stage, "requires_structured_resume": True})
+
+
+def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
+    if not isinstance(candidates, list):
+        return {}
+    refs: dict[str, str] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = candidate.get("candidate_id")
+        final_ref = candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
+        if candidate_id and final_ref:
+            refs[str(candidate_id)] = str(final_ref)
+    return refs
 
 
 def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
@@ -327,6 +365,405 @@ def _latest_artifact_by_suffix(artifacts: list[dict[str, Any]], suffix: str) -> 
     return None
 
 
+def _latest_artifact_by_type(artifacts: list[dict[str, Any]], artifact_type: str) -> dict[str, Any] | None:
+    for artifact in reversed(artifacts):
+        if artifact.get("artifact_type") == artifact_type:
+            return artifact
+    return None
+
+
+def _latest_artifact_by_types(artifacts: list[dict[str, Any]], artifact_types: set[str]) -> dict[str, Any] | None:
+    for artifact in reversed(artifacts):
+        if artifact.get("artifact_type") in artifact_types:
+            return artifact
+    return None
+
+
+def _latest_relevant_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    relevant_prefixes = (
+        "operator_report.",
+        "final_report.",
+        "assembly_review.",
+        "hic_scaffolding.",
+        "repeat_annotation.",
+        "gene_annotation.",
+        "function_annotation.",
+    )
+    relevant: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for artifact in reversed(artifacts):
+        artifact_type = str(artifact.get("artifact_type", ""))
+        if not artifact_type.startswith(relevant_prefixes):
+            continue
+        if artifact_type in seen:
+            continue
+        relevant.append(artifact)
+        seen.add(artifact_type)
+        if len(relevant) >= 8:
+            break
+    return list(reversed(relevant))
+
+
+def _read_json_artifact(artifact: ArtifactMeta | dict[str, Any] | None) -> dict[str, Any] | None:
+    if not artifact:
+        return None
+    meta = artifact if isinstance(artifact, ArtifactMeta) else ArtifactMeta.model_validate(artifact)
+    path = Path(meta.file_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def build_next_action(summary: dict[str, Any], *, data_dir: str | Path = "data") -> dict[str, Any]:
+    if summary.get("error"):
+        return {
+            "kind": "inspect_unavailable",
+            "summary": f"No durable ledger session found for {summary.get('session_id')!r}.",
+            "required_fields": [],
+            "relevant_refs": [],
+        }
+
+    requirements = summary.get("decision_requirements")
+    if requirements:
+        return _review_gate_next_action(summary, data_dir=data_dir)
+
+    if summary.get("latest_final_report") or summary.get("latest_function_annotation_bundle"):
+        refs = _artifact_refs(
+            summary.get("latest_final_report"),
+            summary.get("latest_function_annotation_bundle"),
+        )
+        return {
+            "kind": "completed",
+            "summary": "Workflow completed; inspect the listed final report and function annotation artifacts.",
+            "required_fields": [],
+            "relevant_refs": refs,
+        }
+
+    report_payload = summary.get("latest_operator_report_payload")
+    if (
+        summary.get("supervision_state") in {"blocked_human", "failed_terminal"}
+        and isinstance(report_payload, dict)
+        and isinstance(report_payload.get("next_action"), dict)
+    ):
+        return report_payload["next_action"]
+
+    env_block = summary.get("latest_env_preflight_block")
+    if env_block:
+        return _env_block_next_action(env_block)
+
+    if summary.get("supervision_state") == "failed_terminal":
+        return _failed_terminal_next_action(summary)
+
+    return {
+        "kind": "unknown",
+        "summary": "No active operator action was inferred from durable ledger and artifact records.",
+        "required_fields": [],
+        "relevant_refs": _artifact_refs(*summary.get("latest_relevant_artifacts", [])),
+    }
+
+
+def build_result_next_action(result: dict[str, Any]) -> dict[str, Any]:
+    supervision = result.get("supervision_state")
+    active_interrupt = result.get("active_interrupt")
+    if supervision == "blocked_human" and active_interrupt:
+        requirements = _decision_requirements(active_interrupt)
+        checkpoint = result.get("checkpoint_persistence")
+        summary = {
+            "session_id": result.get("session_id"),
+            "decision_requirements": requirements,
+            "durable_resume_available": checkpoint != "memory",
+        }
+        return _review_gate_next_action(summary, data_dir=result.get("data_dir", "data"))
+    if supervision == "failed_terminal":
+        missing_input = _result_missing_input(result)
+        if missing_input:
+            return _missing_input_next_action(missing_input)
+        env_block = _result_env_block(result)
+        if env_block:
+            return _env_block_next_action(env_block)
+        return _failed_terminal_next_action(
+            {
+                "supervision_state": supervision,
+                "latest_operator_report_payload": {
+                    "current_stage": result.get("current_stage"),
+                    "last_error": result.get("last_error"),
+                    "relevant_refs": _result_relevant_refs(result),
+                },
+            }
+        )
+    return {
+        "kind": "unknown",
+        "summary": "No active operator action was inferred from the workflow result.",
+        "required_fields": [],
+        "relevant_refs": [],
+    }
+
+
+def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
+    requirements = summary.get("decision_requirements") or {}
+    stage = requirements.get("stage")
+    if stage not in {"assembly_review", "hic_scaffolding"}:
+        raise ResumeValidationError("no active assembly_review or hic_scaffolding decision requirements")
+
+    decisions_allowed = list(requirements.get("decisions_allowed") or [])
+    decision = _preferred_template_decision(stage, decisions_allowed)
+    guidance = {
+        "decisions_allowed": decisions_allowed,
+        "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
+    }
+    template: dict[str, Any] = {
+        "session_id": summary.get("session_id"),
+        "stage": stage,
+        "decision": decision,
+        "notes": ["replace this note with the operator rationale"],
+        "metadata": {"template_guidance": guidance},
+        "decided_by": "human",
+        "rationale_artifact_ref": None,
+    }
+    if stage == "assembly_review":
+        candidate_ids = list(requirements.get("candidate_ids") or [])
+        candidate_refs = dict(requirements.get("candidate_final_assembly_refs") or {})
+        selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
+        guidance["candidate_ids"] = candidate_ids
+        guidance["candidate_final_assembly_refs"] = candidate_refs
+        template["candidate_id"] = selected_candidate
+        template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
+        template["rejected_candidates"] = []
+    else:
+        candidate_methods = list(requirements.get("candidate_methods") or [])
+        guidance["candidate_methods"] = candidate_methods
+        template["method_name"] = candidate_methods[0] if candidate_methods else "<method_name>"
+    return template
+
+
+def _preferred_template_decision(stage: str, decisions_allowed: list[str]) -> str:
+    if stage == "hic_scaffolding" and "select_method" in decisions_allowed:
+        return "select_method"
+    if stage == "assembly_review" and "accept" in decisions_allowed:
+        return "accept"
+    return decisions_allowed[0] if decisions_allowed else ("select_method" if stage == "hic_scaffolding" else "accept")
+
+
+def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -> dict[str, Any]:
+    session_id = summary.get("session_id")
+    requirements = summary.get("decision_requirements") or {}
+    stage = requirements.get("stage", "review")
+    abs_data_dir = str(Path(data_dir).expanduser().resolve(strict=False))
+    template_hint = str(Path(abs_data_dir) / "decisions" / f"{session_id}_{stage}_decision.json")
+    command = (
+        "gene-agent inspect "
+        f"--session-id {session_id} --data-dir {abs_data_dir} "
+        f"--write-decision-template {template_hint}"
+    )
+    resume_command = (
+        "gene-agent resume "
+        f"--session-id {session_id} --data-dir {abs_data_dir} "
+        f"--decision-file {template_hint} --checkpointer sqlite"
+    )
+    if not summary.get("durable_resume_available"):
+        resume_summary = "Durable resume is unavailable until the session has a sqlite checkpoint database."
+    else:
+        resume_summary = f"Human review is required for {stage}; write and edit a decision file, then resume."
+    fields = ["session_id", "stage", "decision", "decided_by"]
+    if stage == "assembly_review":
+        fields.extend(["candidate_id", "final_assembly_ref"])
+    if stage == "hic_scaffolding":
+        fields.append("method_name")
+    return {
+        "kind": "review_decision_required",
+        "summary": resume_summary,
+        "stage": stage,
+        "decisions_allowed": list(requirements.get("decisions_allowed") or []),
+        "candidate_ids": list(requirements.get("candidate_ids") or []),
+        "candidate_methods": list(requirements.get("candidate_methods") or []),
+        "required_fields": fields,
+        "decision_template_path_hint": template_hint,
+        "command": command,
+        "resume_command": resume_command,
+        "relevant_refs": _artifact_refs(summary.get("latest_review_request_artifact")),
+    }
+
+
+def _env_block_next_action(event: dict[str, Any]) -> dict[str, Any]:
+    status = event.get("status")
+    kind = "missing_tool" if status == "missing_tool" else "blocked_env"
+    missing_tools = list(event.get("missing_tools") or [])
+    env_target = event.get("env_target")
+    detail = event.get("detail") or "environment preflight failed"
+    if kind == "missing_tool":
+        summary = f"Install or expose required tool(s) in {env_target}: {', '.join(missing_tools)}."
+    else:
+        summary = f"Fix the configured execution environment {env_target}: {detail}."
+    return {
+        "kind": kind,
+        "summary": summary,
+        "stage": event.get("stage"),
+        "method_name": event.get("method_name"),
+        "env_target": env_target,
+        "missing_tools": missing_tools,
+        "detail": detail,
+        "required_fields": [],
+        "relevant_refs": [],
+    }
+
+
+def _result_stage_output(result: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    current_stage = result.get("current_stage")
+    stage_outputs = result.get("stage_outputs") or {}
+    if not isinstance(current_stage, str) or not isinstance(stage_outputs, dict):
+        return None
+    output = stage_outputs.get(current_stage)
+    if not isinstance(output, dict):
+        return None
+    return current_stage, output
+
+
+def _result_missing_input(result: dict[str, Any]) -> dict[str, Any] | None:
+    stage_output = _result_stage_output(result)
+    if not stage_output:
+        return None
+    current_stage, output = stage_output
+    if output.get("status") != "blocked_input":
+        return None
+    return {
+        "stage": current_stage,
+        "blocked_input_ref": output.get("blocked_input_ref"),
+        "detail": output.get("reason") or result.get("last_error"),
+    }
+
+
+def _result_env_block(result: dict[str, Any]) -> dict[str, Any] | None:
+    stage_output = _result_stage_output(result)
+    if not stage_output:
+        return None
+    current_stage, output = stage_output
+    if output.get("status") not in {"missing_tool", "blocked_env"}:
+        return None
+    return {
+        "stage": current_stage,
+        "method_name": output.get("method_name"),
+        "status": output.get("status"),
+        "env_target": output.get("env_target"),
+        "missing_tools": output.get("missing_tools") or [],
+        "detail": output.get("reason"),
+    }
+
+
+def _missing_input_next_action(block: dict[str, Any]) -> dict[str, Any]:
+    blocked_ref = block.get("blocked_input_ref")
+    detail = block.get("detail") or "required input is missing"
+    if blocked_ref:
+        summary = f"Provide or correct the missing input path, then rerun with the original manifest: {blocked_ref}."
+    else:
+        summary = f"Provide or correct the missing input referenced by the manifest: {detail}."
+    return {
+        "kind": "missing_input",
+        "summary": summary,
+        "stage": block.get("stage"),
+        "blocked_input_ref": blocked_ref,
+        "detail": detail,
+        "required_fields": ["manifest asset path"],
+        "relevant_refs": [str(blocked_ref)] if blocked_ref else [],
+    }
+
+
+def _result_relevant_refs(result: dict[str, Any]) -> dict[str, Any]:
+    refs: dict[str, Any] = {}
+    for key in ("asset_registry_ref", "stage_plan_ref"):
+        if result.get(key):
+            refs[key] = result[key]
+    current_stage = result.get("current_stage")
+    stage_outputs = result.get("stage_outputs") or {}
+    if isinstance(current_stage, str) and isinstance(stage_outputs, dict):
+        output = stage_outputs.get(current_stage)
+        if isinstance(output, dict):
+            refs[current_stage] = {
+                key: value
+                for key, value in output.items()
+                if key.endswith("_ref") or key.endswith("_artifact_ref")
+            }
+    return refs
+
+
+def _report_missing_input(payload: dict[str, Any]) -> dict[str, Any] | None:
+    refs = payload.get("relevant_refs")
+    if not isinstance(refs, dict):
+        return None
+    stage = payload.get("current_stage")
+    stage_refs = refs.get(stage) if stage else None
+    if not isinstance(stage_refs, dict):
+        return None
+    blocked_ref = stage_refs.get("blocked_input_ref")
+    if not blocked_ref:
+        return None
+    return {
+        "stage": stage,
+        "blocked_input_ref": blocked_ref,
+        "detail": payload.get("last_error"),
+    }
+
+
+def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
+    payload = summary.get("latest_operator_report_payload") or {}
+    last_error = str(payload.get("last_error") or summary.get("last_error") or "unknown failure")
+    stage = payload.get("current_stage") or summary.get("current_stage")
+    missing_input = _report_missing_input(payload)
+    if missing_input:
+        return _missing_input_next_action(missing_input)
+    if "database_provenance" in last_error:
+        required_fields = [
+            "method_name",
+            "database_name",
+            "database_version",
+            "snapshot_date",
+            "input_proteins_ref",
+            "command or descriptor_version",
+        ]
+        return {
+            "kind": "provenance_required",
+            "summary": "Function annotation requires database_provenance records matching the planned proteins_fasta_ref.",
+            "stage": stage or "function_annotation",
+            "last_error": last_error,
+            "required_fields": required_fields,
+            "run_config_path": "function_annotation.database_provenance",
+            "relevant_refs": _artifact_refs(payload.get("relevant_refs")),
+        }
+    return {
+        "kind": "failed_terminal",
+        "summary": last_error,
+        "stage": stage,
+        "last_error": last_error,
+        "required_fields": [],
+        "relevant_refs": _artifact_refs(payload.get("relevant_refs")),
+    }
+
+
+def _artifact_refs(*values: Any) -> list[str]:
+    refs: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        if isinstance(value, list):
+            refs.extend(_artifact_refs(*value))
+        elif isinstance(value, dict):
+            file_path = value.get("file_path")
+            if file_path:
+                refs.append(str(file_path))
+            elif value.get("artifact"):
+                refs.extend(_artifact_refs(value.get("artifact")))
+            elif value.get("relevant_refs"):
+                refs.extend(_artifact_refs(value.get("relevant_refs")))
+            else:
+                refs.extend(_artifact_refs(*value.values()))
+        else:
+            refs.append(str(value))
+    return list(dict.fromkeys(refs))
+
+
 def _decision_requirements_from_artifact(
     artifact: ArtifactMeta | dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -370,6 +807,7 @@ def _decision_requirements_from_artifact(
             for c in candidates
             if isinstance(c, dict) and c.get("candidate_id") is not None
         ]
+        requirements["candidate_final_assembly_refs"] = _candidate_final_assembly_refs(candidates)
     candidate_methods = payload.get("candidate_methods")
     if isinstance(candidate_methods, list):
         requirements["candidate_methods"] = list(candidate_methods)

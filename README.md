@@ -80,9 +80,13 @@ Implemented:
 - CLI `gene-agent ask "..."` natural-language entry that materialises a
   manifest from source files/folders and reuses the structured `run` path
 - CLI `gene-agent inspect --session-id ...` reads durable ledger/artifact
-  records
-- in-process structured review resume helpers for `assembly_review` and
-  `hic_scaffolding`
+  records, supports `--json`, surfaces next actions, and can write review
+  decision-file templates with `--write-decision-template PATH`
+- structured review resume for `assembly_review` and `hic_scaffolding`,
+  including durable sqlite cross-process resume via `gene-agent resume
+  --decision-file ... --checkpointer sqlite`
+- blocked and failed terminal sessions write lightweight operator report
+  artifacts through the artifact registry
 - minimal `LocalRunner` that dispatches through `conda run` when a frozen
   attempt carries `conda_env` / `conda_prefix`
 
@@ -96,9 +100,34 @@ Not implemented:
   TRF, de novo repeat library; BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
   StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, DIAMOND, KofamScan)
 - requested-stage routing (the `--stages` flag is intentionally not exposed)
-- durable cross-process resume (the graph uses the memory-only LangGraph
-  checkpointer; this is a Phase 6 concern)
+- lifecycle operations beyond structured review resume, such as retry, abort,
+  rebuild, or requested-stage reruns
 - automatic annotation database downloads
+
+## Operator Inspect / Resume
+
+Use absolute `--data-dir` values on the server/HPC checkout so ledger,
+checkpoints, and artifacts resolve to the same run directory:
+
+```bash
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data
+```
+
+```bash
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --json
+```
+
+For a blocked `assembly_review` or `hic_scaffolding` gate, generate and edit a
+structured decision file, then resume against the same sqlite checkpoint store:
+
+```bash
+gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --write-decision-template /absolute/path/to/decision.json
+gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --decision-file /absolute/path/to/decision.json --checkpointer sqlite
+```
+
+The default checkpointer is sqlite unless overridden by `--checkpointer` or
+`GENE_AGENT_CHECKPOINTER`; memory checkpoints are for tests and do not support
+cross-process resume.
 
 ## Verification
 

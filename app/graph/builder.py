@@ -36,7 +36,19 @@ def build_graph(
     """
     graph = StateGraph(TopLevelState)
 
-    graph.add_node("route_controller", route_controller)
+    def operator_route_controller(state: TopLevelState) -> dict:
+        supervision = state.get("supervision_state")
+        if supervision in {"failed_terminal", "blocked_human"} and state.get("session_id"):
+            from app.reports.review_report import write_operator_report
+
+            write_operator_report(
+                state.get("data_dir", data_dir),
+                state["session_id"],
+                {**state, "checkpoint_persistence": backend},
+            )
+        return route_controller(state)
+
+    graph.add_node("route_controller", operator_route_controller)
     graph.add_node("inventory_stage", build_inventory_stage())
     graph.add_node("read_qc_stage", build_read_qc_stage())
     graph.add_node("genome_survey_stage", build_genome_survey_stage())

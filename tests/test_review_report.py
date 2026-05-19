@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from app.control.ledger import Ledger
-from app.reports.review_report import write_final_review_report
+from app.reports.review_report import write_final_review_report, write_operator_report
 
 
 class ReviewReportTests(unittest.TestCase):
@@ -42,6 +42,111 @@ class ReviewReportTests(unittest.TestCase):
             self.assertEqual(report["decisions"][0]["rationale_artifact_ref"], "assembly_review_recommendation.json")
             artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
             self.assertIn("final_report.review_decisions", artifact_index.read_text(encoding="utf-8"))
+
+    def test_failed_operator_report_is_registered_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Ledger(tmp).create_session("s1", "manifest.yaml")
+            report_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "function_annotation",
+                    "supervision_state": "failed_terminal",
+                    "last_error": "missing database_provenance for function_annotation",
+                    "route_trace": ["gene_annotation_stage", "function_annotation_stage"],
+                },
+            )
+
+            report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
+            self.assertEqual(report["next_action"]["kind"], "provenance_required")
+            self.assertEqual(report["route_trace_tail"], ["gene_annotation_stage", "function_annotation_stage"])
+            artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
+            self.assertIn("operator_report.failed_terminal", artifact_index.read_text(encoding="utf-8"))
+
+    def test_blocked_operator_report_compacts_active_interrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Ledger(tmp).create_session("s1", "manifest.yaml")
+            report_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "assembly_review",
+                    "supervision_state": "blocked_human",
+                    "checkpoint_persistence": "sqlite",
+                    "active_interrupt": {
+                        "stage": "assembly_review",
+                        "reason": "needs_review",
+                        "decisions_allowed": ["accept"],
+                        "candidates": [{"candidate_id": "flye", "large_unused": "x"}],
+                    },
+                    "route_trace": ["assembly_review_stage"],
+                },
+            )
+
+            report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
+            self.assertEqual(report["active_interrupt"]["candidate_ids"], ["flye"])
+            self.assertEqual(report["next_action"]["kind"], "review_decision_required")
+            artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
+            self.assertIn("operator_report.blocked_human", artifact_index.read_text(encoding="utf-8"))
+
+    def test_blocked_operator_report_records_later_gate_without_overwriting_prior_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Ledger(tmp).create_session("s1", "manifest.yaml")
+            first_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "assembly_review",
+                    "supervision_state": "blocked_human",
+                    "checkpoint_persistence": "sqlite",
+                    "active_interrupt": {
+                        "stage": "assembly_review",
+                        "reason": "needs_review",
+                        "decisions_allowed": ["accept"],
+                        "candidates": [{"candidate_id": "flye"}],
+                    },
+                },
+            )
+            second_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "hic_scaffolding",
+                    "supervision_state": "blocked_human",
+                    "checkpoint_persistence": "sqlite",
+                    "active_interrupt": {
+                        "stage": "hic_scaffolding",
+                        "reason": "needs_review",
+                        "decisions_allowed": ["select_method"],
+                        "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                    },
+                },
+            )
+            repeated_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "hic_scaffolding",
+                    "supervision_state": "blocked_human",
+                    "checkpoint_persistence": "sqlite",
+                    "active_interrupt": {
+                        "stage": "hic_scaffolding",
+                        "reason": "needs_review",
+                        "decisions_allowed": ["select_method"],
+                        "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                    },
+                },
+            )
+
+            first = json.loads(Path(first_ref).read_text(encoding="utf-8"))
+            second = json.loads(Path(second_ref).read_text(encoding="utf-8"))
+            artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+            self.assertNotEqual(first_ref, second_ref)
+            self.assertEqual(first["current_stage"], "assembly_review")
+            self.assertEqual(second["current_stage"], "hic_scaffolding")
+            self.assertEqual(second_ref, repeated_ref)
+            self.assertEqual(artifact_types.count("operator_report.blocked_human"), 2)
 
 
 if __name__ == "__main__":

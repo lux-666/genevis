@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -79,6 +80,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
     inspect_parser.add_argument("--data-dir", default="data", help="Output data directory")
     inspect_parser.add_argument("--filter", action="append", default=[], help="Filter inspect output, currently supports decided_by=<origin>")
+    inspect_parser.add_argument("--json", action="store_true", help="Emit a machine-readable inspect summary")
+    inspect_parser.add_argument(
+        "--write-decision-template",
+        help="Write a JSON decision-file template for the active review gate",
+    )
 
     resume_parser = subparsers.add_parser(
         "resume",
@@ -355,25 +361,60 @@ def generate_session_id(data_dir: str | Path = "data", *, now: datetime | None =
 
 
 def _run_inspect(args: argparse.Namespace) -> int:
-    from app.control.lifecycle import inspect_session
+    from app.control.lifecycle import ResumeValidationError, build_resume_decision_template, inspect_session
 
     filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
     if filters is None:
         return 1
-    summary = inspect_session(args.session_id, args.data_dir)
+    data_dir = _resolve_data_dir(args.data_dir)
+    summary = inspect_session(args.session_id, data_dir)
+    template_path = getattr(args, "write_decision_template", None)
+    if template_path:
+        try:
+            template = build_resume_decision_template(summary)
+        except ResumeValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        out_path = Path(template_path).expanduser().resolve(strict=False)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
+        resume_command = (
+            f"gene-agent resume --session-id {args.session_id} --data-dir {data_dir} "
+            f"--decision-file {out_path} --checkpointer sqlite"
+        )
+        summary["decision_template_written"] = str(out_path)
+        summary["decision_template_resume_command"] = resume_command
+        if not getattr(args, "json", False):
+            print(f"decision_template: {out_path}")
+            print(f"resume_command: {resume_command}")
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    else:
+        _print_inspect_text(summary, filters)
+    if summary.get("error"):
+        print(f"error: {summary['error']}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _print_inspect_text(summary: dict, filters: dict[str, str]) -> None:
     print(f"session_id: {summary['session_id']}")
     print(f"supervision_state: {summary['supervision_state']}")
     print(f"checkpoint_persistence: {summary['checkpoint_persistence']}")
     print(f"durable_resume_available: {str(summary['durable_resume_available']).lower()}")
+    print(f"artifact_count: {summary.get('artifact_count', 0)}")
     print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):
         print(f"latest_review_request: {summary['latest_review_request']}")
     if summary.get("latest_review_request_artifact"):
         print(f"latest_review_request_artifact: {summary['latest_review_request_artifact']}")
+    if summary.get("latest_operator_report"):
+        print(f"latest_operator_report: {summary['latest_operator_report']}")
+    if summary.get("latest_final_report"):
+        print(f"latest_final_report: {summary['latest_final_report']}")
     requirements = summary.get("decision_requirements")
     if requirements:
-        # Surface the structured decision contract so operators can author
-        # a decision file without opening the request artifact themselves.
         print(f"decision_requirements.stage: {requirements.get('stage')}")
         decisions_allowed = requirements.get("decisions_allowed") or []
         print(f"decision_requirements.decisions_allowed: {decisions_allowed}")
@@ -386,10 +427,17 @@ def _run_inspect(args: argparse.Namespace) -> int:
     review_decisions = _filter_review_decisions(summary.get("review_decisions") or [], filters)
     if filters:
         print(f"review_decisions: {review_decisions}")
-    if summary.get("error"):
-        print(f"error: {summary['error']}", file=sys.stderr)
-        return 1
-    return 0
+    next_action = summary.get("next_action") or {}
+    print(f"next_action.kind: {next_action.get('kind')}")
+    print(f"next_action.summary: {next_action.get('summary')}")
+    if next_action.get("required_fields"):
+        print(f"next_action.required_fields: {next_action['required_fields']}")
+    if next_action.get("command"):
+        print(f"next_action.command: {next_action['command']}")
+    if next_action.get("resume_command"):
+        print(f"next_action.resume_command: {next_action['resume_command']}")
+    if next_action.get("relevant_refs"):
+        print(f"next_action.relevant_refs: {next_action['relevant_refs']}")
 
 
 def _parse_inspect_filters(raw_filters: list[str]) -> dict[str, str] | None:
