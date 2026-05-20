@@ -10,18 +10,24 @@ from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.assembly_review.nodes import (
+    collect_busco_artifacts,
     collect_quast_artifacts,
     commit_assembly_review,
     enter_assembly_review,
     evaluate_review_rules,
     fail_assembly_review,
+    freeze_busco_attempts,
     freeze_quast_attempts,
     human_review_gate,
     plan_review_metrics,
     resolve_candidates,
+    run_busco_attempts,
     run_quast_attempts,
 )
 from app.stages.assembly_review.routing import (
+    route_after_busco_collect,
+    route_after_busco_freeze,
+    route_after_busco_run,
     route_after_plan_metrics,
     route_after_quast_collect,
     route_after_quast_freeze,
@@ -40,6 +46,9 @@ def build_stage():
     graph.add_node("freeze_quast", freeze_quast_attempts)
     graph.add_node("run_quast", run_quast_attempts)
     graph.add_node("collect_quast", collect_quast_artifacts)
+    graph.add_node("freeze_busco", freeze_busco_attempts)
+    graph.add_node("run_busco", run_busco_attempts)
+    graph.add_node("collect_busco", collect_busco_artifacts)
     graph.add_node("evaluate_rules", evaluate_review_rules)
     graph.add_node("human_gate", human_review_gate)
     graph.add_node("commit", commit_assembly_review)
@@ -74,6 +83,25 @@ def build_stage():
     graph.add_conditional_edges(
         "collect_quast",
         route_after_quast_collect,
+        {"freeze_busco": "freeze_busco", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "freeze_busco",
+        route_after_busco_freeze,
+        {
+            "run_busco": "run_busco",
+            "evaluate_rules": "evaluate_rules",
+            "fail": "fail",
+        },
+    )
+    graph.add_conditional_edges(
+        "run_busco",
+        route_after_busco_run,
+        {"collect_busco": "collect_busco", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "collect_busco",
+        route_after_busco_collect,
         {"evaluate_rules": "evaluate_rules", "fail": "fail"},
     )
     graph.add_conditional_edges(

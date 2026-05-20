@@ -213,6 +213,29 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("gene_annotation", str(ctx.exception))
 
+    def test_assembly_review_busco_parameters_accepted(self):
+        cfg = RunConfig.model_validate({
+            "local_exec": ["assembly_review"],
+            "assembly_review": {
+                "busco": {
+                    "lineage_path": "/data/busco/embryophyta_odb10",
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "operator_offline_cache",
+                    "threads": 16,
+                }
+            },
+        })
+
+        assert cfg.assembly_review is not None
+        assert cfg.assembly_review.busco is not None
+        self.assertEqual(cfg.assembly_review.busco.lineage_name, "embryophyta_odb10")
+        self.assertEqual(cfg.assembly_review.busco.threads, 16)
+
+    def test_assembly_review_busco_unknown_field_rejected(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({"assembly_review": {"busco": {"lineage_path": "/x", "unknown": "x"}}})
+
     def test_function_annotation_database_provenance_accepted(self):
         cfg = RunConfig.model_validate({
             "function_annotation": {

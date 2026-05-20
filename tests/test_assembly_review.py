@@ -113,7 +113,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
     def _fake_quast_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
         bin_dir = Path(tmpdir) / "bin"
-        bin_dir.mkdir()
+        bin_dir.mkdir(exist_ok=True)
         quast = bin_dir / "quast.py"
         if fail:
             quast.write_text(
@@ -140,6 +140,39 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
         quast.chmod(0o755)
+        return bin_dir
+
+    def _fake_busco_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        busco = bin_dir / "busco"
+        if fail:
+            busco.write_text(
+                "#!/bin/sh\n"
+                "echo fake busco failed >&2\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+        else:
+            busco.write_text(
+                "#!/bin/sh\n"
+                "out=\"\"\n"
+                "lineage=\"\"\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -o) shift; out=\"$1\" ;;\n"
+                "    -l) shift; lineage=\"$1\" ;;\n"
+                "  esac\n"
+                "  shift\n"
+                "done\n"
+                "lineage_name=$(basename \"$lineage\")\n"
+                "mkdir -p \"$out\"\n"
+                "summary=\"$out/short_summary.specific.$lineage_name.$out.txt\"\n"
+                "printf 'C:95.0%%[S:93.0%%,D:2.0%%],F:3.0%%,M:2.0%%,n:100\n10\tComplete BUSCOs (C)\n8\tComplete and single-copy BUSCOs (S)\n2\tComplete and duplicated BUSCOs (D)\n1\tFragmented BUSCOs (F)\n1\tMissing BUSCOs (M)\n100\tTotal BUSCO groups searched\n' > \"$summary\"\n"
+                "printf 'fake busco stdout\n'\n",
+                encoding="utf-8",
+            )
+        busco.chmod(0o755)
         return bin_dir
 
     def test_existing_assembly_auto_advances_deterministically(self):
@@ -356,6 +389,162 @@ class AssemblyReviewStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly_review.quast_summary", artifact_types)
             self.assertIn("assembly_review.quast_report_tsv", artifact_types)
+
+    def test_local_busco_success_updates_signals_and_review_request(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            lineage = Path(tmpdir) / "embryophyta_odb10"
+            lineage.mkdir()
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            self._fake_busco_bin(tmpdir)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["current_stage"] = "assembly_review"
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "quast_parameters": {"threads": 1},
+                "busco_parameters": {
+                    "lineage_path": str(lineage),
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "operator_offline_cache",
+                    "threads": 1,
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            ar_out = result["stage_outputs"]["assembly_review"]
+            busco_signal = next(signal for signal in ar_out["signals"] if signal["signal_name"] == "busco")
+            self.assertEqual(busco_signal["status"], "available")
+            self.assertTrue(busco_signal["metric_refs"])
+            self.assertEqual(busco_signal["metadata"]["metrics"]["complete_percent"], 95.0)
+            self.assertEqual(busco_signal["metadata"]["metrics"]["total_busco_groups_searched"], 100)
+            self.assertEqual(busco_signal["metadata"]["provenance"]["lineage_name"], "embryophyta_odb10")
+            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request_busco = next(signal for signal in request_payload["signals"] if signal["signal_name"] == "busco")
+            self.assertEqual(request_busco["status"], "available")
+            self.assertEqual(request_busco["candidate_id"], "flye_01")
+            self.assertTrue(request_payload["auto_decidable"])
+
+            summary_ref = busco_signal["metadata"].get("busco_summary_ref")
+            self.assertTrue(summary_ref)
+            summary_payload = json.loads(Path(summary_ref).read_text(encoding="utf-8"))
+            self.assertEqual(summary_payload["lineage"]["lineage_source"], "operator_offline_cache")
+            self.assertIn(str(summary_ref), busco_signal["metric_refs"])
+
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn("assembly_review.busco_short_summary", artifact_types)
+            self.assertIn("assembly_review.busco_summary", artifact_types)
+
+    def test_local_busco_missing_lineage_marks_signal_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            self._fake_busco_bin(tmpdir)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "quast_parameters": {"threads": 1},
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            ar_out = result["stage_outputs"]["assembly_review"]
+            busco_signal = next(signal for signal in ar_out["signals"] if signal["signal_name"] == "busco")
+            self.assertEqual(busco_signal["status"], "missing")
+            self.assertIn("busco_lineage_not_supplied", busco_signal["notes"])
+            self.assertFalse(ar_out["auto_decidable"])
+            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertFalse(request_payload["auto_decidable"])
+
+    def test_local_busco_failure_marks_signal_failed_and_still_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            lineage = Path(tmpdir) / "embryophyta_odb10"
+            lineage.mkdir()
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            fake_bin = self._fake_quast_bin(tmpdir)
+            self._fake_busco_bin(tmpdir, fail=True)
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            state["stage_outputs"]["assembly_review"] = {
+                "execution_mode": "local",
+                "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "quast_parameters": {"threads": 1},
+                "busco_parameters": {
+                    "lineage_path": str(lineage),
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "odb10",
+                    "lineage_source": "operator_offline_cache",
+                    "threads": 1,
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            busco_signal = next(
+                signal for signal in result["stage_outputs"]["assembly_review"]["signals"] if signal["signal_name"] == "busco"
+            )
+            self.assertEqual(busco_signal["status"], "failed")
+            self.assertIn("candidate_not_rejected_from_metrics", busco_signal["notes"])
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn("command.stdout", artifact_types)
+            self.assertIn("command.stderr", artifact_types)
+
+    def test_auto_decidable_requires_quast_and_busco(self):
+        from app.stages.assembly_review.nodes import _assembly_review_auto_decidable
+
+        quast_only = {
+            "candidates": [{"candidate_id": "flye_01"}],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/q.tsv"]},
+                {"signal_name": "busco", "candidate_id": "flye_01", "status": "missing", "metric_refs": []},
+            ],
+        }
+        quast_busco = {
+            "candidates": [{"candidate_id": "flye_01"}],
+            "signals": [
+                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/q.tsv"]},
+                {"signal_name": "busco", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/b.json"]},
+            ],
+        }
+        self.assertFalse(_assembly_review_auto_decidable(quast_only))
+        self.assertTrue(_assembly_review_auto_decidable(quast_busco))
 
     def test_local_quast_failure_marks_signal_failed_and_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -644,6 +833,12 @@ class AssemblyReviewStageTests(unittest.TestCase):
                         "metric_refs": ["/tmp/quast/report.tsv"],
                     },
                     {
+                        "signal_name": "busco",
+                        "candidate_id": "flye_01",
+                        "status": "available",
+                        "metric_refs": ["/tmp/busco/summary.json"],
+                    },
+                    {
                         "signal_name": "contamination_check",
                         "candidate_id": "flye_01",
                         "status": "pending",
@@ -679,6 +874,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             "candidates": [{"candidate_id": "flye_01"}],
             "signals": [
                 {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/q.tsv"]},
+                {"signal_name": "busco", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/b.json"]},
                 {"signal_name": "contamination_check", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/c.tsv"]},
             ],
         }

@@ -80,6 +80,39 @@ class AssemblyRunConfig(BaseModel):
     flye_parameters: FlyeRunParameters | None = None
 
 
+class BuscoRunParameters(BaseModel):
+    """Explicit BUSCO parameters for assembly_review local execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lineage_path: str
+    lineage_name: str
+    lineage_version: str
+    lineage_source: str
+    mode: Literal["genome"] = "genome"
+    threads: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _lineage_path_must_not_be_empty(self) -> "BuscoRunParameters":
+        if not self.lineage_path.strip():
+            raise ValueError("assembly_review.busco.lineage_path must be non-empty")
+        if not self.lineage_name.strip():
+            raise ValueError("assembly_review.busco.lineage_name must be non-empty")
+        if not self.lineage_version.strip():
+            raise ValueError("assembly_review.busco.lineage_version must be non-empty")
+        if not self.lineage_source.strip():
+            raise ValueError("assembly_review.busco.lineage_source must be non-empty")
+        return self
+
+
+class AssemblyReviewRunConfig(BaseModel):
+    """Run-config block for the assembly_review stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    busco: BuscoRunParameters | None = None
+
+
 class FunctionAnnotationRunConfig(BaseModel):
     """Run-config block for function annotation — carries database provenance for smoke fixtures."""
 
@@ -95,6 +128,7 @@ class RunConfig(BaseModel):
 
     local_exec: list[LocalExecStage] = Field(default_factory=list)
     assembly: AssemblyRunConfig | None = None
+    assembly_review: AssemblyReviewRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig | None = None
 

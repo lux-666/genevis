@@ -199,6 +199,8 @@ Outputs:
 - optional `polished_assembly`
 - optional `purged_assembly`
 - `final_assembly_for_scaffolding_or_annotation`
+- optional real local evaluation artifacts for QUAST and BUSCO when
+  `assembly_review` local execution is enabled
 
 Planning rules:
 
@@ -209,6 +211,15 @@ Planning rules:
 - Plan purge_dups with long-read depth evidence.
 - Plan Redundans only when paired short reads exist and high heterozygous
   redundancy is plausible.
+- When `local_exec` includes `assembly_review` and `assembly_review.busco`
+  run-config is supplied, run BUSCO in offline mode against the
+  operator-provided lineage path; never download lineages.
+- BUSCO lineage provenance must include path, lineage name, version, source,
+  mode, and threads. Missing lineage marks the BUSCO signal `missing` rather
+  than rejecting the candidate.
+- Auto review is conservative with QUAST-only evidence; QUAST plus BUSCO
+  evidence is required for `auto_decidable` when no disqualifying signals are
+  present.
 
 Review triggers:
 

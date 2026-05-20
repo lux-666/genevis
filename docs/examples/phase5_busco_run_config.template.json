@@ -1,0 +1,13 @@
+{
+  "local_exec": ["assembly_review"],
+  "assembly_review": {
+    "busco": {
+      "lineage_path": "/absolute/path/to/busco_downloads/lineages/embryophyta_odb10",
+      "lineage_name": "embryophyta_odb10",
+      "lineage_version": "odb10",
+      "lineage_source": "operator_offline_cache",
+      "mode": "genome",
+      "threads": 16
+    }
+  }
+}

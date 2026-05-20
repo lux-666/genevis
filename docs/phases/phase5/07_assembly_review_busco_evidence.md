@@ -1,6 +1,6 @@
 # 07 Assembly Review Evidence Expansion, BUSCO First
 
-Task status: planned.
+Task status: implemented. Server/HPC smoke pending.
 
 ## Goal
 
@@ -58,14 +58,14 @@ descriptor
 
 ## Tasks
 
-- [ ] Define the BUSCO run-config/provenance contract for offline lineage paths.
-- [ ] Add method-level env resolution and preflight for BUSCO.
-- [ ] Freeze and run the BUSCO attempt through `LocalRunner`.
-- [ ] Parse the BUSCO short summary into compact JSON without applying
+- [x] Define the BUSCO run-config/provenance contract for offline lineage paths.
+- [x] Add method-level env resolution and preflight for BUSCO.
+- [x] Freeze and run the BUSCO attempt through `LocalRunner`.
+- [x] Parse the BUSCO short summary into compact JSON without applying
   thresholds.
-- [ ] Register raw and summary BUSCO artifacts.
-- [ ] Add BUSCO signals to `assembly_review_request.json`.
-- [ ] Update `_assembly_review_auto_decidable` and tests so QUAST-only evidence
+- [x] Register raw and summary BUSCO artifacts.
+- [x] Add BUSCO signals to `assembly_review_request.json`.
+- [x] Update `_assembly_review_auto_decidable` and tests so QUAST-only evidence
   is conservative and QUAST+BUSCO can be auto-decidable when no disqualifying
   signals are present.
 - [ ] Add a server/HPC smoke with offline lineage path supplied by the operator.
@@ -78,6 +78,30 @@ descriptor
   artifacts.
 - Human and LLM review still make decisions through the existing review path.
 - No biological threshold is encoded as automatic accept/reject logic.
+
+## Implementation Notes
+
+- BUSCO parameters are supplied through `--run-config` under
+  `assembly_review.busco`; the contract requires `lineage_path`,
+  `lineage_name`, `lineage_version`, `lineage_source`, `mode="genome"`, and
+  positive `threads`.
+- `config/envs.yaml` now has a method-level `assembly_review.eval.busco` entry
+  requiring the `busco` binary. Local execution uses the existing
+  `EnvResolver` preflight and `LocalRunner` path.
+- Missing lineage parameters or a missing lineage path marks BUSCO as a
+  `missing` review signal and keeps review conservative; it does not reject the
+  candidate.
+- Successful BUSCO runs register the raw short summary and a compact
+  `busco_summary.json` with parsed percentages/counts plus lineage provenance.
+- `assembly_review_request.json` carries BUSCO `available` / `missing` /
+  `failed` signals alongside QUAST. BUSCO failure is evidence for review only,
+  not an automatic reject.
+- `_assembly_review_auto_decidable` now requires QUAST and BUSCO evidence for
+  every candidate and still refuses auto-decision when contamination evidence is
+  available.
+- Example run-config:
+  `docs/examples/phase5_busco_run_config.template.json`.
+- Server smoke script: `scripts/server_phase5_busco_smoke.sh`.
 
 ## Verification
 

@@ -45,6 +45,13 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         self.assertEqual(quast_spec.conda_env, "env_geno_exec")
         self.assertEqual(quast_spec.required_tools, ["quast.py"])
 
+        busco_spec = resolver.resolve(
+            stage="assembly_review",
+            method_name="assembly_review.eval.busco",
+        )
+        self.assertEqual(busco_spec.conda_env, "env_geno_exec")
+        self.assertEqual(busco_spec.required_tools, ["busco"])
+
         yahs_spec = resolver.resolve(
             stage="hic_scaffolding",
             method_name="hic_scaffolding.candidate.yahs",

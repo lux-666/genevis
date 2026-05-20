@@ -18,14 +18,15 @@ and LLM provisional recommendation smokes. Phase 5 task 05 operator usability is
 implemented in code/docs with inspect JSON, next-action output, decision-template
 generation, and blocked/failed operator report artifacts. Phase 5 task 06
 provided gene annotation adoption is implemented in code and tests; server/HPC
-smoke is pending.
+smoke is pending. Phase 5 task 07 assembly review BUSCO evidence is implemented
+in code and tests; server/HPC smoke is pending.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
 (SeqKit), `genome_survey` (Jellyfish + GenomeScope2), `assembly` (Flye),
-`assembly_review` (QUAST), `hic_scaffolding` (YaHS), `repeat_annotation`
-(RepeatMasker for provided libraries). All other methods are
-planning-only contracts.
+`assembly_review` (QUAST + BUSCO when offline lineage provenance is supplied),
+`hic_scaffolding` (YaHS), `repeat_annotation` (RepeatMasker for provided
+libraries). All other methods are planning-only contracts.
 
 Stage details and contracts live in `docs/stage_contracts.md`.
 Per-phase task records live under `docs/phases/`. The full implemented
@@ -300,14 +301,15 @@ done
 
 Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker,
 task 04 review-policy server validations, task 05 operator usability code/docs,
-and task 06 provided gene annotation adoption code/tests are recorded. The next
-best task is Phase 5 task 07, assembly review evidence expansion with BUSCO
-first. The approved remaining Phase 5 order is:
+and task 06 provided gene annotation adoption code/tests are recorded. Phase 5
+task 07 assembly review BUSCO evidence is implemented in code/tests with
+server/HPC smoke pending. The next best implementation task is Phase 5 task 08,
+assembly parameter loop and candidate comparison. The approved remaining Phase 5
+order is:
 
-1. task 07 — assembly review evidence expansion, BUSCO first
-2. task 08 — assembly parameter loop and candidate comparison
-3. task 09 — assembly review visual report and human selection
-4. task 10 — function annotation provenance completion
+1. task 08 — assembly parameter loop and candidate comparison
+2. task 09 — assembly review visual report and human selection
+3. task 10 — function annotation provenance completion
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

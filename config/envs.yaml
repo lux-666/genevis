@@ -62,6 +62,10 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - quast.py
+  assembly_review.eval.busco:
+    conda_env: env_geno_exec
+    required_tools:
+      - busco
   hic_scaffolding.candidate.yahs:
     conda_env: env_geno_exec
     required_tools:

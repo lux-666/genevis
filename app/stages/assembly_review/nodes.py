@@ -27,6 +27,8 @@ from app.review.recommender import RecommendationError, recommend_review_decisio
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_ACTION,
+    ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
+    ASSEMBLY_REVIEW_BUSCO_SUMMARY,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
@@ -43,6 +45,7 @@ from app.schemas.state import TopLevelState
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 QUAST_METHOD = "assembly_review.eval.quast"
+BUSCO_METHOD = "assembly_review.eval.busco"
 
 
 def enter_assembly_review(state: TopLevelState) -> dict:
@@ -317,6 +320,265 @@ def run_quast_attempts(state: TopLevelState) -> dict:
         results.append(result_payload)
 
     return _update_assembly_review_output(state, {"status": "quast_ran", "quast_execution_results": results})
+
+
+def freeze_busco_attempts(state: TopLevelState) -> dict:
+    """Freeze local BUSCO attempts when offline lineage parameters are supplied."""
+    stage_outputs = state.get("stage_outputs") or {}
+    ar_out = stage_outputs.get("assembly_review", {})
+    if ar_out.get("status") == "failed" or not _local_quast_enabled(ar_out):
+        return {}
+
+    descriptor_error = _validate_review_methods([BUSCO_METHOD])
+    if descriptor_error:
+        return _update_assembly_review_output(state, {"status": "failed", "reason": descriptor_error})
+
+    busco_params, error = _busco_parameters(ar_out)
+    candidates = ar_out.get("candidates", [])
+    materialized = _materialized_quast_candidates(candidates)
+    signals = ar_out.get("signals", [])
+    if error:
+        signals = _mark_missing_busco_signals(signals, candidates, error)
+        return _rewrite_eval_bundle(state, {**ar_out, "signals": signals}, status="evaluating")
+
+    signals = _mark_missing_busco_signals(
+        signals,
+        candidates,
+        None,
+        {candidate.get("candidate_id") for candidate in materialized},
+    )
+    if not materialized:
+        return _rewrite_eval_bundle(state, {**ar_out, "signals": signals}, status="evaluating")
+
+    session_id = state["session_id"]
+    data_dir = absolute_data_dir(state)
+    env_spec, blocked = resolve_method_env(
+        ar_out,
+        stage="assembly_review",
+        method_name=BUSCO_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_assembly_review_output(state, blocked)
+
+    attempts = []
+    lineage_path = Path(busco_params["lineage_path"])
+    for candidate in materialized:
+        candidate_id = candidate.get("candidate_id", "unknown")
+        safe_id = _safe_candidate_id(candidate_id)
+        working_dir = data_dir / "work" / "assembly_review" / session_id / "busco" / safe_id
+        artifact_dir = data_dir / "artifacts" / "assembly_review" / session_id / "busco" / safe_id
+        working_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        script_path = working_dir / "run_busco.sh"
+        out_name = f"busco_{safe_id}"
+        short_summary = artifact_dir / out_name / f"short_summary.specific.{lineage_path.name}.{out_name}.txt"
+        assembly_ref = Path(candidate["final_assembly_ref"])
+        script_path.write_text(
+            "set -e\n"
+            f"mkdir -p {shlex.quote(str(artifact_dir))}\n"
+            f"cd {shlex.quote(str(artifact_dir))}\n"
+            f"busco -i {shlex.quote(str(assembly_ref))} "
+            f"-l {shlex.quote(str(lineage_path))} "
+            f"-o {shlex.quote(out_name)} "
+            f"-m {shlex.quote(str(busco_params['mode']))} "
+            f"--offline --cpu {busco_params['threads']}\n"
+            f"test -f {shlex.quote(str(short_summary))}\n",
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        attempt_kwargs: dict[str, Any] = {
+            "attempt_id": f"{session_id}:assembly_review:busco:{safe_id}",
+            "session_id": session_id,
+            "stage": "assembly_review",
+            "method_name": BUSCO_METHOD,
+            "script_path": script_path,
+            "working_dir": working_dir,
+            "interpreter": "/bin/bash",
+            "expected_outputs": [short_summary],
+            "env": {str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
+            "metadata": {
+                "candidate_id": candidate_id,
+                "draft_assembly_ref": str(assembly_ref),
+                "busco_output_dir": str(artifact_dir / out_name),
+                "short_summary_ref": str(short_summary),
+                "lineage_path": str(lineage_path),
+                "lineage_name": busco_params["lineage_name"],
+                "lineage_version": busco_params["lineage_version"],
+                "lineage_source": busco_params["lineage_source"],
+                "mode": busco_params["mode"],
+                "threads": busco_params["threads"],
+            },
+        }
+        attach_conda_fields(env_spec, attempt_kwargs)
+        attempts.append(FrozenAttemptSpec(**attempt_kwargs).model_dump(mode="json"))
+
+    return _update_assembly_review_output(
+        state,
+        {"status": "busco_frozen", "signals": signals, "busco_frozen_attempts": attempts},
+    )
+
+
+def run_busco_attempts(state: TopLevelState) -> dict:
+    """Run frozen BUSCO attempts locally."""
+    ar_out = (state.get("stage_outputs") or {}).get("assembly_review", {})
+    if ar_out.get("status") != "busco_frozen":
+        return {}
+
+    ledger = Ledger(state.get("data_dir", "data"))
+    results = []
+    for payload in ar_out.get("busco_frozen_attempts", []):
+        attempt = FrozenAttemptSpec.model_validate(payload)
+        ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+        ledger.record_attempt_started(attempt.session_id, attempt)
+        result = LocalRunner().run(attempt)
+        result_payload = result.model_dump(mode="json")
+        if not result.success:
+            stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+            error = stderr.strip() or f"BUSCO failed with return code {result.return_code}"
+            ledger.record_attempt_failed(
+                attempt.session_id,
+                attempt,
+                return_code=result.return_code,
+                error=error,
+            )
+            result_payload["error"] = error
+        results.append(result_payload)
+
+    return _update_assembly_review_output(state, {"status": "busco_ran", "busco_execution_results": results})
+
+
+def collect_busco_artifacts(state: TopLevelState) -> dict:
+    """Collect BUSCO artifacts and update review signals before rule evaluation."""
+    ar_out = (state.get("stage_outputs") or {}).get("assembly_review", {})
+    if ar_out.get("status") != "busco_ran":
+        return {}
+
+    attempts = {
+        payload["attempt_id"]: FrozenAttemptSpec.model_validate(payload)
+        for payload in ar_out.get("busco_frozen_attempts", [])
+    }
+    signals = list(ar_out.get("signals") or [])
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    artifact_refs = list(ar_out.get("artifact_refs") or [])
+    ledger = Ledger(data_dir)
+
+    for result in ar_out.get("busco_execution_results", []):
+        attempt = attempts[result["attempt_id"]]
+        candidate_id = str(attempt.metadata.get("candidate_id"))
+        artifacts: list[ArtifactMeta] = []
+        metric_refs: list[str] = []
+        metadata = {
+            "attempt_id": attempt.attempt_id,
+            "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
+            "busco_output_dir": attempt.metadata.get("busco_output_dir"),
+            "provenance": _busco_provenance(attempt),
+        }
+        if result.get("success"):
+            short_summary = Path(attempt.metadata["short_summary_ref"])
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    short_summary,
+                    stage="assembly_review",
+                    method_name=BUSCO_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
+                    metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                )
+            )
+            metric_refs.append(str(short_summary))
+            metrics = _parse_busco_short_summary(short_summary)
+            busco_summary_path = Path(attempt.metadata["busco_output_dir"]).parent / "busco_summary.json"
+            busco_summary_payload = {
+                "session_id": session_id,
+                "method_name": BUSCO_METHOD,
+                "candidate_id": candidate_id,
+                "attempt_id": attempt.attempt_id,
+                "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
+                "short_summary_ref": str(short_summary),
+                "lineage": _busco_provenance(attempt),
+                "metrics": metrics,
+                "notes": ["thresholds_not_applied_without_human_approval"],
+            }
+            busco_summary_path.write_text(json.dumps(busco_summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    busco_summary_path,
+                    stage="assembly_review",
+                    method_name=BUSCO_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_BUSCO_SUMMARY,
+                    metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                )
+            )
+            metric_refs.append(str(busco_summary_path))
+            for path, artifact_type in [(Path(result["stdout_path"]), "command.stdout"), (Path(result["stderr_path"]), "command.stderr")]:
+                if path.exists():
+                    artifacts.append(
+                        ArtifactMeta.from_file(
+                            path,
+                            stage="assembly_review",
+                            method_name=BUSCO_METHOD,
+                            artifact_type=artifact_type,
+                            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                        )
+                    )
+            append_artifact_records(data_dir, session_id, artifacts)
+            artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+            ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
+            for artifact in artifact_payloads:
+                ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+            artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
+            metadata["metrics"] = metrics
+            metadata["busco_summary_ref"] = str(busco_summary_path)
+            signals = _update_busco_signal(
+                signals,
+                candidate_id,
+                "available",
+                metric_refs,
+                ["thresholds_not_applied_without_human_approval", "busco_executed_locally"],
+                metadata,
+            )
+        else:
+            for path, artifact_type in [(Path(result["stdout_path"]), "command.stdout"), (Path(result["stderr_path"]), "command.stderr")]:
+                if path.exists():
+                    artifacts.append(
+                        ArtifactMeta.from_file(
+                            path,
+                            stage="assembly_review",
+                            method_name=BUSCO_METHOD,
+                            artifact_type=artifact_type,
+                            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id},
+                        )
+                    )
+            if artifacts:
+                append_artifact_records(data_dir, session_id, artifacts)
+                artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+                for artifact in artifact_payloads:
+                    ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+                artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
+            failed_refs = [str(artifact.file_path) for artifact in artifacts]
+            metadata["return_code"] = result.get("return_code")
+            metadata["error"] = result.get("error")
+            signals = _update_busco_signal(
+                signals,
+                candidate_id,
+                "failed",
+                failed_refs,
+                ["busco_local_execution_failed", "candidate_not_rejected_from_metrics"],
+                metadata,
+            )
+
+    ar_out = {**ar_out, "signals": signals, "artifact_refs": _unique_refs(artifact_refs)}
+    update = _rewrite_eval_bundle(state, ar_out, status="evaluating")
+    outputs = update["stage_outputs"]
+    outputs["assembly_review"] = {
+        **outputs["assembly_review"],
+        "busco_frozen_attempts": [],
+        "busco_execution_results": [],
+    }
+    return {"stage_outputs": outputs}
 
 
 def collect_quast_artifacts(state: TopLevelState) -> dict:
@@ -993,13 +1255,25 @@ def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
         if signal.get("status") == "available" and signal.get("metric_refs"):
             return False
 
-    has_eval_evidence = any(
-        signal.get("signal_name") in _EVAL_SIGNAL_NAMES
-        and signal.get("status") == "available"
-        and signal.get("metric_refs")
-        for signal in signals
-    )
-    return has_eval_evidence
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id")
+        has_quast = any(
+            signal.get("signal_name") == "quast"
+            and signal.get("candidate_id") == candidate_id
+            and signal.get("status") == "available"
+            and signal.get("metric_refs")
+            for signal in signals
+        )
+        has_busco = any(
+            signal.get("signal_name") == "busco"
+            and signal.get("candidate_id") == candidate_id
+            and signal.get("status") == "available"
+            and signal.get("metric_refs")
+            for signal in signals
+        )
+        if not (has_quast and has_busco):
+            return False
+    return True
 
 
 def _local_quast_enabled(ar_out: dict[str, Any]) -> bool:
@@ -1039,6 +1313,34 @@ def _quast_threads(ar_out: dict[str, Any]) -> tuple[int, str | None]:
     return threads, None
 
 
+def _busco_parameters(ar_out: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    params = dict(ar_out.get("busco_parameters") or {})
+    if not params:
+        return {}, "busco_lineage_not_supplied"
+    required = ["lineage_path", "lineage_name", "lineage_version", "lineage_source"]
+    for key in required:
+        if not str(params.get(key) or "").strip():
+            return {}, f"assembly_review.busco_parameters.{key} is required"
+    lineage_path = Path(str(params["lineage_path"])).expanduser()
+    if not lineage_path.exists():
+        return {}, "busco_lineage_path_missing"
+    raw_threads = params.get("threads", 1)
+    try:
+        threads = int(raw_threads)
+    except (TypeError, ValueError):
+        return {}, "assembly_review.busco_parameters.threads must be a positive integer"
+    if threads <= 0:
+        return {}, "assembly_review.busco_parameters.threads must be a positive integer"
+    return {
+        "lineage_path": str(lineage_path.resolve(strict=False)),
+        "lineage_name": str(params["lineage_name"]),
+        "lineage_version": str(params["lineage_version"]),
+        "lineage_source": str(params["lineage_source"]),
+        "mode": str(params.get("mode") or "genome"),
+        "threads": threads,
+    }, None
+
+
 def _mark_missing_quast_signals(
     signals: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
@@ -1060,8 +1362,74 @@ def _mark_missing_quast_signals(
     return updated
 
 
+def _mark_missing_busco_signals(
+    signals: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    reason: str | None,
+    materialized_ids: set[Any] | None = None,
+) -> list[dict[str, Any]]:
+    updated = list(signals)
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id")
+        if materialized_ids is not None and candidate_id in materialized_ids:
+            continue
+        notes = [reason or "busco_requires_materialized_draft_assembly", "execution_skipped"]
+        updated = _update_busco_signal(
+            updated,
+            str(candidate_id),
+            "missing",
+            [],
+            notes,
+            {"draft_assembly_ref": candidate.get("final_assembly_ref")},
+        )
+    return updated
+
+
 def _update_quast_signal(
     signals: list[dict[str, Any]],
+    candidate_id: str,
+    status: str,
+    metric_refs: list[str],
+    notes: list[str],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return _update_eval_signal(
+        signals,
+        signal_name="quast",
+        method_name=QUAST_METHOD,
+        candidate_id=candidate_id,
+        status=status,
+        metric_refs=metric_refs,
+        notes=notes,
+        metadata=metadata,
+    )
+
+
+def _update_busco_signal(
+    signals: list[dict[str, Any]],
+    candidate_id: str,
+    status: str,
+    metric_refs: list[str],
+    notes: list[str],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return _update_eval_signal(
+        signals,
+        signal_name="busco",
+        method_name=BUSCO_METHOD,
+        candidate_id=candidate_id,
+        status=status,
+        metric_refs=metric_refs,
+        notes=notes,
+        metadata=metadata,
+    )
+
+
+def _update_eval_signal(
+    signals: list[dict[str, Any]],
+    *,
+    signal_name: str,
+    method_name: str,
     candidate_id: str,
     status: str,
     metric_refs: list[str],
@@ -1071,7 +1439,7 @@ def _update_quast_signal(
     updated = []
     matched = False
     for signal in signals:
-        if signal.get("signal_name") == "quast" and signal.get("candidate_id") in {None, candidate_id}:
+        if signal.get("signal_name") == signal_name and signal.get("candidate_id") in {None, candidate_id}:
             payload = {**signal, "candidate_id": candidate_id, "status": status, "metric_refs": metric_refs, "notes": notes, "metadata": metadata}
             updated.append(payload)
             matched = True
@@ -1080,8 +1448,8 @@ def _update_quast_signal(
     if not matched:
         updated.append(
             ReviewSignal(
-                signal_name="quast",
-                method_name=QUAST_METHOD,
+                signal_name=signal_name,
+                method_name=method_name,
                 candidate_id=candidate_id,
                 status=status,  # type: ignore[arg-type]
                 metric_refs=metric_refs,
@@ -1175,6 +1543,45 @@ def _parse_quast_report_tsv(path: Path) -> dict[str, Any]:
         except ValueError:
             metrics[f"{out_key}_raw"] = parts[1].strip()
     return metrics
+
+
+def _parse_busco_short_summary(path: Path) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    key_map = {
+        "complete buscos (c)": "complete_buscos",
+        "complete and single-copy buscos (s)": "single_copy_buscos",
+        "complete and duplicated buscos (d)": "duplicated_buscos",
+        "fragmented buscos (f)": "fragmented_buscos",
+        "missing buscos (m)": "missing_buscos",
+        "total busco groups searched": "total_busco_groups_searched",
+    }
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("C:"):
+            metrics["summary_line"] = stripped
+            for key, value in re.findall(r"([CSDFM]):([0-9.]+)%", stripped):
+                metrics[{"C": "complete_percent", "S": "single_copy_percent", "D": "duplicated_percent", "F": "fragmented_percent", "M": "missing_percent"}[key]] = float(value)
+            continue
+        match = re.match(r"^(\d+)\s+(.+)$", stripped)
+        if not match:
+            continue
+        out_key = key_map.get(match.group(2).strip().lower())
+        if out_key:
+            metrics[out_key] = int(match.group(1))
+    return metrics
+
+
+def _busco_provenance(attempt: FrozenAttemptSpec) -> dict[str, Any]:
+    return {
+        "lineage_path": attempt.metadata.get("lineage_path"),
+        "lineage_name": attempt.metadata.get("lineage_name"),
+        "lineage_version": attempt.metadata.get("lineage_version"),
+        "lineage_source": attempt.metadata.get("lineage_source"),
+        "mode": attempt.metadata.get("mode"),
+        "threads": attempt.metadata.get("threads"),
+    }
 
 
 def _unique_refs(refs: list[str]) -> list[str]:
