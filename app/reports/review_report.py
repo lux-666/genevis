@@ -140,6 +140,8 @@ def _compact_active_interrupt(active_interrupt: Any) -> dict[str, Any] | None:
         "auto_decidable",
         "pending_human_confirmation",
         "blocked_at",
+        "report_refs",
+        "candidate_comparison_context",
     ):
         if key in active_interrupt:
             compact[key] = active_interrupt[key]

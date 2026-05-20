@@ -43,6 +43,14 @@ def _write_assembly_review_request(data_dir: Path, session_id: str) -> Path:
                 "signals": [],
                 "decisions_allowed": ["accept", "stop_human_review"],
                 "auto_decidable": False,
+                "report_refs": {
+                    "assembly_review_report": str(request_dir / "reports" / "assembly_review_report.md"),
+                    "assembly_review_report_data": str(request_dir / "reports" / "assembly_review_report.json"),
+                },
+                "candidate_comparison_context": {
+                    "candidate_ids": ["flye"],
+                    "candidate_final_assembly_refs": {"flye": "draft.fasta"},
+                },
                 "review_request_artifact_ref": str(request_ref),
             }
         ),
@@ -713,12 +721,14 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("next_action.kind: review_decision_required", stdout)
             self.assertIn("--write-decision-template", stdout)
             self.assertIn("gene-agent resume", stdout)
+            self.assertIn("assembly_review_report.md", stdout)
             self.assertEqual(template["session_id"], "s1")
             self.assertEqual(template["stage"], "assembly_review")
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "flye")
             self.assertEqual(template["final_assembly_ref"], "draft.fasta")
             self.assertEqual(template["decided_by"], "human")
+            self.assertIn("assembly_review_report", template["metadata"]["template_guidance"]["report_refs"])
 
     def test_inspect_json_includes_review_next_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -744,6 +754,9 @@ class EntrypointTests(unittest.TestCase):
         summary = json.loads(stdout)
         self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
         self.assertIn("gene-agent resume", summary["next_action"]["resume_command"])
+        self.assertTrue(
+            any(ref.endswith("assembly_review_report.md") for ref in summary["next_action"]["relevant_refs"])
+        )
 
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
         with tempfile.TemporaryDirectory() as tmp:

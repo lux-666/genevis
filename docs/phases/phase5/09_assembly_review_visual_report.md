@@ -1,6 +1,6 @@
 # 09 Assembly Review Visual Report And Human Selection
 
-Task status: planned.
+Task status: implemented.
 
 ## Goal
 
@@ -42,16 +42,37 @@ surface without introducing a web UI or automatic biological thresholds.
 
 ## Tasks
 
-- [ ] Define the report artifact schema and stable output paths.
-- [ ] Add report generation from QUAST/BUSCO compact summaries and candidate
+- [x] Define the report artifact schema and stable output paths.
+- [x] Add report generation from QUAST/BUSCO compact summaries and candidate
   parameter provenance.
-- [ ] Add report refs to review request payloads and inspect next-action output.
-- [ ] Extend decision templates with report refs and candidate comparison
+- [x] Add report refs to review request payloads and inspect next-action output.
+- [x] Extend decision templates with report refs and candidate comparison
   context.
-- [ ] Add tests for report generation with QUAST-only, QUAST+BUSCO, missing
+- [x] Add tests for report generation with QUAST-only, QUAST+BUSCO, missing
   signal, and multi-candidate inputs.
-- [ ] Add a server/HPC smoke that produces a report artifact and demonstrates
+- [x] Add a server/HPC smoke that produces a report artifact and demonstrates
   human selection from the report.
+
+## Implementation Key Points
+
+- Assembly review now writes stable static report artifacts before the human gate:
+  `assembly_review_report.md` for the operator-facing table and
+  `assembly_review_report.json` for compact machine-readable report data.
+- Multi-candidate rerun loops additionally write
+  `assembly_candidate_comparison_report.md` and keep the existing
+  `candidate_comparison.json` available as raw comparison context.
+- Reports are generated only from compact candidate, QUAST/BUSCO summary, signal
+  status, and parameter-provenance data. Raw command output and large reports are
+  referenced by artifact path rather than embedded.
+- Missing, failed, and pending evidence are shown explicitly; no biological
+  pass/fail thresholds or automatic candidate selection are encoded in the
+  report.
+- Review request payloads, active interrupts, durable inspect requirements,
+  `next_action.relevant_refs`, decision-template guidance, and blocked operator
+  reports now carry `report_refs` plus candidate comparison context.
+- Report paths are stable and replay-safe: if content is unchanged and the
+  artifact index already has the matching record, replay reuses the existing
+  report without rewriting it or appending duplicate report artifact records.
 
 ## Acceptance
 

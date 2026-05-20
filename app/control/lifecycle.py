@@ -263,6 +263,8 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
                 "decisions_allowed": active_interrupt.get("decisions_allowed", []),
                 "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
                 "candidate_final_assembly_refs": _candidate_final_assembly_refs(active_interrupt.get("candidates", [])),
+                "report_refs": dict(active_interrupt.get("report_refs") or {}),
+                "candidate_comparison_context": dict(active_interrupt.get("candidate_comparison_context") or {}),
                 "requires_structured_resume": True,
             },
         )
@@ -515,6 +517,10 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "decisions_allowed": decisions_allowed,
         "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
     }
+    if requirements.get("report_refs"):
+        guidance["report_refs"] = dict(requirements.get("report_refs") or {})
+    if requirements.get("candidate_comparison_context"):
+        guidance["candidate_comparison_context"] = dict(requirements.get("candidate_comparison_context") or {})
     template: dict[str, Any] = {
         "session_id": summary.get("session_id"),
         "stage": stage,
@@ -584,7 +590,11 @@ def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -
         "decision_template_path_hint": template_hint,
         "command": command,
         "resume_command": resume_command,
-        "relevant_refs": _artifact_refs(summary.get("latest_review_request_artifact")),
+        "relevant_refs": _artifact_refs(
+            summary.get("latest_review_request_artifact"),
+            requirements.get("report_refs"),
+            _candidate_comparison_relevant_refs(requirements.get("candidate_comparison_context")),
+        ),
     }
 
 
@@ -742,6 +752,16 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _candidate_comparison_relevant_refs(context: Any) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    return {
+        key: context[key]
+        for key in ("candidate_comparison_ref", "assembly_candidate_comparison_report_ref")
+        if context.get(key)
+    }
+
+
 def _artifact_refs(*values: Any) -> list[str]:
     refs: list[str] = []
     for value in values:
@@ -811,6 +831,12 @@ def _decision_requirements_from_artifact(
     candidate_methods = payload.get("candidate_methods")
     if isinstance(candidate_methods, list):
         requirements["candidate_methods"] = list(candidate_methods)
+    report_refs = payload.get("report_refs")
+    if isinstance(report_refs, dict):
+        requirements["report_refs"] = dict(report_refs)
+    comparison_context = payload.get("candidate_comparison_context")
+    if isinstance(comparison_context, dict):
+        requirements["candidate_comparison_context"] = dict(comparison_context)
     for key in ("auto_decidable", "pending_human_confirmation", "review_request_artifact_ref"):
         if key in payload:
             requirements[key] = payload.get(key)

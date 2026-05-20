@@ -78,6 +78,8 @@ class ReviewReportTests(unittest.TestCase):
                         "reason": "needs_review",
                         "decisions_allowed": ["accept"],
                         "candidates": [{"candidate_id": "flye", "large_unused": "x"}],
+                        "report_refs": {"assembly_review_report": "report.md"},
+                        "candidate_comparison_context": {"candidate_ids": ["flye"]},
                     },
                     "route_trace": ["assembly_review_stage"],
                 },
@@ -85,6 +87,8 @@ class ReviewReportTests(unittest.TestCase):
 
             report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
             self.assertEqual(report["active_interrupt"]["candidate_ids"], ["flye"])
+            self.assertEqual(report["active_interrupt"]["report_refs"]["assembly_review_report"], "report.md")
+            self.assertEqual(report["active_interrupt"]["candidate_comparison_context"]["candidate_ids"], ["flye"])
             self.assertEqual(report["next_action"]["kind"], "review_decision_required")
             artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
             self.assertIn("operator_report.blocked_human", artifact_index.read_text(encoding="utf-8"))

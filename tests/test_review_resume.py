@@ -15,6 +15,7 @@ from app.control.lifecycle import (
     ResumeValidationError,
     _decision_requirements_from_artifact,
     inspect_session,
+    build_resume_decision_template,
     inspect_state,
     resume_review_state,
 )
@@ -504,6 +505,19 @@ class ReviewResumeTests(unittest.TestCase):
         )
         self.assertEqual(sorted(requirements["candidate_ids"]), ["canu", "flye"])
         self.assertTrue(requirements["requires_structured_resume"])
+        self.assertEqual(requirements["report_refs"]["assembly_review_report"], "reports/assembly_review_report.md")
+        self.assertEqual(requirements["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
+
+    def test_resume_decision_template_includes_report_guidance(self):
+        state = _assembly_blocked_state()
+
+        summary = inspect_session("s1", state["data_dir"])
+        template = build_resume_decision_template(summary)
+
+        guidance = template["metadata"]["template_guidance"]
+        self.assertEqual(guidance["report_refs"]["assembly_review_report"], "reports/assembly_review_report.md")
+        self.assertEqual(guidance["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
+        self.assertEqual(sorted(guidance["candidate_ids"]), ["canu", "flye"])
 
     def test_decision_requirements_uses_artifact_meta_file_path_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,6 +681,19 @@ def _assembly_blocked_state() -> dict:
         "signals": [],
         "decisions_allowed": ["pass", "accept", "purge", "polish", "continue_low_confidence", "stop_human_review"],
         "notes": [],
+        "report_refs": {
+            "assembly_review_report": "reports/assembly_review_report.md",
+            "assembly_review_report_data": "reports/assembly_review_report.json",
+            "candidate_comparison": "candidate_comparison.json",
+        },
+        "candidate_comparison_context": {
+            "candidate_ids": ["flye", "canu"],
+            "candidate_final_assembly_refs": {
+                "flye": "work/assembly/flye/draft.fasta",
+                "canu": "work/assembly/canu/draft.fasta",
+            },
+            "candidate_comparison_ref": "candidate_comparison.json",
+        },
         "blocked_at": datetime.now(timezone.utc).isoformat(),
         "review_request_artifact_ref": str(request_ref),
     }

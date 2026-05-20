@@ -18,7 +18,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records
+from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
@@ -28,10 +28,13 @@ from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
+    ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
     ASSEMBLY_REVIEW_BUSCO_SUMMARY,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    ASSEMBLY_REVIEW_REPORT,
+    ASSEMBLY_REVIEW_REPORT_DATA,
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
     ASSEMBLY_REVIEW_QUAST_SUMMARY,
@@ -776,6 +779,7 @@ def human_review_gate(state: TopLevelState) -> dict:
     """Set an active interrupt for unresolved assembly review decisions."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
+    ar_out, report_refs, comparison_context = _ensure_assembly_review_reports(state, ar_out)
     candidates = ar_out.get("candidates", [])
     signals = ar_out.get("signals", [])
 
@@ -798,6 +802,8 @@ def human_review_gate(state: TopLevelState) -> dict:
             "Purge and polish actions require explicit action output refs, human approval, and provenance; pre-action assemblies are preserved.",
         ],
         auto_decidable=_assembly_review_auto_decidable(ar_out),
+        report_refs=report_refs,
+        candidate_comparison_context=comparison_context,
     )
 
     request_ref = _write_json_artifact(
@@ -1644,6 +1650,314 @@ def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -
     except json.JSONDecodeError:
         return False
     return existing == payload
+
+
+def _ensure_assembly_review_reports(
+    state: TopLevelState,
+    ar_out: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+    candidates = ar_out.get("candidates", [])
+    report_kind = "candidate_comparison_review" if len(candidates) >= 2 else "single_candidate_review"
+    payload = _assembly_review_report_payload(state, ar_out, report_kind=report_kind)
+    data_ref = _write_report_json_artifact_if_changed(
+        state,
+        "assembly_review_report.json",
+        payload,
+        artifact_type=ASSEMBLY_REVIEW_REPORT_DATA,
+    )
+    report_ref = _write_report_text_artifact_if_changed(
+        state,
+        "assembly_review_report.md",
+        _render_assembly_review_markdown(payload, title="Assembly Review Report"),
+        artifact_type=ASSEMBLY_REVIEW_REPORT,
+        metadata={"report_kind": report_kind, "candidate_count": len(candidates)},
+    )
+
+    updated = {
+        **ar_out,
+        "assembly_review_report_ref": report_ref,
+        "assembly_review_report_data_ref": data_ref,
+    }
+    report_refs = {
+        "assembly_review_report": report_ref,
+        "assembly_review_report_data": data_ref,
+    }
+    if ar_out.get("candidate_comparison_ref"):
+        report_refs["candidate_comparison"] = str(ar_out["candidate_comparison_ref"])
+
+    if len(candidates) >= 2:
+        comparison_ref = _write_report_text_artifact_if_changed(
+            state,
+            "assembly_candidate_comparison_report.md",
+            _render_assembly_review_markdown(payload, title="Assembly Candidate Comparison Report"),
+            artifact_type=ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
+            metadata={"report_kind": report_kind, "candidate_count": len(candidates)},
+        )
+        updated["assembly_candidate_comparison_report_ref"] = comparison_ref
+        report_refs["assembly_candidate_comparison_report"] = comparison_ref
+
+    comparison_context = _candidate_comparison_context(updated)
+    return updated, report_refs, comparison_context
+
+
+def _assembly_review_report_payload(
+    state: TopLevelState,
+    ar_out: dict[str, Any],
+    *,
+    report_kind: str,
+) -> dict[str, Any]:
+    candidates = ar_out.get("candidates", [])
+    signals = ar_out.get("signals", [])
+    assembly_out = (state.get("stage_outputs") or {}).get("assembly", {})
+    eval_bundle = _read_eval_bundle(ar_out.get("eval_bundle_ref"))
+    review_plan = ar_out.get("review_plan") or {}
+    return {
+        "artifact_type": ASSEMBLY_REVIEW_REPORT_DATA,
+        "session_id": state["session_id"],
+        "stage": "assembly_review",
+        "report_kind": report_kind,
+        "candidate_count": len(candidates),
+        "candidates": [
+            _candidate_report_row(candidate, signals, assembly_out)
+            for candidate in candidates
+        ],
+        "route_evidence": {
+            "planned_signals": list(review_plan.get("planned_signals") or []),
+            "available_signals": list(review_plan.get("available_signals") or []),
+            "missing_signals": list(review_plan.get("missing_signals") or []),
+            "available_inputs": list(eval_bundle.get("available_inputs") or []),
+            "missing_inputs": list(eval_bundle.get("missing_inputs") or []),
+        },
+        "raw_refs": {
+            "eval_bundle_ref": ar_out.get("eval_bundle_ref"),
+            "candidate_comparison_ref": ar_out.get("candidate_comparison_ref"),
+        },
+        "notes": [
+            "thresholds_not_applied_without_human_approval",
+            "report_informs_human_decision_only",
+        ],
+    }
+
+
+def _candidate_report_row(
+    candidate: dict[str, Any],
+    signals: list[dict[str, Any]],
+    assembly_out: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_id = candidate.get("candidate_id", "unknown")
+    candidate_signals = [
+        signal for signal in signals
+        if signal.get("candidate_id") == candidate_id
+    ]
+    return {
+        "candidate_id": candidate_id,
+        "method_name": candidate.get("method_name"),
+        "source": candidate.get("source"),
+        "status": candidate.get("status", "unknown"),
+        "final_assembly_ref": candidate.get("final_assembly_ref") or candidate.get("assembly_ref"),
+        "parameters": _candidate_parameters(candidate, assembly_out),
+        "metrics": _candidate_metrics(candidate_id, signals),
+        "signals": _signal_status_buckets(candidate_signals),
+        "metric_refs_by_signal": {
+            str(signal.get("signal_name")): [str(ref) for ref in signal.get("metric_refs", [])]
+            for signal in candidate_signals
+            if signal.get("metric_refs")
+        },
+        "signal_notes_by_signal": {
+            str(signal.get("signal_name")): list(signal.get("notes") or [])
+            for signal in candidate_signals
+            if signal.get("notes")
+        },
+    }
+
+
+def _signal_status_buckets(signals: list[dict[str, Any]]) -> dict[str, list[str]]:
+    buckets = {"available": [], "missing": [], "failed": [], "pending": []}
+    for signal in signals:
+        status = signal.get("status", "pending")
+        signal_name = signal.get("signal_name")
+        if status in buckets and signal_name:
+            buckets[status].append(str(signal_name))
+    return {key: sorted(values) for key, values in buckets.items()}
+
+
+def _candidate_comparison_context(ar_out: dict[str, Any]) -> dict[str, Any]:
+    candidates = ar_out.get("candidates", [])
+    context: dict[str, Any] = {
+        "candidate_ids": [candidate.get("candidate_id") for candidate in candidates if candidate.get("candidate_id")],
+        "candidate_final_assembly_refs": {
+            str(candidate.get("candidate_id")): str(candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
+            for candidate in candidates
+            if candidate.get("candidate_id") and (candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
+        },
+    }
+    for key in ("candidate_comparison_ref", "assembly_candidate_comparison_report_ref"):
+        if ar_out.get(key):
+            context[key] = ar_out[key]
+    return context
+
+
+def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "No automatic biological thresholds are applied. This report informs the human decision only.",
+        "",
+        "## Candidate Metrics",
+        "",
+        "| Candidate | Method | Source | Assembly ref | QUAST contigs | Total length | N50 | Largest contig | BUSCO C% | BUSCO S% | BUSCO D% | BUSCO F% | BUSCO M% | Available signals | Missing/failed/pending signals |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for candidate in payload.get("candidates", []):
+        metrics = candidate.get("metrics") or {}
+        quast = metrics.get("quast") or {}
+        busco = metrics.get("busco") or {}
+        signal_buckets = candidate.get("signals") or {}
+        unavailable = []
+        for status in ("missing", "failed", "pending"):
+            for signal_name in signal_buckets.get(status, []):
+                unavailable.append(f"{signal_name} ({status})")
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in [
+                    candidate.get("candidate_id"),
+                    candidate.get("method_name"),
+                    candidate.get("source"),
+                    candidate.get("final_assembly_ref"),
+                    quast.get("contig_count"),
+                    quast.get("total_length"),
+                    quast.get("n50"),
+                    quast.get("largest_contig"),
+                    busco.get("complete_percent"),
+                    busco.get("single_copy_percent"),
+                    busco.get("duplicated_percent"),
+                    busco.get("fragmented_percent"),
+                    busco.get("missing_percent"),
+                    ", ".join(signal_buckets.get("available", [])),
+                    ", ".join(unavailable),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend([
+        "",
+        "## Parameter Provenance",
+        "",
+        "| Candidate | Read profile | Estimated genome size | Threads | Rerun index |",
+        "| --- | --- | --- | --- | --- |",
+    ])
+    for candidate in payload.get("candidates", []):
+        params = candidate.get("parameters") or {}
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in [
+                    candidate.get("candidate_id"),
+                    params.get("read_profile"),
+                    params.get("estimated_genome_size"),
+                    params.get("threads"),
+                    params.get("rerun_index"),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(["", "## Evidence Refs", ""])
+    raw_refs = payload.get("raw_refs") or {}
+    for key, value in raw_refs.items():
+        if value:
+            lines.append(f"- {key}: `{value}`")
+    for candidate in payload.get("candidates", []):
+        metric_refs = candidate.get("metric_refs_by_signal") or {}
+        for signal_name, refs in metric_refs.items():
+            for ref in refs:
+                lines.append(f"- {candidate.get('candidate_id')} {signal_name}: `{ref}`")
+
+    lines.extend(["", "## Missing Evidence", ""])
+    for candidate in payload.get("candidates", []):
+        signal_buckets = candidate.get("signals") or {}
+        notes_by_signal = candidate.get("signal_notes_by_signal") or {}
+        for status in ("missing", "failed", "pending"):
+            for signal_name in signal_buckets.get(status, []):
+                notes = ", ".join(notes_by_signal.get(signal_name, []))
+                suffix = f" — {notes}" if notes else ""
+                lines.append(f"- {candidate.get('candidate_id')} {signal_name}: {status}{suffix}")
+
+    lines.extend(["", "## Report Notes", ""])
+    for note in payload.get("notes", []):
+        lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _markdown_cell(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _write_report_json_artifact_if_changed(
+    state: TopLevelState,
+    filename: str,
+    payload: dict[str, Any],
+    *,
+    artifact_type: str,
+) -> str:
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    return _write_report_text_artifact_if_changed(
+        state,
+        filename,
+        text,
+        artifact_type=artifact_type,
+        metadata={"report_kind": payload.get("report_kind"), "candidate_count": payload.get("candidate_count")},
+    )
+
+
+def _write_report_text_artifact_if_changed(
+    state: TopLevelState,
+    filename: str,
+    text: str,
+    *,
+    artifact_type: str,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    data_dir = Path(state.get("data_dir", "data"))
+    out_dir = data_dir / "artifacts" / "assembly_review" / state["session_id"] / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / filename
+    if _path_has_same_content(path, text) and _artifact_record_exists(data_dir, state["session_id"], artifact_type, path):
+        return str(path)
+    if not _path_has_same_content(path, text):
+        path.write_text(text, encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        path,
+        stage="assembly_review",
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
+        artifact_type=artifact_type,
+        metadata=metadata or {},
+    )
+    append_artifact_records(data_dir, state["session_id"], [artifact])
+    return str(path)
+
+
+def _artifact_record_exists(data_dir: Path | str, session_id: str, artifact_type: str, path: Path) -> bool:
+    for record in read_artifact_records(data_dir, session_id):
+        if record.get("artifact_type") == artifact_type and Path(record.get("file_path", "")) == path:
+            return True
+    return False
+
+
+def _path_has_same_content(path: Path, expected: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        return path.read_text(encoding="utf-8") == expected
+    except OSError:
+        return False
 
 
 

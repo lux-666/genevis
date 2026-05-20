@@ -17,7 +17,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.schemas.artifacts import ReviewDecisionArtifact
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
+    ASSEMBLY_REVIEW_REPORT,
+    ASSEMBLY_REVIEW_REPORT_DATA,
+    ReviewDecisionArtifact,
+)
 from app.schemas.descriptors import DescriptorRegistry
 from app.stages.assembly_review.builder import build_stage
 from app.schemas.state import initial_state
@@ -284,6 +289,31 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("review_requested", event_types)
             self.assertNotIn("attempt_started", event_types)
 
+    def test_default_review_report_shows_missing_or_pending_signals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            draft = Path(tmpdir) / "draft.fasta"
+            draft.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+            candidate_ref = self._write_candidate_bundle(
+                tmpdir,
+                candidate_id="flye_01",
+                method_name="assembly.candidate.flye",
+                draft_assembly_fasta=str(draft),
+            )
+            state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
+            state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+
+            result = build_stage().invoke(state)
+
+            ar_out = result["stage_outputs"]["assembly_review"]
+            self.assertTrue(Path(ar_out["assembly_review_report_ref"]).exists())
+            report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
+            self.assertIn("quast (pending)", report_text)
+            self.assertIn("busco (pending)", report_text)
+            self.assertIn("No automatic biological thresholds are applied", report_text)
+            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            self.assertNotIn("recommended_candidate_id", report_data)
+            self.assertNotIn("pass_fail", json.dumps(report_data))
+
     def test_local_quast_success_updates_signals_and_review_request(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
@@ -321,6 +351,20 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertTrue(all(signal.get("candidate_id") for signal in request_payload["signals"]))
             self.assertTrue(ar_out["eval_bundle_ref"].endswith("assembly_eval_bundle.evaluating.json"))
             self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_review" / "test-session" / "assembly_eval_bundle.planned.json").exists())
+            self.assertTrue(Path(ar_out["assembly_review_report_ref"]).exists())
+            self.assertTrue(Path(ar_out["assembly_review_report_data_ref"]).exists())
+            report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
+            self.assertIn("flye_01", report_text)
+            self.assertIn("N50", report_text)
+            self.assertIn("Total length", report_text)
+            self.assertIn("Largest contig", report_text)
+            self.assertIn("busco", report_text)
+            self.assertIn("thresholds_not_applied_without_human_approval", report_text)
+            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(report_data["candidates"][0]["metrics"]["quast"]["n50"], 8)
+            self.assertEqual(report_data["candidates"][0]["signals"]["missing"], ["busco"])
+            self.assertEqual(request_payload["report_refs"]["assembly_review_report"], ar_out["assembly_review_report_ref"])
+            self.assertEqual(result["active_interrupt"]["report_refs"]["assembly_review_report"], ar_out["assembly_review_report_ref"])
 
             artifact_events = [
                 json.loads(line)
@@ -329,6 +373,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly_review.quast_report_tsv", artifact_types)
             self.assertIn("assembly_review.quast_report_txt", artifact_types)
+            self.assertIn(ASSEMBLY_REVIEW_REPORT, artifact_types)
+            self.assertIn(ASSEMBLY_REVIEW_REPORT_DATA, artifact_types)
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
             ledger_events = [
@@ -435,6 +481,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(request_busco["status"], "available")
             self.assertEqual(request_busco["candidate_id"], "flye_01")
             self.assertTrue(request_payload["auto_decidable"])
+            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(report_data["candidates"][0]["metrics"]["busco"]["complete_percent"], 95.0)
+            report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
+            self.assertIn("95.0", report_text)
+            self.assertNotIn("fake busco stdout", report_text)
 
             summary_ref = busco_signal["metadata"].get("busco_summary_ref")
             self.assertTrue(summary_ref)
@@ -1538,6 +1589,41 @@ class AssemblyRerunTests(unittest.TestCase):
             self.assertEqual(read_artifact_records(tmpdir, state["session_id"]), artifacts_before)
             self.assertEqual(Ledger(tmpdir).read_events(state["session_id"]), events_before)
 
+    def test_review_report_replay_does_not_duplicate_artifact_records(self):
+        from app.execution.artifacts import read_artifact_records
+        from app.stages.assembly_review.nodes import human_review_gate
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            state["stage_outputs"]["assembly_review"] = {
+                **state["stage_outputs"]["assembly_review"],
+                "status": "evaluated",
+                "signals": [],
+                "review_plan": {"planned_signals": ["quast"], "available_signals": [], "missing_signals": ["quast"]},
+            }
+
+            first = human_review_gate(state)
+            merged = {**state, **first}
+            artifacts_before = [
+                record for record in read_artifact_records(tmpdir, state["session_id"])
+                if record["artifact_type"] in {ASSEMBLY_REVIEW_REPORT, ASSEMBLY_REVIEW_REPORT_DATA}
+            ]
+            report_ref = first["stage_outputs"]["assembly_review"]["assembly_review_report_ref"]
+            mtime_before = Path(report_ref).stat().st_mtime_ns
+
+            second = human_review_gate(merged)
+
+            artifacts_after = [
+                record for record in read_artifact_records(tmpdir, state["session_id"])
+                if record["artifact_type"] in {ASSEMBLY_REVIEW_REPORT, ASSEMBLY_REVIEW_REPORT_DATA}
+            ]
+            self.assertEqual(Path(report_ref).stat().st_mtime_ns, mtime_before)
+            self.assertEqual(artifacts_after, artifacts_before)
+            self.assertEqual(
+                second["active_interrupt"]["report_refs"]["assembly_review_report"],
+                report_ref,
+            )
+
     def test_rerun_generates_candidate_comparison_artifact(self):
         """After rerun re-enters assembly_review, comparison artifact is generated for 2+ candidates."""
         from app.review.base import ResumeReviewRequest
@@ -1570,6 +1656,26 @@ class AssemblyRerunTests(unittest.TestCase):
             comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
             self.assertEqual(len(comparison["candidates"]), 2)
             self.assertIn("thresholds_not_applied_without_human_approval", comparison["notes"])
+            self.assertTrue(Path(ar_out["assembly_candidate_comparison_report_ref"]).exists())
+            report_text = Path(ar_out["assembly_candidate_comparison_report_ref"]).read_text(encoding="utf-8")
+            self.assertIn(comparison["candidates"][0]["candidate_id"], report_text)
+            self.assertIn(comparison["candidates"][1]["candidate_id"], report_text)
+            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(request_payload["report_refs"]["candidate_comparison"], ar_out["candidate_comparison_ref"])
+            self.assertEqual(
+                request_payload["report_refs"]["assembly_candidate_comparison_report"],
+                ar_out["assembly_candidate_comparison_report_ref"],
+            )
+            self.assertEqual(
+                sorted(request_payload["candidate_comparison_context"]["candidate_ids"]),
+                sorted(candidate["candidate_id"] for candidate in comparison["candidates"]),
+            )
+            artifact_events = [
+                json.loads(line)
+                for line in (Path(tmpdir) / "artifacts" / state["session_id"] / "artifacts.jsonl").read_text().splitlines()
+            ]
+            artifact_types = {event["artifact_type"] for event in artifact_events}
+            self.assertIn(ASSEMBLY_CANDIDATE_COMPARISON_REPORT, artifact_types)
 
 
 if __name__ == "__main__":

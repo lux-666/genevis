@@ -60,6 +60,8 @@ class ReviewPayload(BaseModel):
     decisions_allowed: list[ResumeReviewDecision] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     auto_decidable: bool = True
+    report_refs: dict[str, str] = Field(default_factory=dict)
+    candidate_comparison_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResumeReviewRequest(BaseModel):
