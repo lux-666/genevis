@@ -111,6 +111,7 @@ class AssemblyReviewRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     busco: BuscoRunParameters | None = None
+    max_reruns: int = Field(default=3, ge=1, le=10)
 
 
 class FunctionAnnotationRunConfig(BaseModel):

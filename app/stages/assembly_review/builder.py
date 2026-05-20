@@ -18,6 +18,7 @@ from app.stages.assembly_review.nodes import (
     fail_assembly_review,
     freeze_busco_attempts,
     freeze_quast_attempts,
+    generate_candidate_comparison,
     human_review_gate,
     plan_review_metrics,
     resolve_candidates,
@@ -28,6 +29,7 @@ from app.stages.assembly_review.routing import (
     route_after_busco_collect,
     route_after_busco_freeze,
     route_after_busco_run,
+    route_after_comparison,
     route_after_plan_metrics,
     route_after_quast_collect,
     route_after_quast_freeze,
@@ -50,6 +52,7 @@ def build_stage():
     graph.add_node("run_busco", run_busco_attempts)
     graph.add_node("collect_busco", collect_busco_artifacts)
     graph.add_node("evaluate_rules", evaluate_review_rules)
+    graph.add_node("generate_comparison", generate_candidate_comparison)
     graph.add_node("human_gate", human_review_gate)
     graph.add_node("commit", commit_assembly_review)
     graph.add_node("fail", fail_assembly_review)
@@ -109,9 +112,15 @@ def build_stage():
         route_from_evaluation,
         {
             "commit": "commit",
+            "generate_comparison": "generate_comparison",
             "human_gate": "human_gate",
             "fail": "fail",
         },
+    )
+    graph.add_conditional_edges(
+        "generate_comparison",
+        route_after_comparison,
+        {"human_gate": "human_gate", "fail": "fail"},
     )
     graph.add_edge("human_gate", END)
     graph.add_edge("commit", END)

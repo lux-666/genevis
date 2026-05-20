@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from app.control.lifecycle import (
     ResumeValidationError,
-    UnsupportedLifecycleOperationError,
     _decision_requirements_from_artifact,
     inspect_session,
     inspect_state,
@@ -326,12 +325,26 @@ class ReviewResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ResumeValidationError, "unknown"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_rerun_as_out_of_scope(self):
+    def test_resume_assembly_rejects_rerun_without_parameters(self):
         state = _assembly_blocked_state()
         state["active_interrupt"]["decisions_allowed"] = [*state["active_interrupt"]["decisions_allowed"], "rerun"]
         request = ResumeReviewRequest(session_id="s1", stage="assembly_review", decision="rerun")
 
-        with self.assertRaises(UnsupportedLifecycleOperationError):
+        with self.assertRaises(ResumeValidationError):
+            resume_review_state(state, request)
+
+    def test_resume_assembly_rejects_rerun_unknown_candidate(self):
+        state = _assembly_blocked_state()
+        state["active_interrupt"]["decisions_allowed"] = [*state["active_interrupt"]["decisions_allowed"], "rerun"]
+        request = ResumeReviewRequest(
+            session_id="s1",
+            stage="assembly_review",
+            decision="rerun",
+            candidate_id="unknown",
+            metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+        )
+
+        with self.assertRaisesRegex(ResumeValidationError, "unknown"):
             resume_review_state(state, request)
 
     def test_resume_assembly_stop_records_failed_terminal(self):

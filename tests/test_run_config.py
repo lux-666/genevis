@@ -236,6 +236,22 @@ class RunConfigSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate({"assembly_review": {"busco": {"lineage_path": "/x", "unknown": "x"}}})
 
+    def test_assembly_review_max_reruns_accepted(self):
+        cfg = RunConfig.model_validate({"assembly_review": {"max_reruns": 5}})
+        assert cfg.assembly_review is not None
+        self.assertEqual(cfg.assembly_review.max_reruns, 5)
+
+    def test_assembly_review_max_reruns_default(self):
+        cfg = RunConfig.model_validate({"assembly_review": {}})
+        assert cfg.assembly_review is not None
+        self.assertEqual(cfg.assembly_review.max_reruns, 3)
+
+    def test_assembly_review_max_reruns_out_of_range_rejected(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({"assembly_review": {"max_reruns": 0}})
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({"assembly_review": {"max_reruns": 11}})
+
     def test_function_annotation_database_provenance_accepted(self):
         cfg = RunConfig.model_validate({
             "function_annotation": {

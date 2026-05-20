@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
-from app.control.lifecycle import ResumeValidationError, UnsupportedLifecycleOperationError
+from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
@@ -26,6 +26,8 @@ from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
     ASSEMBLY_REVIEW_BUSCO_SUMMARY,
@@ -34,6 +36,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
     ASSEMBLY_REVIEW_QUAST_SUMMARY,
     ArtifactMeta,
+    AssemblyCandidateBundle,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
     AssemblyReviewActionArtifact,
@@ -1041,9 +1044,7 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
     ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
     candidates = ar_out.get("candidates") or []
     candidates_by_id = {candidate.get("candidate_id"): candidate for candidate in candidates}
-    allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review"}
-    if request.decision == "rerun":
-        raise UnsupportedLifecycleOperationError("rerun is not implemented by review resume")
+    allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"}
     if request.decision not in allowed:
         raise ResumeValidationError(f"unsupported assembly_review decision: {request.decision}")
 
@@ -1054,6 +1055,9 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         raise ResumeValidationError("assembly_review resume requires candidate_id")
     if request.candidate_id not in candidates_by_id:
         raise ResumeValidationError(f"unknown assembly_review candidate_id: {request.candidate_id}")
+
+    if request.decision == "rerun":
+        return _apply_rerun_decision(state, request)
 
     candidate_final_ref = candidates_by_id[request.candidate_id].get("final_assembly_ref")
     action_payload = _assembly_review_action_payload(request, candidate_final_ref)
@@ -1185,6 +1189,496 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         "stage_outputs": stage_outputs,
         "last_error": "assembly_review stopped by human review decision",
     }
+
+
+def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    """Execute a Flye rerun with adjusted parameters and re-enter assembly_review."""
+    from app.stages.assembly.nodes import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
+
+    stage_outputs = dict(state.get("stage_outputs") or {})
+    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    assembly_out = dict(stage_outputs.get("assembly") or {})
+    session_id = state["session_id"]
+    data_dir = absolute_data_dir(state)
+    ledger = Ledger(data_dir)
+
+    rerun_params = request.metadata.get("rerun_parameters")
+    if not isinstance(rerun_params, dict):
+        raise ResumeValidationError("rerun requires metadata.rerun_parameters dict")
+
+    params, error = _validate_rerun_flye_parameters(rerun_params, FLYE_READ_TYPE_FLAGS)
+    if error:
+        raise ResumeValidationError(f"rerun flye_parameters invalid: {error}")
+
+    max_reruns = ar_out.get("max_reruns", 3)
+    existing_refs = list(assembly_out.get("selected_candidate_refs") or [])
+    selected_rerun_indices = _rerun_indices_from_refs(existing_refs)
+    completed_rerun_count = len(selected_rerun_indices)
+    if completed_rerun_count >= max_reruns:
+        raise ResumeValidationError(
+            f"rerun limit reached ({completed_rerun_count}/{max_reruns}); "
+            "adjust max_reruns in run_config or accept a candidate"
+        )
+
+    input_ref = assembly_out.get("input_ref")
+    input_type = assembly_out.get("input_type")
+    if not input_ref:
+        raise ResumeValidationError("rerun requires assembly stage input_ref (no inventory rebuild)")
+
+    candidate_dir = data_dir / "artifacts" / "assembly" / session_id / "candidates"
+    read_type = params["read_type"]
+    genome_size = params["estimated_genome_size"]
+    threads = params["threads"]
+    rerun_index, existing_bundle_ref = _next_rerun_index(
+        data_dir,
+        session_id,
+        candidate_dir,
+        max_reruns=max_reruns,
+        selected_rerun_indices=selected_rerun_indices,
+    )
+    candidate_id = f"{session_id}:{FLYE_METHOD}:rerun_{rerun_index}"
+    working_dir = data_dir / "work" / "assembly" / session_id / f"flye_rerun_{rerun_index}"
+    flye_out_dir = working_dir / "flye_out"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"flye_rerun_{rerun_index}"
+    draft_assembly = artifact_dir / "draft_assembly.fasta"
+    script_path = working_dir / "run_flye.sh"
+    bundle_path = candidate_dir / f"flye_rerun_{rerun_index}_candidate.json"
+
+    if existing_bundle_ref is not None:
+        _load_completed_rerun_bundle_if_matching(
+            bundle_path,
+            session_id=session_id,
+            candidate_id=candidate_id,
+            method_name=FLYE_METHOD,
+            input_ref=input_ref,
+            input_type=input_type,
+            params=params,
+            source_candidate_id=request.candidate_id,
+            rerun_index=rerun_index,
+        )
+        if existing_bundle_ref not in existing_refs:
+            existing_refs = [*existing_refs, existing_bundle_ref]
+        assembly_out["selected_candidate_refs"] = existing_refs
+        preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
+        preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
+        stage_outputs["assembly"] = assembly_out
+        stage_outputs["assembly_review"] = preserved
+        return {
+            "current_stage": "assembly_review",
+            "supervision_state": "running_stage",
+            "active_interrupt": None,
+            "stage_outputs": stage_outputs,
+        }
+
+    ledger.record_event(session_id, "rerun_requested", {
+        "candidate_id": candidate_id,
+        "rerun_index": rerun_index,
+        "parameters": params,
+        "rerun_reason": request.metadata.get("rerun_reason"),
+        "source_candidate_id": request.candidate_id,
+    })
+
+    read_paths, read_error = _rerun_read_paths(input_ref, input_type)
+    if read_error:
+        ledger.record_event(session_id, "rerun_failed", {
+            "candidate_id": candidate_id, "error": read_error,
+        })
+        raise ResumeValidationError(f"rerun read path resolution failed: {read_error}")
+
+    env_spec, blocked = resolve_method_env(
+        assembly_out,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        ledger.record_event(session_id, "rerun_failed", {
+            "candidate_id": candidate_id, "error": "env_blocked",
+        })
+        raise ResumeValidationError("rerun blocked on environment resolution")
+
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    read_flag = FLYE_READ_TYPE_FLAGS[read_type]
+    reads_arg = " ".join(shlex.quote(str(p)) for p in read_paths)
+    script_path.write_text(
+        "set -e\n"
+        f"flye {read_flag} {reads_arg}"
+        f" --out-dir {shlex.quote(str(flye_out_dir))}"
+        f" --genome-size {shlex.quote(str(genome_size))}"
+        f" --threads {threads}\n"
+        f"test -f {shlex.quote(str(flye_out_dir / 'assembly.fasta'))}\n"
+        f"cp {shlex.quote(str(flye_out_dir / 'assembly.fasta'))} {shlex.quote(str(draft_assembly))}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:assembly:flye:rerun_{rerun_index}",
+        "session_id": session_id,
+        "stage": "assembly",
+        "method_name": FLYE_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [draft_assembly],
+        "env": {str(k): str(v) for k, v in (assembly_out.get("env") or {}).items()},
+        "metadata": {
+            "input_ref": input_ref,
+            "input_type": input_type,
+            "read_paths": [str(p) for p in read_paths],
+            "read_profile": read_type,
+            "estimated_genome_size": genome_size,
+            "threads": threads,
+            "flye_output_dir": str(flye_out_dir),
+            "draft_assembly_path": str(draft_assembly),
+            "rerun_index": rerun_index,
+            "source_candidate_id": request.candidate_id,
+        },
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
+
+    ledger.create_session(session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(session_id, attempt)
+    result = LocalRunner().run(attempt)
+
+    if not result.success:
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error_msg = stderr.strip() or f"flye rerun failed with return code {result.return_code}"
+        ledger.record_attempt_failed(session_id, attempt, return_code=result.return_code, error=error_msg)
+        ledger.record_event(session_id, "rerun_failed", {
+            "candidate_id": candidate_id, "error": error_msg, "rerun_index": rerun_index,
+        })
+        raise ResumeValidationError(f"rerun Flye execution failed: {error_msg}")
+
+    if not draft_assembly.exists():
+        error_msg = f"rerun Flye draft assembly missing: {draft_assembly}"
+        ledger.record_attempt_failed(session_id, attempt, return_code=0, error=error_msg)
+        ledger.record_event(session_id, "rerun_failed", {
+            "candidate_id": candidate_id, "error": error_msg,
+        })
+        raise ResumeValidationError(error_msg)
+
+    artifacts = [
+        ArtifactMeta.from_file(
+            draft_assembly,
+            stage="assembly",
+            method_name=FLYE_METHOD,
+            artifact_type="assembly.draft_assembly",
+            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id, "rerun_index": rerun_index},
+        )
+    ]
+    for path, artifact_type in [
+        (result.stdout_path, "command.stdout"),
+        (result.stderr_path, "command.stderr"),
+    ]:
+        if path.exists():
+            artifacts.append(ArtifactMeta.from_file(
+                path, stage="assembly", method_name=FLYE_METHOD, artifact_type=artifact_type,
+                metadata={"attempt_id": attempt.attempt_id, "rerun_index": rerun_index},
+            ))
+
+    append_artifact_records(data_dir, session_id, artifacts)
+    artifact_payloads = [a.model_dump(mode="json") for a in artifacts]
+    ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
+    for a in artifact_payloads:
+        ledger.record_artifact_registered(session_id, a, attempt_id=attempt.attempt_id)
+
+    bundle = AssemblyCandidateBundle(
+        session_id=session_id,
+        candidate_id=candidate_id,
+        method_name=FLYE_METHOD,
+        status="executed",
+        input_ref=str(input_ref),
+        input_type=str(input_type),
+        genome_size_prior=assembly_out.get("genome_size_prior"),
+        expected_outputs={"draft_assembly_fasta": str(draft_assembly)},
+        logs={"stdout": str(result.stdout_path), "stderr": str(result.stderr_path)},
+        metadata={
+            "execution_enabled": True,
+            "execution_mode": "local",
+            "attempt_id": attempt.attempt_id,
+            "draft_assembly_artifact_ref": str(draft_assembly),
+            "draft_assembly_ref_status": "materialized",
+            "read_profile": read_type,
+            "estimated_genome_size": genome_size,
+            "threads": threads,
+            "rerun_index": rerun_index,
+            "source_candidate_id": request.candidate_id,
+            "rerun_reason": request.metadata.get("rerun_reason"),
+        },
+    )
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    bundle_artifact = ArtifactMeta.from_file(
+        bundle_path, stage="assembly", method_name=FLYE_METHOD,
+        artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        metadata={"candidate_id": candidate_id, "execution_enabled": True, "rerun_index": rerun_index},
+    )
+    append_artifact_records(data_dir, session_id, [bundle_artifact])
+    ledger.record_artifact_registered(session_id, bundle_artifact.model_dump(mode="json"), attempt_id=attempt.attempt_id)
+
+    bundle_ref = str(bundle_path)
+    updated_refs = existing_refs if bundle_ref in existing_refs else [*existing_refs, bundle_ref]
+    assembly_out["selected_candidate_refs"] = updated_refs
+
+    ledger.record_event(session_id, "rerun_completed", {
+        "candidate_id": candidate_id,
+        "rerun_index": rerun_index,
+        "parameters": params,
+        "draft_assembly_ref": str(draft_assembly),
+        "bundle_ref": str(bundle_path),
+    })
+
+    preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
+    preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
+
+    stage_outputs["assembly"] = assembly_out
+    stage_outputs["assembly_review"] = preserved
+
+    return {
+        "current_stage": "assembly_review",
+        "supervision_state": "running_stage",
+        "active_interrupt": None,
+        "stage_outputs": stage_outputs,
+    }
+
+
+def _validate_rerun_flye_parameters(
+    params: dict[str, Any],
+    read_type_flags: dict[str, str],
+) -> tuple[dict[str, Any], str | None]:
+    read_type = params.get("read_type")
+    if not read_type or read_type not in read_type_flags:
+        return {}, f"read_type must be one of {sorted(read_type_flags)}"
+    raw_genome_size = params.get("estimated_genome_size")
+    try:
+        genome_size = int(raw_genome_size)
+    except (TypeError, ValueError):
+        return {}, "estimated_genome_size must be a positive integer"
+    if genome_size <= 0:
+        return {}, "estimated_genome_size must be a positive integer"
+    raw_threads = params.get("threads")
+    try:
+        threads = int(raw_threads)
+    except (TypeError, ValueError):
+        return {}, "threads must be a positive integer"
+    if threads <= 0:
+        return {}, "threads must be a positive integer"
+    return {"read_type": read_type, "estimated_genome_size": genome_size, "threads": threads}, None
+
+
+def _next_rerun_index(
+    data_dir: Path,
+    session_id: str,
+    candidate_dir: Path,
+    *,
+    max_reruns: int,
+    selected_rerun_indices: set[int],
+) -> tuple[int, str | None]:
+    index = 1
+    while index <= max_reruns:
+        if index in selected_rerun_indices:
+            index += 1
+            continue
+        bundle_path = candidate_dir / f"flye_rerun_{index}_candidate.json"
+        if bundle_path.exists():
+            return index, str(bundle_path)
+        working_dir = data_dir / "work" / "assembly" / session_id / f"flye_rerun_{index}"
+        artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"flye_rerun_{index}"
+        if working_dir.exists() or artifact_dir.exists():
+            index += 1
+            continue
+        return index, None
+    raise ResumeValidationError(
+        f"rerun limit reached ({max_reruns}/{max_reruns}); "
+        "adjust max_reruns in run_config or accept a candidate"
+    )
+
+
+def _rerun_indices_from_refs(refs: list[str]) -> set[int]:
+    indices: set[int] = set()
+    for ref in refs:
+        match = re.search(r"rerun_(\d+)", str(ref))
+        if match:
+            indices.add(int(match.group(1)))
+    return indices
+
+
+def _load_completed_rerun_bundle_if_matching(
+    bundle_path: Path,
+    *,
+    session_id: str,
+    candidate_id: str,
+    method_name: str,
+    input_ref: Any,
+    input_type: Any,
+    params: dict[str, Any],
+    source_candidate_id: str | None,
+    rerun_index: int,
+) -> dict[str, Any] | None:
+    if not bundle_path.exists():
+        return None
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ResumeValidationError(f"existing rerun bundle is invalid JSON: {bundle_path}") from exc
+
+    metadata = bundle.get("metadata") or {}
+    expected = {
+        "session_id": session_id,
+        "candidate_id": candidate_id,
+        "method_name": method_name,
+        "status": "executed",
+        "input_ref": str(input_ref),
+        "input_type": str(input_type),
+    }
+    for key, value in expected.items():
+        if bundle.get(key) != value:
+            raise ResumeValidationError(
+                f"existing rerun bundle conflicts with requested rerun ({key}: {bundle.get(key)!r} != {value!r})"
+            )
+    metadata_expected = {
+        "rerun_index": rerun_index,
+        "source_candidate_id": source_candidate_id,
+        "read_profile": params["read_type"],
+        "estimated_genome_size": params["estimated_genome_size"],
+        "threads": params["threads"],
+    }
+    for key, value in metadata_expected.items():
+        if metadata.get(key) != value:
+            raise ResumeValidationError(
+                f"existing rerun bundle conflicts with requested rerun (metadata.{key}: {metadata.get(key)!r} != {value!r})"
+            )
+
+    draft_ref = (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
+    if not draft_ref or not Path(str(draft_ref)).exists():
+        raise ResumeValidationError(f"existing rerun bundle is incomplete; draft assembly missing: {draft_ref}")
+    return bundle
+
+
+def _rerun_read_paths(input_ref: Any, input_type: Any) -> tuple[list[Path], str | None]:
+    if not input_ref:
+        return [], "rerun requires assembly input_ref"
+    if input_type == "long_reads.fofn":
+        fofn = Path(str(input_ref))
+        if not fofn.exists():
+            return [], f"rerun FOFN not found: {fofn}"
+        paths = [Path(line.strip()) for line in fofn.read_text(encoding="utf-8").splitlines() if line.strip()]
+    elif input_type == "clean_long_reads":
+        paths = [Path(str(input_ref))]
+    else:
+        return [], f"rerun does not support input_type: {input_type}"
+    if not paths:
+        return [], "rerun requires at least one read path"
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        return [], f"rerun read paths not found: {missing}"
+    return paths, None
+
+
+def generate_candidate_comparison(state: TopLevelState) -> dict:
+    """Generate a candidate comparison artifact when multiple candidates exist."""
+    stage_outputs = state.get("stage_outputs") or {}
+    ar_out = stage_outputs.get("assembly_review", {})
+    candidates = ar_out.get("candidates", [])
+
+    if len(candidates) < 2:
+        return {}
+
+    signals = ar_out.get("signals", [])
+    assembly_out = (state.get("stage_outputs") or {}).get("assembly", {})
+    comparison_candidates = []
+    for candidate in candidates:
+        candidate_id = candidate.get("candidate_id", "unknown")
+        entry = {
+            "candidate_id": candidate_id,
+            "method_name": candidate.get("method_name"),
+            "source": candidate.get("source"),
+            "status": candidate.get("status", "unknown"),
+            "parameters": _candidate_parameters(candidate, assembly_out),
+            "metrics": _candidate_metrics(candidate_id, signals),
+        }
+        comparison_candidates.append(entry)
+
+    comparison_payload = {
+        "session_id": state["session_id"],
+        "candidates": comparison_candidates,
+        "notes": ["thresholds_not_applied_without_human_approval"],
+    }
+    existing_ref = ar_out.get("candidate_comparison_ref")
+    if existing_ref and _json_artifact_payload_matches(existing_ref, comparison_payload):
+        return {}
+
+    comparison_ref = _write_json_artifact(
+        state,
+        "candidate_comparison.json",
+        comparison_payload,
+        artifact_type=ASSEMBLY_CANDIDATE_COMPARISON,
+    )
+
+    ledger = Ledger(state.get("data_dir", "data"))
+    ledger.record_event(state["session_id"], "candidate_comparison_generated", {
+        "candidate_ids": [c["candidate_id"] for c in comparison_candidates],
+        "candidate_count": len(comparison_candidates),
+        "comparison_artifact_ref": comparison_ref,
+    })
+
+    outputs = dict(stage_outputs)
+    outputs["assembly_review"] = {**ar_out, "candidate_comparison_ref": comparison_ref}
+    return {"stage_outputs": outputs}
+
+
+def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -> bool:
+    path = Path(str(artifact_ref))
+    if not path.exists():
+        return False
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return existing == payload
+
+
+
+def _candidate_parameters(candidate: dict[str, Any], assembly_out: dict[str, Any]) -> dict[str, Any]:
+    bundle_ref = candidate.get("bundle_ref")
+    if bundle_ref and Path(str(bundle_ref)).exists():
+        bundle = json.loads(Path(str(bundle_ref)).read_text(encoding="utf-8"))
+        metadata = bundle.get("metadata") or {}
+        params = {}
+        for key in ("read_profile", "estimated_genome_size", "threads", "rerun_index"):
+            if key in metadata:
+                params[key] = metadata[key]
+        if params:
+            return params
+    if candidate.get("source") == "assembly_stage":
+        return {
+            "read_profile": assembly_out.get("flye_parameters", {}).get("read_type"),
+            "estimated_genome_size": assembly_out.get("flye_parameters", {}).get("estimated_genome_size"),
+            "threads": assembly_out.get("flye_parameters", {}).get("threads"),
+        }
+    return {}
+
+
+def _candidate_metrics(candidate_id: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for signal in signals:
+        if signal.get("candidate_id") != candidate_id:
+            continue
+        if signal.get("status") != "available":
+            continue
+        signal_name = signal.get("signal_name")
+        signal_metrics = (signal.get("metadata") or {}).get("metrics")
+        if signal_name and signal_metrics:
+            metrics[signal_name] = signal_metrics
+    return metrics
 
 
 def fail_assembly_review(state: TopLevelState) -> dict:

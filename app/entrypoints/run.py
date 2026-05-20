@@ -269,9 +269,11 @@ def _run_session(args: argparse.Namespace) -> int:
         assembly_out = dict(stage_outputs.get("assembly") or {})
         assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump()
         stage_outputs["assembly"] = assembly_out
-    if run_config and run_config.assembly_review and run_config.assembly_review.busco:
+    if run_config and run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})
-        review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
+        if run_config.assembly_review.busco:
+            review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
+        review_out["max_reruns"] = run_config.assembly_review.max_reruns
         stage_outputs["assembly_review"] = review_out
     if run_config and run_config.review_policy:
         for review_stage in ["assembly_review", "hic_scaffolding"]:

@@ -1105,5 +1105,472 @@ class AssemblyReviewSchemaTests(unittest.TestCase):
         self.assertIn("stop_human_review", payload.decisions_allowed)
 
 
+class AssemblyRerunTests(unittest.TestCase):
+    """Tests for the assembly parameter loop (rerun from review gate)."""
+
+    def _build_blocked_state(self, tmpdir: str, *, rerun_count: int = 0) -> dict:
+        """Build a state that is blocked at the assembly_review human gate with a Flye candidate."""
+        session_id = "test-rerun-session"
+        assembly_fasta = Path(tmpdir) / "draft.fasta"
+        assembly_fasta.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        reads = Path(tmpdir) / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\nIIII\n", encoding="utf-8")
+        fofn = Path(tmpdir) / "long_reads.fofn"
+        fofn.write_text(str(reads) + "\n", encoding="utf-8")
+
+        candidate_id = f"{session_id}:assembly.candidate.flye"
+        bundle_path = Path(tmpdir) / "flye_candidate.json"
+        bundle_path.write_text(json.dumps({
+            "session_id": session_id,
+            "candidate_id": candidate_id,
+            "method_name": "assembly.candidate.flye",
+            "status": "executed",
+            "artifact_type": "draft_assembly.candidate",
+            "input_ref": str(fofn),
+            "input_type": "long_reads.fofn",
+            "expected_outputs": {"draft_assembly_fasta": str(assembly_fasta)},
+            "logs": {},
+            "metadata": {
+                "execution_enabled": True,
+                "execution_mode": "local",
+                "read_profile": "nano-raw",
+                "estimated_genome_size": 100000000,
+                "threads": 4,
+            },
+        }, indent=2), encoding="utf-8")
+
+        selected_refs = [str(bundle_path)]
+        for i in range(rerun_count):
+            rerun_bundle = Path(tmpdir) / f"flye_rerun_{i+1}_candidate.json"
+            rerun_bundle.write_text(json.dumps({
+                "session_id": session_id,
+                "candidate_id": f"{session_id}:assembly.candidate.flye:rerun_{i+1}",
+                "method_name": "assembly.candidate.flye",
+                "status": "executed",
+                "artifact_type": "draft_assembly.candidate",
+                "input_ref": str(fofn),
+                "input_type": "long_reads.fofn",
+                "expected_outputs": {"draft_assembly_fasta": str(assembly_fasta)},
+                "logs": {},
+                "metadata": {"rerun_index": i + 1},
+            }, indent=2), encoding="utf-8")
+            selected_refs.append(str(rerun_bundle))
+
+        state = initial_state(
+            session_id=session_id,
+            input_manifest_ref="inputs/manifest.yaml",
+            data_dir=tmpdir,
+        )
+        state["stage_outputs"] = {
+            "assembly": {
+                "status": "completed",
+                "input_ref": str(fofn),
+                "input_type": "long_reads.fofn",
+                "selected_candidate_refs": selected_refs,
+                "flye_parameters": {
+                    "read_type": "nano-raw",
+                    "estimated_genome_size": 100000000,
+                    "threads": 4,
+                },
+            },
+            "assembly_review": {
+                "status": "blocked_human",
+                "execution_mode": "local",
+                "env": {},
+                "quast_parameters": {"threads": 1},
+                "busco_parameters": {},
+                "candidates": [{
+                    "candidate_id": candidate_id,
+                    "method_name": "assembly.candidate.flye",
+                    "source": "assembly_stage",
+                    "bundle_ref": str(bundle_path),
+                    "final_assembly_ref": str(assembly_fasta),
+                }],
+            },
+        }
+        state["supervision_state"] = "blocked_human"
+        state["active_interrupt"] = {
+            "stage": "assembly_review",
+            "reason": "assembly_review_human_decision_required",
+            "decisions_allowed": ["pass", "accept", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"],
+            "candidates": state["stage_outputs"]["assembly_review"]["candidates"],
+        }
+        return state
+
+    def _fake_flye_bin(self, tmpdir: str, *, fail: bool = False, name: str = "bin") -> Path:
+        bin_dir = Path(tmpdir) / name
+        bin_dir.mkdir(exist_ok=True)
+        flye = bin_dir / "flye"
+        if fail:
+            flye.write_text("#!/bin/sh\necho flye failed >&2\nexit 1\n", encoding="utf-8")
+        else:
+            flye.write_text(
+                "#!/bin/sh\n"
+                "outdir=\"\"\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = \"--out-dir\" ]; then shift; outdir=\"$1\"; fi\n"
+                "  shift\n"
+                "done\n"
+                "mkdir -p \"$outdir\"\n"
+                "printf '>ctg1\\nACGTACGT\\n' > \"$outdir/assembly.fasta\"\n",
+                encoding="utf-8",
+            )
+        flye.chmod(0o755)
+        return bin_dir
+
+    def _rerun_request(self, state: dict, *, genome_size: int = 200000000, threads: int = 2):
+        from app.review.base import ResumeReviewRequest
+
+        return ResumeReviewRequest(
+            session_id=state["session_id"],
+            stage="assembly_review",
+            decision="rerun",
+            candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+            metadata={
+                "rerun_parameters": {
+                    "read_type": "nano-raw",
+                    "estimated_genome_size": genome_size,
+                    "threads": threads,
+                },
+                "rerun_reason": "try larger genome size",
+            },
+        )
+
+    def test_rerun_decision_validates_flye_parameters(self):
+        """Rerun with missing or invalid parameters is rejected."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            bad_cases = [
+                {},
+                {"read_type": "invalid", "estimated_genome_size": 100, "threads": 4},
+                {"read_type": "nano-raw", "estimated_genome_size": -1, "threads": 4},
+                {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 0},
+            ]
+            for params in bad_cases:
+                request = ResumeReviewRequest(
+                    session_id=state["session_id"],
+                    stage="assembly_review",
+                    decision="rerun",
+                    candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                    metadata={"rerun_parameters": params},
+                )
+                with self.assertRaises(ResumeValidationError):
+                    resume_review_state(state, request)
+
+    def test_rerun_requires_rerun_parameters_in_metadata(self):
+        """Rerun without metadata.rerun_parameters is rejected."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={},
+            )
+            with self.assertRaises(ResumeValidationError):
+                resume_review_state(state, request)
+
+    def test_rerun_creates_distinct_candidate_with_provenance(self):
+        """Rerun produces a new candidate; original candidate is preserved."""
+        from app.control.lifecycle import resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir)
+            state = self._build_blocked_state(tmpdir)
+            original_refs = list(state["stage_outputs"]["assembly"]["selected_candidate_refs"])
+
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={
+                    "rerun_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 200000000,
+                        "threads": 2,
+                    },
+                    "rerun_reason": "try larger genome size",
+                },
+            )
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                update = resume_review_state(state, request)
+
+            self.assertEqual(update["current_stage"], "assembly_review")
+            self.assertEqual(update["supervision_state"], "running_stage")
+            self.assertIsNone(update.get("active_interrupt"))
+
+            new_refs = update["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            self.assertEqual(len(new_refs), len(original_refs) + 1)
+            for ref in original_refs:
+                self.assertIn(ref, new_refs)
+
+            new_bundle_path = Path(new_refs[-1])
+            self.assertTrue(new_bundle_path.exists())
+            bundle = json.loads(new_bundle_path.read_text(encoding="utf-8"))
+            self.assertIn("rerun_1", bundle["candidate_id"])
+            self.assertEqual(bundle["metadata"]["estimated_genome_size"], 200000000)
+            self.assertEqual(bundle["metadata"]["rerun_index"], 1)
+            self.assertEqual(bundle["status"], "executed")
+
+    def test_rerun_replay_reuses_existing_completed_bundle_without_side_effects(self):
+        """Replaying stale checkpoint state reuses the completed rerun bundle."""
+        from app.control.ledger import Ledger
+        from app.control.lifecycle import resume_review_state
+        from app.execution.artifacts import read_artifact_records
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            success_bin = self._fake_flye_bin(tmpdir, name="bin_success")
+            fail_bin = self._fake_flye_bin(tmpdir, fail=True, name="bin_fail")
+            state = self._build_blocked_state(tmpdir)
+            request = self._rerun_request(state)
+
+            with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
+                first_update = resume_review_state(state, request)
+
+            first_refs = first_update["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            rerun_ref = first_refs[-1]
+            self.assertTrue(Path(rerun_ref).exists())
+            artifacts_before = read_artifact_records(tmpdir, state["session_id"])
+            events_before = Ledger(tmpdir).read_events(state["session_id"])
+
+            with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
+                replay_update = resume_review_state(state, request)
+
+            replay_refs = replay_update["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            self.assertEqual(replay_refs, first_refs)
+            self.assertEqual(replay_refs.count(rerun_ref), 1)
+            self.assertEqual(read_artifact_records(tmpdir, state["session_id"]), artifacts_before)
+            self.assertEqual(Ledger(tmpdir).read_events(state["session_id"]), events_before)
+
+    def test_rerun_replay_rejects_existing_bundle_with_different_parameters(self):
+        """A stale replay with changed parameters must not overwrite rerun_1."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir)
+            state = self._build_blocked_state(tmpdir)
+            request = self._rerun_request(state, genome_size=200000000)
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                resume_review_state(state, request)
+
+            conflicting_request = self._rerun_request(state, genome_size=150000000)
+            with self.assertRaises(ResumeValidationError) as ctx:
+                resume_review_state(state, conflicting_request)
+            self.assertIn("existing rerun bundle conflicts", str(ctx.exception))
+
+    def test_rerun_after_failed_attempt_uses_next_index(self):
+        """Failed rerun output does not block the next parameter adjustment."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fail_bin = self._fake_flye_bin(tmpdir, fail=True, name="bin_fail")
+            success_bin = self._fake_flye_bin(tmpdir, name="bin_success")
+            state = self._build_blocked_state(tmpdir)
+
+            with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
+                with self.assertRaises(ResumeValidationError):
+                    resume_review_state(state, self._rerun_request(state, genome_size=150000000))
+
+            with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
+                update = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
+
+            rerun_ref = update["stage_outputs"]["assembly"]["selected_candidate_refs"][-1]
+            self.assertIn("flye_rerun_2_candidate.json", rerun_ref)
+            bundle = json.loads(Path(rerun_ref).read_text(encoding="utf-8"))
+            self.assertIn("rerun_2", bundle["candidate_id"])
+            self.assertEqual(bundle["metadata"]["rerun_index"], 2)
+
+    def test_rerun_after_failed_then_successful_attempt_uses_next_free_index(self):
+        """A selected rerun after a failed attempt does not get mistaken for stale replay."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fail_bin = self._fake_flye_bin(tmpdir, fail=True, name="bin_fail")
+            success_bin = self._fake_flye_bin(tmpdir, name="bin_success")
+            state = self._build_blocked_state(tmpdir)
+
+            with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
+                with self.assertRaises(ResumeValidationError):
+                    resume_review_state(state, self._rerun_request(state, genome_size=150000000))
+
+            with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
+                first_success = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
+
+            state["stage_outputs"]["assembly"]["selected_candidate_refs"] = first_success["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
+                second_success = resume_review_state(state, self._rerun_request(state, genome_size=250000000))
+
+            rerun_ref = second_success["stage_outputs"]["assembly"]["selected_candidate_refs"][-1]
+            self.assertIn("flye_rerun_3_candidate.json", rerun_ref)
+            bundle = json.loads(Path(rerun_ref).read_text(encoding="utf-8"))
+            self.assertIn("rerun_3", bundle["candidate_id"])
+            self.assertEqual(bundle["metadata"]["estimated_genome_size"], 250000000)
+
+    def test_rerun_rejects_unknown_source_candidate(self):
+        """Rerun provenance must point to a known review candidate."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir)
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id="unknown",
+                metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+            )
+
+            with self.assertRaisesRegex(ResumeValidationError, "unknown assembly_review candidate_id"):
+                resume_review_state(state, request)
+
+    def test_rerun_does_not_restart_from_inventory(self):
+        """Rerun reuses assembly input_ref; does not touch inventory."""
+        from app.control.lifecycle import resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir)
+            state = self._build_blocked_state(tmpdir)
+            original_input_ref = state["stage_outputs"]["assembly"]["input_ref"]
+
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 150000000, "threads": 1}},
+            )
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                update = resume_review_state(state, request)
+
+            self.assertEqual(update["stage_outputs"]["assembly"]["input_ref"], original_input_ref)
+            self.assertNotIn("inventory", update.get("route_trace", []))
+
+    def test_rerun_bounded_by_max_reruns(self):
+        """Exceeding max_reruns raises validation error."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir, rerun_count=3)
+            state["stage_outputs"]["assembly_review"]["max_reruns"] = 3
+
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+            )
+            with self.assertRaises(ResumeValidationError) as ctx:
+                resume_review_state(state, request)
+            self.assertIn("rerun limit", str(ctx.exception))
+
+    def test_rerun_failed_assembly_does_not_discard_prior_candidates(self):
+        """A failed rerun raises but does not modify prior candidate refs."""
+        from app.control.lifecycle import ResumeValidationError, resume_review_state
+        from app.review.base import ResumeReviewRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir, fail=True)
+            state = self._build_blocked_state(tmpdir)
+            original_refs = list(state["stage_outputs"]["assembly"]["selected_candidate_refs"])
+
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+            )
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                with self.assertRaises(ResumeValidationError):
+                    resume_review_state(state, request)
+
+            self.assertEqual(
+                state["stage_outputs"]["assembly"]["selected_candidate_refs"],
+                original_refs,
+            )
+
+    def test_candidate_comparison_replay_reuses_existing_artifact(self):
+        """Comparison generation is idempotent when candidates and signals are unchanged."""
+        from app.control.ledger import Ledger
+        from app.execution.artifacts import read_artifact_records
+        from app.stages.assembly_review.nodes import generate_candidate_comparison
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._build_blocked_state(tmpdir, rerun_count=1)
+            candidates = []
+            for ref in state["stage_outputs"]["assembly"]["selected_candidate_refs"]:
+                bundle = json.loads(Path(ref).read_text(encoding="utf-8"))
+                bundle["bundle_ref"] = ref
+                bundle["source"] = "assembly_stage"
+                bundle["final_assembly_ref"] = bundle["expected_outputs"]["draft_assembly_fasta"]
+                candidates.append(bundle)
+            state["stage_outputs"]["assembly_review"] = {
+                **state["stage_outputs"]["assembly_review"],
+                "candidates": candidates,
+                "signals": [],
+            }
+
+            first_update = generate_candidate_comparison(state)
+            first_ref = first_update["stage_outputs"]["assembly_review"]["candidate_comparison_ref"]
+            merged = {**state, "stage_outputs": first_update["stage_outputs"]}
+            artifacts_before = read_artifact_records(tmpdir, state["session_id"])
+            events_before = Ledger(tmpdir).read_events(state["session_id"])
+            mtime_before = Path(first_ref).stat().st_mtime_ns
+
+            replay_update = generate_candidate_comparison(merged)
+
+            self.assertEqual(replay_update, {})
+            self.assertEqual(Path(first_ref).stat().st_mtime_ns, mtime_before)
+            self.assertEqual(read_artifact_records(tmpdir, state["session_id"]), artifacts_before)
+            self.assertEqual(Ledger(tmpdir).read_events(state["session_id"]), events_before)
+
+    def test_rerun_generates_candidate_comparison_artifact(self):
+        """After rerun re-enters assembly_review, comparison artifact is generated for 2+ candidates."""
+        from app.review.base import ResumeReviewRequest
+        from app.control.lifecycle import resume_review_state
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir)
+            state = self._build_blocked_state(tmpdir)
+
+            request = ResumeReviewRequest(
+                session_id=state["session_id"],
+                stage="assembly_review",
+                decision="rerun",
+                candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
+                metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 200000000, "threads": 2}},
+            )
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                update = resume_review_state(state, request)
+
+            merged = {**state, **update}
+            # Clear execution_mode so graph skips QUAST/BUSCO (no tools in test env)
+            merged["stage_outputs"]["assembly_review"].pop("execution_mode", None)
+            graph = build_stage()
+            result = graph.invoke(merged)
+
+            ar_out = result["stage_outputs"]["assembly_review"]
+            self.assertIn("candidate_comparison_ref", ar_out)
+            comparison_path = Path(ar_out["candidate_comparison_ref"])
+            self.assertTrue(comparison_path.exists())
+            comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(comparison["candidates"]), 2)
+            self.assertIn("thresholds_not_applied_without_human_approval", comparison["notes"])
+
+
 if __name__ == "__main__":
     unittest.main()

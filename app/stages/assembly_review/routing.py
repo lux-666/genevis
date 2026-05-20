@@ -78,6 +78,10 @@ def route_from_evaluation(state: TopLevelState) -> str:
     if ar_out.get("deterministic_safe"):
         return "commit"
 
+    candidates = ar_out.get("candidates", [])
+    if len(candidates) >= 2:
+        return "generate_comparison"
+
     if ar_out.get("needs_human"):
         return "human_gate"
 
@@ -87,3 +91,11 @@ def route_from_evaluation(state: TopLevelState) -> str:
         return "human_gate"
 
     return "fail"
+
+
+def route_after_comparison(state: TopLevelState) -> str:
+    """Route after generating candidate comparison."""
+    ar_out = _output(state)
+    if ar_out.get("status") in FAIL_STATUSES:
+        return "fail"
+    return "human_gate"
