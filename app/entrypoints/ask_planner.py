@@ -397,7 +397,7 @@ def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
                 roles[stage] = "dependency"
         else:
             method = (plan.selected_methods or {}).get(stage)
-            if method and method in {m for methods in [_ASSEMBLY_PLANNED_METHODS] for m in methods}:
+            if method and method in _ASSEMBLY_PLANNED_METHODS:
                 roles[stage] = "planned_only"
             elif stage not in selected:
                 roles[stage] = "dependency"
