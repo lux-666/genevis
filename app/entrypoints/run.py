@@ -371,6 +371,9 @@ def _run_ask(args: argparse.Namespace) -> int:
     from app.entrypoints.intent import parse_request_with_llm
     from app.entrypoints.manifest_materializer import materialize_entry_manifest
 
+    if not getattr(args, "request_text", None):
+        print("error: request_text is required for gene-agent ask", file=sys.stderr)
+        return 1
     data_dir = args.data_dir or "data"
     defaults = {
         "session_id": args.session_id or generate_session_id(data_dir),
