@@ -121,6 +121,30 @@ class IntentParsingTests(unittest.TestCase):
             with self.subTest(asset_type_hint=asset_type_hint):
                 self.assertIn(asset_type_hint, system_prompt)
 
+    def test_intent_prompt_describes_cyclone_fasta_raw_read_rules(self):
+        system_prompt = load_prompt_bundle("intent.parse").system
+
+        self.assertIn("cyclone文件", system_prompt)
+        self.assertIn("cycloneseq", system_prompt)
+        self.assertIn("raw_long_reads", system_prompt)
+        self.assertIn(".fasta", system_prompt)
+
+    def test_cyclone_nanopore_fasta_raw_reads_parse_result_is_valid(self):
+        request = parse_intent_response(
+            json.dumps(
+                {
+                    "command": "run",
+                    "source_paths": ["/data/work/genevis/data/bht.Nanopore.pass.fa"],
+                    "platform": "cycloneseq",
+                    "asset_type_hint": "raw_long_reads",
+                }
+            )
+        )
+
+        self.assertEqual(request.source_paths, ["/data/work/genevis/data/bht.Nanopore.pass.fa"])
+        self.assertEqual(request.platform, "cycloneseq")
+        self.assertEqual(request.asset_type_hint, "raw_long_reads")
+
     def test_blank_session_id_is_rejected_when_explicit(self):
         with self.assertRaisesRegex(ValueError, "session_id"):
             EntryRequest(session_id="", manifest="inputs/manifest.yaml")

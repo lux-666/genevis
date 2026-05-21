@@ -11,13 +11,15 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from typing import get_args
 from unittest.mock import patch
 
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_resolver import PreflightResult
-from app.entrypoints.run import _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.entry import EntryRequest
+from app.schemas.run_config import LocalExecStage
 
 
 class _FakeGraph:
@@ -72,6 +74,19 @@ def _write_assembly_review_request(data_dir: Path, session_id: str) -> Path:
 
 
 class EntrypointTests(unittest.TestCase):
+    def _ask_namespace(self, **overrides):
+        base = dict(
+            request_text="use manifest",
+            session_id=None,
+            data_dir=None,
+            local_exec=[],
+            run_config=None,
+            checkpointer=None,
+            flye_threads=4,
+        )
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
     def test_stages_flag_is_not_exposed_until_routing_semantics_exist(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
@@ -95,6 +110,34 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(args.request_text, "use inputs/manifest.yaml to start s1")
         self.assertEqual(args.session_id, "s1")
         self.assertEqual(args.data_dir, "out")
+
+    def test_local_exec_parser_choices_match_run_config_schema(self):
+        schema_choices = set(get_args(LocalExecStage))
+        cli_choices = set(_LOCAL_EXEC_STAGE_CHOICES)
+
+        self.assertEqual(cli_choices, schema_choices)
+
+    def test_ask_args_accept_execution_flags(self):
+        args = _parse_args([
+            "ask",
+            "run reads",
+            "--local-exec",
+            "read_qc",
+            "--local-exec",
+            "assembly",
+            "--run-config",
+            "run_config.json",
+            "--checkpointer",
+            "sqlite",
+            "--flye-threads",
+            "8",
+        ])
+
+        self.assertEqual(args.command, "ask")
+        self.assertEqual(args.local_exec, ["read_qc", "assembly"])
+        self.assertEqual(args.run_config, "run_config.json")
+        self.assertEqual(args.checkpointer, "sqlite")
+        self.assertEqual(args.flye_threads, 8)
 
     def test_inspect_args_parse_session_id(self):
         args = _parse_args(["inspect", "--session-id", "s1", "--data-dir", "out"])
@@ -447,7 +490,7 @@ class EntrypointTests(unittest.TestCase):
             ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text="use manifest", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text="use manifest", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 1)
@@ -476,7 +519,7 @@ class EntrypointTests(unittest.TestCase):
             ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text="use manifest", session_id="default", data_dir=str(root / "default_data")),
+                    self._ask_namespace(request_text="use manifest", session_id="default", data_dir=str(root / "default_data")),
                 )
 
             self.assertEqual(code, 0)
@@ -509,7 +552,7 @@ class EntrypointTests(unittest.TestCase):
             ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text=f"use {assembly}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text=f"use {assembly}", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 0)
@@ -521,6 +564,42 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("assembly_fasta_registered", text)
             self.assertIn(str(assembly), text)
             self.assertIn("session_id: s1", text)
+            self.assertIn("session_id: s1", stdout)
+
+    def test_ask_materializes_cyclone_fasta_as_raw_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "bht.Nanopore.pass.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            request = EntryRequest(
+                session_id="s1",
+                source_paths=[str(reads)],
+                data_dir=str(root / "data"),
+                platform="cycloneseq",
+                asset_type_hint="raw_long_reads",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            captured = {}
+
+            def fake_initial_state(**kwargs):
+                captured.update(kwargs)
+                return {"session_id": kwargs["session_id"]}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text=f"帮我跑一下这个 cyclone文件：{reads}", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            manifest = Path(captured["input_manifest_ref"])
+            text = manifest.read_text(encoding="utf-8")
+            self.assertIn("raw_long_reads", text)
+            self.assertIn("cycloneseq", text)
+            self.assertIn(str(reads), text)
             self.assertIn("session_id: s1", stdout)
 
     def test_ask_materializes_hic_alignment_bam_manifest_before_run(self):
@@ -541,7 +620,7 @@ class EntrypointTests(unittest.TestCase):
             ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text=f"use {hic_bam}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text=f"use {hic_bam}", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 0)
@@ -569,7 +648,7 @@ class EntrypointTests(unittest.TestCase):
             ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text=f"use {bam}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text=f"use {bam}", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 0)
@@ -600,7 +679,7 @@ class EntrypointTests(unittest.TestCase):
             ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text=f"use {reads_dir}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text=f"use {reads_dir}", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 0)
@@ -612,6 +691,332 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn(str(read1), text)
             self.assertIn(str(read2), text)
             self.assertIn("session_id: s1", stdout)
+
+    def test_ask_auto_generates_run_config_for_raw_long_reads_with_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "bht.Nanopore.pass.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            request = EntryRequest(
+                session_id="s1",
+                source_paths=[str(reads)],
+                data_dir=str(root / "data"),
+                platform="cycloneseq",
+                asset_type_hint="raw_long_reads",
+                genome_size_estimate=2_000_000,
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(
+                        request_text=f"帮我跑一下这个 cyclone文件：{reads}，基因组大小约 2000000",
+                        data_dir=str(root / "data"),
+                        flye_threads=6,
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            config_path = root / "data" / "run_configs" / "s1" / "ask_run_config.json"
+            self.assertTrue(config_path.exists())
+            self.assertFalse((root / "data" / "manifests" / "s1" / "ask_run_config.json").exists())
+            self.assertIn(f"run_config_ref: {config_path.resolve(strict=False)}", stdout)
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["local_exec"], ["read_qc", "assembly"])
+            self.assertEqual(
+                payload["assembly"]["flye_parameters"],
+                {"read_type": "nano-raw", "estimated_genome_size": 2_000_000, "threads": 6},
+            )
+            stage_outputs = graph.invocations[0][0]["stage_outputs"]
+            self.assertEqual(stage_outputs["read_qc"]["execution_mode"], "local")
+            self.assertEqual(stage_outputs["assembly"]["execution_mode"], "local")
+            self.assertEqual(stage_outputs["assembly"]["flye_parameters"], payload["assembly"]["flye_parameters"])
+
+    def test_ask_auto_run_config_uses_manifest_genome_size_when_request_omits_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "reads.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fasta\n    platform: cycloneseq\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            config_path = root / "data" / "run_configs" / "s1" / "ask_run_config.json"
+            self.assertTrue(config_path.exists())
+            self.assertIn(f"run_config_ref: {config_path.resolve(strict=False)}", stdout)
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["assembly"]["flye_parameters"]["estimated_genome_size"], 3_000_000)
+
+    def test_ask_auto_run_config_ignores_non_raw_long_read_platforms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "short.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_short_dna_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertNotIn("run_config_ref", stdout)
+            self.assertFalse((root / "data" / "run_configs" / "s1" / "ask_run_config.json").exists())
+            self.assertEqual(graph.invocations[0][0].get("stage_outputs"), {})
+
+    def test_ask_explicit_local_assembly_rejects_non_raw_long_read_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "short.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_short_dna_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph"
+            ) as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data"), local_exec=["assembly"]),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("no raw_long_reads", stderr)
+            build_graph.assert_not_called()
+
+    def test_ask_flye_read_type_uses_raw_long_read_platform_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            long_reads = root / "reads.bam"
+            short_reads = root / "short.fastq"
+            long_reads.write_text("bam", encoding="utf-8")
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {long_reads}\n    format: bam\n    platform: clr\n  - asset_type: raw_short_dna_reads\n    paths:\n      - {short_reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, _stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            config_path = root / "data" / "run_configs" / "s1" / "ask_run_config.json"
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["assembly"]["flye_parameters"]["read_type"], "pacbio-raw")
+
+    def test_ask_genome_size_conflict_does_not_auto_generate_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "reads.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fasta\n    platform: cycloneseq\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(
+                session_id="s1",
+                manifest=str(manifest),
+                data_dir=str(root / "data"),
+                genome_size_estimate=2_000_000,
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertNotIn("run_config_ref", stdout)
+            self.assertFalse((root / "data" / "run_configs" / "s1" / "ask_run_config.json").exists())
+
+    def test_ask_explicit_local_assembly_rejects_genome_size_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "reads.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 3000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fasta\n    platform: cycloneseq\n",
+                encoding="utf-8",
+            )
+            request = EntryRequest(
+                session_id="s1",
+                manifest=str(manifest),
+                data_dir=str(root / "data"),
+                genome_size_estimate=2_000_000,
+            )
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph"
+            ) as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text="use manifest", data_dir=str(root / "data"), local_exec=["assembly"]),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("conflicts", stderr)
+            build_graph.assert_not_called()
+
+    def test_ask_without_genome_size_starts_without_auto_local_assembly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "bht.Nanopore.pass.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            request = EntryRequest(
+                session_id="s1",
+                source_paths=[str(reads)],
+                data_dir=str(root / "data"),
+                platform="cycloneseq",
+                asset_type_hint="raw_long_reads",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(request_text=f"帮我跑一下这个 cyclone文件：{reads}", data_dir=str(root / "data")),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertNotIn("run_config_ref", stdout)
+            self.assertFalse((root / "data" / "run_configs" / "s1" / "ask_run_config.json").exists())
+            self.assertEqual(graph.invocations[0][0].get("stage_outputs"), {})
+
+    def test_ask_explicit_local_assembly_requires_genome_size_or_run_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "bht.Nanopore.pass.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            request = EntryRequest(
+                session_id="s1",
+                source_paths=[str(reads)],
+                data_dir=str(root / "data"),
+                platform="cycloneseq",
+                asset_type_hint="raw_long_reads",
+            )
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph"
+            ) as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(
+                        request_text=f"local assembly for {reads}",
+                        data_dir=str(root / "data"),
+                        local_exec=["assembly"],
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("genome_size_estimate", stderr)
+            build_graph.assert_not_called()
+
+    def test_ask_passes_explicit_run_config_and_checkpointer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8")
+            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
+                "app.entrypoints.run.build_graph", return_value=graph
+            ) as build_graph, patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+                code, stdout, stderr = _capture_cli(
+                    _run_ask,
+                    self._ask_namespace(
+                        request_text="use manifest",
+                        session_id="s1",
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                        checkpointer="sqlite",
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertIn("checkpoint_persistence: sqlite", stdout)
+            self.assertIn(f"run_config_ref: {config_path.resolve(strict=False)}", stdout)
+            build_graph.assert_called_once()
+            self.assertEqual(build_graph.call_args.kwargs["backend"], "sqlite")
+            self.assertEqual(graph.invocations[0][0]["stage_outputs"]["read_qc"]["execution_mode"], "local")
 
     def test_ask_rejects_unsupported_source_file_before_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -625,7 +1030,7 @@ class EntrypointTests(unittest.TestCase):
             ) as build_graph:
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    argparse.Namespace(request_text=f"use {notes}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(request_text=f"use {notes}", session_id=None, data_dir=str(root / "data")),
                 )
 
             self.assertEqual(code, 1)
@@ -639,7 +1044,7 @@ class EntrypointTests(unittest.TestCase):
         ) as build_graph:
             code, stdout, stderr = _capture_cli(
                 _run_ask,
-                argparse.Namespace(request_text="resume s1", session_id=None, data_dir=None),
+                self._ask_namespace(request_text="resume s1", session_id=None, data_dir=None),
             )
 
         self.assertEqual(code, 1)

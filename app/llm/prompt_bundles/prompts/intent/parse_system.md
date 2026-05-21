@@ -27,6 +27,10 @@ Rules:
 - Use data_dir "data" unless a data directory is explicitly provided or present in defaults.
 - Extract only stable hints that map to the manifest schema: sample_id, platform, asset_type_hint, target_assembly_level, genome_size_estimate.
 - Use asset_type_hint "hic_alignment_bam" when the user explicitly says a BAM or CRAM is a Hi-C alignment.
+- If the user explicitly mentions CycloneSEQ, cyclone sequencing, or cyclone文件, use platform "cycloneseq".
+- If a `.fa`, `.fasta`, or `.fna` path is described as raw sequencing reads, Nanopore, CycloneSEQ, cyclone, or a sequencing file to run, use asset_type_hint "raw_long_reads".
+- If a `.fa`, `.fasta`, or `.fna` path is described as an existing genome assembly or assembled genome, use or allow asset_type_hint "assembly_fasta_registered".
+- Only include genome_size_estimate when the user explicitly provides it.
 - Use platform "unknown" when the platform is not explicit.
 - Do not invent asset types, paths, genome sizes, database versions, method choices, thresholds, or review decisions.
 - Do not include stages, requested stages, method names, thresholds, database choices, review decisions, retry/rerun instructions, or resume state.

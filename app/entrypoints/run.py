@@ -11,15 +11,29 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, get_args
 
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
-from app.schemas.run_config import RunConfig, load_run_config
+from app.schemas.manifest import InputManifest
+from app.schemas.run_config import LocalExecStage, RunConfig, load_run_config
 from app.schemas.state import initial_state
+
+
+_LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
+
+
+@dataclass(frozen=True)
+class AskAutoRunFacts:
+    raw_long_read_platforms: set[str]
+    genome_size_estimate: int | None
+    read_type: str | None
+    reason_not_auto_runnable: str | None
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,14 +49,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         default=[],
         metavar="STAGE",
-        choices=[
-            "read_qc",
-            "genome_survey",
-            "assembly",
-            "assembly_review",
-            "hic_scaffolding",
-            "repeat_annotation",
-        ],
+        choices=_LOCAL_EXEC_STAGE_CHOICES,
         help=(
             "Opt a stage into local execution by seeding "
             "stage_outputs[STAGE].execution_mode=local. Repeat the flag to "
@@ -75,6 +82,35 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ask_parser.add_argument("request_text", help="Natural-language workflow-start request")
     ask_parser.add_argument("--session-id", help="Default session identifier if omitted from the request")
     ask_parser.add_argument("--data-dir", help="Default output data directory if omitted from the request")
+    ask_parser.add_argument(
+        "--local-exec",
+        action="append",
+        default=[],
+        metavar="STAGE",
+        choices=_LOCAL_EXEC_STAGE_CHOICES,
+        help=(
+            "Opt a stage into local execution after the natural-language "
+            "request is materialized. Repeat the flag to enable multiple stages."
+        ),
+    )
+    ask_parser.add_argument(
+        "--run-config",
+        dest="run_config",
+        default=None,
+        help="Path to a JSON run-config file to use after ask materializes the manifest.",
+    )
+    ask_parser.add_argument(
+        "--checkpointer",
+        choices=["sqlite", "memory"],
+        default=None,
+        help="Checkpoint backend for the structured run launched by ask.",
+    )
+    ask_parser.add_argument(
+        "--flye-threads",
+        type=int,
+        default=4,
+        help="Threads for ask-generated Flye parameters when auto-enabling local assembly.",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a workflow session from durable records")
     inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
@@ -320,6 +356,9 @@ def _run_session(args: argparse.Namespace) -> int:
         print(f"asset_registry_ref: {registry_ref}")
     if stage_plan_ref:
         print(f"stage_plan_ref: {stage_plan_ref}")
+    if run_config_path:
+        run_config_ref = Path(run_config_path).expanduser().resolve(strict=False)
+        print(f"run_config_ref: {run_config_ref}")
 
     if supervision == "failed_terminal":
         print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
@@ -344,11 +383,123 @@ def _run_ask(args: argparse.Namespace) -> int:
         return 1
     try:
         request = materialize_entry_manifest(request)
+        argv = _ask_run_argv(request, args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    structured_args = _parse_args(request.to_cli_argv())
+    structured_args = _parse_args(argv)
     return _run_session(structured_args)
+
+
+def _ask_run_argv(request: EntryRequest, args: argparse.Namespace) -> list[str]:
+    argv = request.to_cli_argv()
+    generated_config = _maybe_write_auto_ask_run_config(request, args)
+    if generated_config:
+        argv.extend(["--run-config", generated_config])
+    elif getattr(args, "run_config", None):
+        argv.extend(["--run-config", args.run_config])
+
+    if not generated_config:
+        for stage in getattr(args, "local_exec", []) or []:
+            argv.extend(["--local-exec", stage])
+
+    if getattr(args, "checkpointer", None):
+        argv.extend(["--checkpointer", args.checkpointer])
+    return argv
+
+
+def _maybe_write_auto_ask_run_config(request: EntryRequest, args: argparse.Namespace) -> str | None:
+    if getattr(args, "run_config", None):
+        return None
+    local_exec = list(getattr(args, "local_exec", []) or [])
+    facts = _resolve_ask_auto_run_facts(request)
+    wants_local_assembly = "assembly" in local_exec
+
+    if wants_local_assembly and facts.reason_not_auto_runnable:
+        raise ValueError(
+            "ask local assembly cannot auto-generate Flye parameters: "
+            f"{facts.reason_not_auto_runnable}; pass --run-config or provide raw_long_reads, "
+            "genome_size_estimate, and a supported long-read platform"
+        )
+    if local_exec and not wants_local_assembly:
+        return None
+    if facts.reason_not_auto_runnable:
+        return None
+
+    flye_threads = getattr(args, "flye_threads", 4)
+    if flye_threads <= 0:
+        raise ValueError("ask --flye-threads must be positive")
+    payload = {
+        "local_exec": list(dict.fromkeys([*local_exec, "read_qc", "assembly"])),
+        "assembly": {
+            "flye_parameters": {
+                "read_type": facts.read_type,
+                "estimated_genome_size": facts.genome_size_estimate,
+                "threads": flye_threads,
+            }
+        },
+    }
+    RunConfig.model_validate(payload)
+    config_path = Path(request.data_dir) / "run_configs" / str(request.session_id) / "ask_run_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(config_path)
+
+
+def _resolve_ask_auto_run_facts(request: EntryRequest) -> AskAutoRunFacts:
+    manifest_path = Path(str(request.manifest or ""))
+    if not manifest_path.exists():
+        return AskAutoRunFacts(set(), None, None, f"manifest not found: {manifest_path}")
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+        if manifest_path.suffix.lower() == ".json":
+            raw: Any = json.loads(text)
+        else:
+            import yaml
+
+            raw = yaml.safe_load(text)
+        manifest = InputManifest.model_validate(raw)
+    except Exception as exc:
+        return AskAutoRunFacts(set(), None, None, f"manifest is invalid: {manifest_path}: {exc}")
+
+    raw_long_read_platforms = {
+        asset.platform
+        for asset in manifest.assets
+        if asset.asset_type == "raw_long_reads" and asset.platform != "unknown"
+    }
+    genome_size, genome_size_reason = _resolve_ask_genome_size(request, manifest)
+    read_type = _flye_read_type_for_platform(raw_long_read_platforms)
+    reason = None
+    if not any(asset.asset_type == "raw_long_reads" for asset in manifest.assets):
+        reason = "manifest has no raw_long_reads assets"
+    elif genome_size_reason:
+        reason = genome_size_reason
+    elif not raw_long_read_platforms:
+        reason = "raw_long_reads platform is missing or unknown"
+    elif not read_type:
+        reason = f"raw_long_reads platform is not supported for Flye auto config: {sorted(raw_long_read_platforms)}"
+    return AskAutoRunFacts(raw_long_read_platforms, genome_size, read_type, reason)
+
+
+def _resolve_ask_genome_size(request: EntryRequest, manifest: InputManifest) -> tuple[int | None, str | None]:
+    request_size = request.genome_size_estimate
+    manifest_size = manifest.genome_size_estimate
+    if request_size is not None and manifest_size is not None and request_size != manifest_size:
+        return None, (
+            "genome_size_estimate conflicts between natural-language request "
+            f"({request_size}) and manifest ({manifest_size})"
+        )
+    genome_size = request_size if request_size is not None else manifest_size
+    if genome_size is None:
+        return None, "genome_size_estimate is missing"
+    return genome_size, None
+
+
+def _flye_read_type_for_platform(platforms: set[str]) -> str | None:
+    for platform in ("cycloneseq", "ont", "clr"):
+        if platform in platforms:
+            return {"cycloneseq": "nano-raw", "ont": "nano-raw", "clr": "pacbio-raw"}[platform]
+    return None
 
 
 def generate_session_id(data_dir: str | Path = "data", *, now: datetime | None = None) -> str:
