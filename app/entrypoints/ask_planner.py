@@ -13,8 +13,9 @@ from typing import Any
 
 import yaml
 
+from pydantic import ValidationError
+
 from app.schemas.ask_plan import (
-    AskClarificationKind,
     AskClarificationRequest,
     AskClarificationResponse,
     AskPlanState,
@@ -236,8 +237,9 @@ def _build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["warnings"] = warnings
     try:
         summary["run_config_preview"] = build_run_config_payload(plan)
-    except Exception:
+    except (ValueError, ValidationError) as exc:
         summary["run_config_preview"] = None
+        summary["run_config_preview_error"] = str(exc)
     return summary
 
 
