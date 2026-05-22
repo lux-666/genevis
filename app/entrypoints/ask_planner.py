@@ -1,9 +1,4 @@
-"""Staged planning helpers for `gene-agent ask`.
-
-First-version scope: assembly/Flye path only. Other stages are included in
-execution order when they are upstream dependencies but do not enter method
-selection or parameter collection.
-"""
+"""Staged planning helpers for `gene-agent ask`."""
 
 from __future__ import annotations
 
@@ -27,21 +22,118 @@ from app.stages import STAGE_ORDER
 
 _FLYE_READ_TYPE_MAP = {"cycloneseq": "nano-raw", "ont": "nano-raw", "clr": "pacbio-raw"}
 
-_STAGES_NEEDING_METHOD_SELECTION = {"assembly"}
+# ---------------------------------------------------------------------------
+# Unified method registry — all stages and their methods
+# ---------------------------------------------------------------------------
 
-_ASSEMBLY_EXECUTABLE_METHODS = {
-    "assembly.candidate.flye": {
-        "execution_support": "executable",
-        "required_parameters": ["read_type", "estimated_genome_size", "threads"],
-        "parameter_defaults": {"threads": 4},
-    },
+_STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
+    "read_qc": [
+        {
+            "method_name": "read_qc.long_read_stats.seqkit_stats",
+            "execution_support": "executable",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "read_qc.length_filter.seqkit_seq",
+            "execution_support": "executable",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "read_qc.make_fofn.local",
+            "execution_support": "executable",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "genome_survey": [
+        {
+            "method_name": "genome_survey.kmer_count.jellyfish",
+            "execution_support": "executable",
+            "required_parameters": ["kmer_size", "hash_size", "read_length", "threads"],
+            "parameter_defaults": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
+        },
+        {
+            "method_name": "genome_survey.model.genomescope2",
+            "execution_support": "executable",
+            "required_parameters": ["kmer_size"],
+            "parameter_defaults": {"kmer_size": 21},
+        },
+        {
+            "method_name": "genome_survey.kmer_count.meryl",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "genome_survey.model.smudgeplot",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "assembly": [
+        {
+            "method_name": "assembly.candidate.flye",
+            "execution_support": "executable",
+            "required_parameters": ["read_type", "estimated_genome_size", "threads"],
+            "parameter_defaults": {"threads": 4},
+        },
+        {
+            "method_name": "assembly.candidate.nextdenovo",
+            "execution_support": "planned_only",
+            "required_parameters": ["estimated_genome_size"],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "assembly.candidate.canu",
+            "execution_support": "planned_only",
+            "required_parameters": ["estimated_genome_size"],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "assembly.candidate.hifiasm",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "assembly_review": [
+        {
+            "method_name": "assembly_review.eval.quast",
+            "execution_support": "executable",
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 4},
+        },
+        {
+            "method_name": "assembly_review.eval.busco",
+            "execution_support": "planned_only",
+            "required_parameters": ["lineage", "threads"],
+            "parameter_defaults": {"threads": 8},
+        },
+        {
+            "method_name": "assembly_review.check.merqury",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "assembly_review.check.contamination",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "assembly_review.check.purge_dups",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
 }
 
-_ASSEMBLY_PLANNED_METHODS = [
-    "assembly.candidate.nextdenovo",
-    "assembly.candidate.canu",
-    "assembly.candidate.hifiasm",
-]
+_STAGES_NEEDING_METHOD_SELECTION = set(_STAGE_METHODS.keys())
 
 _ASSEMBLY_UPSTREAM_DEPS = {
     "assembly": ["read_qc"],
@@ -51,6 +143,22 @@ _ASSEMBLY_UPSTREAM_DEPS = {
     "gene_annotation": ["read_qc", "assembly", "assembly_review", "repeat_annotation"],
     "function_annotation": ["read_qc", "assembly", "assembly_review", "repeat_annotation", "gene_annotation"],
 }
+
+
+def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
+    for methods in _STAGE_METHODS.values():
+        for m in methods:
+            if m["method_name"] == method_name:
+                return m
+    return None
+
+
+def _all_known_methods() -> set[str]:
+    return {m["method_name"] for methods in _STAGE_METHODS.values() for m in methods}
+
+
+def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
+    return [m for m in _STAGE_METHODS.get(stage, []) if m["execution_support"] == "executable"]
 
 
 def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
@@ -128,13 +236,16 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
 def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
     local_stages = []
     for stage in plan.resolved_execution_order or []:
-        if stage in ("read_qc", "assembly") and _stage_has_executable_method(plan, stage):
+        if _stage_has_executable_method(plan, stage):
             local_stages.append(stage)
 
     payload: dict[str, Any] = {"local_exec": local_stages}
     flye_params = (plan.method_parameters or {}).get("assembly.candidate.flye")
     if flye_params and "assembly" in local_stages:
         payload["assembly"] = {"flye_parameters": flye_params}
+    quast_params = (plan.method_parameters or {}).get("assembly_review.eval.quast")
+    if quast_params and "assembly_review" in local_stages:
+        payload["assembly_review"] = {"quast_threads": quast_params.get("threads", 4)}
     RunConfig.model_validate(payload)
     return payload
 
@@ -185,13 +296,12 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
     for stage in plan.resolved_execution_order or []:
         if stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
-        if stage == "assembly":
-            methods = []
-            for method, cap in _ASSEMBLY_EXECUTABLE_METHODS.items():
-                methods.append({"method_name": method, "execution_support": cap["execution_support"]})
-            for method in _ASSEMBLY_PLANNED_METHODS:
-                methods.append({"method_name": method, "execution_support": "planned_only"})
-            methods_by_stage[stage] = methods
+        stage_methods = _STAGE_METHODS.get(stage, [])
+        if stage_methods:
+            methods_by_stage[stage] = [
+                {"method_name": m["method_name"], "execution_support": m["execution_support"]}
+                for m in stage_methods
+            ]
     return AskClarificationRequest(
         status="clarification_required",
         kind="method_selection",
@@ -327,17 +437,16 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
     return any(stage in _STAGES_NEEDING_METHOD_SELECTION for stage in plan.resolved_execution_order or [])
 
 
-_ALL_KNOWN_METHODS = set(_ASSEMBLY_EXECUTABLE_METHODS) | set(_ASSEMBLY_PLANNED_METHODS)
-
-
 def _validate_selected_methods(methods: dict[str, str], plan: AskPlanState) -> None:
+    known = _all_known_methods()
     for stage, method in methods.items():
         if not method or not method.strip():
             raise ValueError(f"empty method name for stage {stage!r}")
-        if stage == "assembly" and method not in _ALL_KNOWN_METHODS:
+        if method not in known:
+            stage_methods = [m["method_name"] for m in _STAGE_METHODS.get(stage, [])]
             raise ValueError(
                 f"unknown method {method!r} for stage {stage!r}; "
-                f"known methods: {sorted(_ALL_KNOWN_METHODS)}"
+                f"known methods: {sorted(stage_methods)}"
             )
 
 
@@ -359,8 +468,8 @@ def _missing_parameters_and_defaults(plan: AskPlanState) -> tuple[list[str], dic
     defaults: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     for stage, method in (plan.selected_methods or {}).items():
-        cap = _ASSEMBLY_EXECUTABLE_METHODS.get(method)
-        if not cap:
+        cap = _get_method_descriptor(method)
+        if not cap or cap["execution_support"] != "executable":
             continue
         provided = (plan.method_parameters or {}).get(method, {})
         inferred, method_warnings = _infer_parameter_defaults(plan, method, cap)
@@ -407,7 +516,8 @@ def _stage_has_executable_method(plan: AskPlanState, stage: str) -> bool:
     method = (plan.selected_methods or {}).get(stage)
     if not method:
         return stage == "read_qc"
-    return method in _ASSEMBLY_EXECUTABLE_METHODS
+    cap = _get_method_descriptor(method)
+    return cap is not None and cap["execution_support"] == "executable"
 
 
 def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
@@ -422,7 +532,8 @@ def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
                 roles[stage] = "dependency"
         else:
             method = (plan.selected_methods or {}).get(stage)
-            if method and method in _ASSEMBLY_PLANNED_METHODS:
+            cap = _get_method_descriptor(method) if method else None
+            if cap and cap["execution_support"] == "planned_only":
                 roles[stage] = "planned_only"
             elif stage not in selected:
                 roles[stage] = "dependency"
