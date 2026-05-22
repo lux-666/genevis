@@ -35,11 +35,13 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
     auto_resolved = auto_resolve_plan(plan)
     plan = _apply_set_params(auto_resolved, getattr(args, "set_params", None) or [])
 
-    # Store auto-resolved hints for re-use after rejection
-    _auto_hint = auto_resolved if auto_resolved.selected_stages is not None else None
+    # Only carry over method hints if user accepted auto-resolve
+    _auto_hint: AskPlanState | None = None
 
     if plan.selected_stages is not None and original_plan.selected_stages is None:
-        if not _confirm_auto_resolve(plan):
+        if _confirm_auto_resolve(plan):
+            _auto_hint = plan
+        else:
             plan = original_plan
             plan = _apply_set_params(plan, getattr(args, "set_params", None) or [])
 
@@ -53,7 +55,7 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
         if clarification.kind == "confirm":
             _render_confirm(clarification)
             if not _prompt_confirm("Proceed?"):
-                print("\nRestarting from stage selection.\n")
+                print("\n--- Restarting from stage selection ---\n")
                 plan = plan.model_copy(update={
                     "selected_stages": None,
                     "resolved_execution_order": None,
@@ -69,7 +71,7 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
 
         plan = merge_clarification_response(plan, response)
 
-        # After stage_selection, auto-fill method if it matches the hint
+        # After stage_selection, auto-fill method only if user had accepted auto-resolve
         if response.kind == "stage_selection" and _auto_hint is not None:
             plan = _try_auto_fill_methods(plan, _auto_hint)
 
@@ -214,6 +216,7 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
     suggested = req.choices.get("suggested_stages", [])
 
     if _HAS_QUESTIONARY:
+        print("\n--- Step 1: Stage Selection ---\n")
         choices = [
             questionary.Choice(stage, value=stage, checked=(stage in suggested))
             for stage in available
@@ -227,14 +230,15 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
         return AskClarificationResponse(kind="stage_selection", selected_stages=selected)
 
     # Plain-text fallback
-    print()
+    print("\n--- Step 1: Stage Selection ---\n")
     print("Available stages:")
     for i, stage in enumerate(available, 1):
         marker = "*" if stage in suggested else " "
         print(f"  {marker} {i}. {stage}")
     if suggested:
-        print(f"\nSuggested: {', '.join(suggested)}")
-    print("Enter numbers or names, e.g. 1,3 or read_qc,assembly (Enter = accept suggested):")
+        print(f"\n  Suggested: {', '.join(suggested)}")
+    print("\n  Enter numbers or names, e.g. 1,3 or read_qc,assembly")
+    print("  Press Enter to accept suggested.")
     raw = input("> ").strip()
     stages = _parse_selection(raw, available) if raw else suggested
     return AskClarificationResponse(kind="stage_selection", selected_stages=stages)
@@ -243,6 +247,8 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
 def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationResponse:
     methods_by_stage = req.choices.get("methods_by_stage", {})
     selected: dict[str, str] = {}
+
+    print("\n--- Step 2: Method Selection ---\n")
 
     for stage, methods in methods_by_stage.items():
         method_names = [m["method_name"] for m in methods]
@@ -265,13 +271,13 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
             ).ask()
             selected[stage] = answer or default_method or method_names[0]
         else:
-            print(f"\nMethods for {stage}:")
+            print(f"  Methods for [{stage}]:")
             for i, m in enumerate(methods, 1):
                 support = m.get("execution_support", "")
                 label = " (executable)" if support == "executable" else " (planned only)"
-                print(f"  {i}. {m['method_name']}{label}")
-            print("Enter method name or number (Enter = first executable):")
-            raw = input("> ").strip()
+                print(f"    {i}. {m['method_name']}{label}")
+            print(f"\n  Enter method name or number (Enter = {default_method or 'first'}):")
+            raw = input(f"  {stage}> ").strip()
             if not raw and default_method:
                 selected[stage] = default_method
             else:
@@ -284,7 +290,7 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
 def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
     params: dict[str, dict[str, Any]] = {}
-    print()
+    print("\n--- Step 3: Parameters ---\n")
     for field in req.required_fields:
         method_key, _, param_name = field.rpartition(".")
         if not method_key:
