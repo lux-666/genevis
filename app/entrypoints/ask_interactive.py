@@ -222,8 +222,9 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
             for stage in available
         ]
         selected = questionary.checkbox(
-            "Select stages (Space=toggle, Enter=confirm):",
+            "Select stages:",
             choices=choices,
+            instruction="(↑↓ navigate, Space toggle, Enter confirm)",
         ).ask()
         if not selected:
             selected = suggested
@@ -268,6 +269,7 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
                 f"Method for {stage}:",
                 choices=choices,
                 default=default_method,
+                instruction="(↑↓ navigate, Enter select)",
             ).ask()
             selected[stage] = answer or default_method or method_names[0]
         else:
