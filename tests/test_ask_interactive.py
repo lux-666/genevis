@@ -167,9 +167,10 @@ class InteractiveLoopTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
             )
             args = _ask_ns()
-            # "y" auto-resolve, "" x3 params, "n" reject confirm,
-            # "" stage select, "" x3 params, "y" confirm
-            inputs = iter(["y", "", "", "", "n", "", "", "", "", "y"])
+            # "y" auto-resolve, "" x3 flye params, "n" reject confirm,
+            # "" stage select (suggested), "" assembly method, "" review method,
+            # "" x3 flye params, "" quast threads, "y" confirm
+            inputs = iter(["y", "", "", "", "n", "", "", "", "", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:

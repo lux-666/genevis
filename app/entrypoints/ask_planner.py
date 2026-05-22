@@ -26,6 +26,13 @@ _FLYE_READ_TYPE_MAP = {"cycloneseq": "nano-raw", "ont": "nano-raw", "clr": "pacb
 # Unified method registry — all stages and their methods
 # ---------------------------------------------------------------------------
 
+_STAGE_SELECTION_MODE: dict[str, str] = {
+    "read_qc": "pipeline",
+    "genome_survey": "choose_many",
+    "assembly": "choose_many",
+    "assembly_review": "choose_many",
+}
+
 _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "read_qc": [
         {
@@ -133,7 +140,9 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     ],
 }
 
-_STAGES_NEEDING_METHOD_SELECTION = set(_STAGE_METHODS.keys())
+_STAGES_NEEDING_METHOD_SELECTION = {
+    stage for stage, mode in _STAGE_SELECTION_MODE.items() if mode != "pipeline"
+}
 
 _ASSEMBLY_UPSTREAM_DEPS = {
     "assembly": ["read_qc"],
@@ -159,6 +168,17 @@ def _all_known_methods() -> set[str]:
 
 def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
     return [m for m in _STAGE_METHODS.get(stage, []) if m["execution_support"] == "executable"]
+
+
+def _auto_fill_pipeline_methods(execution_order: list[str]) -> dict[str, str | list[str]]:
+    """Auto-fill methods for pipeline stages (all executable methods run)."""
+    result: dict[str, str | list[str]] = {}
+    for stage in execution_order:
+        if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
+            methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
+            if methods:
+                result[stage] = methods
+    return result
 
 
 def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
@@ -209,18 +229,21 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
     if response.kind == "stage_selection":
         stages = list(response.selected_stages or [])
         order = _resolve_execution_order(stages, plan)
+        pipeline_methods = _auto_fill_pipeline_methods(order)
         return plan.model_copy(update={
             "selected_stages": stages,
             "resolved_execution_order": order,
-            "selected_methods": None,
+            "selected_methods": pipeline_methods or None,
             "method_parameters": None,
             "confirmed": False,
         })
     if response.kind == "method_selection":
         methods = dict(response.selected_methods or {})
-        _validate_selected_methods(methods, plan)
+        existing = dict(plan.selected_methods or {})
+        existing.update(methods)
+        _validate_selected_methods(existing, plan)
         return plan.model_copy(update={
-            "selected_methods": methods,
+            "selected_methods": existing,
             "method_parameters": None,
             "confirmed": False,
         })
@@ -318,9 +341,8 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
     missing_fields, defaults, warnings = _missing_parameters_and_defaults(plan)
-    # Show all params (not just missing) so user can confirm/edit defaults
     all_fields: list[str] = []
-    for stage, method in (plan.selected_methods or {}).items():
+    for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
             continue
@@ -442,26 +464,42 @@ def _can_skip_dependency(dep_stage: str, manifest_asset_types: set[str]) -> bool
 
 def _needs_method_selection(plan: AskPlanState) -> bool:
     if plan.selected_methods is not None:
+        # Check if all non-pipeline stages have methods selected
+        for stage in plan.resolved_execution_order or []:
+            if stage in _STAGES_NEEDING_METHOD_SELECTION and stage not in plan.selected_methods:
+                return True
         return False
     return any(stage in _STAGES_NEEDING_METHOD_SELECTION for stage in plan.resolved_execution_order or [])
 
 
-def _validate_selected_methods(methods: dict[str, str], plan: AskPlanState) -> None:
+def _iter_selected_methods(plan: AskPlanState) -> list[tuple[str, str]]:
+    """Yield (stage, method_name) pairs, flattening list values."""
+    for stage, methods in (plan.selected_methods or {}).items():
+        if isinstance(methods, list):
+            for m in methods:
+                yield stage, m
+        else:
+            yield stage, methods
+
+
+def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPlanState) -> None:
     known = _all_known_methods()
-    for stage, method in methods.items():
-        if not method or not method.strip():
-            raise ValueError(f"empty method name for stage {stage!r}")
-        if method not in known:
-            stage_methods = [m["method_name"] for m in _STAGE_METHODS.get(stage, [])]
-            raise ValueError(
-                f"unknown method {method!r} for stage {stage!r}; "
-                f"known methods: {sorted(stage_methods)}"
-            )
+    for stage, value in methods.items():
+        method_list = value if isinstance(value, list) else [value]
+        for method in method_list:
+            if not method or not method.strip():
+                raise ValueError(f"empty method name for stage {stage!r}")
+            if method not in known:
+                stage_methods = [m["method_name"] for m in _STAGE_METHODS.get(stage, [])]
+                raise ValueError(
+                    f"unknown method {method!r} for stage {stage!r}; "
+                    f"known methods: {sorted(stage_methods)}"
+                )
 
 
 def _needs_parameter_values(plan: AskPlanState) -> bool:
     """True when there are executable methods with parameters to show/confirm."""
-    for stage, method in (plan.selected_methods or {}).items():
+    for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
             continue
@@ -489,7 +527,7 @@ def _missing_parameters_and_defaults(plan: AskPlanState) -> tuple[list[str], dic
     missing_fields: list[str] = []
     defaults: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
-    for stage, method in (plan.selected_methods or {}).items():
+    for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
             continue
@@ -535,11 +573,14 @@ def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, An
 
 
 def _stage_has_executable_method(plan: AskPlanState, stage: str) -> bool:
-    method = (plan.selected_methods or {}).get(stage)
-    if not method:
-        return stage == "read_qc"
-    cap = _get_method_descriptor(method)
-    return cap is not None and cap["execution_support"] == "executable"
+    value = (plan.selected_methods or {}).get(stage)
+    if not value:
+        return _STAGE_SELECTION_MODE.get(stage) == "pipeline"
+    methods = value if isinstance(value, list) else [value]
+    return any(
+        (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "executable"
+        for m in methods
+    )
 
 
 def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
@@ -553,9 +594,13 @@ def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
             else:
                 roles[stage] = "dependency"
         else:
-            method = (plan.selected_methods or {}).get(stage)
-            cap = _get_method_descriptor(method) if method else None
-            if cap and cap["execution_support"] == "planned_only":
+            value = (plan.selected_methods or {}).get(stage)
+            methods = value if isinstance(value, list) else [value] if value else []
+            has_planned = any(
+                (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "planned_only"
+                for m in methods
+            )
+            if has_planned:
                 roles[stage] = "planned_only"
             elif stage not in selected:
                 roles[stage] = "dependency"

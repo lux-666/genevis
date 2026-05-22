@@ -108,7 +108,7 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
 
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
-    def test_method_selection_includes_all_stages(self):
+    def test_method_selection_includes_non_pipeline_stages(self):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
@@ -116,18 +116,19 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
         self.assertIn("assembly", result.choices["methods_by_stage"])
-        self.assertIn("read_qc", result.choices["methods_by_stage"])
+        # read_qc is a pipeline stage, not shown in method selection
+        self.assertNotIn("read_qc", result.choices["methods_by_stage"])
         flye = [m for m in result.choices["methods_by_stage"]["assembly"] if m["method_name"] == "assembly.candidate.flye"]
         self.assertEqual(flye[0]["execution_support"], "executable")
 
-    def test_method_selection_for_single_stage(self):
+    def test_pipeline_stage_only_skips_to_confirm(self):
         plan = _base_plan(
             selected_stages=["read_qc"],
             resolved_execution_order=["read_qc"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        self.assertIn("read_qc", result.choices["methods_by_stage"])
+        # read_qc is pipeline, auto-filled — goes to confirm directly
+        self.assertEqual(result.kind, "confirm")
 
     def test_empty_method_name_rejected(self):
         plan = _base_plan(

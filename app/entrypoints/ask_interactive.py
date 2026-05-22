@@ -22,6 +22,10 @@ except ImportError:
     _HAS_QUESTIONARY = False
 
 
+class _UserAbort(Exception):
+    pass
+
+
 def is_interactive(args: argparse.Namespace) -> bool:
     if getattr(args, "json", False):
         return False
@@ -31,11 +35,18 @@ def is_interactive(args: argparse.Namespace) -> bool:
 
 
 def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
+    try:
+        return _interactive_loop_inner(plan, args)
+    except (_UserAbort, KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        return 1
+
+
+def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int:
     original_plan = plan
     auto_resolved = auto_resolve_plan(plan)
     plan = _apply_set_params(auto_resolved, getattr(args, "set_params", None) or [])
 
-    # Only carry over method hints if user accepted auto-resolve
     _auto_hint: AskPlanState | None = None
 
     if plan.selected_stages is not None and original_plan.selected_stages is None:
@@ -71,7 +82,6 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
 
         plan = merge_clarification_response(plan, response)
 
-        # After stage_selection, auto-fill method only if user had accepted auto-resolve
         if response.kind == "stage_selection" and _auto_hint is not None:
             plan = _try_auto_fill_methods(plan, _auto_hint)
 
@@ -82,21 +92,14 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
 
 def _try_auto_fill_methods(plan: AskPlanState, hint: AskPlanState) -> AskPlanState:
     """If user-selected stages match the auto-resolved hint, carry over methods."""
-    if plan.selected_methods is not None:
-        return plan
     if not hint.selected_methods:
         return plan
-    selected = set(plan.selected_stages or [])
-    hint_stages = set(hint.selected_stages or [])
-    if not selected or not selected.issubset(hint_stages | selected):
-        return plan
-    # Carry over methods for stages that match
-    methods: dict[str, str] = {}
+    existing = dict(plan.selected_methods or {})
     for stage, method in hint.selected_methods.items():
-        if stage in selected or stage in (plan.resolved_execution_order or []):
-            methods[stage] = method
-    if methods:
-        return plan.model_copy(update={"selected_methods": methods})
+        if stage not in existing and stage in (plan.resolved_execution_order or []):
+            existing[stage] = method
+    if existing != (plan.selected_methods or {}):
+        return plan.model_copy(update={"selected_methods": existing})
     return plan
 
 
@@ -116,7 +119,7 @@ def parse_set_params(raw: list[str]) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Rendering (confirm screen only — other steps use questionary directly)
+# Rendering
 # ---------------------------------------------------------------------------
 
 _ROLE_LABELS = {
@@ -155,15 +158,19 @@ def _render_confirm(req: AskClarificationRequest) -> None:
     methods = summary.get("selected_methods", {})
     if methods:
         print("\nMethods:")
-        for stage, method in methods.items():
-            print(f"  {stage}: {method}")
+        for stage, value in methods.items():
+            if isinstance(value, list):
+                print(f"  {stage}: {', '.join(value)}")
+            else:
+                print(f"  {stage}: {value}")
 
     params = summary.get("method_parameters", {})
     if params:
         print("\nParameters:")
         for method, pdict in params.items():
+            short = method.rsplit(".", 1)[-1]
             for k, v in pdict.items():
-                print(f"  {k}: {v}")
+                print(f"  [{short}] {k}: {v}")
 
     warnings = summary.get("warnings", [])
     for w in warnings:
@@ -177,8 +184,19 @@ def _render_confirm(req: AskClarificationRequest) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Prompting — questionary with plain-text fallback
+# Prompting
 # ---------------------------------------------------------------------------
+
+def _safe_ask(question: Any) -> Any:
+    """Call questionary .ask() with Ctrl+C / Esc handling."""
+    try:
+        result = question.ask()
+    except KeyboardInterrupt:
+        raise _UserAbort()
+    if result is None:
+        raise _UserAbort()
+    return result
+
 
 def _prompt_for_answer(req: AskClarificationRequest) -> AskClarificationResponse:
     if req.kind == "stage_selection":
@@ -192,7 +210,7 @@ def _prompt_for_answer(req: AskClarificationRequest) -> AskClarificationResponse
 
 def _prompt_confirm(message: str) -> bool:
     if _HAS_QUESTIONARY:
-        return questionary.confirm(message, default=False).ask() or False
+        return _safe_ask(questionary.confirm(message, default=False))
     raw = input(f"{message} [y/N] ").strip().lower()
     return raw in ("y", "yes")
 
@@ -201,7 +219,13 @@ def _confirm_auto_resolve(plan: AskPlanState) -> bool:
     stages = ", ".join(plan.selected_stages or [])
     methods = ""
     if plan.selected_methods:
-        methods = ", ".join(plan.selected_methods.values())
+        all_methods = []
+        for v in plan.selected_methods.values():
+            if isinstance(v, list):
+                all_methods.extend(v)
+            else:
+                all_methods.append(v)
+        methods = ", ".join(all_methods)
     deps = [s for s in (plan.resolved_execution_order or []) if s not in (plan.selected_stages or [])]
     dep_str = f" (deps: {', '.join(deps)})" if deps else ""
 
@@ -221,11 +245,11 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
             questionary.Choice(stage, value=stage, checked=(stage in suggested))
             for stage in available
         ]
-        selected = questionary.checkbox(
+        selected = _safe_ask(questionary.checkbox(
             "Select stages:",
             choices=choices,
             instruction="(↑↓ navigate, Space toggle, Enter confirm)",
-        ).ask()
+        ))
         if not selected:
             selected = suggested
         return AskClarificationResponse(kind="stage_selection", selected_stages=selected)
@@ -247,14 +271,14 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
 
 def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationResponse:
     methods_by_stage = req.choices.get("methods_by_stage", {})
-    selected: dict[str, str] = {}
+    selected: dict[str, str | list[str]] = {}
 
     print("\n--- Step 2: Method Selection ---\n")
 
     for stage, methods in methods_by_stage.items():
         method_names = [m["method_name"] for m in methods]
         executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
-        default_method = executable[0] if executable else method_names[0] if method_names else None
+        default_checked = executable if executable else method_names[:1]
 
         if _HAS_QUESTIONARY:
             choices = []
@@ -264,27 +288,30 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
                 choices.append(questionary.Choice(
                     f"{m['method_name']}{suffix}",
                     value=m["method_name"],
+                    checked=(m["method_name"] in default_checked),
                 ))
-            answer = questionary.select(
-                f"Method for {stage}:",
+            answer = _safe_ask(questionary.checkbox(
+                f"Methods for {stage}:",
                 choices=choices,
-                default=default_method,
-                instruction="(↑↓ navigate, Enter select)",
-            ).ask()
-            selected[stage] = answer or default_method or method_names[0]
+                instruction="(↑↓ navigate, Space toggle, Enter confirm)",
+            ))
+            if not answer:
+                answer = default_checked
+            selected[stage] = answer[0] if len(answer) == 1 else answer
         else:
             print(f"  Methods for [{stage}]:")
             for i, m in enumerate(methods, 1):
                 support = m.get("execution_support", "")
                 label = " (executable)" if support == "executable" else " (planned only)"
-                print(f"    {i}. {m['method_name']}{label}")
-            print(f"\n  Enter method name or number (Enter = {default_method or 'first'}):")
+                marker = "*" if m["method_name"] in default_checked else " "
+                print(f"    {marker} {i}. {m['method_name']}{label}")
+            print(f"\n  Enter numbers or names (comma-separated). Enter = {', '.join(default_checked)}:")
             raw = input(f"  {stage}> ").strip()
-            if not raw and default_method:
-                selected[stage] = default_method
+            if not raw:
+                picks = default_checked
             else:
                 picks = _parse_selection(raw, method_names)
-                selected[stage] = picks[0] if picks else default_method or method_names[0]
+            selected[stage] = picks[0] if len(picks) == 1 else picks
 
     return AskClarificationResponse(kind="method_selection", selected_methods=selected)
 
@@ -297,18 +324,23 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
         method_key, _, param_name = field.rpartition(".")
         if not method_key:
             method_key = param_name
+        # Build label: [stage / short_method] param_name
+        short_method = method_key.rsplit(".", 1)[-1]
+        stage_name = method_key.split(".")[0] if "." in method_key else method_key
+        label = f"[{stage_name} / {short_method}] {param_name}"
+
         default = _find_default(field, defaults)
 
         if _HAS_QUESTIONARY:
-            answer = questionary.text(
-                f"{param_name}:",
+            answer = _safe_ask(questionary.text(
+                f"{label}:",
                 default=str(default) if default is not None else "",
-            ).ask() or ""
+            ))
         else:
             if default is not None:
-                answer = input(f"{param_name} [{default}]: ").strip()
+                answer = input(f"  {label} [{default}]: ").strip()
             else:
-                answer = input(f"{param_name}: ").strip()
+                answer = input(f"  {label}: ").strip()
 
         value: Any = answer if answer else default
         if param_name == "estimated_genome_size" and isinstance(value, str):

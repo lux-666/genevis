@@ -29,7 +29,7 @@ class AskPlanState(BaseModel):
     manifest_ref: str
     selected_stages: list[str] | None = None
     resolved_execution_order: list[str] | None = None
-    selected_methods: dict[str, str] | None = None
+    selected_methods: dict[str, str | list[str]] | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool = False
 
@@ -59,7 +59,7 @@ class AskClarificationResponse(BaseModel):
 
     kind: AskClarificationKind
     selected_stages: list[str] | None = None
-    selected_methods: dict[str, str] | None = None
+    selected_methods: dict[str, str | list[str]] | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool | None = None
 
