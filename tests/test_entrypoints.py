@@ -86,6 +86,9 @@ class EntrypointTests(unittest.TestCase):
             clarification_response=None,
             write_clarification_template=None,
             json=False,
+            non_interactive=False,
+            resume_session=None,
+            set_params=[],
         )
         base.update(overrides)
         return argparse.Namespace(**base)

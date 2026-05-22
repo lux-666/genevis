@@ -61,6 +61,26 @@ def save_plan_to_default_path(plan: AskPlanState) -> Path:
     return save_ask_plan(plan, ask_plan_path(plan.data_dir, plan.session_id))
 
 
+def auto_resolve_plan(plan: AskPlanState) -> AskPlanState:
+    """Auto-select assembly/flye when the manifest contains only raw long reads."""
+    if plan.selected_stages is not None:
+        return plan
+    manifest = _load_manifest(plan.manifest_ref)
+    if manifest is None:
+        return plan
+    asset_types = {asset.asset_type for asset in manifest.assets}
+    if asset_types != {"raw_long_reads"}:
+        return plan
+    stages = ["assembly"]
+    order = _resolve_execution_order(stages, plan)
+    plan = plan.model_copy(update={
+        "selected_stages": stages,
+        "resolved_execution_order": order,
+        "selected_methods": {"assembly": "assembly.candidate.flye"},
+    })
+    return plan
+
+
 def next_clarification(plan: AskPlanState, *, ask_plan_ref: str | Path) -> AskClarificationRequest | None:
     ref = str(Path(str(ask_plan_ref)).expanduser().resolve(strict=False))
     if plan.selected_stages is None:
@@ -120,6 +140,7 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
 
 
 def write_ask_run_config(plan: AskPlanState) -> Path:
+    plan = _auto_fill_inferred_defaults(plan)
     payload = build_run_config_payload(plan)
     path = Path(plan.data_dir) / "run_configs" / plan.session_id / "ask_run_config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,11 +244,15 @@ def _confirm_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationR
 def _build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "session_id": plan.session_id,
+        "data_dir": plan.data_dir,
         "manifest_ref": plan.manifest_ref,
         "selected_stages": plan.selected_stages,
         "resolved_execution_order": plan.resolved_execution_order,
         "stage_roles": _classify_stage_roles(plan),
     }
+    entry = plan.entry_request or {}
+    if entry.get("source_paths"):
+        summary["source_paths"] = entry["source_paths"]
     if plan.selected_methods:
         summary["selected_methods"] = plan.selected_methods
     if plan.method_parameters:
@@ -322,13 +347,11 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
 
 
 def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
-    """Populate method_parameters from inferred defaults when parameter_values step was skipped."""
-    if plan.method_parameters is not None:
-        return plan
+    """Merge inferred defaults into method_parameters for any missing keys."""
     _, defaults, _ = _missing_parameters_and_defaults(plan)
-    if defaults:
-        return plan.model_copy(update={"method_parameters": defaults})
-    return plan
+    if not defaults:
+        return plan
+    return plan.model_copy(update={"method_parameters": defaults})
 
 
 def _missing_parameters_and_defaults(plan: AskPlanState) -> tuple[list[str], dict[str, dict[str, Any]], list[str]]:

@@ -91,6 +91,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Opt a stage into local execution (used with --run-config bypass).",
     )
     ask_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        default=False,
+        help="Exit after first clarification (for automation/scripts).",
+    )
+    ask_parser.add_argument(
+        "--resume",
+        dest="resume_session",
+        default=None,
+        metavar="SESSION_ID",
+        help="Resume an existing ask session by session ID.",
+    )
+    ask_parser.add_argument(
+        "--set",
+        dest="set_params",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Pre-supply parameter values (e.g. --set genome_size=500m).",
+    )
+    ask_parser.add_argument(
         "--checkpointer",
         choices=["sqlite", "memory"],
         default=None,
@@ -353,7 +374,9 @@ def _run_session(args: argparse.Namespace) -> int:
 
 
 def _run_ask(args: argparse.Namespace) -> int:
+    from app.entrypoints.ask_interactive import apply_set_params, is_interactive, run_interactive_loop
     from app.entrypoints.ask_planner import (
+        ask_plan_path,
         clarification_template,
         merge_clarification_response,
         next_clarification,
@@ -374,11 +397,15 @@ def _run_ask(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        if getattr(args, "ask_plan", None):
+        if getattr(args, "resume_session", None):
+            data_dir = args.data_dir or "data"
+            ref = ask_plan_path(data_dir, args.resume_session)
+            plan = load_ask_plan(ref)
+        elif getattr(args, "ask_plan", None):
             plan = load_ask_plan(args.ask_plan)
         else:
             if not getattr(args, "request_text", None):
-                print("error: request_text is required unless --ask-plan is provided", file=sys.stderr)
+                print("error: request_text is required unless --ask-plan or --resume is provided", file=sys.stderr)
                 return 1
             plan = _create_ask_plan(args)
 
@@ -386,9 +413,20 @@ def _run_ask(args: argparse.Namespace) -> int:
             response = load_ask_clarification_response(args.clarification_response)
             plan = merge_clarification_response(plan, response)
 
+        if getattr(args, "set_params", None):
+            plan = apply_set_params(plan, args.set_params)
+
         plan_ref = save_plan_to_default_path(plan)
-        clarification = next_clarification(plan, ask_plan_ref=plan_ref)
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if is_interactive(args):
+        return run_interactive_loop(plan, args)
+
+    try:
+        clarification = next_clarification(plan, ask_plan_ref=plan_ref)
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
