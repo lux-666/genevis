@@ -318,6 +318,15 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
     missing_fields, defaults, warnings = _missing_parameters_and_defaults(plan)
+    # Show all params (not just missing) so user can confirm/edit defaults
+    all_fields: list[str] = []
+    for stage, method in (plan.selected_methods or {}).items():
+        cap = _get_method_descriptor(method)
+        if not cap or cap["execution_support"] != "executable":
+            continue
+        for param in cap["required_parameters"]:
+            all_fields.append(f"{method}.{param}")
+    display_fields = all_fields if all_fields else missing_fields
     choices: dict[str, Any] = {"defaults": defaults}
     if warnings:
         choices["warnings"] = warnings
@@ -327,9 +336,9 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         session_id=plan.session_id,
         ask_plan_ref=ask_plan_ref,
         manifest_ref=plan.manifest_ref,
-        question="Provide required parameters for the selected executable methods.",
+        question="Confirm or edit parameters for executable methods.",
         choices=choices,
-        required_fields=missing_fields,
+        required_fields=display_fields,
         response_schema={"kind": "parameter_values", "method_parameters": defaults},
         next_action=_next_action(ask_plan_ref),
     )
@@ -451,8 +460,21 @@ def _validate_selected_methods(methods: dict[str, str], plan: AskPlanState) -> N
 
 
 def _needs_parameter_values(plan: AskPlanState) -> bool:
-    missing, _, _ = _missing_parameters_and_defaults(plan)
-    return bool(missing)
+    """True when there are executable methods with parameters to show/confirm."""
+    for stage, method in (plan.selected_methods or {}).items():
+        cap = _get_method_descriptor(method)
+        if not cap or cap["execution_support"] != "executable":
+            continue
+        if cap["required_parameters"]:
+            provided = (plan.method_parameters or {}).get(method, {})
+            inferred, _ = _infer_parameter_defaults(plan, method, cap)
+            merged = {**inferred, **provided}
+            for param in cap["required_parameters"]:
+                if param not in merged:
+                    return True
+            if not provided:
+                return True
+    return False
 
 
 def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:

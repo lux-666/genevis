@@ -143,8 +143,8 @@ class InteractiveLoopTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
             )
             args = _ask_ns()
-            # "y" for auto-resolve confirm, "y" for final confirm
-            inputs = iter(["y", "y"])
+            # "y" auto-resolve, "" x3 for params (accept defaults), "y" confirm
+            inputs = iter(["y", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -167,9 +167,9 @@ class InteractiveLoopTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
             )
             args = _ask_ns()
-            # "y" auto-resolve, "n" reject confirm -> restarts -> stage select (Enter=suggested),
-            # method auto-filled from hint, "y" confirm
-            inputs = iter(["y", "n", "", "y"])
+            # "y" auto-resolve, "" x3 params, "n" reject confirm,
+            # "" stage select, "" x3 params, "y" confirm
+            inputs = iter(["y", "", "", "", "n", "", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -189,8 +189,8 @@ class InteractiveLoopTests(unittest.TestCase):
             plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp,
                              entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
             args = _ask_ns()
-            # "y" for auto-resolve confirm, "500m" for genome_size, "y" for final confirm
-            inputs = iter(["y", "500m", "y"])
+            # "y" auto-resolve, "" read_type [nano-raw], "500m" genome_size, "" threads [4], "y" confirm
+            inputs = iter(["y", "", "500m", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:

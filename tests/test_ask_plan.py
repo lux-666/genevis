@@ -160,7 +160,7 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertTrue(any("read_type" in f for f in result.required_fields))
         self.assertTrue(any("estimated_genome_size" in f for f in result.required_fields))
 
-    def test_manifest_platform_infers_defaults_skips_to_confirm(self):
+    def test_manifest_platform_infers_defaults_shows_parameter_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -176,11 +176,11 @@ class AskPlannerParameterTests(unittest.TestCase):
                 selected_methods={"assembly": "assembly.candidate.flye"},
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-            self.assertEqual(result.kind, "confirm")
-            preview = result.summary.get("run_config_preview", {})
-            flye = preview.get("assembly", {}).get("flye_parameters", {})
-            self.assertEqual(flye.get("read_type"), "nano-raw")
-            self.assertEqual(flye.get("estimated_genome_size"), 2_000_000)
+            self.assertEqual(result.kind, "parameter_values")
+            defaults = result.choices.get("defaults", {})
+            flye_defaults = defaults.get("assembly.candidate.flye", {})
+            self.assertEqual(flye_defaults.get("read_type"), "nano-raw")
+            self.assertEqual(flye_defaults.get("estimated_genome_size"), 2_000_000)
 
     def test_genome_size_conflict_surfaces_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,9 +199,9 @@ class AskPlannerParameterTests(unittest.TestCase):
                 selected_methods={"assembly": "assembly.candidate.flye"},
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-            self.assertEqual(result.kind, "confirm")
-            self.assertIn("warnings", result.summary)
-            self.assertTrue(any("genome_size conflict" in w for w in result.summary["warnings"]))
+            self.assertEqual(result.kind, "parameter_values")
+            self.assertIn("warnings", result.choices)
+            self.assertTrue(any("genome_size conflict" in w for w in result.choices["warnings"]))
 
 
 class AskPlannerConfirmTests(unittest.TestCase):
