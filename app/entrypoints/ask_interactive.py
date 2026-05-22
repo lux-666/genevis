@@ -32,8 +32,11 @@ def is_interactive(args: argparse.Namespace) -> bool:
 
 def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
     original_plan = plan
-    plan = auto_resolve_plan(plan)
-    plan = _apply_set_params(plan, getattr(args, "set_params", None) or [])
+    auto_resolved = auto_resolve_plan(plan)
+    plan = _apply_set_params(auto_resolved, getattr(args, "set_params", None) or [])
+
+    # Store auto-resolved hints for re-use after rejection
+    _auto_hint = auto_resolved if auto_resolved.selected_stages is not None else None
 
     if plan.selected_stages is not None and original_plan.selected_stages is None:
         if not _confirm_auto_resolve(plan):
@@ -65,9 +68,34 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
             response = _prompt_for_answer(clarification)
 
         plan = merge_clarification_response(plan, response)
+
+        # After stage_selection, auto-fill method if it matches the hint
+        if response.kind == "stage_selection" and _auto_hint is not None:
+            plan = _try_auto_fill_methods(plan, _auto_hint)
+
         plan_ref = save_plan_to_default_path(plan)
 
     return _execute_confirmed_plan(plan, args)
+
+
+def _try_auto_fill_methods(plan: AskPlanState, hint: AskPlanState) -> AskPlanState:
+    """If user-selected stages match the auto-resolved hint, carry over methods."""
+    if plan.selected_methods is not None:
+        return plan
+    if not hint.selected_methods:
+        return plan
+    selected = set(plan.selected_stages or [])
+    hint_stages = set(hint.selected_stages or [])
+    if not selected or not selected.issubset(hint_stages | selected):
+        return plan
+    # Carry over methods for stages that match
+    methods: dict[str, str] = {}
+    for stage, method in hint.selected_methods.items():
+        if stage in selected or stage in (plan.resolved_execution_order or []):
+            methods[stage] = method
+    if methods:
+        return plan.model_copy(update={"selected_methods": methods})
+    return plan
 
 
 def apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
