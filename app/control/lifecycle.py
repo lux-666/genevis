@@ -724,18 +724,34 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
     missing_input = _report_missing_input(payload)
     if missing_input:
         return _missing_input_next_action(missing_input)
+    if _is_function_protein_artifact_error(last_error):
+        return {
+            "kind": "materialized_proteins_required",
+            "summary": "Function annotation requires a materialized local predicted-proteins FASTA matching database_provenance input_proteins_ref.",
+            "stage": stage or "function_annotation",
+            "last_error": last_error,
+            "required_fields": [
+                "manifest.assets[predicted_proteins].paths[0]",
+                "stage_outputs.gene_annotation.proteins_fasta_ref",
+                "function_annotation.database_provenance[*].input_proteins_ref",
+            ],
+            "manifest_asset_type": "predicted_proteins",
+            "run_config_path": "function_annotation.database_provenance[*].input_proteins_ref",
+            "relevant_refs": _artifact_refs(payload.get("relevant_refs")),
+        }
     if "database_provenance" in last_error:
         required_fields = [
             "method_name",
             "database_name",
             "database_version",
             "snapshot_date",
+            "database_source_ref",
             "input_proteins_ref",
             "command or descriptor_version",
         ]
         return {
             "kind": "provenance_required",
-            "summary": "Function annotation requires database_provenance records matching the planned proteins_fasta_ref.",
+            "summary": "Function annotation requires database_provenance records matching a materialized proteins_fasta_ref.",
             "stage": stage or "function_annotation",
             "last_error": last_error,
             "required_fields": required_fields,
@@ -750,6 +766,16 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
         "required_fields": [],
         "relevant_refs": _artifact_refs(payload.get("relevant_refs")),
     }
+
+def _is_function_protein_artifact_error(last_error: str) -> bool:
+    return any(
+        marker in last_error
+        for marker in (
+            "protein artifact not found for function_annotation",
+            "protein artifact is not a file for function_annotation",
+            "proteins_fasta_ref must be a local file path for function_annotation",
+        )
+    )
 
 
 def _candidate_comparison_relevant_refs(context: Any) -> dict[str, Any]:

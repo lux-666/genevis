@@ -1254,6 +1254,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertEqual(report["next_action"]["kind"], "provenance_required")
             self.assertIn("database_provenance", report["last_error"])
             self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
+            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1333,7 +1334,11 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
 class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
     def _write_provided_annotation_inputs(
-        self, root: Path, *, session_id: str = "phase5-provided-ann-e2e"
+        self,
+        root: Path,
+        *,
+        session_id: str = "phase5-provided-ann-e2e",
+        include_provenance: bool = False,
     ) -> tuple[Path, Path, Path]:
         assembly = root / "existing_assembly.fa"
         gene_models = root / "gene_models.gff3"
@@ -1364,7 +1369,22 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             encoding="utf-8",
         )
         run_config = root / "run_config.json"
-        run_config.write_text(json.dumps({"local_exec": []}), encoding="utf-8")
+        run_config_payload = {"local_exec": []}
+        if include_provenance:
+            run_config_payload["function_annotation"] = {
+                "database_provenance": [
+                    {
+                        "method_name": "function_annotation.candidate.interproscan",
+                        "database_name": "InterPro",
+                        "database_version": "99.0",
+                        "snapshot_date": "2026-05-25",
+                        "database_source_ref": "/db/interpro/99.0",
+                        "descriptor_version": "interproscan.yaml",
+                        "input_proteins_ref": str(proteins),
+                    }
+                ]
+            }
+        run_config.write_text(json.dumps(run_config_payload), encoding="utf-8")
         return manifest, run_config, root / "out"
 
     def _run_args(self, *, session_id: str, manifest: Path, run_config: Path, data_dir: Path) -> argparse.Namespace:
@@ -1425,6 +1445,54 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             self.assertEqual(report["current_stage"], "function_annotation")
             self.assertEqual(report["next_action"]["kind"], "provenance_required")
             self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
+            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
+
+    def test_existing_assembly_provided_annotation_with_provenance_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-function-provenance-e2e"
+            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
+                root,
+                session_id=session_id,
+                include_provenance=True,
+            )
+            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+
+            code, stdout, stderr = _capture_cli(_run_session, args)
+
+            self.assertEqual(code, 0, stderr)
+            self.assertIn("current_stage: done", stdout)
+            self.assertIn("supervision_state: completed", stdout)
+
+            proteins_file = root / "predicted_proteins.fasta"
+            function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            final_report_path = data_dir / "artifacts" / "final_report" / session_id / "review_decision_report.json"
+            self.assertTrue(function_bundle_path.exists())
+            self.assertTrue(final_report_path.exists())
+
+            bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
+            self.assertEqual(bundle["proteins_fasta_ref"], str(proteins_file))
+            self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
+            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/interpro/99.0")
+
+            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+            artifact_types = [
+                json.loads(line)["artifact_type"]
+                for line in artifact_index.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("function_annotation.plan", artifact_types)
+            self.assertIn("function_annotation.bundle", artifact_types)
+            self.assertIn("final_report.review_decisions", artifact_types)
+
+            events_path = data_dir / "ledger" / session_id / "events.jsonl"
+            ledger_types = [
+                json.loads(line)["artifact"]["artifact_type"]
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event_type"] == "artifact_registered"
+            ]
+            self.assertIn("function_annotation.plan", ledger_types)
+            self.assertIn("function_annotation.bundle", ledger_types)
+            self.assertIn("final_report.review_decisions", ledger_types)
 
 
 class ResumeCLITests(unittest.TestCase):

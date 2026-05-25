@@ -77,6 +77,7 @@ def write_final_review_report(data_dir: str | Path, session_id: str) -> str:
         metadata={"pending_human_confirmations": len(pending)},
     )
     append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
     return str(report_ref)
 
 

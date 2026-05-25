@@ -95,6 +95,7 @@ Record:
 - database name;
 - database version;
 - snapshot date;
+- database source/ref;
 - command or descriptor version;
 - input `proteins.fa` artifact ref.
 
@@ -125,7 +126,9 @@ without a version or snapshot reference.
   incomplete, or protein-ref-mismatched provenance fails terminally instead of
   becoming best-effort metadata.
 - `FunctionDatabaseProvenance`, `FunctionAnnotationPlan`, and
-  `FunctionAnnotationBundle` are defined in `app/schemas/artifacts.py`.
+  `FunctionAnnotationBundle` are defined in `app/schemas/artifacts.py`; Phase 5
+  later tightens provenance with `database_source_ref` and materialized protein
+  FASTA validation.
 - The stage writes `function_annotation_plan.json` and
   `function_annotation_bundle.json`, records `execution_enabled: false` and
   `database_download_enabled: false`, and publishes planned function table refs.
@@ -145,8 +148,8 @@ without a version or snapshot reference.
 - `app/stages/function_annotation/nodes.py` 实现 protein 输入解析、候选方法规划、
   database provenance 硬校验、plan/bundle artifact 写入和路由到 `done`。
 - `FunctionDatabaseProvenance`、`FunctionAnnotationPlan`、`FunctionAnnotationBundle`
-  在 `app/schemas/artifacts.py` 中定义，明确 database name/version/snapshot/input
-  protein ref 以及 command 或 descriptor version 要求。
+  在 `app/schemas/artifacts.py` 中定义，明确 database name/version/snapshot、
+  database source/ref、input protein ref 以及 command 或 descriptor version 要求。
 - InterProScan、eggNOG-mapper、DIAMOND、KofamScan descriptors 注册为 planning
   candidates；Phase 2 不下载数据库、不执行工具、不选择默认 function annotation 路径。
 - `tests/test_function_annotation.py` 是上手入口：看 proteins.fa 必需、provenance 必需、

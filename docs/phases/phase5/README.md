@@ -53,7 +53,8 @@ provenance gate.
 7. [Assembly Review Evidence Expansion, BUSCO First](07_assembly_review_busco_evidence.md)
 8. [Assembly Parameter Loop And Candidate Comparison](08_assembly_parameter_loop.md)
 9. [Assembly Review Visual Report And Human Selection](09_assembly_review_visual_report.md)
-10. [Function Annotation Provenance Completion](10_function_annotation_provenance_completion.md)
+10. [Ask Staged Clarification](10_ask_staged_clarification.md)
+11. [Function Annotation Provenance Completion](11_function_annotation_provenance_completion.md)
 
 ## Phase 5 Guardrails
 

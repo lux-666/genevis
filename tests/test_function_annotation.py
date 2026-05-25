@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.ledger import Ledger
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.function_annotation.builder import build_stage
@@ -40,9 +41,18 @@ class FunctionAnnotationStageTests(unittest.TestCase):
         state["current_stage"] = "function_annotation"
         return state
 
-    def _protein_state(self, tmpdir: str, *, protein_key: str = "proteins_fasta_ref", provenance: list[dict] | None = None):
+    def _protein_state(
+        self,
+        tmpdir: str,
+        *,
+        protein_key: str = "proteins_fasta_ref",
+        provenance: list[dict] | None = None,
+        create_proteins: bool = True,
+    ):
         state = self._state(tmpdir)
         proteins_ref = str(Path(tmpdir) / "proteins.fa")
+        if create_proteins:
+            Path(proteins_ref).write_text(">prot1\nMPEPTIDE\n", encoding="utf-8")
         state["stage_outputs"] = {
             "gene_annotation": {
                 "status": "completed",
@@ -62,6 +72,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 "database_name": "InterPro",
                 "database_version": "99.0",
                 "snapshot_date": "2026-05-05",
+                "database_source_ref": "/db/interpro/99.0",
                 "descriptor_version": "interproscan.yaml",
                 "input_proteins_ref": proteins_ref,
             },
@@ -70,6 +81,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 "database_name": "KOfam",
                 "database_version": "2026-04",
                 "snapshot_date": "2026-05-05",
+                "database_source_ref": "/db/kofam/2026-04",
                 "command": "exec_annotation --version",
                 "input_proteins_ref": proteins_ref,
             },
@@ -94,6 +106,14 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("database_provenance", result["last_error"])
 
+    def test_empty_database_provenance_fails_terminally(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = build_stage().invoke(self._protein_state(tmpdir, provenance=[]))
+
+            self.assertEqual(result["current_stage"], "function_annotation")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("non-empty list", result["last_error"])
+
     def test_incomplete_database_provenance_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins_ref = str(Path(tmpdir) / "proteins.fa")
@@ -104,6 +124,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                         "method_name": "function_annotation.candidate.interproscan",
                         "database_name": "InterPro",
                         "snapshot_date": "2026-05-05",
+                        "database_source_ref": "/db/interpro/99.0",
                         "descriptor_version": "interproscan.yaml",
                         "input_proteins_ref": proteins_ref,
                     }
@@ -126,6 +147,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                         "database_name": "InterPro",
                         "database_version": "99.0",
                         "snapshot_date": "2026-05-05",
+                        "database_source_ref": "/db/interpro/99.0",
                         "input_proteins_ref": proteins_ref,
                     }
                 ],
@@ -147,6 +169,20 @@ class FunctionAnnotationStageTests(unittest.TestCase):
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("input_proteins_ref", result["last_error"])
+
+    def test_valid_provenance_requires_materialized_protein_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proteins_ref = str(Path(tmpdir) / "proteins.fa")
+            state = self._protein_state(
+                tmpdir,
+                provenance=self._provenance(proteins_ref),
+                create_proteins=False,
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("protein artifact not found", result["last_error"])
 
     def test_valid_provenance_commits_and_marks_workflow_done(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,6 +208,17 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertFalse(plan["metadata"]["database_download_enabled"])
             bundle = json.loads(Path(function["bundle_artifact_ref"]).read_text(encoding="utf-8"))
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], proteins_ref)
+            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/interpro/99.0")
+            self.assertTrue(Path(function["final_review_report_artifact_ref"]).exists())
+            events = Ledger(tmpdir).read_events("s1")
+            registered_types = [
+                event["artifact"]["artifact_type"]
+                for event in events
+                if event["event_type"] == "artifact_registered"
+            ]
+            self.assertIn("function_annotation.plan", registered_types)
+            self.assertIn("function_annotation.bundle", registered_types)
+            self.assertIn("final_report.review_decisions", registered_types)
 
     def test_predicted_proteins_alias_is_accepted_when_provenance_matches(self):
         with tempfile.TemporaryDirectory() as tmpdir:

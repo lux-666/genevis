@@ -261,6 +261,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                         "database_name": "InterPro",
                         "database_version": "99.0",
                         "snapshot_date": "2026-05-16",
+                        "database_source_ref": "/db/interpro/99.0",
                         "descriptor_version": "interproscan.yaml",
                         "input_proteins_ref": "/data/proteins.fa",
                     }
@@ -271,9 +272,33 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert len(cfg.function_annotation.database_provenance) == 1
         assert cfg.function_annotation.database_provenance[0].database_name == "InterPro"
 
+    def test_function_annotation_empty_database_provenance_rejected_by_run_config(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({"function_annotation": {"database_provenance": []}})
+
     def test_function_annotation_unknown_field_rejected(self):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate({"function_annotation": {"unknown_field": "x"}})
+
+    def test_function_annotation_empty_database_source_ref_rejected(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate(
+                {
+                    "function_annotation": {
+                        "database_provenance": [
+                            {
+                                "method_name": "function_annotation.candidate.interproscan",
+                                "database_name": "InterPro",
+                                "database_version": "99.0",
+                                "snapshot_date": "2026-05-16",
+                                "database_source_ref": "",
+                                "descriptor_version": "interproscan.yaml",
+                                "input_proteins_ref": "/data/proteins.fa",
+                            }
+                        ]
+                    }
+                }
+            )
 
 
 class RunConfigLoaderTests(unittest.TestCase):

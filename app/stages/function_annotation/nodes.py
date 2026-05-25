@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
 from app.reports.review_report import write_final_review_report
@@ -115,6 +116,9 @@ def validate_database_provenance(state: TopLevelState) -> dict:
     provenance, error = _validate_provenance_records(raw_provenance, function_out["proteins_fasta_ref"])
     if error:
         return _fail_update(state, error)
+    protein_error = _validate_protein_artifact_ref(function_out["proteins_fasta_ref"])
+    if protein_error:
+        return _fail_update(state, protein_error)
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
@@ -154,6 +158,7 @@ def validate_database_provenance(state: TopLevelState) -> dict:
         },
     )
     append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
     return _update_function_output(
         state,
         {
@@ -212,6 +217,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         },
     )
     append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
     final_report_ref = write_final_review_report(data_dir, session_id)
 
     outputs = dict(state.get("stage_outputs") or {})
@@ -253,13 +259,26 @@ def _first_value(values: dict[str, Any], keys: list[str]) -> str | None:
     return None
 
 
+def _validate_protein_artifact_ref(proteins_ref: str) -> str | None:
+    if "://" in proteins_ref:
+        return f"proteins_fasta_ref must be a local file path for function_annotation: {proteins_ref}"
+    path = Path(proteins_ref)
+    if not path.exists():
+        return f"protein artifact not found for function_annotation: {proteins_ref}"
+    if not path.is_file():
+        return f"protein artifact is not a file for function_annotation: {proteins_ref}"
+    return None
+
+
 def _validate_provenance_records(
     raw_provenance: Any,
     proteins_ref: str,
 ) -> tuple[list[FunctionDatabaseProvenance], str | None]:
-    if not raw_provenance:
+    if raw_provenance is None:
         return [], "missing database_provenance for function_annotation"
     if not isinstance(raw_provenance, list):
+        return [], "database_provenance must be a non-empty list"
+    if not raw_provenance:
         return [], "database_provenance must be a non-empty list"
 
     records: list[FunctionDatabaseProvenance] = []

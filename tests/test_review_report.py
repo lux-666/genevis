@@ -62,6 +62,32 @@ class ReviewReportTests(unittest.TestCase):
             self.assertEqual(report["route_trace_tail"], ["gene_annotation_stage", "function_annotation_stage"])
             artifact_index = Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl"
             self.assertIn("operator_report.failed_terminal", artifact_index.read_text(encoding="utf-8"))
+            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
+
+    def test_failed_operator_report_points_to_materialized_proteins_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Ledger(tmp).create_session("s1", "manifest.yaml")
+            report_ref = write_operator_report(
+                tmp,
+                "s1",
+                {
+                    "current_stage": "function_annotation",
+                    "supervision_state": "failed_terminal",
+                    "last_error": "protein artifact not found for function_annotation: /tmp/missing.fa",
+                    "route_trace": ["gene_annotation_stage", "function_annotation_stage"],
+                },
+            )
+
+            report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
+            next_action = report["next_action"]
+            self.assertEqual(next_action["kind"], "materialized_proteins_required")
+            self.assertEqual(next_action["manifest_asset_type"], "predicted_proteins")
+            self.assertIn("manifest.assets[predicted_proteins].paths[0]", next_action["required_fields"])
+            self.assertIn("function_annotation.database_provenance[*].input_proteins_ref", next_action["required_fields"])
+            self.assertEqual(
+                next_action["run_config_path"],
+                "function_annotation.database_provenance[*].input_proteins_ref",
+            )
 
     def test_blocked_operator_report_compacts_active_interrupt(self):
         with tempfile.TemporaryDirectory() as tmp:

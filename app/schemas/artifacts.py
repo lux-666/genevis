@@ -7,7 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
@@ -328,14 +328,31 @@ class FunctionDatabaseProvenance(BaseModel):
     database_name: str
     database_version: str
     snapshot_date: str
+    database_source_ref: str
     input_proteins_ref: str
     command: str | None = None
     descriptor_version: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator(
+        "method_name",
+        "database_name",
+        "database_version",
+        "snapshot_date",
+        "database_source_ref",
+        "input_proteins_ref",
+    )
+    @classmethod
+    def _required_text_must_not_be_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
     @model_validator(mode="after")
     def _require_command_or_descriptor_version(self):
-        if not self.command and not self.descriptor_version:
+        if not (self.command and self.command.strip()) and not (
+            self.descriptor_version and self.descriptor_version.strip()
+        ):
             raise ValueError("function database provenance requires command or descriptor_version")
         return self
 

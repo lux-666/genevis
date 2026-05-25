@@ -19,7 +19,9 @@ implemented in code/docs with inspect JSON, next-action output, decision-templat
 generation, and blocked/failed operator report artifacts. Phase 5 task 06
 provided gene annotation adoption is implemented in code and tests; server/HPC
 smoke is pending. Phase 5 task 07 assembly review BUSCO evidence is implemented
-in code and tests; server/HPC smoke is pending.
+in code and tests; server/HPC smoke is pending. Phase 5 task 11 function
+annotation provenance completion is implemented in code/tests with a server/HPC
+completion smoke script added; actual server execution is pending.
 
 The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
@@ -231,6 +233,42 @@ The existing function-provenance failure smoke remains useful regression
 coverage but is not final-report evidence — failed-terminal paths intentionally
 do not write the final report artifact in task 04.
 
+## Phase 5 Function Annotation Provenance Completion
+
+Phase 5 task 11 is implemented locally for the true terminal path:
+provided/adopted annotation proteins plus run-config database provenance now
+reaches `current_stage=done` and `supervision_state=completed` without running
+function annotation tools or fabricating annotation tables.
+
+Implementation highlights:
+
+- `FunctionDatabaseProvenance` now requires `database_source_ref` and non-empty
+  provenance text fields, plus the existing `command` or `descriptor_version`
+  anchor.
+- `function_annotation` validates provenance first, then requires the matched
+  `proteins_fasta_ref` to be a materialized local file before writing plan and
+  bundle artifacts.
+- Function annotation plan, bundle, and final report artifacts are registered in
+  both the artifact index and ledger.
+- `scripts/server_phase5_function_provenance_smoke.sh` is the dedicated
+  server/HPC completion smoke. It reads `predicted_proteins` from the manifest
+  using manifest-relative path resolution, patches the run-config placeholder,
+  verifies terminal success, and asserts the planned function tables were not
+  materialized.
+
+Server/HPC command to run after replacing manifest placeholders with real files:
+
+```bash
+bash scripts/server_phase5_function_provenance_smoke.sh \
+  --manifest    /data/work/genevis/data/phase5_auto_review/manifest.yaml \
+  --run-config  /data/work/genevis/data/phase5_auto_review/run_config.json \
+  --session-id  phase5-function-provenance-YYYYMMDD-a \
+  --data-dir    /data/work/genevis/data/phase5_function_provenance/out
+```
+
+Record the observed session id, exit code `0`, final report path, function
+bundle path, and proteins ref here after the server run.
+
 ## Cloud Test Conventions
 
 For server/HPC command snippets, prefer the explicit environment prefix:
@@ -299,17 +337,12 @@ done
 
 ## Next Best Task
 
-Phase 4 server QUAST/resume validation plus Phase 5 task 03 RepeatMasker,
-task 04 review-policy server validations, task 05 operator usability code/docs,
-and task 06 provided gene annotation adoption code/tests are recorded. Phase 5
-task 07 assembly review BUSCO evidence is implemented in code/tests with
-server/HPC smoke pending. The next best implementation task is Phase 5 task 08,
-assembly parameter loop and candidate comparison. The approved remaining Phase 5
-order is:
-
-1. task 08 — assembly parameter loop and candidate comparison
-2. task 09 — assembly review visual report and human selection
-3. task 10 — function annotation provenance completion
+Phase 5 task 11 is locally implemented; the next best follow-up is to run and
+record `scripts/server_phase5_function_provenance_smoke.sh` on the server/HPC
+with real provided annotation files and database provenance. Existing pending
+server/HPC validations for Phase 5 task 06/07 should also be closed before
+claiming the full Phase 5 backbone as server-accepted. Continue any remaining
+Phase 5 implementation work according to `docs/phases/phase5/README.md`.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

@@ -52,7 +52,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Path to a JSON run-config file that seeds approved stage_outputs "
-            "fields (local_exec stages and assembly.flye_parameters)."
+            "fields (local_exec stages, assembly.flye_parameters, and "
+            "function_annotation.database_provenance)."
         ),
     )
     run_parser.add_argument(

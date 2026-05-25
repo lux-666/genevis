@@ -2,15 +2,17 @@
 # Server-side Phase 5 auto-review smoke (deterministic auto_rule path).
 #
 # WHAT THIS VALIDATES:
-#   - existing-assembly entry → assembly_review deterministic_safe → auto_rule
-#     decision → workflow reaches commit_function_annotation → final review
-#     decision report is written.
+#   - existing-assembly entry with provided gene annotation proteins →
+#     assembly_review deterministic_safe → auto_rule decision →
+#     function_annotation provenance validation against the real proteins file →
+#     final review decision report is written.
 #
 # WHAT THIS DOES NOT VALIDATE:
 #   - LLM-backed `decided_by="llm_provisional"` review. The deterministic path
 #     bypasses `human_review_gate` entirely, so the recommender is never called.
 #     For LLM-provisional evidence, run scripts/server_phase5_llm_review_smoke.sh
 #     against a raw_inputs fixture with valid GENE_AGENT_LLM_API_KEY.
+#   - Function annotation tool execution; this smoke records provenance only.
 #
 # Usage:
 #   bash scripts/server_phase5_auto_review_smoke.sh \
@@ -54,11 +56,29 @@ DATA_DIR="$(abs_path "${DATA_DIR}")"
 
 mkdir -p "${DATA_DIR}"
 
-# gene_annotation planning sets proteins_fasta_ref to this path string. The
-# database_provenance.input_proteins_ref must match it exactly; the smoke
-# validates the committed bundle fields rather than requiring the planned FASTA
-# to exist on disk.
-PROTEINS_REF="${DATA_DIR}/work/gene_annotation/${SESSION_ID}/proteins.fa"
+PROTEINS_REF=$(conda run -n "${ORCHESTRATOR_ENV}" python - "${MANIFEST}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+manifest_path = Path(sys.argv[1]).expanduser().resolve(strict=False)
+manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+for asset in manifest.get("assets", []):
+    if asset.get("asset_type") == "predicted_proteins":
+        paths = asset.get("paths") or []
+        if len(paths) != 1:
+            raise SystemExit("error: predicted_proteins asset must have exactly one path")
+        proteins_ref = Path(paths[0]).expanduser()
+        if not proteins_ref.is_absolute():
+            proteins_ref = manifest_path.parent / proteins_ref
+        print(proteins_ref.resolve(strict=False))
+        break
+else:
+    raise SystemExit("error: manifest must include a predicted_proteins asset for terminal function provenance")
+PY
+)
+ensure_file predicted-proteins "${PROTEINS_REF}"
 
 RUN_CONFIG="${DATA_DIR}/run_config_patched.json"
 sed "s|__REPLACE_WITH_PROTEINS_FASTA_REF__|${PROTEINS_REF}|g" \
@@ -90,11 +110,6 @@ if ! grep -q 'supervision_state: completed' "${run_log}"; then
   exit 1
 fi
 
-# Note: gene_annotation is planning-only — it sets proteins_fasta_ref to a
-# planned path string but never writes the file. validate_database_provenance
-# only checks string equality, so the run reaches terminal commit even though
-# ${PROTEINS_REF} does not exist on disk. Do not check for the file here.
-
 final_report="${DATA_DIR}/artifacts/final_report/${SESSION_ID}/review_decision_report.json"
 function_bundle="${DATA_DIR}/artifacts/function_annotation/${SESSION_ID}/function_annotation_bundle.json"
 
@@ -104,7 +119,7 @@ done
 
 # Validate this smoke's specific claim: at least one decision is decided_by=auto_rule
 # (the deterministic existing-assembly accept), and the seeded provenance matched
-# the planning-only proteins_fasta_ref string used by function_annotation.
+# the manifest-provided proteins_fasta_ref consumed by function_annotation.
 conda run -n "${ORCHESTRATOR_ENV}" python - <<PY
 import json, sys
 report = json.loads(open("${final_report}").read())
@@ -126,6 +141,8 @@ if not provenance:
 for index, record in enumerate(provenance):
     if record.get("input_proteins_ref") != "${PROTEINS_REF}":
         sys.exit(f"error: provenance[{index}].input_proteins_ref mismatch: {record.get('input_proteins_ref')!r}")
+    if not record.get("database_source_ref"):
+        sys.exit(f"error: provenance[{index}] missing database_source_ref")
 print(f"decisions: {len(decisions)}, by_origin: {origins}")
 print(f"proteins_fasta_ref: {bundle.get('proteins_fasta_ref')}")
 PY

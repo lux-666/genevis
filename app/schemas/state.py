@@ -1,5 +1,7 @@
 """Small LangGraph state schema.
 
+Canonical definition path: ``app/schemas/state.py``.
+
 Large files, command logs, generated scripts, and metric tables belong in
 artifacts or ledger records. The checkpointed state stores control fields and
 references only.
@@ -24,12 +26,16 @@ DomainStage = Literal[
 
 
 class TopLevelState(TypedDict, total=False):
-    """Checkpointed state for the parent graph."""
 
+    # Stable run identity and storage root.
     session_id: str
     thread_id: str
     data_dir: str
+
+    # Operator-level lifecycle for the whole run.
     control_state: Literal["running", "paused_manual", "stop_requested", "closed"]
+
+    # Current supervision status used by routing, review gates, and entrypoints.
     supervision_state: Literal[
         "idle",
         "running_stage",
@@ -38,16 +44,32 @@ class TopLevelState(TypedDict, total=False):
         "completed",
         "failed_terminal",
     ]
+
+    # Workflow position and requested stage subset.
     current_stage: DomainStage
     requested_stages: list[DomainStage] | None
+
+    # Durable references to external contracts and compact artifact indexes.
     input_manifest_ref: str
     asset_registry_ref: str | None
     stage_plan_ref: str | None
+
+    # Human-review or pause metadata. Keep payloads short and ref-heavy.
     active_interrupt: dict[str, Any] | None
+
+    # Last terminal or blocking error, if any.
     last_error: str | None
+
+    # Small operator-facing notes accumulated during review or resume flows.
     review_notes: list[str]
+
+    # Ordered node/stage trace for debugging high-level routing.
     route_trace: list[str]
+
+    # Per-stage compact outputs. Large outputs must be represented by refs.
     stage_outputs: dict[str, dict[str, Any]]
+
+    # Stage skip reasons keyed by stage name.
     skip_reasons: dict[str, str]
 
 

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from app.entrypoints.ask_planner import (
+    _STAGE_METHODS,
     build_run_config_payload,
     merge_clarification_response,
     next_clarification,
@@ -19,6 +20,7 @@ from app.schemas.ask_plan import (
     load_ask_plan,
     save_ask_plan,
 )
+from app.schemas.descriptors import DescriptorRegistry
 
 
 def _base_plan(**overrides) -> AskPlanState:
@@ -108,6 +110,14 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
 
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
+    def test_stage_methods_match_descriptor_registry(self):
+        registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+        for stage, methods in _STAGE_METHODS.items():
+            with self.subTest(stage=stage):
+                planner_methods = {m["method_name"] for m in methods}
+                registered_methods = set(registry.by_stage.get(stage, []))
+                self.assertEqual(planner_methods, registered_methods)
+
     def test_method_selection_includes_non_pipeline_stages(self):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
@@ -120,6 +130,20 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         self.assertNotIn("read_qc", result.choices["methods_by_stage"])
         flye = [m for m in result.choices["methods_by_stage"]["assembly"] if m["method_name"] == "assembly.candidate.flye"]
         self.assertEqual(flye[0]["execution_support"], "executable")
+
+    def test_assembly_review_method_selection_uses_registered_method_names(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        method_names = {
+            m["method_name"]
+            for m in result.choices["methods_by_stage"]["assembly_review"]
+        }
+        self.assertIn("assembly_review.eval.merqury", method_names)
+        self.assertIn("assembly_review.eval.mapping_coverage", method_names)
+        self.assertNotIn("assembly_review.check.merqury", method_names)
 
     def test_pipeline_stage_only_skips_to_confirm(self):
         plan = _base_plan(

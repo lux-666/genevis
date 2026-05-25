@@ -367,7 +367,8 @@ Inputs:
 - required: `predicted_proteins` / `proteins.fa`
 - optional: `gene_models`
 - optional: `transcripts.fa`
-- required before commit: database provenance records
+- required before commit: database provenance records whose
+  `input_proteins_ref` matches a materialized local predicted-proteins FASTA
 
 Outputs:
 
@@ -384,8 +385,8 @@ Planning rules:
 - InterProScan is the domain/motif/GO backbone candidate.
 - DIAMOND is the fast homology path candidate for Swiss-Prot, UniProt, or NR.
 - KofamScan is the KO/pathway candidate.
-- Record database name, version, snapshot date, command or descriptor version,
-  and input protein ref in provenance before committing.
+- Record database name, version, snapshot date, database source/ref, command or
+  descriptor version, and input protein ref in provenance before committing.
 
 Review triggers:
 

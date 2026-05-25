@@ -115,11 +115,11 @@ class AssemblyReviewRunConfig(BaseModel):
 
 
 class FunctionAnnotationRunConfig(BaseModel):
-    """Run-config block for function annotation — carries database provenance for smoke fixtures."""
+    """Run-config block for user-supplied function database provenance."""
 
     model_config = ConfigDict(extra="forbid")
 
-    database_provenance: list[FunctionDatabaseProvenance] | None = None
+    database_provenance: list[FunctionDatabaseProvenance] | None = Field(default=None, min_length=1)
 
 
 class RunConfig(BaseModel):

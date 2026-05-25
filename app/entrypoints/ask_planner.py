@@ -48,8 +48,20 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
             "parameter_defaults": {},
         },
         {
-            "method_name": "read_qc.make_fofn.local",
-            "execution_support": "executable",
+            "method_name": "read_qc.length_filter.chopper",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "read_qc.length_filter.filtlong",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "read_qc.length_filter.fastplong",
+            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
         },
@@ -120,7 +132,13 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
             "parameter_defaults": {"threads": 8},
         },
         {
-            "method_name": "assembly_review.check.merqury",
+            "method_name": "assembly_review.eval.merqury",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "assembly_review.eval.mapping_coverage",
             "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},

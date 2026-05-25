@@ -281,10 +281,10 @@ bash scripts/server_phase5_llm_review_smoke.sh \
 
 The `phase5_auto_review` template `run_config.json` seeds
 `function_annotation.database_provenance` with a placeholder
-`__REPLACE_WITH_PROTEINS_FASTA_REF__`. The smoke script substitutes
-`<data_dir>/work/gene_annotation/<session_id>/proteins.fa`; this is a planned
-path string, not a required on-disk protein FASTA, because gene annotation is
-currently planning-only.
+`__REPLACE_WITH_PROTEINS_FASTA_REF__`. The smoke script substitutes the actual
+manifest `predicted_proteins` asset path and requires that FASTA to exist before
+terminal commit; completion no longer accepts a non-materialized planned
+`proteins.fa` path.
 
 Both scripts have been run on the server. Recorded evidence lives in
 `docs/handoff.md` under "Phase 5 Review Policy Run Record".
