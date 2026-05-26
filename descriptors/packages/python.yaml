@@ -1,0 +1,13 @@
+package_name: python
+version_constraint: ">=3.10"
+language: python
+install_channel: builtin
+entry_patterns:
+  - "python"
+help_summary: "Repository-internal Python code executed by the workflow runtime."
+known_pitfalls: []
+resource_defaults:
+  cpu_cores: 1
+  memory_gb: 0.1
+  gpu_required: false
+  walltime_hours: 0.1

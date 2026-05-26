@@ -40,6 +40,100 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.flye_parameters.estimated_genome_size, 2_000_000)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
+    def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly"],
+                "shared_parameters": {
+                    "read_type": "ont_raw",
+                    "estimated_genome_size": 2_000_000,
+                },
+                "assembly": {"flye_parameters": {"threads": 4}},
+            }
+        )
+
+        assert config.shared_parameters is not None
+        assert config.assembly is not None
+        assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.shared_parameters.read_type, "ont_raw")
+        self.assertEqual(config.assembly.flye_parameters.threads, 4)
+
+    def test_read_qc_length_filter_choice_is_accepted(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["read_qc"],
+                "read_qc": {
+                    "length_filter": {
+                        "method": "read_qc.length_filter.seqkit_seq",
+                        "approved": True,
+                        "thresholds": {"min_len": 1000},
+                    }
+                },
+            }
+        )
+
+        assert config.read_qc is not None
+        assert config.read_qc.length_filter is not None
+        self.assertEqual(config.read_qc.length_filter.method, "read_qc.length_filter.seqkit_seq")
+        self.assertEqual(config.read_qc.length_filter.thresholds, {"min_len": 1000})
+
+    def test_read_qc_seqkit_filter_requires_threshold_when_approved(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "read_qc": {
+                        "length_filter": {
+                            "method": "read_qc.length_filter.seqkit_seq",
+                            "approved": True,
+                            "thresholds": {},
+                        }
+                    }
+                }
+            )
+
+        self.assertIn("min_len", str(ctx.exception))
+
+    def test_read_qc_planned_only_filter_cannot_be_approved(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "read_qc": {
+                        "length_filter": {
+                            "method": "read_qc.length_filter.filtlong",
+                            "approved": True,
+                            "thresholds": {"min_len": 1000},
+                        }
+                    }
+                }
+            )
+
+        self.assertIn("approved execution", str(ctx.exception))
+
+    def test_assembly_review_quast_parameters_are_accepted(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly_review"],
+                "assembly_review": {"quast": {"threads": 4}},
+            }
+        )
+
+        assert config.assembly_review is not None
+        assert config.assembly_review.quast is not None
+        self.assertEqual(config.assembly_review.quast.threads, 4)
+
+    def test_invalid_shared_read_type_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "shared_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                    }
+                }
+            )
+
+        self.assertIn("read_type", str(ctx.exception))
+
     def test_unknown_stage_in_local_exec_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate({"local_exec": ["assembly", "gene_annotation"]})
@@ -299,6 +393,55 @@ class RunConfigSchemaTests(unittest.TestCase):
                     }
                 }
             )
+
+    def test_skip_method_with_approved_true_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["read_qc"],
+                    "read_qc": {
+                        "length_filter": {
+                            "method": "skip",
+                            "approved": True,
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("skip", str(ctx.exception))
+
+    def test_approved_filter_without_read_qc_in_local_exec_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "read_qc": {
+                        "length_filter": {
+                            "method": "read_qc.length_filter.seqkit_seq",
+                            "approved": True,
+                            "thresholds": {"min_len": 1000},
+                        }
+                    }
+                }
+            )
+
+        self.assertIn("local_exec", str(ctx.exception))
+
+    def test_unapproved_filter_without_read_qc_in_local_exec_is_allowed(self):
+        config = RunConfig.model_validate(
+            {
+                "read_qc": {
+                    "length_filter": {
+                        "method": "read_qc.length_filter.seqkit_seq",
+                        "approved": False,
+                        "thresholds": {"min_len": 1000},
+                    }
+                }
+            }
+        )
+
+        assert config.read_qc is not None
+        assert config.read_qc.length_filter is not None
+        self.assertFalse(config.read_qc.length_filter.approved)
 
 
 class RunConfigLoaderTests(unittest.TestCase):

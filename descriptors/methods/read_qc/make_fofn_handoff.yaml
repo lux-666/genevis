@@ -1,0 +1,20 @@
+method_name: read_qc.make_fofn.local
+stage: read_qc
+package_ref: python
+goal: "Write the stable long-read FOFN handoff for downstream assembly."
+required_inputs:
+  - name: raw_or_filtered_long_reads
+    type: raw_long_reads
+    description: "Raw reads or explicitly approved filtered long reads selected by read_qc."
+expected_outputs:
+  - name: long_reads_fofn
+    type: read_qc.long_reads.fofn
+    description: "Stable FOFN consumed by assembly candidate planning."
+review_rules:
+  - fofn_artifact_exists
+human_review_triggers: []
+resource_hints:
+  cpu_cores: 1
+  memory_gb: 0.1
+  gpu_required: false
+  walltime_hours: 0.1

@@ -302,6 +302,12 @@ def _run_session(args: argparse.Namespace) -> int:
             existing = dict(stage_outputs.get(stage_name) or {})
             existing["execution_mode"] = "local"
             stage_outputs[stage_name] = existing
+    if run_config and run_config.shared_parameters:
+        state["shared_parameters"] = run_config.shared_parameters.model_dump(exclude_none=True)
+    if run_config and run_config.read_qc and run_config.read_qc.length_filter:
+        read_qc_out = dict(stage_outputs.get("read_qc") or {})
+        read_qc_out["length_filter_request"] = run_config.read_qc.length_filter.model_dump(mode="json")
+        stage_outputs["read_qc"] = read_qc_out
     if "repeat_annotation" in local_stages:
         repeat_out = dict(stage_outputs.get("repeat_annotation") or {})
         repeat_out.setdefault(
@@ -314,6 +320,8 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["assembly"] = assembly_out
     if run_config and run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})
+        if run_config.assembly_review.quast:
+            review_out["quast_parameters"] = run_config.assembly_review.quast.model_dump()
         if run_config.assembly_review.busco:
             review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
         review_out["max_reruns"] = run_config.assembly_review.max_reruns

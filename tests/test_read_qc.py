@@ -43,6 +43,17 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["read_qc"])
 
+    def test_descriptor_registry_loads_make_fofn_with_runtime_method_name(self):
+        registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+
+        self.assertIn("python", registry.packages)
+        self.assertIn("read_qc.make_fofn.local", registry.methods)
+        method = registry.methods["read_qc.make_fofn.local"]
+        self.assertEqual(method.stage, "read_qc")
+        self.assertEqual(method.package_ref, "python")
+        self.assertIn("read_qc.make_fofn.local", registry.by_stage["read_qc"])
+        self.assertNotIn("read_qc.handoff.make_fofn", registry.methods)
+
 
 class ReadQCSeqKitStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
@@ -249,6 +260,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             read_qc = result["stage_outputs"]["read_qc"]
             self.assertEqual(read_qc["substeps"]["long_read_stats"]["status"], "executed")
             self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
+            self.assertEqual(read_qc["length_filter_method"], "skip")
+            self.assertEqual(read_qc["length_filter_decision"], "skip filtering, use raw reads")
             self.assertEqual(
                 read_qc["substeps"]["length_filter"]["skip_reason"],
                 "no_filtering_requested",
@@ -305,6 +318,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "read_qc.length_filter.seqkit_seq",
             )
             self.assertEqual(read_qc["substeps"]["length_filter"]["thresholds"], {"min_len": 1000})
+            self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.seqkit_seq")
+            self.assertEqual(read_qc["length_filter_decision"], "seqkit_seq")
             self.assertNotIn("length_filter_request", read_qc)
             filtered_ref = Path(read_qc["filtered_long_reads_ref"])
             self.assertTrue(filtered_ref.exists())
@@ -365,6 +380,76 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertNotIn("length_filter_request", read_qc)
             self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
             self.assertEqual(Path(read_qc["long_reads_fofn_ref"]).read_text(encoding="utf-8"), f"{fq}\n")
+
+    def test_non_seqkit_filter_selection_does_not_run_without_executable_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                    }
+                ],
+            )
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.filtlong",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            read_qc = result["stage_outputs"]["read_qc"]
+            self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
+            self.assertEqual(read_qc["substeps"]["length_filter"]["skip_reason"], "filter_method_not_executable")
+            self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.filtlong")
+            self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
+
+    def test_approved_filter_without_local_execution_mode_is_not_planned(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "reads.fastq"
+            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq),
+                    }
+                ],
+            )
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            read_qc = result["stage_outputs"]["read_qc"]
+            substeps = read_qc.get("substeps", {})
+            self.assertNotIn("length_filter", substeps)
+            self.assertNotIn("filtered_long_reads_ref", read_qc)
 
     def test_missing_seqkit_records_failed_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:

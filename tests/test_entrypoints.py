@@ -273,14 +273,19 @@ class EntrypointTests(unittest.TestCase):
             ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
-                    argparse.Namespace(session_id="s1", manifest=str(manifest), data_dir=str(root / "data")),
+                    argparse.Namespace(
+                        session_id="s1",
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        checkpointer="sqlite",
+                    ),
                 )
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
-            self.assertIn("checkpoint_persistence: memory", stdout)
+            self.assertIn("checkpoint_persistence: sqlite", stdout)
             self.assertIn(
-                "resume_note: durable cross-process resume requires --checkpointer sqlite",
+                "resume_note: pass --decision-file to `gene-agent resume`",
                 stdout,
             )
             self.assertEqual(
@@ -884,6 +889,13 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps(
                     {
                         "local_exec": ["read_qc", "assembly", "assembly_review"],
+                        "read_qc": {
+                            "length_filter": {
+                                "method": "read_qc.length_filter.filtlong",
+                                "approved": False,
+                                "thresholds": {},
+                            }
+                        },
                         "assembly": {
                             "flye_parameters": {
                                 "read_type": "nano-raw",
@@ -891,6 +903,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                                 "threads": 4,
                             }
                         },
+                        "assembly_review": {"quast": {"threads": 2}},
                     }
                 ),
                 encoding="utf-8",
@@ -921,6 +934,14 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             for stage in ("read_qc", "assembly", "assembly_review"):
                 self.assertEqual(stage_outputs[stage]["execution_mode"], "local")
             self.assertEqual(
+                stage_outputs["read_qc"]["length_filter_request"],
+                {
+                    "method": "read_qc.length_filter.filtlong",
+                    "approved": False,
+                    "thresholds": {},
+                },
+            )
+            self.assertEqual(
                 stage_outputs["assembly"]["flye_parameters"],
                 {
                     "read_type": "nano-raw",
@@ -928,6 +949,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                     "threads": 4,
                 },
             )
+            self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
 
     def test_run_config_local_exec_unions_with_cli_local_exec(self):
         with tempfile.TemporaryDirectory() as tmp:

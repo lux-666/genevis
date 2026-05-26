@@ -2,12 +2,15 @@
 
 Lets `gene-agent run --run-config <file>.json` supply the parameters that
 previously required a Python one-liner: the set of stages to opt into local
-execution and the validated Flye parameters for `assembly`.
+execution, shared assembly facts, and method-specific execution parameters.
 
 The schema rejects unknown stages, unknown fields, and the combination of
-requesting local `assembly` execution without the three required Flye
-parameters. It does not invent defaults, does not carry descriptor or env
-facts, and is not a method catalog.
+requesting local `assembly` execution without a Flye parameter block carrying
+`threads`. Flye-specific `read_type` and `estimated_genome_size` are advanced
+overrides; normal runs may provide them once through `shared_parameters`, or
+let runtime priors resolve them before command freezing. This schema does not
+invent defaults, does not carry descriptor or env facts, and is not a method
+catalog.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.schemas.artifacts import FunctionDatabaseProvenance
+from app.schemas.shared_parameters import SharedParameters
 
 LocalExecStage = Literal[
     "read_qc",
@@ -29,7 +33,14 @@ LocalExecStage = Literal[
     "repeat_annotation",
 ]
 
-FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw"]
+FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
+ReadQCLengthFilterMethod = Literal[
+    "skip",
+    "read_qc.length_filter.seqkit_seq",
+    "read_qc.length_filter.chopper",
+    "read_qc.length_filter.filtlong",
+    "read_qc.length_filter.fastplong",
+]
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly_review", "hic_scaffolding"]
 
@@ -63,12 +74,12 @@ class ReviewPolicyConfig(StageReviewPolicyConfig):
 
 
 class FlyeRunParameters(BaseModel):
-    """Explicit Flye parameters required when assembly runs locally."""
+    """Explicit Flye overrides and execution parameters."""
 
     model_config = ConfigDict(extra="forbid")
 
-    read_type: FlyeReadType
-    estimated_genome_size: int = Field(gt=0)
+    read_type: FlyeReadType | None = None
+    estimated_genome_size: int | None = Field(default=None, gt=0)
     threads: int = Field(gt=0)
 
 
@@ -78,6 +89,39 @@ class AssemblyRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     flye_parameters: FlyeRunParameters | None = None
+
+
+class ReadQCLengthFilterConfig(BaseModel):
+    """Explicit read_qc length-filter choice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: ReadQCLengthFilterMethod = "skip"
+    approved: bool = False
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_thresholds_for_executable_filter(self) -> "ReadQCLengthFilterConfig":
+        if self.approved and self.method == "skip":
+            raise ValueError("read_qc.length_filter: approved must be false when method is 'skip'")
+        if self.approved and self.method not in ("skip", "read_qc.length_filter.seqkit_seq"):
+            raise ValueError(
+                "read_qc.length_filter approved execution is currently supported only for "
+                "read_qc.length_filter.seqkit_seq"
+            )
+        if self.method == "read_qc.length_filter.seqkit_seq":
+            min_len = self.thresholds.get("min_len")
+            if self.approved and (not isinstance(min_len, int) or min_len <= 0):
+                raise ValueError("read_qc.length_filter.thresholds.min_len must be a positive integer when approved")
+        return self
+
+
+class ReadQCRunConfig(BaseModel):
+    """Run-config block for read_qc choices."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    length_filter: ReadQCLengthFilterConfig | None = None
 
 
 class BuscoRunParameters(BaseModel):
@@ -105,11 +149,20 @@ class BuscoRunParameters(BaseModel):
         return self
 
 
+class QuastRunParameters(BaseModel):
+    """Explicit QUAST parameters for assembly_review local execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    threads: int = Field(gt=0)
+
+
 class AssemblyReviewRunConfig(BaseModel):
     """Run-config block for the assembly_review stage."""
 
     model_config = ConfigDict(extra="forbid")
 
+    quast: QuastRunParameters | None = None
     busco: BuscoRunParameters | None = None
     max_reruns: int = Field(default=3, ge=1, le=10)
 
@@ -128,19 +181,40 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     local_exec: list[LocalExecStage] = Field(default_factory=list)
+    shared_parameters: SharedParameters | None = None
+    read_qc: ReadQCRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig | None = None
 
     @model_validator(mode="after")
-    def _require_flye_params_when_assembly_local(self) -> "RunConfig":
+    def _require_flye_threads_when_assembly_local(self) -> "RunConfig":
         if "assembly" in self.local_exec:
             if not self.assembly or not self.assembly.flye_parameters:
                 raise ValueError(
                     "run_config: local_exec includes 'assembly' but "
                     "assembly.flye_parameters is missing"
                 )
+            if self.assembly.flye_parameters.threads is None:
+                raise ValueError(
+                    "run_config: local_exec includes 'assembly' but "
+                    "assembly.flye_parameters.threads is missing"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _require_local_exec_for_approved_filter(self) -> "RunConfig":
+        if (
+            self.read_qc
+            and self.read_qc.length_filter
+            and self.read_qc.length_filter.approved
+            and "read_qc" not in self.local_exec
+        ):
+            raise ValueError(
+                "run_config: read_qc.length_filter.approved is true but "
+                "'read_qc' is not in local_exec"
+            )
         return self
 
 

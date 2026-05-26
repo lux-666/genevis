@@ -28,6 +28,14 @@ from app.schemas.state import TopLevelState
 METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
 LENGTH_FILTER_METHOD_NAME = "read_qc.length_filter.seqkit_seq"
 MAKE_FOFN_METHOD_NAME = "read_qc.make_fofn.local"
+LENGTH_FILTER_SKIP = "skip"
+LENGTH_FILTER_DECISIONS = {
+    LENGTH_FILTER_SKIP: "skip filtering, use raw reads",
+    "read_qc.length_filter.seqkit_seq": "seqkit_seq",
+    "read_qc.length_filter.chopper": "chopper",
+    "read_qc.length_filter.filtlong": "filtlong",
+    "read_qc.length_filter.fastplong": "fastplong",
+}
 
 
 def _resolve_method_env(
@@ -69,6 +77,27 @@ def _substep_status_update(
     substeps = dict(read_qc_out.get("substeps") or {})
     substeps[name] = {**dict(substeps.get(name) or {}), "name": name, **payload}
     return _update_read_qc_output(state, {"status": status, "substeps": substeps})
+
+
+def _length_filter_status_update(
+    state: TopLevelState,
+    payload: dict[str, Any],
+    status: str,
+    *,
+    method_name: str,
+) -> dict:
+    read_qc_out = _read_qc_output(state)
+    substeps = dict(read_qc_out.get("substeps") or {})
+    substeps["length_filter"] = {**dict(substeps.get("length_filter") or {}), "name": "length_filter", **payload}
+    return _update_read_qc_output(
+        state,
+        {
+            "status": status,
+            "length_filter_method": method_name,
+            "length_filter_decision": LENGTH_FILTER_DECISIONS.get(method_name, str(method_name)),
+            "substeps": substeps,
+        },
+    )
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
@@ -380,25 +409,56 @@ def plan_length_filter(state: TopLevelState) -> dict:
     read_qc_out = _read_qc_output(state)
     if read_qc_out.get("status") == "failed":
         return {}
+    if read_qc_out.get("execution_mode") != "local":
+        return {}
 
     request = dict(read_qc_out.get("length_filter_request") or {})
     thresholds = dict(request.get("thresholds") or {})
     approved = bool(request.get("approved") or request.get("human_approved"))
-    method_name = request.get("method_name") or LENGTH_FILTER_METHOD_NAME
+    method_name = request.get("method_name") or request.get("method") or LENGTH_FILTER_SKIP
 
-    if not request:
-        return _substep_status_update(
+    if not request or method_name == LENGTH_FILTER_SKIP:
+        return _length_filter_status_update(
             state,
-            "length_filter",
-            {"status": "skipped", "skip_reason": "no_filtering_requested"},
+            {
+                "status": "skipped",
+                "method_name": LENGTH_FILTER_SKIP,
+                "skip_reason": "no_filtering_requested",
+            },
             "length_filter_skipped",
+            method_name=LENGTH_FILTER_SKIP,
+        )
+
+    if method_name not in LENGTH_FILTER_DECISIONS:
+        return _length_filter_status_update(
+            state,
+            {
+                "status": "skipped",
+                "method_name": method_name,
+                "skip_reason": "unknown_filter_method",
+                "thresholds": thresholds,
+            },
+            "length_filter_skipped",
+            method_name=method_name,
+        )
+
+    if method_name != LENGTH_FILTER_METHOD_NAME:
+        return _length_filter_status_update(
+            state,
+            {
+                "status": "skipped",
+                "method_name": method_name,
+                "skip_reason": "filter_method_not_executable",
+                "thresholds": thresholds,
+            },
+            "length_filter_skipped",
+            method_name=method_name,
         )
 
     min_len = thresholds.get("min_len")
-    if not approved or method_name != LENGTH_FILTER_METHOD_NAME or not isinstance(min_len, int) or min_len <= 0:
-        return _substep_status_update(
+    if not approved or not isinstance(min_len, int) or min_len <= 0:
+        return _length_filter_status_update(
             state,
-            "length_filter",
             {
                 "status": "skipped",
                 "method_name": method_name,
@@ -406,17 +466,18 @@ def plan_length_filter(state: TopLevelState) -> dict:
                 "thresholds": thresholds,
             },
             "length_filter_skipped",
+            method_name=method_name,
         )
 
-    return _substep_status_update(
+    return _length_filter_status_update(
         state,
-        "length_filter",
         {
             "status": "planned",
             "method_name": LENGTH_FILTER_METHOD_NAME,
             "thresholds": {"min_len": min_len},
         },
         "length_filter_planned",
+        method_name=LENGTH_FILTER_METHOD_NAME,
     )
 
 
@@ -538,6 +599,8 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         {
             "status": "length_filter_executed",
             "filtered_long_reads_ref": str(filtered_path),
+            "length_filter_method": LENGTH_FILTER_METHOD_NAME,
+            "length_filter_decision": LENGTH_FILTER_DECISIONS[LENGTH_FILTER_METHOD_NAME],
             "substeps": substeps,
         },
     )
@@ -616,6 +679,8 @@ def commit_read_qc(state: TopLevelState) -> dict:
         "format",
         "input_asset_ref",
         "long_reads_fofn_ref",
+        "length_filter_decision",
+        "length_filter_method",
         "method_name",
         "missing_tools",
         "package_name",

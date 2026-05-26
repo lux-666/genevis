@@ -26,6 +26,7 @@ packages:
   minimap2: minimap2.yaml
   nextdenovo: nextdenovo.yaml
   purge_dups: purge_dups.yaml
+  python: python.yaml
   quast: quast.yaml
   juicer: juicer.yaml
   juicebox: juicebox.yaml
@@ -73,6 +74,7 @@ methods:
   read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
   read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
+  read_qc.make_fofn.local: read_qc/make_fofn_handoff.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
 by_stage:
   inventory: []
@@ -82,6 +84,7 @@ by_stage:
     - read_qc.length_filter.fastplong
     - read_qc.length_filter.filtlong
     - read_qc.length_filter.seqkit_seq
+    - read_qc.make_fofn.local
   genome_survey:
     - genome_survey.kmer_count.jellyfish
     - genome_survey.kmer_count.meryl
