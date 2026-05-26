@@ -335,14 +335,57 @@ done
 ['inventory_stage', 'read_qc_stage', 'genome_survey_stage', 'assembly_stage', 'assembly_review_stage', 'hic_scaffolding_stage', 'repeat_annotation_stage', 'gene_annotation_stage', 'function_annotation_stage']
 ```
 
+## Phase 6 End-to-End Acceptance Run Record
+
+- host: HPC (`/data/work/genevis`)
+- git commit: `8d918ae` (feature/hic-scaffolding)
+- session_id: `phase6-e2e-20260526-a`
+- manifest: `/data/work/genevis/data/phase6_e2e/manifest.yaml`
+- run-config: `/data/work/genevis/data/phase6_e2e/run_config.json`
+- data_dir: `/data/work/genevis/data/phase6_e2e/out`
+- local_exec: `read_qc, assembly, assembly_review, repeat_annotation`
+- review_policy: `strict`
+- shared_parameters: `read_type=ont_raw, estimated_genome_size=5000000`
+
+Terminal state:
+
+- `current_stage: done`
+- `supervision_state: completed`
+- `checkpoint_persistence: sqlite`
+- `route_trace`: inventory → read_qc → genome_survey → assembly →
+  assembly_review → hic_scaffolding → repeat_annotation →
+  gene_annotation → function_annotation (all 9 stages)
+- `decisions: 1, by_origin: {human: 1}`
+- `ledger_events: 38`
+
+Review gate exercised:
+
+- assembly_review blocked with strict policy
+- durable sqlite resume with structured decision file
+- candidate: `phase6-e2e-20260526-a:assembly.candidate.flye` (executed)
+- QUAST ran on flye candidate (3 contigs, N50=6135, total=15971bp)
+- NextDenovo candidate planned but not executed (no tool)
+- BUSCO skipped (lineage not supplied)
+- Decision: `accept` via human decision file
+
+Key artifact refs:
+
+- final_report: `out/artifacts/final_report/phase6-e2e-20260526-a/review_decision_report.json`
+- function_bundle: `out/artifacts/function_annotation/phase6-e2e-20260526-a/function_annotation_bundle.json`
+- repeat_bundle: `out/artifacts/repeat_annotation/phase6-e2e-20260526-a/repeat_annotation_bundle.json`
+- assembly: `out/artifacts/assembly/phase6-e2e-20260526-a/flye/draft_assembly.fasta`
+- read_qc: `out/artifacts/read_qc/phase6-e2e-20260526-a/read_qc_summary.json`
+- checkpoint: `out/checkpoints/checkpoints.sqlite`
+
+Duplicate-attempt check: PASS (no duplicates after resume).
+
+Issues found: none. Script ran to completion without code fixes.
+
 ## Next Best Task
 
-Phase 5 task 11 is locally implemented; the next best follow-up is to run and
-record `scripts/server_phase5_function_provenance_smoke.sh` on the server/HPC
-with real provided annotation files and database provenance. Existing pending
-server/HPC validations for Phase 5 task 06/07 should also be closed before
-claiming the full Phase 5 backbone as server-accepted. Continue any remaining
-Phase 5 implementation work according to `docs/phases/phase5/README.md`.
+Phase 6 task 02 end-to-end acceptance is complete. The `gene-agent ask`
+acceptance script is ready to run on HPC (requires `GENE_AGENT_LLM_API_KEY`).
+Phase 6 task 03 (session observability and run trace) is the next task.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
