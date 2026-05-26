@@ -122,6 +122,9 @@ class FileInferenceTests(unittest.TestCase):
         self.assertEqual(_detect_platform(Path("ont_reads.fq"), "unknown"), "ont")
         self.assertEqual(_detect_platform(Path("clr_reads.fq"), "unknown"), "clr")
         self.assertEqual(_detect_platform(Path("hifi_reads.fq"), "unknown"), "pacbio_hifi")
+        self.assertEqual(_detect_platform(Path("pacbio_hifi_reads.fq"), "unknown"), "pacbio_hifi")
+        self.assertEqual(_detect_platform(Path("pacbio-hifi.fastq"), "unknown"), "pacbio_hifi")
+        self.assertEqual(_detect_platform(Path("pacbio.ccs.fastq"), "unknown"), "pacbio_hifi")
         self.assertEqual(_detect_platform(Path("sample_CycloneSEQ.fastq.gz"), "unknown"), "cycloneseq")
 
     def test_detect_platform_respects_declared(self):

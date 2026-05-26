@@ -141,10 +141,10 @@ def _detect_platform(
         return "cycloneseq"
     if "ont" in name or "nanopore" in name or "minion" in name:
         return "ont"
-    if "clr" in name or "pacbio" in name or "sequel" in name:
-        return "clr"
     if "hifi" in name or "ccs" in name:
         return "pacbio_hifi"
+    if "clr" in name or "pacbio" in name or "sequel" in name:
+        return "clr"
     if "illumina" in name or "nova" in name or "hiseq" in name:
         return "illumina"
     return "unknown"
