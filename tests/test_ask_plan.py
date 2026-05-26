@@ -433,6 +433,153 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         payload = build_run_config_payload(plan)
         self.assertEqual(payload["assembly_review"]["quast"], {"threads": 4})
 
+    def test_build_run_config_quast_and_busco_multi_select(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.quast", "assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.quast": {"threads": 4},
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/data/busco/embryophyta_odb10",
+                    "lineage_name": "embryophyta_odb10",
+                    "lineage_version": "2024-01-08",
+                    "lineage_source": "local",
+                    "threads": 16,
+                },
+            },
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertIn("assembly_review", payload["local_exec"])
+        self.assertEqual(payload["assembly_review"]["quast"], {"threads": 4})
+        self.assertEqual(payload["assembly_review"]["busco"], {
+            "lineage_path": "/data/busco/embryophyta_odb10",
+            "lineage_name": "embryophyta_odb10",
+            "lineage_version": "2024-01-08",
+            "lineage_source": "local",
+            "threads": 16,
+        })
+
+    def test_build_run_config_raises_valueerror_for_partial_busco_params(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.busco": {"threads": 8},
+            },
+            confirmed=True,
+        )
+        with self.assertRaisesRegex(ValueError, r"assembly_review\.eval\.busco\.lineage_path is required"):
+            build_run_config_payload(plan)
+
+
+class AskPlannerBuscoFlowTests(unittest.TestCase):
+    def test_busco_appears_as_executable_in_method_choices(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "method_selection")
+        ar_methods = {
+            m["method_name"]: m
+            for m in result.choices["methods_by_stage"]["assembly_review"]
+        }
+        self.assertEqual(ar_methods["assembly_review.eval.busco"]["execution_support"], "executable")
+        self.assertEqual(ar_methods["assembly_review.eval.quast"]["execution_support"], "executable")
+
+    def test_busco_parameter_clarification_asks_for_all_fields(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.quast", "assembly_review.eval.busco"],
+            },
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "parameter_values")
+        required = result.required_fields
+        for field in ("lineage_path", "lineage_name", "lineage_version", "lineage_source"):
+            self.assertTrue(
+                any(f"assembly_review.eval.busco.{field}" in f for f in required),
+                f"Missing required field: assembly_review.eval.busco.{field}",
+            )
+
+    def test_missing_busco_fields_block_confirmation(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.busco": {"threads": 8},
+            },
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "parameter_values")
+        self.assertTrue(
+            any("lineage_path" in f for f in result.required_fields),
+        )
+
+    def test_write_ask_run_config_with_busco_after_auto_fill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = _base_plan(
+                data_dir=tmp,
+                selected_stages=["assembly_review"],
+                resolved_execution_order=["assembly_review"],
+                selected_methods={
+                    "assembly_review": ["assembly_review.eval.quast", "assembly_review.eval.busco"],
+                },
+                method_parameters={
+                    "assembly_review.eval.quast": {"threads": 2},
+                    "assembly_review.eval.busco": {
+                        "lineage_path": "/data/busco/lineage",
+                        "lineage_name": "embryophyta_odb10",
+                        "lineage_version": "2024-01-08",
+                        "lineage_source": "local",
+                        "threads": 12,
+                    },
+                },
+                confirmed=True,
+            )
+            from app.entrypoints.ask_planner import write_ask_run_config
+            path = write_ask_run_config(plan)
+            config = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIn("assembly_review", config["local_exec"])
+            self.assertEqual(config["assembly_review"]["quast"]["threads"], 2)
+            self.assertEqual(config["assembly_review"]["busco"]["lineage_name"], "embryophyta_odb10")
+
+    def test_busco_lineage_path_warning_surfaces_in_plan(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/nonexistent/busco/lineage",
+                    "lineage_name": "test_odb10",
+                    "lineage_version": "2024-01-01",
+                    "lineage_source": "local",
+                    "threads": 8,
+                },
+            },
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "confirm")
+        self.assertIn("warnings", result.summary)
+        self.assertTrue(
+            any("does not exist" in w for w in result.summary["warnings"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

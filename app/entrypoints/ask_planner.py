@@ -171,8 +171,8 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": "assembly_review.eval.busco",
-            "execution_support": "planned_only",
-            "required_parameters": ["lineage", "threads"],
+            "execution_support": "executable",
+            "required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"],
             "parameter_defaults": {"threads": 8},
         },
         {
@@ -201,6 +201,32 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
     ],
 }
+
+_AR_RUN_CONFIG_METHODS: dict[str, tuple[str, list[str], dict[str, Any]]] = {
+    "assembly_review.eval.quast": ("quast", ["threads"], {"threads": 4}),
+    "assembly_review.eval.busco": (
+        "busco",
+        ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"],
+        {"threads": 8},
+    ),
+}
+
+
+def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
+    ar_config: dict[str, Any] = {}
+    for method_name, (config_key, required, defaults) in _AR_RUN_CONFIG_METHODS.items():
+        params = (plan.method_parameters or {}).get(method_name)
+        if not params:
+            continue
+        block: dict[str, Any] = {}
+        for field in required:
+            value = params.get(field, defaults.get(field))
+            if value is None:
+                raise ValueError(f"assembly_review.eval.{config_key}.{field} is required")
+            block[field] = value
+        ar_config[config_key] = block
+    return ar_config
+
 
 _STAGES_NEEDING_METHOD_SELECTION = {
     stage for stage, mode in _STAGE_SELECTION_MODE.items() if mode != "pipeline"
@@ -356,9 +382,10 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         payload["assembly"] = {"flye_parameters": flye_params}
     if "read_qc" in local_stages:
         payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
-    quast_params = (plan.method_parameters or {}).get("assembly_review.eval.quast")
-    if quast_params and "assembly_review" in local_stages:
-        payload["assembly_review"] = {"quast": {"threads": quast_params.get("threads", 4)}}
+    if "assembly_review" in local_stages:
+        ar_config = _build_assembly_review_config(plan)
+        if ar_config:
+            payload["assembly_review"] = ar_config
     RunConfig.model_validate(payload)
     return payload
 
@@ -748,6 +775,14 @@ def _missing_parameters_and_defaults(
 def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
+    if method == "assembly_review.eval.busco":
+        provided = (plan.method_parameters or {}).get(method, {})
+        lineage_path = provided.get("lineage_path")
+        if lineage_path and not Path(lineage_path).exists():
+            warnings.append(
+                f"assembly_review.eval.busco: lineage_path '{lineage_path}' does not exist; "
+                "BUSCO will be skipped at runtime"
+            )
     return inferred, warnings
 
 
