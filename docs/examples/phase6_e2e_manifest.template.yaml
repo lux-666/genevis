@@ -1,0 +1,28 @@
+# Phase 6 End-to-End Acceptance Manifest Template
+#
+# Copy this file to a server-local path and replace placeholder paths with
+# real files on the HPC. Do NOT commit the filled-in version with private paths.
+#
+# This manifest starts from raw long reads and includes a provided repeat
+# library so the full mainline can reach terminal completion in one session.
+
+session_id: phase6-e2e-YYYYMMDD-a
+
+assets:
+  - asset_type: raw_long_reads
+    platform: cycloneseq
+    format: fasta
+    paths:
+      - /abs/path/to/raw_long_reads.fa
+    metadata:
+      source: replace with actual source description
+      note: real CycloneSEQ/Nanopore reads
+
+  - asset_type: repeat_library
+    format: fasta
+    paths:
+      - /abs/path/to/repeat_library.fa
+    metadata:
+      source: provided
+      trusted: true
+      note: provided repeat library for RepeatMasker
