@@ -409,8 +409,6 @@ def plan_length_filter(state: TopLevelState) -> dict:
     read_qc_out = _read_qc_output(state)
     if read_qc_out.get("status") == "failed":
         return {}
-    if read_qc_out.get("execution_mode") != "local":
-        return {}
 
     request = dict(read_qc_out.get("length_filter_request") or {})
     thresholds = dict(request.get("thresholds") or {})

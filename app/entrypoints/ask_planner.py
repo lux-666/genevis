@@ -18,52 +18,96 @@ from app.schemas.ask_plan import (
 )
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import RunConfig
+from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.stages import STAGE_ORDER
 
-_FLYE_READ_TYPE_MAP = {"cycloneseq": "nano-raw", "ont": "nano-raw", "clr": "pacbio-raw"}
+_ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
+    "assembly.candidate.flye",
+    "assembly.candidate.nextdenovo",
+    "assembly.candidate.canu",
+}
+_ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
+    "assembly.candidate.flye",
+    "assembly.candidate.nextdenovo",
+    "assembly.candidate.canu",
+    "assembly.candidate.hifiasm",
+}
 
 # ---------------------------------------------------------------------------
 # Unified method registry — all stages and their methods
 # ---------------------------------------------------------------------------
 
 _STAGE_SELECTION_MODE: dict[str, str] = {
-    "read_qc": "pipeline",
+    "read_qc": "read_qc_filter_choice",
     "genome_survey": "choose_many",
     "assembly": "choose_many",
     "assembly_review": "choose_many",
 }
 
+READ_QC_STATS_METHOD = "read_qc.long_read_stats.seqkit_stats"
+READ_QC_FILTER_SKIP = "read_qc.length_filter.skip"
+READ_QC_FILTER_SEQKIT = "read_qc.length_filter.seqkit_seq"
+READ_QC_HANDOFF_METHOD = "read_qc.make_fofn.local"
+READ_QC_FILTER_METHODS = [
+    READ_QC_FILTER_SKIP,
+    READ_QC_FILTER_SEQKIT,
+    "read_qc.length_filter.chopper",
+    "read_qc.length_filter.filtlong",
+    "read_qc.length_filter.fastplong",
+]
+READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
+
 _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "read_qc": [
         {
-            "method_name": "read_qc.long_read_stats.seqkit_stats",
+            "method_name": READ_QC_STATS_METHOD,
             "execution_support": "executable",
             "required_parameters": [],
             "parameter_defaults": {},
+            "selection_role": "always",
         },
         {
-            "method_name": "read_qc.length_filter.seqkit_seq",
-            "execution_support": "executable",
+            "method_name": READ_QC_FILTER_SKIP,
+            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
+            "selection_role": "length_filter",
+            "display_name": "skip filtering, use raw reads",
+        },
+        {
+            "method_name": READ_QC_FILTER_SEQKIT,
+            "execution_support": "executable",
+            "required_parameters": ["min_len"],
+            "parameter_defaults": {},
+            "selection_role": "length_filter",
         },
         {
             "method_name": "read_qc.length_filter.chopper",
             "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
+            "selection_role": "length_filter",
         },
         {
             "method_name": "read_qc.length_filter.filtlong",
             "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
+            "selection_role": "length_filter",
         },
         {
             "method_name": "read_qc.length_filter.fastplong",
             "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
+            "selection_role": "length_filter",
+        },
+        {
+            "method_name": READ_QC_HANDOFF_METHOD,
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+            "selection_role": "always",
         },
     ],
     "genome_survey": [
@@ -96,19 +140,19 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         {
             "method_name": "assembly.candidate.flye",
             "execution_support": "executable",
-            "required_parameters": ["read_type", "estimated_genome_size", "threads"],
+            "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 4},
         },
         {
             "method_name": "assembly.candidate.nextdenovo",
             "execution_support": "planned_only",
-            "required_parameters": ["estimated_genome_size"],
+            "required_parameters": [],
             "parameter_defaults": {},
         },
         {
             "method_name": "assembly.candidate.canu",
             "execution_support": "planned_only",
-            "required_parameters": ["estimated_genome_size"],
+            "required_parameters": [],
             "parameter_defaults": {},
         },
         {
@@ -199,6 +243,15 @@ def _auto_fill_pipeline_methods(execution_order: list[str]) -> dict[str, str | l
     return result
 
 
+def _default_methods_for_stage(stage: str) -> str | list[str] | None:
+    if stage == "read_qc":
+        return list(READ_QC_DEFAULT_METHODS)
+    if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
+        methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
+        return methods or None
+    return None
+
+
 def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
     return Path(data_dir) / "ask_plans" / session_id / "ask_plan.json"
 
@@ -256,10 +309,11 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
             "confirmed": False,
         })
     if response.kind == "method_selection":
-        methods = dict(response.selected_methods or {})
+        methods = _fill_missing_method_defaults(plan, dict(response.selected_methods or {}))
         existing = dict(plan.selected_methods or {})
         existing.update(methods)
         _validate_selected_methods(existing, plan)
+        existing = _normalize_selected_methods(existing)
         return plan.model_copy(update={
             "selected_methods": existing,
             "method_parameters": None,
@@ -268,7 +322,12 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
     if response.kind == "parameter_values":
         existing = dict(plan.method_parameters or {})
         existing.update(response.method_parameters or {})
-        return plan.model_copy(update={"method_parameters": existing, "confirmed": False})
+        update: dict[str, Any] = {"method_parameters": existing or None, "confirmed": False}
+        if response.shared_parameters:
+            current_shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+            current_shared.update(response.shared_parameters.model_dump(exclude_none=True))
+            update["shared_parameters"] = SharedParameters.model_validate(current_shared)
+        return plan.model_copy(update=update)
     if response.kind == "confirm":
         return plan.model_copy(update={"confirmed": bool(response.confirmed)})
     return plan
@@ -281,12 +340,25 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             local_stages.append(stage)
 
     payload: dict[str, Any] = {"local_exec": local_stages}
-    flye_params = (plan.method_parameters or {}).get("assembly.candidate.flye")
+    if plan.shared_parameters:
+        payload["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
+    flye_params = dict((plan.method_parameters or {}).get("assembly.candidate.flye") or {})
     if flye_params and "assembly" in local_stages:
+        if plan.shared_parameters:
+            shared = plan.shared_parameters
+            if "read_type" not in flye_params and shared.read_type:
+                from app.schemas.shared_parameters import SHARED_TO_METHOD_READ_TYPE
+                flye_rt = SHARED_TO_METHOD_READ_TYPE.get(shared.read_type, {}).get("flye")
+                if flye_rt:
+                    flye_params["read_type"] = flye_rt
+            if "estimated_genome_size" not in flye_params and shared.estimated_genome_size:
+                flye_params["estimated_genome_size"] = shared.estimated_genome_size
         payload["assembly"] = {"flye_parameters": flye_params}
+    if "read_qc" in local_stages:
+        payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
     quast_params = (plan.method_parameters or {}).get("assembly_review.eval.quast")
     if quast_params and "assembly_review" in local_stages:
-        payload["assembly_review"] = {"quast_threads": quast_params.get("threads", 4)}
+        payload["assembly_review"] = {"quast": {"threads": quast_params.get("threads", 4)}}
     RunConfig.model_validate(payload)
     return payload
 
@@ -307,11 +379,20 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
         methods_by_stage = request.choices.get("methods_by_stage", {})
         selected = {}
         for stage, methods in methods_by_stage.items():
+            default = request.choices.get("defaults", {}).get(stage)
+            if default:
+                selected[stage] = default
+                continue
             executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
             selected[stage] = executable[0] if executable else (methods[0]["method_name"] if methods else "")
         return {"kind": "method_selection", "selected_methods": selected}
     if request.kind == "parameter_values":
-        return {"kind": "parameter_values", "method_parameters": dict(request.choices.get("defaults", {}))}
+        defaults = dict(request.choices.get("defaults", {}))
+        return {
+            "kind": "parameter_values",
+            "shared_parameters": dict(request.choices.get("shared_defaults", {})),
+            "method_parameters": defaults,
+        }
     return {"kind": "confirm", "confirmed": True}
 
 
@@ -334,15 +415,24 @@ def _stage_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarif
 
 def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
     methods_by_stage: dict[str, list[dict[str, Any]]] = {}
+    defaults: dict[str, str | list[str]] = {}
     for stage in plan.resolved_execution_order or []:
         if stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
         stage_methods = _STAGE_METHODS.get(stage, [])
         if stage_methods:
             methods_by_stage[stage] = [
-                {"method_name": m["method_name"], "execution_support": m["execution_support"]}
+                {
+                    "method_name": m["method_name"],
+                    "execution_support": m["execution_support"],
+                    "selection_role": m.get("selection_role"),
+                    "display_name": m.get("display_name"),
+                }
                 for m in stage_methods
             ]
+            default = _default_methods_for_stage(stage)
+            if default:
+                defaults[stage] = default
     return AskClarificationRequest(
         status="clarification_required",
         kind="method_selection",
@@ -350,16 +440,20 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         ask_plan_ref=ask_plan_ref,
         manifest_ref=plan.manifest_ref,
         question="Which methods should run for the selected stages?",
-        choices={"methods_by_stage": methods_by_stage},
+        choices={"methods_by_stage": methods_by_stage, "defaults": defaults},
         required_fields=["selected_methods"],
-        response_schema={"kind": "method_selection", "selected_methods": {stage: "" for stage in methods_by_stage}},
+        response_schema={"kind": "method_selection", "selected_methods": defaults or {stage: "" for stage in methods_by_stage}},
         next_action=_next_action(ask_plan_ref),
     )
 
 
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
-    missing_fields, defaults, warnings = _missing_parameters_and_defaults(plan)
+    missing_fields, defaults, shared_defaults, warnings = _missing_parameters_and_defaults(plan)
     all_fields: list[str] = []
+    if _assembly_needs_shared_read_type(plan):
+        all_fields.append("shared_parameters.read_type")
+    if _assembly_needs_shared_genome_size(plan):
+        all_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
@@ -367,7 +461,7 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         for param in cap["required_parameters"]:
             all_fields.append(f"{method}.{param}")
     display_fields = all_fields if all_fields else missing_fields
-    choices: dict[str, Any] = {"defaults": defaults}
+    choices: dict[str, Any] = {"defaults": defaults, "shared_defaults": shared_defaults}
     if warnings:
         choices["warnings"] = warnings
     return AskClarificationRequest(
@@ -379,7 +473,11 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         question="Confirm or edit parameters for executable methods.",
         choices=choices,
         required_fields=display_fields,
-        response_schema={"kind": "parameter_values", "method_parameters": defaults},
+        response_schema={
+            "kind": "parameter_values",
+            "shared_parameters": shared_defaults,
+            "method_parameters": defaults,
+        },
         next_action=_next_action(ask_plan_ref),
     )
 
@@ -414,9 +512,11 @@ def _build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["source_paths"] = entry["source_paths"]
     if plan.selected_methods:
         summary["selected_methods"] = plan.selected_methods
+    if plan.shared_parameters:
+        summary["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
     if plan.method_parameters:
         summary["method_parameters"] = plan.method_parameters
-    _, _, warnings = _missing_parameters_and_defaults(plan)
+    _, _, _, warnings = _missing_parameters_and_defaults(plan)
     if warnings:
         summary["warnings"] = warnings
     try:
@@ -513,10 +613,78 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
                     f"unknown method {method!r} for stage {stage!r}; "
                     f"known methods: {sorted(stage_methods)}"
                 )
+        if stage == "read_qc":
+            filters = [method for method in method_list if method in READ_QC_FILTER_METHODS]
+            if len(filters) != 1:
+                raise ValueError("read_qc method selection requires exactly one length filter choice")
+            if READ_QC_STATS_METHOD not in method_list:
+                raise ValueError(f"read_qc method selection requires {READ_QC_STATS_METHOD}")
+            if READ_QC_HANDOFF_METHOD not in method_list:
+                raise ValueError(f"read_qc method selection requires {READ_QC_HANDOFF_METHOD}")
+
+
+def _normalize_selected_methods(methods: dict[str, str | list[str]]) -> dict[str, str | list[str]]:
+    normalized = dict(methods)
+    if "read_qc" in normalized:
+        selected = normalized["read_qc"]
+        method_list = selected if isinstance(selected, list) else [selected]
+        filter_method = next((method for method in method_list if method in READ_QC_FILTER_METHODS), READ_QC_FILTER_SKIP)
+        normalized["read_qc"] = [READ_QC_STATS_METHOD, filter_method, READ_QC_HANDOFF_METHOD]
+    return normalized
+
+
+def _fill_missing_method_defaults(plan: AskPlanState, methods: dict[str, str | list[str]]) -> dict[str, str | list[str]]:
+    filled = dict(methods)
+    for stage in plan.resolved_execution_order or []:
+        if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
+            continue
+        default = _default_methods_for_stage(stage)
+        if default:
+            filled[stage] = default
+    return filled
+
+
+def _read_qc_length_filter_config(plan: AskPlanState) -> dict[str, Any]:
+    selected = (plan.selected_methods or {}).get("read_qc") or list(READ_QC_DEFAULT_METHODS)
+    method_list = selected if isinstance(selected, list) else [selected]
+    filter_method = next((method for method in method_list if method in READ_QC_FILTER_METHODS), READ_QC_FILTER_SKIP)
+    if filter_method == READ_QC_FILTER_SKIP:
+        return {"method": "skip", "approved": False, "thresholds": {}}
+    if filter_method == READ_QC_FILTER_SEQKIT:
+        params = (plan.method_parameters or {}).get(READ_QC_FILTER_SEQKIT) or {}
+        min_len = _coerce_positive_int(params.get("min_len"))
+        if min_len is None:
+            raise ValueError("read_qc.length_filter.seqkit_seq.min_len must be a positive integer")
+        return {"method": filter_method, "approved": True, "thresholds": {"min_len": min_len}}
+    return {"method": filter_method, "approved": False, "thresholds": {}}
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
 
 
 def _needs_parameter_values(plan: AskPlanState) -> bool:
     """True when there are executable methods with parameters to show/confirm."""
+    shared_defaults, _ = _infer_shared_parameter_defaults(plan)
+    shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+    method_overrides = _method_specific_shared_overrides(plan)
+    merged_shared = {**shared_defaults, **shared, **method_overrides}
+    if _assembly_needs_shared_read_type(plan) and "read_type" not in merged_shared:
+        return True
+    if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in merged_shared:
+        return True
+    if (plan.resolved_execution_order or []) and any(
+        method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE | _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE
+        for _, method in _iter_selected_methods(plan)
+    ) and plan.shared_parameters is None and not method_overrides:
+        return True
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
@@ -535,16 +703,33 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
 
 def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
     """Merge inferred defaults into method_parameters for any missing keys."""
-    _, defaults, _ = _missing_parameters_and_defaults(plan)
-    if not defaults:
+    _, defaults, shared_defaults, _ = _missing_parameters_and_defaults(plan)
+    update: dict[str, Any] = {}
+    if defaults:
+        update["method_parameters"] = defaults
+    if shared_defaults:
+        current_shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+        current_shared = {**shared_defaults, **current_shared}
+        update["shared_parameters"] = SharedParameters.model_validate(current_shared)
+    if not update:
         return plan
-    return plan.model_copy(update={"method_parameters": defaults})
+    return plan.model_copy(update=update)
 
 
-def _missing_parameters_and_defaults(plan: AskPlanState) -> tuple[list[str], dict[str, dict[str, Any]], list[str]]:
+def _missing_parameters_and_defaults(
+    plan: AskPlanState,
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any], list[str]]:
     missing_fields: list[str] = []
     defaults: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
+    shared_defaults, shared_warnings = _infer_shared_parameter_defaults(plan)
+    warnings.extend(shared_warnings)
+    shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+    shared_defaults = {**shared_defaults, **shared, **_method_specific_shared_overrides(plan)}
+    if _assembly_needs_shared_read_type(plan) and "read_type" not in shared_defaults:
+        missing_fields.append("shared_parameters.read_type")
+    if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in shared_defaults:
+        missing_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         if not cap or cap["execution_support"] != "executable":
@@ -557,40 +742,67 @@ def _missing_parameters_and_defaults(plan: AskPlanState) -> tuple[list[str], dic
         for param in cap["required_parameters"]:
             if param not in merged:
                 missing_fields.append(f"{method}.{param}")
-    return missing_fields, defaults, warnings
+    return missing_fields, defaults, shared_defaults, warnings
 
 
 def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
-    if method == "assembly.candidate.flye":
-        manifest = _load_manifest(plan.manifest_ref)
-        if manifest:
-            platforms = {
-                asset.platform for asset in manifest.assets
-                if asset.asset_type == "raw_long_reads" and asset.platform != "unknown"
-            }
-            for platform, read_type in _FLYE_READ_TYPE_MAP.items():
-                if platform in platforms:
-                    inferred.setdefault("read_type", read_type)
-                    break
-            if manifest.genome_size_estimate:
-                inferred.setdefault("estimated_genome_size", manifest.genome_size_estimate)
-        entry = plan.entry_request or {}
-        if entry.get("genome_size_estimate"):
-            manifest_size = (manifest.genome_size_estimate if manifest else None)
-            request_size = entry["genome_size_estimate"]
-            if manifest_size is not None and manifest_size != request_size:
-                warnings.append(
-                    f"genome_size conflict: manifest says {manifest_size}, "
-                    f"request says {request_size}; using manifest value"
-                )
-            else:
-                inferred.setdefault("estimated_genome_size", request_size)
     return inferred, warnings
 
 
+def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any], list[str]]:
+    inferred: dict[str, Any] = {}
+    warnings: list[str] = []
+    manifest = _load_manifest(plan.manifest_ref)
+    if manifest:
+        platforms = {
+            asset.platform for asset in manifest.assets
+            if asset.asset_type == "raw_long_reads" and asset.platform != "unknown"
+        }
+        for platform, read_type in PLATFORM_TO_SHARED_READ_TYPE.items():
+            if platform in platforms:
+                inferred.setdefault("read_type", read_type)
+                break
+        if manifest.genome_size_estimate:
+            inferred.setdefault("estimated_genome_size", manifest.genome_size_estimate)
+    entry = plan.entry_request or {}
+    if entry.get("genome_size_estimate"):
+        manifest_size = (manifest.genome_size_estimate if manifest else None)
+        request_size = entry["genome_size_estimate"]
+        if manifest_size is not None and manifest_size != request_size:
+            warnings.append(
+                f"genome_size conflict: manifest says {manifest_size}, "
+                f"request says {request_size}; using manifest value"
+            )
+        else:
+            inferred.setdefault("estimated_genome_size", request_size)
+    return inferred, warnings
+
+
+def _assembly_needs_shared_read_type(plan: AskPlanState) -> bool:
+    return any(method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE for _, method in _iter_selected_methods(plan))
+
+
+def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
+    return any(method in _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE for _, method in _iter_selected_methods(plan))
+
+
+def _method_specific_shared_overrides(plan: AskPlanState) -> dict[str, Any]:
+    flye = (plan.method_parameters or {}).get("assembly.candidate.flye") or {}
+    shared: dict[str, Any] = {}
+    if flye.get("read_type"):
+        mapped = FLYE_TO_SHARED_READ_TYPE.get(str(flye["read_type"]))
+        if mapped:
+            shared["read_type"] = mapped
+    if flye.get("estimated_genome_size"):
+        shared["estimated_genome_size"] = flye["estimated_genome_size"]
+    return shared
+
+
 def _stage_has_executable_method(plan: AskPlanState, stage: str) -> bool:
+    if stage == "read_qc":
+        return stage in (plan.resolved_execution_order or []) or stage in (plan.selected_stages or [])
     value = (plan.selected_methods or {}).get(stage)
     if not value:
         return _STAGE_SELECTION_MODE.get(stage) == "pipeline"

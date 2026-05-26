@@ -417,40 +417,6 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.filtlong")
             self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
 
-    def test_approved_filter_without_local_execution_mode_is_not_planned(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            fq = Path(tmpdir) / "reads.fastq"
-            fq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:raw_long_reads:reads.fastq",
-                        "asset_type": "raw_long_reads",
-                        "path": str(fq),
-                    }
-                ],
-            )
-            fake_bin = self._fake_seqkit_bin(tmpdir)
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "read_qc": {
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "length_filter_request": {
-                        "approved": True,
-                        "method_name": "read_qc.length_filter.seqkit_seq",
-                        "thresholds": {"min_len": 1000},
-                    },
-                }
-            }
-
-            result = build_stage().invoke(state)
-
-            read_qc = result["stage_outputs"]["read_qc"]
-            substeps = read_qc.get("substeps", {})
-            self.assertNotIn("length_filter", substeps)
-            self.assertNotIn("filtered_long_reads_ref", read_qc)
-
     def test_missing_seqkit_records_failed_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "reads.fastq"

@@ -5,12 +5,9 @@ previously required a Python one-liner: the set of stages to opt into local
 execution, shared assembly facts, and method-specific execution parameters.
 
 The schema rejects unknown stages, unknown fields, and the combination of
-requesting local `assembly` execution without a Flye parameter block carrying
-`threads`. Flye-specific `read_type` and `estimated_genome_size` are advanced
-overrides; normal runs may provide them once through `shared_parameters`, or
-let runtime priors resolve them before command freezing. This schema does not
-invent defaults, does not carry descriptor or env facts, and is not a method
-catalog.
+requesting local `assembly` execution without the three required Flye
+parameters. It does not invent defaults, does not carry descriptor or env
+facts, and is not a method catalog.
 """
 
 from __future__ import annotations
@@ -74,7 +71,7 @@ class ReviewPolicyConfig(StageReviewPolicyConfig):
 
 
 class FlyeRunParameters(BaseModel):
-    """Explicit Flye overrides and execution parameters."""
+    """Explicit Flye parameters for local assembly execution."""
 
     model_config = ConfigDict(extra="forbid")
 

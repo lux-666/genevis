@@ -7,13 +7,20 @@ import re
 import sys
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.entrypoints.ask_planner import (
+    READ_QC_FILTER_METHODS,
+    READ_QC_FILTER_SKIP,
+    READ_QC_HANDOFF_METHOD,
+    READ_QC_STATS_METHOD,
     auto_resolve_plan,
     merge_clarification_response,
     next_clarification,
     save_plan_to_default_path,
 )
 from app.schemas.ask_plan import AskClarificationRequest, AskClarificationResponse, AskPlanState
+from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE, SharedParameters
 
 try:
     import questionary
@@ -71,6 +78,7 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                     "selected_stages": None,
                     "resolved_execution_order": None,
                     "selected_methods": None,
+                    "shared_parameters": None,
                     "method_parameters": None,
                     "confirmed": False,
                 })
@@ -130,6 +138,7 @@ _ROLE_LABELS = {
 
 _GENOME_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmg]?)$", re.IGNORECASE)
 _GENOME_SIZE_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+_SHARED_READ_TYPE_VALUES = tuple(SHARED_TO_METHOD_READ_TYPE.keys())
 
 
 def _render_confirm(req: AskClarificationRequest) -> None:
@@ -163,6 +172,12 @@ def _render_confirm(req: AskClarificationRequest) -> None:
                 print(f"  {stage}: {', '.join(value)}")
             else:
                 print(f"  {stage}: {value}")
+
+    shared = summary.get("shared_parameters", {})
+    if shared:
+        print("\nShared parameters:")
+        for k, v in shared.items():
+            print(f"  {k}: {v}")
 
     params = summary.get("method_parameters", {})
     if params:
@@ -277,6 +292,9 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
 
     for stage, methods in methods_by_stage.items():
         method_names = [m["method_name"] for m in methods]
+        if stage == "read_qc":
+            selected[stage] = _prompt_read_qc_filter_choice(methods, req.choices.get("defaults", {}).get(stage))
+            continue
         executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
         default_checked = executable if executable else method_names[:1]
 
@@ -316,9 +334,49 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
     return AskClarificationResponse(kind="method_selection", selected_methods=selected)
 
 
+def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | list[str] | None) -> list[str]:
+    default_methods = default if isinstance(default, list) else [default] if default else []
+    default_filter = next((method for method in default_methods if method in READ_QC_FILTER_METHODS), READ_QC_FILTER_SKIP)
+    filters = [m for m in methods if m.get("method_name") in READ_QC_FILTER_METHODS]
+    filter_names = [m["method_name"] for m in filters]
+
+    if _HAS_QUESTIONARY:
+        choices = [
+            questionary.Choice(
+                m.get("display_name") or m["method_name"],
+                value=m["method_name"],
+            )
+            for m in filters
+        ]
+        answer = _safe_ask(questionary.select(
+            "Read QC length filtering:",
+            choices=choices,
+            default=default_filter,
+            instruction="(↑↓ navigate, Enter confirm)",
+        ))
+        filter_method = answer or default_filter
+    else:
+        print("  Methods for [read_qc]:")
+        print(f"    * always: {READ_QC_STATS_METHOD}")
+        print("    length filtering:")
+        for i, m in enumerate(filters, 1):
+            label = m.get("display_name") or m["method_name"]
+            marker = "*" if m["method_name"] == default_filter else " "
+            print(f"    {marker} {i}. {label}")
+        print(f"    * always: {READ_QC_HANDOFF_METHOD}")
+        print(f"\n  Choose one length filter. Enter = {default_filter}:")
+        raw = input("  read_qc length_filter> ").strip()
+        picks = _parse_selection(raw, filter_names) if raw else [default_filter]
+        filter_method = picks[0] if picks else default_filter
+
+    return [READ_QC_STATS_METHOD, filter_method, READ_QC_HANDOFF_METHOD]
+
+
 def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
+    shared_defaults = req.choices.get("shared_defaults", {})
     params: dict[str, dict[str, Any]] = {}
+    shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---\n")
     for field in req.required_fields:
         method_key, _, param_name = field.rpartition(".")
@@ -329,24 +387,92 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
         stage_name = method_key.split(".")[0] if "." in method_key else method_key
         label = f"[{stage_name} / {short_method}] {param_name}"
 
-        default = _find_default(field, defaults)
+        default = shared_defaults.get(param_name) if method_key == "shared_parameters" else _find_default(field, defaults)
 
-        if _HAS_QUESTIONARY:
-            answer = _safe_ask(questionary.text(
-                f"{label}:",
-                default=str(default) if default is not None else "",
-            ))
+        if method_key == "shared_parameters":
+            value = _prompt_shared_parameter(label, param_name, default)
+            shared_params[param_name] = value
         else:
-            if default is not None:
-                answer = input(f"  {label} [{default}]: ").strip()
-            else:
-                answer = input(f"  {label}: ").strip()
+            value = _prompt_text_value(label, default)
+            if param_name == "estimated_genome_size" and isinstance(value, str):
+                value = _parse_genome_size(value)
+            params.setdefault(method_key, {})[param_name] = value
+    return AskClarificationResponse(
+        kind="parameter_values",
+        shared_parameters=shared_params or None,
+        method_parameters=params or None,
+    )
 
-        value: Any = answer if answer else default
+
+def _prompt_text_value(label: str, default: Any) -> Any:
+    if _HAS_QUESTIONARY:
+        answer = _safe_ask(questionary.text(
+            f"{label}:",
+            default=str(default) if default is not None else "",
+        ))
+    else:
+        if default is not None:
+            answer = input(f"  {label} [{default}]: ").strip()
+        else:
+            answer = input(f"  {label}: ").strip()
+    return answer if answer else default
+
+
+def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
+    if param_name == "read_type":
+        return _prompt_shared_read_type(label, default)
+
+    while True:
+        value = _prompt_text_value(label, default)
         if param_name == "estimated_genome_size" and isinstance(value, str):
             value = _parse_genome_size(value)
-        params.setdefault(method_key, {})[param_name] = value
-    return AskClarificationResponse(kind="parameter_values", method_parameters=params)
+        if _shared_parameter_value_is_valid(param_name, value):
+            return value
+
+
+def _prompt_shared_read_type(label: str, default: Any) -> Any:
+    default_value = _normalize_shared_read_type(default)
+    if _HAS_QUESTIONARY:
+        return _safe_ask(questionary.select(
+            f"{label}:",
+            choices=[
+                questionary.Choice(_read_type_choice_label(value), value=value)
+                for value in _SHARED_READ_TYPE_VALUES
+            ],
+            default=default_value if default_value in _SHARED_READ_TYPE_VALUES else None,
+            instruction="(use normalized shared read type)",
+        ))
+
+    alias_text = ", ".join(f"{alias}->{value}" for alias, value in sorted(FLYE_TO_SHARED_READ_TYPE.items()))
+    print(f"    accepted: {', '.join(_SHARED_READ_TYPE_VALUES)}")
+    print(f"    Flye aliases accepted: {alias_text}")
+    while True:
+        value = _prompt_text_value(label, default_value)
+        normalized = _normalize_shared_read_type(value)
+        if _shared_parameter_value_is_valid("read_type", normalized):
+            return normalized
+
+
+def _read_type_choice_label(value: str) -> str:
+    flye_aliases = sorted(alias for alias, normalized in FLYE_TO_SHARED_READ_TYPE.items() if normalized == value)
+    suffix = f" (Flye: {', '.join(flye_aliases)})" if flye_aliases else ""
+    return f"{value}{suffix}"
+
+
+def _normalize_shared_read_type(value: Any) -> Any:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    return FLYE_TO_SHARED_READ_TYPE.get(raw, raw)
+
+
+def _shared_parameter_value_is_valid(param_name: str, value: Any) -> bool:
+    try:
+        SharedParameters.model_validate({param_name: value})
+    except ValidationError as exc:
+        print(f"  Invalid {param_name}: {exc.errors()[0]['msg']}")
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -398,23 +524,34 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
     # Assembly/Flye MVP only. Generalize via method descriptors when more
     # executable methods are supported.
     _PARAM_ALIASES = {
-        "genome_size": ("assembly.candidate.flye", "estimated_genome_size"),
-        "estimated_genome_size": ("assembly.candidate.flye", "estimated_genome_size"),
-        "read_type": ("assembly.candidate.flye", "read_type"),
+        "genome_size": ("shared_parameters", "estimated_genome_size"),
+        "estimated_genome_size": ("shared_parameters", "estimated_genome_size"),
+        "read_type": ("shared_parameters", "read_type"),
         "threads": ("assembly.candidate.flye", "threads"),
     }
     existing = dict(plan.method_parameters or {})
+    shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
     for key, value in parsed.items():
         alias = _PARAM_ALIASES.get(key)
         if alias:
             method, param = alias
+            if method == "shared_parameters":
+                if param == "estimated_genome_size":
+                    value = _parse_genome_size(value)
+                if param == "read_type":
+                    value = FLYE_TO_SHARED_READ_TYPE.get(str(value), value)
+                shared[param] = value
+                continue
             bucket = dict(existing.get(method, {}))
-            if param == "estimated_genome_size":
-                value = _parse_genome_size(value)
             bucket[param] = value
             existing[method] = bucket
+    update = {}
     if existing:
-        return plan.model_copy(update={"method_parameters": existing})
+        update["method_parameters"] = existing
+    if shared:
+        update["shared_parameters"] = SharedParameters.model_validate(shared)
+    if update:
+        return plan.model_copy(update=update)
     return plan
 
 

@@ -16,13 +16,15 @@ from app.entrypoints.ask_interactive import (
     run_interactive_loop,
     _apply_set_params,
     _parse_genome_size,
+    _prompt_parameter_values,
+    _render_confirm,
 )
 from app.entrypoints.ask_planner import (
     auto_resolve_plan,
     next_clarification,
     save_plan_to_default_path,
 )
-from app.schemas.ask_plan import AskPlanState
+from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
 
 
 def _base_plan(**overrides) -> AskPlanState:
@@ -109,7 +111,7 @@ class AutoResolvePlanTests(unittest.TestCase):
         resolved = auto_resolve_plan(plan)
         self.assertEqual(resolved.selected_stages, ["read_qc"])
 
-    def test_nanopore_fasta_skips_to_parameter_values(self):
+    def test_nanopore_fasta_asks_for_read_qc_filter_choice(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "bht.Nanopore.pass.first500.fa"
             reads.write_text(">r1\nACGT\n", encoding="utf-8")
@@ -122,7 +124,8 @@ class AutoResolvePlanTests(unittest.TestCase):
             resolved = auto_resolve_plan(plan)
             plan_ref = save_plan_to_default_path(resolved)
             clarification = next_clarification(resolved, ask_plan_ref=plan_ref)
-            self.assertIn(clarification.kind, ("parameter_values", "confirm"))
+            self.assertEqual(clarification.kind, "method_selection")
+            self.assertIn("read_qc", clarification.choices["methods_by_stage"])
 
 
 class InteractiveLoopTests(unittest.TestCase):
@@ -143,14 +146,85 @@ class InteractiveLoopTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
             )
             args = _ask_ns()
-            # "y" auto-resolve, "" x3 for params (accept defaults), "y" confirm
-            inputs = iter(["y", "", "", "", "y"])
+            # "y" auto-resolve, "" read_qc filter, "" assembly method,
+            # "" x3 for params (accept defaults), "y" confirm
+            inputs = iter(["y", "", "", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
             mock_exec.assert_called_once()
+
+    def test_confirm_render_includes_shared_parameters(self):
+        req = AskClarificationRequest(
+            status="confirm_required",
+            kind="confirm",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Proceed?",
+            summary={
+                "session_id": "s1",
+                "data_dir": "data",
+                "manifest_ref": "test.yaml",
+                "resolved_execution_order": ["assembly"],
+                "stage_roles": {"assembly": "executable"},
+                "selected_methods": {"assembly": "assembly.candidate.flye"},
+                "shared_parameters": {"read_type": "ont_raw", "estimated_genome_size": 500_000_000},
+                "method_parameters": {"assembly.candidate.flye": {"threads": 4}},
+            },
+            response_schema={},
+            next_action={},
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_confirm(req)
+
+        rendered = stdout.getvalue()
+        self.assertIn("Shared parameters:", rendered)
+        self.assertIn("read_type: ont_raw", rendered)
+        self.assertIn("estimated_genome_size: 500000000", rendered)
+
+    def test_parameter_prompt_maps_flye_read_type_alias(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"shared_defaults": {}},
+            required_fields=["shared_parameters.read_type"],
+            response_schema={},
+            next_action={},
+        )
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", return_value="nano-raw"):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.shared_parameters)
+        self.assertEqual(response.shared_parameters.read_type, "ont_raw")
+
+    def test_parameter_prompt_retries_invalid_shared_read_type(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"shared_defaults": {}},
+            required_fields=["shared_parameters.read_type"],
+            response_schema={},
+            next_action={},
+        )
+        inputs = iter(["nano-old", "pacbio-hifi"])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.shared_parameters)
+        self.assertEqual(response.shared_parameters.read_type, "pacbio_hifi")
 
     def test_confirm_n_restarts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,16 +241,43 @@ class InteractiveLoopTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
             )
             args = _ask_ns()
-            # "y" auto-resolve, "" x3 flye params, "n" reject confirm,
-            # "" stage select (suggested), "" assembly method, "" review method,
-            # "" x3 flye params, "" quast threads, "y" confirm
-            inputs = iter(["y", "", "", "", "n", "", "", "", "", "", "", "", "y"])
+            # "y" auto-resolve, "" read_qc filter, "" assembly method,
+            # "" x3 flye params, "n" reject confirm,
+            # "" stage select, "" read_qc filter, "" assembly method,
+            # "" review method, "" x3 flye params, "" quast threads, "y" confirm
+            inputs = iter(["y", "", "", "", "", "", "n", "", "", "", "", "", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
             mock_exec.assert_called_once()
+
+    def test_confirm_n_restart_clears_shared_parameters(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["read_qc", "assembly"],
+            selected_methods={
+                "read_qc": [
+                    "read_qc.long_read_stats.seqkit_stats",
+                    "read_qc.length_filter.skip",
+                    "read_qc.make_fofn.local",
+                ],
+                "assembly": "assembly.candidate.flye",
+            },
+            shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 500_000_000},
+            method_parameters={"assembly.candidate.flye": {"threads": 4}},
+        )
+        args = _ask_ns()
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=["n", EOFError]), \
+             patch("app.entrypoints.ask_interactive.save_plan_to_default_path") as mock_save:
+            code = run_interactive_loop(plan, args)
+
+        self.assertEqual(code, 1)
+        restarted = mock_save.call_args_list[1].args[0]
+        self.assertIsNone(restarted.shared_parameters)
+        self.assertIsNone(restarted.method_parameters)
 
     def test_parameter_prompt_then_confirm(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,8 +291,9 @@ class InteractiveLoopTests(unittest.TestCase):
             plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp,
                              entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
             args = _ask_ns()
-            # "y" auto-resolve, "" read_type [nano-raw], "500m" genome_size, "" threads [4], "y" confirm
-            inputs = iter(["y", "", "500m", "", "y"])
+            # "y" auto-resolve, "" read_qc filter, "" assembly method,
+            # "" read_type [ont_raw], "500m" genome_size, "" threads [4], "y" confirm
+            inputs = iter(["y", "", "", "", "500m", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -226,9 +328,9 @@ class SetParamsTests(unittest.TestCase):
             selected_methods={"assembly": "assembly.candidate.flye"},
         )
         updated = _apply_set_params(plan, ["genome_size=500m"])
-        params = updated.method_parameters or {}
-        flye = params.get("assembly.candidate.flye", {})
-        self.assertEqual(flye.get("estimated_genome_size"), 500_000_000)
+        shared = updated.shared_parameters
+        self.assertIsNotNone(shared)
+        self.assertEqual(shared.estimated_genome_size, 500_000_000)
 
     def test_parse_genome_size_suffixes(self):
         self.assertEqual(_parse_genome_size("500m"), 500_000_000)

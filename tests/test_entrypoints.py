@@ -951,6 +951,51 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
 
+    def test_run_config_seeds_shared_parameters_and_flye_threads_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "shared_parameters": {
+                            "read_type": "ont_raw",
+                            "estimated_genome_size": 2_000_000,
+                        },
+                        "assembly": {"flye_parameters": {"threads": 4}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            state = graph.invocations[0][0]
+            self.assertEqual(
+                state["shared_parameters"],
+                {"read_type": "ont_raw", "estimated_genome_size": 2_000_000},
+            )
+            self.assertEqual(state["stage_outputs"]["assembly"]["flye_parameters"], {"threads": 4})
+
     def test_run_config_local_exec_unions_with_cli_local_exec(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

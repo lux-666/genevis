@@ -316,7 +316,7 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly and run_config.assembly.flye_parameters:
         assembly_out = dict(stage_outputs.get("assembly") or {})
-        assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump()
+        assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
         stage_outputs["assembly"] = assembly_out
     if run_config and run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})

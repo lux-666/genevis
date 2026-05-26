@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 
 from app.entrypoints.ask_planner import (
+    READ_QC_FILTER_SKIP,
+    READ_QC_FILTER_SEQKIT,
+    READ_QC_HANDOFF_METHOD,
+    READ_QC_STATS_METHOD,
     _STAGE_METHODS,
     build_run_config_payload,
     merge_clarification_response,
@@ -34,6 +38,10 @@ def _base_plan(**overrides) -> AskPlanState:
     return AskPlanState(**base)
 
 
+def _read_qc_default_methods() -> list[str]:
+    return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
+
+
 class AskPlanSchemaTests(unittest.TestCase):
     def test_stage_selection_requires_selected_stages(self):
         with self.assertRaisesRegex(ValueError, "selected_stages"):
@@ -43,9 +51,16 @@ class AskPlanSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "selected_methods"):
             AskClarificationResponse(kind="method_selection")
 
-    def test_parameter_values_requires_method_parameters(self):
-        with self.assertRaisesRegex(ValueError, "method_parameters"):
+    def test_parameter_values_requires_parameter_payload(self):
+        with self.assertRaisesRegex(ValueError, "method_parameters or shared_parameters"):
             AskClarificationResponse(kind="parameter_values")
+
+    def test_parameter_values_accepts_shared_parameters_only(self):
+        response = AskClarificationResponse(
+            kind="parameter_values",
+            shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 2_000_000},
+        )
+        self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
     def test_confirm_requires_confirmed(self):
         with self.assertRaisesRegex(ValueError, "confirmed"):
@@ -114,7 +129,11 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
         for stage, methods in _STAGE_METHODS.items():
             with self.subTest(stage=stage):
-                planner_methods = {m["method_name"] for m in methods}
+                planner_methods = {
+                    m["method_name"]
+                    for m in methods
+                    if not str(m["method_name"]).endswith(".skip")
+                }
                 registered_methods = set(registry.by_stage.get(stage, []))
                 self.assertEqual(planner_methods, registered_methods)
 
@@ -125,9 +144,15 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
+        self.assertIn("read_qc", result.choices["methods_by_stage"])
         self.assertIn("assembly", result.choices["methods_by_stage"])
-        # read_qc is a pipeline stage, not shown in method selection
-        self.assertNotIn("read_qc", result.choices["methods_by_stage"])
+        read_qc_defaults = result.choices["defaults"]["read_qc"]
+        self.assertEqual(read_qc_defaults, _read_qc_default_methods())
+        read_qc_methods = {
+            m["method_name"]: m
+            for m in result.choices["methods_by_stage"]["read_qc"]
+        }
+        self.assertEqual(read_qc_methods[READ_QC_FILTER_SKIP]["display_name"], "skip filtering, use raw reads")
         flye = [m for m in result.choices["methods_by_stage"]["assembly"] if m["method_name"] == "assembly.candidate.flye"]
         self.assertEqual(flye[0]["execution_support"], "executable")
 
@@ -145,14 +170,14 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         self.assertIn("assembly_review.eval.mapping_coverage", method_names)
         self.assertNotIn("assembly_review.check.merqury", method_names)
 
-    def test_pipeline_stage_only_skips_to_confirm(self):
+    def test_read_qc_only_asks_for_filter_choice(self):
         plan = _base_plan(
             selected_stages=["read_qc"],
             resolved_execution_order=["read_qc"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        # read_qc is pipeline, auto-filled — goes to confirm directly
-        self.assertEqual(result.kind, "confirm")
+        self.assertEqual(result.kind, "method_selection")
+        self.assertEqual(result.choices["defaults"]["read_qc"], _read_qc_default_methods())
 
     def test_empty_method_name_rejected(self):
         plan = _base_plan(
@@ -172,13 +197,32 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown method"):
             merge_clarification_response(plan, response)
 
+    def test_read_qc_rejects_multiple_filter_choices(self):
+        plan = _base_plan(
+            selected_stages=["read_qc"],
+            resolved_execution_order=["read_qc"],
+        )
+        response = AskClarificationResponse(
+            kind="method_selection",
+            selected_methods={
+                "read_qc": [
+                    READ_QC_STATS_METHOD,
+                    READ_QC_FILTER_SKIP,
+                    "read_qc.length_filter.seqkit_seq",
+                    READ_QC_HANDOFF_METHOD,
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one length filter"):
+            merge_clarification_response(plan, response)
+
 
 class AskPlannerParameterTests(unittest.TestCase):
     def test_flye_parameters_requested(self):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "parameter_values")
@@ -198,14 +242,16 @@ class AskPlannerParameterTests(unittest.TestCase):
                 manifest_ref=str(manifest),
                 selected_stages=["read_qc", "assembly"],
                 resolved_execution_order=["read_qc", "assembly"],
-                selected_methods={"assembly": "assembly.candidate.flye"},
+                selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
             self.assertEqual(result.kind, "parameter_values")
             defaults = result.choices.get("defaults", {})
+            shared_defaults = result.choices.get("shared_defaults", {})
             flye_defaults = defaults.get("assembly.candidate.flye", {})
-            self.assertEqual(flye_defaults.get("read_type"), "nano-raw")
-            self.assertEqual(flye_defaults.get("estimated_genome_size"), 2_000_000)
+            self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
+            self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
+            self.assertEqual(flye_defaults.get("threads"), 4)
 
     def test_genome_size_conflict_surfaces_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -221,7 +267,7 @@ class AskPlannerParameterTests(unittest.TestCase):
                 entry_request={"command": "run", "manifest": str(manifest), "data_dir": "data", "genome_size_estimate": 5000000},
                 selected_stages=["read_qc", "assembly"],
                 resolved_execution_order=["read_qc", "assembly"],
-                selected_methods={"assembly": "assembly.candidate.flye"},
+                selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
             self.assertEqual(result.kind, "parameter_values")
@@ -234,7 +280,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             method_parameters={
                 "assembly.candidate.flye": {"read_type": "nano-raw", "estimated_genome_size": 2000000, "threads": 8}
             },
@@ -252,7 +298,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             method_parameters={
                 "assembly.candidate.flye": {"read_type": "nano-raw", "estimated_genome_size": 2000000, "threads": 8}
             },
@@ -267,7 +313,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             method_parameters={
                 "assembly.candidate.flye": {"read_type": "nano-raw", "estimated_genome_size": 2000000, "threads": 8}
             },
@@ -280,7 +326,7 @@ class AskPlannerConfirmTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             method_parameters={
                 "assembly.candidate.flye": {"read_type": "nano-raw", "estimated_genome_size": 2000000, "threads": 8}
             },
@@ -293,11 +339,11 @@ class AskPlannerConfirmTests(unittest.TestCase):
 
 
 class AskPlannerRunConfigTests(unittest.TestCase):
-    def test_build_run_config_from_confirmed_plan(self):
+    def test_build_run_config_from_confirmed_plan_with_advanced_flye_overrides(self):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"assembly": "assembly.candidate.flye"},
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             method_parameters={
                 "assembly.candidate.flye": {"read_type": "nano-raw", "estimated_genome_size": 2000000, "threads": 8}
             },
@@ -305,9 +351,87 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         )
         payload = build_run_config_payload(plan)
         self.assertEqual(sorted(payload["local_exec"]), ["assembly", "read_qc"])
+        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "skip")
         self.assertEqual(payload["assembly"]["flye_parameters"]["read_type"], "nano-raw")
         self.assertEqual(payload["assembly"]["flye_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"]["threads"], 8)
+
+    def test_build_run_config_uses_shared_assembly_parameters(self):
+        plan = _base_plan(
+            selected_stages=["read_qc", "assembly"],
+            resolved_execution_order=["read_qc", "assembly"],
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+            shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 2000000},
+            method_parameters={"assembly.candidate.flye": {"threads": 8}},
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
+        self.assertEqual(payload["shared_parameters"]["estimated_genome_size"], 2000000)
+        self.assertEqual(payload["assembly"]["flye_parameters"], {"threads": 8, "read_type": "nano-raw", "estimated_genome_size": 2000000})
+
+    def test_build_run_config_uses_selected_read_qc_filter(self):
+        plan = _base_plan(
+            selected_stages=["read_qc"],
+            resolved_execution_order=["read_qc"],
+            selected_methods={
+                "read_qc": [
+                    READ_QC_STATS_METHOD,
+                    "read_qc.length_filter.filtlong",
+                    READ_QC_HANDOFF_METHOD,
+                ]
+            },
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "read_qc.length_filter.filtlong")
+
+    def test_build_run_config_uses_selected_seqkit_filter_threshold(self):
+        plan = _base_plan(
+            selected_stages=["read_qc"],
+            resolved_execution_order=["read_qc"],
+            selected_methods={
+                "read_qc": [
+                    READ_QC_STATS_METHOD,
+                    READ_QC_FILTER_SEQKIT,
+                    READ_QC_HANDOFF_METHOD,
+                ]
+            },
+            method_parameters={READ_QC_FILTER_SEQKIT: {"min_len": 1000}},
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertEqual(
+            payload["read_qc"]["length_filter"],
+            {"method": READ_QC_FILTER_SEQKIT, "approved": True, "thresholds": {"min_len": 1000}},
+        )
+
+    def test_build_run_config_rejects_seqkit_filter_without_threshold(self):
+        plan = _base_plan(
+            selected_stages=["read_qc"],
+            resolved_execution_order=["read_qc"],
+            selected_methods={
+                "read_qc": [
+                    READ_QC_STATS_METHOD,
+                    READ_QC_FILTER_SEQKIT,
+                    READ_QC_HANDOFF_METHOD,
+                ]
+            },
+            confirmed=True,
+        )
+        with self.assertRaisesRegex(ValueError, "min_len"):
+            build_run_config_payload(plan)
+
+    def test_build_run_config_uses_quast_parameters(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={"assembly_review": "assembly_review.eval.quast"},
+            method_parameters={"assembly_review.eval.quast": {"threads": 4}},
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertEqual(payload["assembly_review"]["quast"], {"threads": 4})
 
 
 if __name__ == "__main__":

@@ -48,7 +48,11 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "read_type": "ont_raw",
                     "estimated_genome_size": 2_000_000,
                 },
-                "assembly": {"flye_parameters": {"threads": 4}},
+                "assembly": {
+                    "flye_parameters": {
+                        "threads": 4,
+                    }
+                },
             }
         )
 
@@ -56,6 +60,8 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly is not None
         assert config.assembly.flye_parameters is not None
         self.assertEqual(config.shared_parameters.read_type, "ont_raw")
+        self.assertIsNone(config.assembly.flye_parameters.read_type)
+        self.assertIsNone(config.assembly.flye_parameters.estimated_genome_size)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
     def test_read_qc_length_filter_choice_is_accepted(self):
@@ -196,6 +202,22 @@ class RunConfigSchemaTests(unittest.TestCase):
             )
 
         self.assertIn("flye_parameters", str(ctx.exception))
+
+    def test_flye_read_type_and_genome_size_are_optional_when_threads_present(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly"],
+                "assembly": {
+                    "flye_parameters": {
+                        "threads": 4,
+                    }
+                },
+            }
+        )
+
+        assert config.assembly is not None
+        assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
     def test_invalid_flye_read_type_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:

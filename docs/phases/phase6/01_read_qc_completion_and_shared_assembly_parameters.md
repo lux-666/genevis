@@ -1,6 +1,6 @@
 # 01 Read QC Completion And Shared Assembly Parameters
 
-Task status: planned.
+Task status: completed.
 
 ## Goal
 
@@ -74,8 +74,9 @@ it.
   `estimated_genome_size`.
 - Map normalized `read_type` values into method-specific command/config values
   during assembly parameter resolution.
-- Make `assembly.flye_parameters.estimated_genome_size` optional when the
-  shared parameter or manifest prior already provides a valid positive value.
+- Make `assembly.flye_parameters.read_type` and
+  `assembly.flye_parameters.estimated_genome_size` optional when shared
+  parameters or manifest priors already provide valid values.
 - Teach assembly method parameter resolution to use this priority order:
   1. method-specific explicit override;
   2. shared workflow parameter, such as
@@ -187,8 +188,9 @@ parameters. Initial mapping:
 ## Run-config Change
 
 Allow local assembly execution without method-specific
-`assembly.flye_parameters.estimated_genome_size` when the shared parameter or
-manifest prior can provide it:
+`assembly.flye_parameters.read_type` or
+`assembly.flye_parameters.estimated_genome_size` when shared parameters or
+manifest priors can provide them:
 
 ```json
 {
@@ -234,27 +236,27 @@ positive integer genome size before the Flye command is frozen.
 
 ## Tasks
 
-- [ ] Add the read QC length-filter selection contract with options:
+- [x] Add the read QC length-filter selection contract with options:
   skip, seqkit_seq, chopper, filtlong, fastplong.
-- [ ] Ensure skip filtering writes an explicit decision record and raw-read
+- [x] Ensure skip filtering writes an explicit decision record and raw-read
   `long_reads.fofn`.
-- [ ] Ensure exactly one selected filtering route can run, and only with
+- [x] Ensure exactly one selected filtering route can run, and only with
   explicit user thresholds/config.
-- [ ] Add a shared `read_type` and `estimated_genome_size` parameter surface to
+- [x] Add a shared `read_type` and `estimated_genome_size` parameter surface to
   ask-plan, run-config, and runtime state.
-- [ ] Add normalized read-type validation with allowed values:
+- [x] Add normalized read-type validation with allowed values:
   `ont_raw`, `ont_hq`, `pacbio_clr`, `pacbio_hifi`.
-- [ ] Update assembly genome-size resolution to prefer method override, shared
+- [x] Update assembly genome-size resolution to prefer method override, shared
   parameter, then manifest/inventory prior.
-- [ ] Add assembly read-type resolution that maps shared `read_type` to
+- [x] Add assembly read-type resolution that maps shared `read_type` to
   method-specific Flye, NextDenovo, Canu, and hifiasm values.
-- [ ] Relax run-config validation so Flye-specific `estimated_genome_size` is
+- [x] Relax run-config validation so Flye-specific `estimated_genome_size` is
   optional when the shared parameter or manifest prior exists.
-- [ ] Keep Flye freezing blocked when no positive genome size is available from
+- [x] Keep Flye freezing blocked when no positive genome size is available from
   any approved source.
-- [ ] Update `gene-agent ask` parameter prompts so genome size and read type
+- [x] Update `gene-agent ask` parameter prompts so genome size and read type
   are asked once as shared assembly facts, not once per method.
-- [ ] Add tests for:
+- [x] Add tests for:
   - read QC filtering option rendering and skip behavior;
   - default read QC filtering choice is skip;
   - one selected filter method only;

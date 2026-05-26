@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.schemas.shared_parameters import SharedParameters
+
 AskClarificationKind = Literal[
     "stage_selection",
     "method_selection",
@@ -30,6 +32,7 @@ class AskPlanState(BaseModel):
     selected_stages: list[str] | None = None
     resolved_execution_order: list[str] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
+    shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool = False
 
@@ -60,6 +63,7 @@ class AskClarificationResponse(BaseModel):
     kind: AskClarificationKind
     selected_stages: list[str] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
+    shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool | None = None
 
@@ -69,8 +73,8 @@ class AskClarificationResponse(BaseModel):
             raise ValueError("stage_selection response requires selected_stages")
         if self.kind == "method_selection" and not self.selected_methods:
             raise ValueError("method_selection response requires selected_methods")
-        if self.kind == "parameter_values" and not self.method_parameters:
-            raise ValueError("parameter_values response requires method_parameters")
+        if self.kind == "parameter_values" and not (self.method_parameters or self.shared_parameters):
+            raise ValueError("parameter_values response requires method_parameters or shared_parameters")
         if self.kind == "confirm" and self.confirmed is None:
             raise ValueError("confirm response requires confirmed field")
         return self

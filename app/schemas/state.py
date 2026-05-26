@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from app.schemas.shared_parameters import SharedParameters
+
 DomainStage = Literal[
     "inventory",
     "read_qc",
@@ -57,6 +59,9 @@ class TopLevelState(TypedDict, total=False):
     # Human-review or pause metadata. Keep payloads short and ref-heavy.
     active_interrupt: dict[str, Any] | None
 
+    # Cross-method request parameters collected once by planning.
+    shared_parameters: SharedParameters | dict[str, Any] | None
+
     # Last terminal or blocking error, if any.
     last_error: str | None
 
@@ -93,6 +98,7 @@ def initial_state(
         asset_registry_ref=None,
         stage_plan_ref=None,
         active_interrupt=None,
+        shared_parameters=None,
         last_error=None,
         review_notes=[],
         route_trace=[],
