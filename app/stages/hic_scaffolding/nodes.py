@@ -128,7 +128,7 @@ def plan_hic_scaffold(state: TopLevelState) -> dict:
             "juicebox_review_bundle": str(work_dir / "juicebox_review_bundle"),
         },
         notes=_hic_plan_notes(hic_out),
-        metadata={"execution_mode": hic_out.get("execution_mode", "planned_only")},
+        metadata={},
     )
     scaffold_plan_ref.write_text(
         json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -330,7 +330,7 @@ def collect_yahs_artifacts(state: TopLevelState) -> dict:
                 metadata={"attempt_id": attempt.attempt_id, "review_required": True},
             )
         )
-        notes = _unique_refs([*notes, "yahs_executed_locally", "contact_map_policy_required_before_promotion"])
+        notes = _unique_refs([*notes, "yahs_executed", "contact_map_policy_required_before_promotion"])
         update_payload = {
             "status": "blocked_human",
             "chromosome_scaffolded_assembly_candidate_ref": str(scaffold_fasta),
@@ -340,7 +340,7 @@ def collect_yahs_artifacts(state: TopLevelState) -> dict:
             "notes": notes,
         }
     else:
-        notes = _unique_refs([*notes, "yahs_local_execution_failed", "annotation_continues_on_pre_hic_assembly_fallback"])
+        notes = _unique_refs([*notes, "yahs_execution_failed", "annotation_continues_on_pre_hic_assembly_fallback"])
         update_payload = {
             "status": "blocked_human",
             "selected_method_name": HIC_YAHS_METHOD,
@@ -777,7 +777,7 @@ def _hic_plan_notes(hic_out: dict[str, Any]) -> list[str]:
         if _hic_alignment_path(hic_out)[1]:
             notes.append("alignment_required_before_yahs")
         else:
-            notes.append("yahs_local_execution_requested")
+            notes.append("yahs_execution_requested")
     else:
         notes.append("execution_deferred_to_method_specific_task")
     return notes

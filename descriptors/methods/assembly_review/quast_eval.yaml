@@ -9,7 +9,7 @@ required_inputs:
 expected_outputs:
   - name: quast_report
     type: quast_report
-    description: "Reference-free QUAST basic report files, including report.tsv when local execution is enabled."
+    description: "Reference-free QUAST basic report files, including report.tsv when execution is enabled."
 review_rules:
   - quast_report_exists
 human_review_triggers:

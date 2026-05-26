@@ -263,7 +263,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertTrue(Path(hic["chromosome_scaffolded_assembly_candidate_ref"]).exists())
             self.assertTrue(Path(hic["hic_review_bundle_ref"]).exists())
             self.assertTrue(Path(hic["hic_qc_report_ref"]).exists())
-            self.assertIn("yahs_executed_locally", hic["notes"])
+            self.assertIn("yahs_executed", hic["notes"])
             self.assertIn("hic_review_bundle_ref", result["active_interrupt"])
             artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
@@ -377,7 +377,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertIn("yahs_local_execution_failed", hic["notes"])
+            self.assertIn("yahs_execution_failed", hic["notes"])
             self.assertNotIn("chromosome_scaffolded_assembly_candidate_ref", hic)
             artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]

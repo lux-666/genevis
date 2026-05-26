@@ -13,7 +13,7 @@ required_inputs:
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
-    description: "Draft assembly FASTA path for the Flye candidate; exists after explicit local execution, otherwise remains a planned path."
+    description: "Draft assembly FASTA path for the Flye candidate; exists after explicit execution, otherwise remains a planned path."
 review_rules:
   - candidate_bundle_exists
 human_review_triggers:

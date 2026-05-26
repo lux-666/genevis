@@ -1183,7 +1183,6 @@ class AssemblyRerunTests(unittest.TestCase):
             "logs": {},
             "metadata": {
                 "execution_enabled": True,
-                "execution_mode": "local",
                 "read_profile": "nano-raw",
                 "estimated_genome_size": 100000000,
                 "threads": 4,
@@ -1370,6 +1369,7 @@ class AssemblyRerunTests(unittest.TestCase):
             self.assertIn("rerun_1", bundle["candidate_id"])
             self.assertEqual(bundle["metadata"]["estimated_genome_size"], 200000000)
             self.assertEqual(bundle["metadata"]["rerun_index"], 1)
+            self.assertNotIn("execution_mode", bundle["metadata"])
             self.assertEqual(bundle["status"], "executed")
 
     def test_rerun_replay_reuses_existing_completed_bundle_without_side_effects(self):

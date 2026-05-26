@@ -189,7 +189,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
         low_confidence_reasons=repeat_out.get("low_confidence_reasons", []),
         method_selection_required=bool(repeat_out.get("method_selection_required")),
         notes=notes,
-        metadata={"execution_enabled": execution_enabled, "execution_mode": "local" if execution_enabled else "planned_only"},
+        metadata={"execution_enabled": execution_enabled},
     )
     plan_ref = out_dir / "repeat_annotation_plan.json"
     plan_ref.write_text(
@@ -401,7 +401,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
         ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
 
     artifact_refs = _unique_refs([*repeat_out.get("artifact_refs", []), *[str(artifact.file_path) for artifact in artifacts]])
-    notes = _unique_refs([*repeat_out.get("notes", []), "repeatmasker_executed_locally"])
+    notes = _unique_refs([*repeat_out.get("notes", []), "repeatmasker_executed"])
     return _update_repeat_output(
         state,
         {
@@ -412,7 +412,6 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
             "artifact_refs": artifact_refs,
             "notes": notes,
             "execution_enabled": True,
-            "execution_mode": "local",
             "repeatmasker_attempt_id": attempt.attempt_id,
             "repeatmasker_frozen_attempt": None,
             "repeatmasker_execution_result": None,
@@ -445,7 +444,6 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
         notes=repeat_out.get("notes", []),
         metadata={
             "execution_enabled": bool(repeat_out.get("execution_enabled")),
-            "execution_mode": repeat_out.get("execution_mode", "planned_only"),
             "attempt_id": repeat_out.get("repeatmasker_attempt_id"),
         },
     )

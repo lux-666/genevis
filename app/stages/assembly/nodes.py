@@ -21,6 +21,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.plan import AssemblyCandidatePlan
+from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import TopLevelState
 
 ASSEMBLY_AUTO_CANDIDATES = [
@@ -41,6 +42,7 @@ FLYE_READ_TYPE_FLAGS = {
     "nano-raw": "--nano-raw",
     "nano-hq": "--nano-hq",
     "pacbio-raw": "--pacbio-raw",
+    "pacbio-hifi": "--pacbio-hifi",
 }
 FLYE_REQUIRED_PARAMS = ("read_type", "estimated_genome_size", "threads")
 
@@ -79,6 +81,7 @@ def resolve_assembly_inputs(state: TopLevelState) -> dict:
         return _fail_update(state, "assembly requires clean_long_reads or long_reads.fofn")
 
     genome_size_prior = _genome_size_prior(state)
+    read_type_prior = _read_type_prior(state)
     return _update_assembly_output(
         state,
         {
@@ -87,6 +90,8 @@ def resolve_assembly_inputs(state: TopLevelState) -> dict:
             "input_type": input_type,
             "input_source": source,
             "genome_size_prior": genome_size_prior,
+            "read_type_prior": read_type_prior,
+            "shared_parameters": _shared_parameters(state),
             "genome_survey_result_ref": _genome_survey_result_ref(state),
         },
     )
@@ -231,9 +236,9 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             logs={"primary_log": str(log_path)},
             metadata={
                 "genome_survey_result_ref": assembly_out.get("genome_survey_result_ref"),
+                "read_type_prior": assembly_out.get("read_type_prior"),
                 "execution_enabled": execution_enabled,
-                "execution_mode": "local" if execution_enabled else "planned_only",
-                "draft_assembly_ref_status": "pending_local_execution" if execution_enabled else "planned_path_not_materialized",
+                "draft_assembly_ref_status": "pending_execution" if execution_enabled else "planned_path_not_materialized",
             },
         )
         bundle_path.write_text(
@@ -477,7 +482,6 @@ def collect_flye_artifacts(state: TopLevelState) -> dict:
     bundle_data["metadata"] = {
         **dict(bundle_data.get("metadata") or {}),
         "execution_enabled": True,
-        "execution_mode": "local",
         "attempt_id": attempt.attempt_id,
         "draft_assembly_artifact_ref": str(draft_assembly),
         "draft_assembly_ref_status": "materialized",
@@ -654,21 +658,17 @@ def _unique_refs(refs: list[str]) -> list[str]:
 
 
 def _flye_parameters(assembly_out: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Validate the three required Flye parameters before freezing an attempt.
-
-    Returns `(resolved_params, None)` when `flye_parameters.read_type`,
-    `flye_parameters.estimated_genome_size`, and `flye_parameters.threads`
-    are all present and well-formed. Returns `({}, blocked_payload)` with
-    structured `missing_params` / `invalid_params` lists otherwise. Phase 4
-    must not invent defaults or attempt a run when any of these are absent.
-    """
+    """Validate and merge Flye parameters before freezing an attempt."""
     params = dict(assembly_out.get("flye_parameters") or {})
     missing: list[str] = []
     invalid: list[dict[str, Any]] = []
 
     read_type = params.get("read_type")
     if read_type is None or read_type == "":
-        missing.append("flye_parameters.read_type")
+        prior = dict(assembly_out.get("read_type_prior") or {})
+        read_type = prior.get("flye")
+        if read_type is None or read_type == "":
+            missing.append("flye_parameters.read_type")
     elif read_type not in FLYE_READ_TYPE_FLAGS:
         invalid.append({
             "param": "flye_parameters.read_type",
@@ -679,8 +679,10 @@ def _flye_parameters(assembly_out: dict[str, Any]) -> tuple[dict[str, Any], dict
     raw_genome_size = params.get("estimated_genome_size")
     genome_size: int | None = None
     if raw_genome_size is None or raw_genome_size == "":
-        missing.append("flye_parameters.estimated_genome_size")
-    else:
+        raw_genome_size = assembly_out.get("genome_size_prior")
+        if raw_genome_size is None or raw_genome_size == "":
+            missing.append("flye_parameters.estimated_genome_size")
+    if raw_genome_size is not None and raw_genome_size != "":
         try:
             genome_size = int(raw_genome_size)
         except (TypeError, ValueError):
@@ -769,17 +771,73 @@ def _asset_input_ref(state: TopLevelState) -> str | None:
 
 def _genome_size_prior(state: TopLevelState) -> int | None:
     assembly_out = _assembly_output(state)
+    params = dict(assembly_out.get("flye_parameters") or {})
+    if params.get("estimated_genome_size"):
+        return int(params["estimated_genome_size"])
     decision = dict(assembly_out.get("method_decision") or {})
     if decision.get("genome_size_prior"):
         return int(decision["genome_size_prior"])
+    shared = _shared_parameters(state)
+    if shared.get("estimated_genome_size"):
+        return int(shared["estimated_genome_size"])
+    inventory = (state.get("stage_outputs") or {}).get("inventory") or {}
+    if inventory.get("genome_size_estimate"):
+        return int(inventory["genome_size_estimate"])
     survey = (state.get("stage_outputs") or {}).get("genome_survey") or {}
     estimates = dict(survey.get("estimates") or {})
     for key in ["genome_size_prior", "genome_size"]:
         if estimates.get(key):
             return int(estimates[key])
-    inventory = (state.get("stage_outputs") or {}).get("inventory") or {}
-    if inventory.get("genome_size_estimate"):
-        return int(inventory["genome_size_estimate"])
+    return None
+
+
+def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
+    assembly_out = _assembly_output(state)
+    params = dict(assembly_out.get("flye_parameters") or {})
+    if params.get("read_type"):
+        return {"flye": str(params["read_type"]), "source": "flye_parameters"}
+
+    shared = _shared_parameters(state)
+    shared_read_type = shared.get("read_type")
+    if shared_read_type in SHARED_TO_METHOD_READ_TYPE:
+        return {
+            **SHARED_TO_METHOD_READ_TYPE[str(shared_read_type)],
+            "shared_read_type": str(shared_read_type),
+            "source": "shared_parameters",
+        }
+
+    platform = _long_read_platform(state)
+    inferred = PLATFORM_TO_SHARED_READ_TYPE.get(platform or "")
+    if inferred:
+        return {
+            **SHARED_TO_METHOD_READ_TYPE[inferred],
+            "shared_read_type": inferred,
+            "source": "manifest_platform",
+        }
+    return None
+
+
+def _shared_parameters(state: TopLevelState) -> dict[str, Any]:
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        return shared.model_dump(exclude_none=True)
+    return dict(shared)
+
+
+def _long_read_platform(state: TopLevelState) -> str | None:
+    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
+    if read_qc_out.get("platform"):
+        return str(read_qc_out["platform"])
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return None
+    registry_path = Path(registry_ref)
+    if not registry_path.exists():
+        return None
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    for asset in registry.get("assets", []):
+        if asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"} and asset.get("platform"):
+            return str(asset["platform"])
     return None
 
 

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import initial_state
 from app.stages.assembly.builder import build_stage
 
@@ -33,6 +34,16 @@ class AssemblyDescriptorTests(unittest.TestCase):
         self.assertIn("compatibility candidate", hifiasm.goal)
         self.assertIn("compatibility_route_explicitly_requested", hifiasm.review_rules)
         self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
+
+    def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
+        self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["pacbio_hifi"], "pacbio_hifi")
+        for shared_read_type in PLATFORM_TO_SHARED_READ_TYPE.values():
+            with self.subTest(shared_read_type=shared_read_type):
+                mapping = SHARED_TO_METHOD_READ_TYPE[shared_read_type]
+                self.assertIn("flye", mapping)
+                self.assertIn("nextdenovo", mapping)
+                self.assertIn("canu", mapping)
+                self.assertIn("hifiasm", mapping)
 
 
 class AssemblyStageTests(unittest.TestCase):
@@ -310,6 +321,7 @@ class AssemblyStageTests(unittest.TestCase):
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "planned")
             self.assertFalse(candidate["metadata"]["execution_enabled"])
+            self.assertNotIn("execution_mode", candidate["metadata"])
             self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "planned_path_not_materialized")
 
     def test_local_flye_rejects_invalid_threads(self):
@@ -397,6 +409,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(Path(candidate["expected_outputs"]["draft_assembly_fasta"]).exists())
             self.assertTrue(candidate["metadata"]["execution_enabled"])
+            self.assertNotIn("execution_mode", candidate["metadata"])
             self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "materialized")
             self.assertEqual(len(assembly["candidate_artifact_refs"]), len(set(assembly["candidate_artifact_refs"])))
 
@@ -620,11 +633,32 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "blocked_param")
-            self.assertIn("flye_parameters.read_type", assembly["missing_params"])
             self.assertIn("flye_parameters.estimated_genome_size", assembly["missing_params"])
             self.assertIn("flye_parameters.threads", assembly["missing_params"])
+            self.assertEqual(assembly["read_type_prior"]["source"], "manifest_platform")
+            self.assertEqual(assembly["read_type_prior"]["flye"], "nano-raw")
             self.assertEqual(assembly["invalid_params"], [])
             self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+
+    def test_shared_parameters_fill_flye_read_type_and_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._local_state_with_flye(
+                tmpdir,
+                flye_parameters={"threads": 1},
+            )
+            state["shared_parameters"] = {"read_type": "pacbio_hifi", "estimated_genome_size": 2_000_000}
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            assembly = result["stage_outputs"]["assembly"]
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            script_text = flye_script.read_text(encoding="utf-8")
+            self.assertIn("--pacbio-hifi", script_text)
+            self.assertIn("--genome-size 2000000", script_text)
+            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(candidate["metadata"]["read_profile"], "pacbio-hifi")
+            self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
 
     def test_unknown_read_type_is_reported_as_invalid_param(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -676,6 +710,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             # provenance.
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertTrue(candidate["metadata"]["execution_enabled"])
+            self.assertNotIn("execution_mode", candidate["metadata"])
             # The executed bundle metadata must reflect the validated
             # parameters, not an unrelated default read profile.
             self.assertEqual(candidate["metadata"]["read_profile"], "nano-hq")

@@ -543,7 +543,7 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
                 candidate_id,
                 "available",
                 metric_refs,
-                ["thresholds_not_applied_without_human_approval", "busco_executed_locally"],
+                ["thresholds_not_applied_without_human_approval", "busco_executed"],
                 metadata,
             )
         else:
@@ -572,7 +572,7 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
                 candidate_id,
                 "failed",
                 failed_refs,
-                ["busco_local_execution_failed", "candidate_not_rejected_from_metrics"],
+                ["busco_execution_failed", "candidate_not_rejected_from_metrics"],
                 metadata,
             )
 
@@ -686,7 +686,7 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
             metadata["metrics"] = metrics
             metadata["quast_summary_ref"] = str(quast_summary_path)
-            notes.append("quast_executed_locally")
+            notes.append("quast_executed")
             signals = _update_quast_signal(signals, candidate_id, "available", metric_refs, notes, metadata)
         else:
             for path, artifact_type in [
@@ -717,7 +717,7 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
                 candidate_id,
                 "failed",
                 failed_refs,
-                ["quast_local_execution_failed", "candidate_not_rejected_from_metrics"],
+                ["quast_execution_failed", "candidate_not_rejected_from_metrics"],
                 metadata,
             )
 
@@ -1405,7 +1405,6 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         logs={"stdout": str(result.stdout_path), "stderr": str(result.stderr_path)},
         metadata={
             "execution_enabled": True,
-            "execution_mode": "local",
             "attempt_id": attempt.attempt_id,
             "draft_assembly_artifact_ref": str(draft_assembly),
             "draft_assembly_ref_status": "materialized",

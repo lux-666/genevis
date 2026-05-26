@@ -175,10 +175,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertTrue(Path(repeat["repeat_annotation_gff3_ref"]).exists())
             self.assertTrue(repeat["execution_enabled"])
             self.assertEqual(repeat["execution_mode"], "local")
-            self.assertIn("repeatmasker_executed_locally", repeat["notes"])
+            self.assertIn("repeatmasker_executed", repeat["notes"])
             bundle = json.loads(Path(repeat["bundle_artifact_ref"]).read_text(encoding="utf-8"))
             self.assertEqual(bundle["status"], "executed")
             self.assertTrue(bundle["metadata"]["execution_enabled"])
+            self.assertNotIn("execution_mode", bundle["metadata"])
             artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
             self.assertIn("repeat_annotation.softmasked_genome", artifact_types)

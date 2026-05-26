@@ -199,8 +199,8 @@ Outputs:
 - optional `polished_assembly`
 - optional `purged_assembly`
 - `final_assembly_for_scaffolding_or_annotation`
-- optional real local evaluation artifacts for QUAST and BUSCO when
-  `assembly_review` local execution is enabled
+- optional real evaluation artifacts for QUAST and BUSCO when
+  `assembly_review` execution is enabled
 
 Planning rules:
 
