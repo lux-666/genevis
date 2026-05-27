@@ -430,7 +430,7 @@ Issues found: none. LLM intent path works end-to-end without code fixes.
 
 Phase 6 task 02 is fully complete: both `gene-agent run` and
 `gene-agent ask` paths validated on HPC with durable resume.
-Phase 6 task 03 (session observability and run trace) is the next task.
+Phase 6 task 03 (interactive human gate and resume CLI) is the next task.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the

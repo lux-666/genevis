@@ -1,4 +1,4 @@
-# 03 Session Observability And Run Trace
+# 04 Session Observability And Run Trace
 
 Task status: not started.
 
@@ -13,11 +13,14 @@ The output should be useful after a long HPC run, when the operator should not
 need to manually read ledger JSONL, artifact indexes, checkpoint snapshots, and
 stage-specific reports to answer "what happened?"
 
-## Relationship To Task 02
+## Relationship To Tasks 02 And 03
 
 Task 02 proves that one real HPC session can reach terminal completion. This
-task turns the evidence from such sessions into a user-facing trace. It should
-be validated against the Phase 6 task 02 acceptance run once that run exists.
+Task 03 makes the human-gate and resume interaction usable without manual
+command assembly. This task turns durable evidence from those sessions into a
+user-facing trace. It should be validated against the Phase 6 task 02 acceptance
+run once that run exists, and against a blocked/resumed session that exercises
+the Phase 6 task 03 operator flow.
 
 ## Scope
 

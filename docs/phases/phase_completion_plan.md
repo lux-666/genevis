@@ -63,11 +63,14 @@ Tasks in `docs/phases/phase6/`:
 1. Read QC completion and shared assembly parameters (task 01, completed).
 2. HPC end-to-end acceptance: single session from raw reads to `done` with
    durable resume at every human gate.
-3. Session observability and run trace: structured stage-by-stage trace
+3. Interactive human gate and resume CLI: let operators inspect, choose, and
+   resume supported human gates from an interactive CLI without hand-editing
+   decision JSON or assembling the command sequence.
+4. Session observability and run trace: structured stage-by-stage trace
    artifact from ledger data, exposed via `gene-agent inspect --trace`.
-4. Hardening beyond the current sqlite resume minimum, including optional
+5. Hardening beyond the current sqlite resume minimum, including optional
    postgres/backend work if long-running deployments require it.
-5. Lifecycle commands beyond the current structured review resume path, such as
+6. Lifecycle commands beyond the current structured review resume path, such as
    pause, retry, abort, or rebuild, once their semantics are explicitly scoped.
 
 Exit criteria:
