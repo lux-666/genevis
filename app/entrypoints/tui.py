@@ -26,8 +26,7 @@ def run_tui(data_dir: str) -> int:
 
 def _tui_main(data_dir: str) -> int:
     from app.entrypoints.ask_interactive import run_interactive_loop
-    from app.entrypoints.ask_planner import save_plan_to_default_path
-    from app.entrypoints.run import _create_ask_plan, generate_session_id
+    from app.entrypoints.run import _create_ask_plan
 
     print("\n=== gene-agent interactive ===\n")
     print("Describe what you want to do (e.g. '对 /path/reads.fa 进行基因组组装'):")
@@ -58,8 +57,6 @@ def _tui_main(data_dir: str) -> int:
     except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-
-    save_plan_to_default_path(plan)
 
     # Enable interactive gate handling during execution
     args._interactive_gate = True

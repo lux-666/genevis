@@ -418,50 +418,19 @@ def _interactive_gate_loop(
     from app.control.lifecycle import (
         DurableResumeUnavailableError,
         ResumeValidationError,
-        inspect_session,
         resume_review_state,
     )
-    from app.entrypoints.review_interactive import (
-        prompt_assembly_review_decision,
-        prompt_hic_scaffolding_decision,
-        render_blocked_summary,
-    )
-    from app.review.base import ResumeReviewRequest
+    from app.entrypoints.review_interactive import collect_gate_decision
+
+    ledger = Ledger(data_dir)
 
     while result.get("supervision_state") == "blocked_human":
-        summary = inspect_session(session_id, data_dir)
-        requirements = summary.get("decision_requirements") or {}
-        stage = requirements.get("stage")
-
-        if stage not in ("assembly_review", "hic_scaffolding"):
-            break
-
-        render_blocked_summary(summary)
-
-        if stage == "assembly_review":
-            raw_decision = prompt_assembly_review_decision(requirements)
-        else:
-            raw_decision = prompt_hic_scaffolding_decision(requirements)
-
-        if raw_decision is None:
+        gate_result = collect_gate_decision(session_id, data_dir)
+        if gate_result is None:
             print("review skipped; session remains blocked")
             break
 
-        raw_decision["session_id"] = session_id
-        try:
-            request = ResumeReviewRequest.model_validate(raw_decision)
-        except Exception as exc:
-            print(f"error: invalid decision: {exc}", file=sys.stderr)
-            break
-
-        # Persist decision artifact
-        decision_dir = Path(data_dir) / "artifacts" / stage / session_id
-        decision_dir.mkdir(parents=True, exist_ok=True)
-        decision_path = decision_dir / f"{stage}_interactive_decision.json"
-        decision_path.write_text(
-            json.dumps(raw_decision, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        request, decision_path = gate_result
 
         snapshot = graph.get_state(config)
         if not snapshot or not snapshot.values:
@@ -469,7 +438,6 @@ def _interactive_gate_loop(
             break
 
         state = snapshot.values
-        ledger = Ledger(data_dir)
         resume_payload = {
             "source": "interactive_gate",
             "decision_artifact_ref": str(decision_path),

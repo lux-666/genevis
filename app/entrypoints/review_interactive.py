@@ -1,16 +1,22 @@
 """Interactive CLI for human-gate review and resume.
 
-Loads a blocked session via inspect, presents the pending gate,
-collects the operator's decision, validates, persists, and resumes
-through the existing durable sqlite path.
+Provides shared primitives for prompting operator decisions at review gates,
+used by both `gene-agent review` (standalone) and the in-process gate loop
+in `_run_session`.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
 
 
 def render_blocked_summary(summary: dict[str, Any]) -> None:
@@ -81,6 +87,11 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
         val = interrupt.get(key) or requirements.get(key)
         if val:
             print(f"{key}: {val}")
+
+
+# ---------------------------------------------------------------------------
+# Prompting
+# ---------------------------------------------------------------------------
 
 
 def prompt_assembly_review_decision(
@@ -208,29 +219,27 @@ def _prompt_choice(label: str, options: list[str]) -> str | None:
     return None
 
 
-def run_interactive_review(
+# ---------------------------------------------------------------------------
+# Shared: inspect → prompt → validate → persist
+# ---------------------------------------------------------------------------
+
+
+def collect_gate_decision(
     session_id: str,
     data_dir: str,
-    *,
-    dry_run: bool = False,
-) -> int:
-    """Full interactive review flow: inspect → prompt → validate → persist → resume.
+) -> tuple[Any, Path] | None:
+    """Inspect a blocked session, prompt operator, validate, persist artifact.
 
-    Returns CLI exit code.
+    Returns (ResumeReviewRequest, decision_artifact_path) on success,
+    or None on cancel/error. Prints errors to stderr.
     """
-    from app.control.lifecycle import (
-        DurableResumeUnavailableError,
-        ResumeValidationError,
-        inspect_session,
-        resume_review_state,
-    )
-    from app.graph.checkpointer import checkpoint_db_path
+    from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
 
     summary = inspect_session(session_id, data_dir)
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
-        return 1
+        return None
 
     if summary.get("supervision_state") != "blocked_human":
         print(
@@ -238,7 +247,7 @@ def run_interactive_review(
             f"(supervision_state={summary.get('supervision_state')!r})",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     requirements = summary.get("decision_requirements") or {}
     stage = requirements.get("stage")
@@ -248,7 +257,7 @@ def run_interactive_review(
             "only assembly_review and hic_scaffolding are supported",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     render_blocked_summary(summary)
 
@@ -259,23 +268,61 @@ def run_interactive_review(
 
     if raw_decision is None:
         print("review cancelled")
-        return 1
+        return None
 
     raw_decision["session_id"] = session_id
     try:
         request = ResumeReviewRequest.model_validate(raw_decision)
     except Exception as exc:
         print(f"error: invalid decision: {exc}", file=sys.stderr)
-        return 1
+        return None
 
+    decision_path = _persist_decision_artifact(raw_decision, stage, session_id, data_dir)
+    print(f"decision_artifact: {decision_path}")
+    return request, decision_path
+
+
+def _persist_decision_artifact(
+    raw_decision: dict,
+    stage: str,
+    session_id: str,
+    data_dir: str,
+) -> Path:
+    """Write decision JSON with a timestamp suffix to avoid overwrites."""
     decision_dir = Path(data_dir) / "artifacts" / stage / session_id
     decision_dir.mkdir(parents=True, exist_ok=True)
-    decision_path = decision_dir / f"{stage}_interactive_decision.json"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    decision_path = decision_dir / f"{stage}_interactive_decision_{ts}.json"
     decision_path.write_text(
         json.dumps(raw_decision, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"decision_artifact: {decision_path}")
+    return decision_path
+
+
+# ---------------------------------------------------------------------------
+# Standalone CLI entry: gene-agent review
+# ---------------------------------------------------------------------------
+
+
+def run_interactive_review(
+    session_id: str,
+    data_dir: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Full interactive review flow: inspect → prompt → validate → persist → resume."""
+    from app.control.lifecycle import (
+        DurableResumeUnavailableError,
+        ResumeValidationError,
+        resume_review_state,
+    )
+    from app.graph.checkpointer import checkpoint_db_path
+
+    result = collect_gate_decision(session_id, data_dir)
+    if result is None:
+        return 1
+    request, decision_path = result
 
     if dry_run:
         print("dry_run: decision validated and written; skipping resume")
@@ -289,8 +336,7 @@ def run_interactive_review(
     from app.control.ledger import Ledger
     from app.entrypoints.run import build_graph
 
-    backend = "sqlite"
-    graph = build_graph(backend=backend, data_dir=data_dir)
+    graph = build_graph(backend="sqlite", data_dir=data_dir)
     config = {"configurable": {"thread_id": session_id}}
     snapshot = graph.get_state(config)
     if (
@@ -306,8 +352,6 @@ def run_interactive_review(
 
     resume_event_payload = {
         "source": "interactive_review",
-        "checkpointer": backend,
-        "data_dir": str(data_dir),
         "decision_artifact_ref": str(decision_path),
         "decision": {
             "stage": request.stage,
@@ -323,8 +367,7 @@ def run_interactive_review(
         update = resume_review_state(state, request)
     except (ResumeValidationError, DurableResumeUnavailableError) as exc:
         ledger.record_event(
-            session_id,
-            "resume_failed",
+            session_id, "resume_failed",
             {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
         )
         print(f"error: resume rejected: {exc}", file=sys.stderr)
@@ -332,37 +375,27 @@ def run_interactive_review(
 
     graph.update_state(config, update)
     try:
-        result = graph.invoke(None, config=config)
+        final = graph.invoke(None, config=config)
     except Exception as exc:
         ledger.record_event(
-            session_id,
-            "resume_failed",
+            session_id, "resume_failed",
             {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
         )
         print(f"error: resume invoke failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    current_stage = result.get("current_stage", "unknown")
-    supervision = result.get("supervision_state", "unknown")
-    route_trace = result.get("route_trace", [])
-
-    ledger.record_event(
-        session_id,
-        "resume_completed",
-        {
-            **resume_event_payload,
-            "current_stage": current_stage,
-            "supervision_state": supervision,
-            "route_trace": route_trace,
-        },
-    )
+    ledger.record_event(session_id, "resume_completed", {
+        **resume_event_payload,
+        "current_stage": final.get("current_stage"),
+        "supervision_state": final.get("supervision_state"),
+    })
 
     print(f"\nsession_id:        {session_id}")
-    print(f"current_stage:     {current_stage}")
-    print(f"supervision_state: {supervision}")
-    print(f"route_trace:       {route_trace}")
+    print(f"current_stage:     {final.get('current_stage', 'unknown')}")
+    print(f"supervision_state: {final.get('supervision_state', 'unknown')}")
+    print(f"route_trace:       {final.get('route_trace', [])}")
 
-    if supervision == "failed_terminal":
-        print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
+    if final.get("supervision_state") == "failed_terminal":
+        print(f"error: {final.get('last_error', 'unknown failure')}", file=sys.stderr)
         return 1
     return 0

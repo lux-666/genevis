@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -240,12 +239,12 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_path = (
-                Path(data_dir) / "artifacts" / "assembly_review"
-                / session_id / "assembly_review_interactive_decision.json"
+            decision_dir = (
+                Path(data_dir) / "artifacts" / "assembly_review" / session_id
             )
-            self.assertTrue(decision_path.exists())
-            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            decisions = list(decision_dir.glob("assembly_review_interactive_decision_*.json"))
+            self.assertEqual(len(decisions), 1)
+            decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "accept")
             self.assertEqual(decision["candidate_id"], "flye")
             self.assertEqual(decision["decided_by"], "human")
@@ -257,12 +256,12 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_path = (
-                Path(data_dir) / "artifacts" / "hic_scaffolding"
-                / session_id / "hic_scaffolding_interactive_decision.json"
+            decision_dir = (
+                Path(data_dir) / "artifacts" / "hic_scaffolding" / session_id
             )
-            self.assertTrue(decision_path.exists())
-            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            decisions = list(decision_dir.glob("hic_scaffolding_interactive_decision_*.json"))
+            self.assertEqual(len(decisions), 1)
+            decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "skip")
             self.assertEqual(decision["stage"], "hic_scaffolding")
 
