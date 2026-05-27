@@ -109,6 +109,7 @@ def prompt_assembly_review_decision(
     candidate_id = None
     final_assembly_ref = None
     rejected = []
+    metadata: dict[str, Any] = {}
 
     if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence", "rerun"):
         if len(candidate_ids) == 1:
@@ -128,22 +129,33 @@ def prompt_assembly_review_decision(
             if not candidate_id:
                 return None
 
-        if not final_assembly_ref:
-            try:
-                final_assembly_ref = input(f"final_assembly_ref [{candidate_refs.get(candidate_id, '')}]: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return None
+        if decision not in ("purge", "polish", "rerun"):
             if not final_assembly_ref:
-                final_assembly_ref = candidate_refs.get(candidate_id)
+                try:
+                    final_assembly_ref = input(f"final_assembly_ref [{candidate_refs.get(candidate_id, '')}]: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+                if not final_assembly_ref:
+                    final_assembly_ref = candidate_refs.get(candidate_id)
 
         rejected = [c for c in candidate_ids if c != candidate_id]
+
+    if decision in ("purge", "polish"):
+        metadata = _prompt_transform_action_metadata(decision)
+        if metadata is None:
+            return None
+        final_assembly_ref = metadata.get("action_output_ref")
+    elif decision == "rerun":
+        metadata = _prompt_rerun_metadata()
+        if metadata is None:
+            return None
 
     try:
         notes_raw = input("notes (optional): ").strip()
     except (EOFError, KeyboardInterrupt):
         notes_raw = ""
 
-    return {
+    result: dict[str, Any] = {
         "stage": "assembly_review",
         "decision": decision,
         "candidate_id": candidate_id,
@@ -152,6 +164,9 @@ def prompt_assembly_review_decision(
         "notes": [notes_raw] if notes_raw else ["interactive review"],
         "decided_by": "human",
     }
+    if metadata:
+        result["metadata"] = metadata
+    return result
 
 
 def prompt_hic_scaffolding_decision(
@@ -219,6 +234,276 @@ def _prompt_choice(label: str, options: list[str]) -> str | None:
     return None
 
 
+def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
+    """Collect metadata required for purge/polish decisions."""
+    print(f"\n  {decision} requires the path to the already-completed output assembly.")
+    try:
+        action_output_ref = input("action_output_ref (path to purged/polished assembly): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not action_output_ref:
+        print("error: action_output_ref is required", file=sys.stderr)
+        return None
+
+    try:
+        method_name = input("method_name (tool used, e.g. purge_dups/nextpolish; required): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not method_name:
+        print("error: method_name is required for transform actions", file=sys.stderr)
+        return None
+
+    try:
+        evidence = input("evidence_notes (what confirms the action, e.g. 'purge_dups log shows 5% removed'): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        evidence = ""
+
+    if not evidence:
+        print("error: evidence_notes is required for transform actions", file=sys.stderr)
+        return None
+
+    metadata: dict[str, Any] = {
+        "action_output_ref": action_output_ref,
+        "human_approved_action": True,
+        "evidence_notes": [evidence],
+        "method_name": method_name,
+    }
+    return metadata
+
+
+def _prompt_rerun_metadata() -> dict[str, Any] | None:
+    """Collect metadata required for rerun decisions."""
+    print("\n  rerun requires adjusted Flye parameters for the new assembly attempt.")
+    try:
+        genome_size = input("estimated_genome_size (e.g. 500m, 2g): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not genome_size:
+        print("error: estimated_genome_size is required for rerun", file=sys.stderr)
+        return None
+
+    try:
+        read_type = input("read_type (e.g. nano-raw, nano-hq, pacbio-hifi): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not read_type:
+        print("error: read_type is required for rerun", file=sys.stderr)
+        return None
+
+    try:
+        threads = input("threads [4]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        threads = ""
+    threads_val = int(threads) if threads.isdigit() else 4
+
+    return {
+        "rerun_parameters": {
+            "estimated_genome_size": genome_size,
+            "read_type": read_type,
+            "threads": threads_val,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Decision brief: consolidated evidence for human judgment
+# ---------------------------------------------------------------------------
+
+
+def build_decision_brief(
+    summary: dict[str, Any],
+    data_dir: str,
+) -> dict[str, Any]:
+    """Build a consolidated decision brief from inspect summary and artifacts.
+
+    Returns a structured dict with sections the TUI can render to help the
+    operator make an informed gate decision. Designed as the preparation layer
+    for future "integrated results for human judgment" in the TUI.
+    """
+    requirements = summary.get("decision_requirements") or {}
+    stage = requirements.get("stage", "unknown")
+
+    brief: dict[str, Any] = {
+        "session_id": summary.get("session_id"),
+        "stage": stage,
+        "supervision_state": summary.get("supervision_state"),
+        "decisions_allowed": requirements.get("decisions_allowed", []),
+    }
+
+    request_artifact = summary.get("latest_review_request_artifact")
+    if isinstance(request_artifact, dict) and request_artifact.get("file_path"):
+        brief["review_request_ref"] = request_artifact["file_path"]
+    request_payload = _load_artifact_payload(request_artifact)
+
+    if stage == "assembly_review":
+        brief["candidates"] = _brief_assembly_candidates(requirements, request_payload)
+        brief["evidence"] = _brief_assembly_evidence(requirements, request_payload, data_dir, summary)
+    elif stage == "hic_scaffolding":
+        brief["candidates"] = _brief_hic_candidates(requirements, request_payload)
+        brief["evidence"] = _brief_hic_evidence(requirements, request_payload, summary)
+
+    next_action = summary.get("next_action") or {}
+    if next_action.get("relevant_refs"):
+        brief["relevant_refs"] = next_action["relevant_refs"]
+
+    return brief
+
+
+def render_decision_brief(brief: dict[str, Any]) -> None:
+    """Render a decision brief to stdout for the operator."""
+    print(f"\n{'=' * 50}")
+    print("Decision Brief")
+    print(f"{'=' * 50}")
+    print(f"\nSession:  {brief.get('session_id')}")
+    print(f"Stage:    {brief.get('stage')}")
+    print(f"State:    {brief.get('supervision_state')}")
+    print(f"Allowed:  {', '.join(brief.get('decisions_allowed', []))}")
+
+    if brief.get("review_request_ref"):
+        print(f"Request:  {brief['review_request_ref']}")
+
+    candidates = brief.get("candidates") or []
+    if candidates:
+        print(f"\nCandidates ({len(candidates)}):")
+        for c in candidates:
+            status = f" [{c['status']}]" if c.get("status") else ""
+            exists_marker = ""
+            if c.get("ref"):
+                exists_marker = " (exists)" if c.get("exists") else " (MISSING)"
+            print(f"  - {c['id']}{status}{exists_marker}")
+            if c.get("ref"):
+                print(f"    ref: {c['ref']}")
+            if c.get("method"):
+                print(f"    method: {c['method']}")
+
+    evidence = brief.get("evidence") or {}
+    if evidence.get("metrics"):
+        print("\nMetrics:")
+        for key, val in evidence["metrics"].items():
+            print(f"  {key}: {val}")
+    if evidence.get("report_refs"):
+        print("\nReports:")
+        for name, ref in evidence["report_refs"].items():
+            print(f"  {name}: {ref}")
+    if evidence.get("notes"):
+        print("\nNotes:")
+        for note in evidence["notes"]:
+            print(f"  - {note}")
+
+    refs = brief.get("relevant_refs")
+    if refs:
+        print("\nRelevant refs:")
+        for ref in (refs if isinstance(refs, list) else [refs]):
+            print(f"  {ref}")
+
+    print(f"{'=' * 50}\n")
+
+
+def _load_artifact_payload(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not artifact:
+        return None
+    file_path = artifact.get("file_path")
+    if not file_path:
+        return None
+    path = Path(file_path)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _brief_assembly_candidates(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    candidate_ids = requirements.get("candidate_ids") or []
+    candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
+    payload_candidates = (request_payload or {}).get("candidates") or []
+    payload_map = {c.get("candidate_id"): c for c in payload_candidates if isinstance(c, dict)}
+
+    result = []
+    for cid in candidate_ids:
+        entry: dict[str, Any] = {"id": cid, "ref": candidate_refs.get(cid)}
+        pc = payload_map.get(cid) or {}
+        if pc.get("method_name"):
+            entry["method"] = pc["method_name"]
+        if pc.get("status"):
+            entry["status"] = pc["status"]
+        ref_path = Path(entry["ref"]) if entry.get("ref") else None
+        entry["exists"] = ref_path.exists() if ref_path else False
+        result.append(entry)
+    return result
+
+
+def _brief_assembly_evidence(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+    data_dir: str,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+
+    comparison = requirements.get("candidate_comparison_context") or {}
+    if comparison:
+        evidence["metrics"] = comparison
+
+    report_refs = requirements.get("report_refs") or {}
+    if report_refs:
+        evidence["report_refs"] = report_refs
+
+    payload = request_payload or {}
+    notes = payload.get("notes") or []
+    signals = payload.get("signals") or []
+    if notes or signals:
+        evidence["notes"] = [*notes, *[s if isinstance(s, str) else str(s) for s in signals]]
+
+    return evidence
+
+
+def _brief_hic_candidates(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    methods = requirements.get("candidate_methods") or []
+    payload_candidates = (request_payload or {}).get("candidates") or []
+    payload_map = {c.get("method_name"): c for c in payload_candidates if isinstance(c, dict)}
+
+    result = []
+    for method in methods:
+        entry: dict[str, Any] = {"id": method, "method": method}
+        pc = payload_map.get(method) or {}
+        if pc.get("status"):
+            entry["status"] = pc["status"]
+        result.append(entry)
+    return result
+
+
+def _brief_hic_evidence(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+
+    payload = request_payload or {}
+    notes = payload.get("notes") or []
+    if notes:
+        evidence["notes"] = notes
+
+    interrupt_payload = (summary.get("latest_review_request") or {}).get("payload", {})
+    refs: dict[str, str] = {}
+    for key in ("pre_hic_assembly_ref", "scaffold_plan_ref", "hic_review_bundle_ref"):
+        val = interrupt_payload.get(key) or requirements.get(key)
+        if val:
+            refs[key] = val
+    if refs:
+        evidence["report_refs"] = refs
+
+    return evidence
+
+
 # ---------------------------------------------------------------------------
 # Shared: inspect → prompt → validate → persist
 # ---------------------------------------------------------------------------
@@ -227,11 +512,13 @@ def _prompt_choice(label: str, options: list[str]) -> str | None:
 def collect_gate_decision(
     session_id: str,
     data_dir: str,
-) -> tuple[Any, Path] | None:
-    """Inspect a blocked session, prompt operator, validate, persist artifact.
+) -> tuple["ResumeReviewRequest", dict[str, Any]] | None:
+    """Inspect a blocked session, prompt operator, validate request schema.
 
-    Returns (ResumeReviewRequest, decision_artifact_path) on success,
-    or None on cancel/error. Prints errors to stderr.
+    Returns (ResumeReviewRequest, raw_decision_dict) on success,
+    or None on cancel/error. Does NOT persist the decision artifact —
+    callers should call persist_decision_artifact() after full resume
+    validation succeeds.
     """
     from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
@@ -259,7 +546,8 @@ def collect_gate_decision(
         )
         return None
 
-    render_blocked_summary(summary)
+    brief = build_decision_brief(summary, data_dir)
+    render_decision_brief(brief)
 
     if stage == "assembly_review":
         raw_decision = prompt_assembly_review_decision(requirements)
@@ -277,12 +565,10 @@ def collect_gate_decision(
         print(f"error: invalid decision: {exc}", file=sys.stderr)
         return None
 
-    decision_path = _persist_decision_artifact(raw_decision, stage, session_id, data_dir)
-    print(f"decision_artifact: {decision_path}")
-    return request, decision_path
+    return request, raw_decision
 
 
-def _persist_decision_artifact(
+def persist_decision_artifact(
     raw_decision: dict,
     stage: str,
     session_id: str,
@@ -322,9 +608,11 @@ def run_interactive_review(
     result = collect_gate_decision(session_id, data_dir)
     if result is None:
         return 1
-    request, decision_path = result
+    request, raw_decision = result
 
     if dry_run:
+        decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+        print(f"decision_artifact: {decision_path}")
         print("dry_run: decision validated and written; skipping resume")
         return 0
 
@@ -348,8 +636,23 @@ def run_interactive_review(
         return 1
 
     state = snapshot.values
-    ledger = Ledger(data_dir)
 
+    try:
+        update = resume_review_state(state, request)
+    except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+        from app.control.ledger import Ledger as _Ledger
+        _Ledger(data_dir).record_event(session_id, "resume_rejected", {
+            "source": "interactive_review",
+            "error": f"{type(exc).__name__}: {exc}",
+            "decision": {"stage": request.stage, "decision": request.decision},
+        })
+        print(f"error: resume rejected: {exc}", file=sys.stderr)
+        return 1
+
+    decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+    print(f"decision_artifact: {decision_path}")
+
+    ledger = Ledger(data_dir)
     resume_event_payload = {
         "source": "interactive_review",
         "decision_artifact_ref": str(decision_path),
@@ -362,16 +665,6 @@ def run_interactive_review(
         },
     }
     ledger.record_event(session_id, "resume_started", resume_event_payload)
-
-    try:
-        update = resume_review_state(state, request)
-    except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-        ledger.record_event(
-            session_id, "resume_failed",
-            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
-        )
-        print(f"error: resume rejected: {exc}", file=sys.stderr)
-        return 1
 
     graph.update_state(config, update)
     try:

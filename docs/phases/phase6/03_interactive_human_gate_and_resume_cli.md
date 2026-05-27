@@ -1,6 +1,6 @@
 # 03 Interactive Human Gate And Resume CLI
 
-Task status: in progress (code complete, pending HPC validation).
+Task status: in progress (code complete, pending HPC validation and handoff record).
 
 ## Goal
 
@@ -156,6 +156,7 @@ The CLI should fail clearly when:
 - [x] Update `README.md` and `docs/handoff.md` with the new operator workflow.
 - [ ] Validate the interactive path against an existing Phase 6 blocked-session
   smoke or a fresh HPC smoke.
+- [x] Add decision brief builder for integrated evidence presentation at gates.
 
 ## Acceptance
 
@@ -191,7 +192,7 @@ After validation, update `docs/handoff.md` with:
 
 - CLI command: `gene-agent review --session-id ... --data-dir ... [--dry-run]`
 - Module: `app/entrypoints/review_interactive.py`
-- Tests: `tests/test_review_interactive.py` (16 tests)
+- Tests: `tests/test_review_interactive.py` (26 tests)
 - Reuses: `inspect_session()` for gate detection, `ResumeReviewRequest` for
   validation, `resume_review_state()` for state mutation, `build_graph()` +
   `graph.invoke()` for continuation.
@@ -201,3 +202,29 @@ After validation, update `docs/handoff.md` with:
   `resume_completed` or `resume_failed`.
 - `--dry-run` validates and writes the decision artifact without checkpoint
   mutation — useful for testing the prompt flow in isolation.
+
+## Decision Brief (TUI integration preparation)
+
+When the TUI (`gene-agent tui`) or `gene-agent review` hits a human gate, the
+system now renders a consolidated "Decision Brief" before prompting the operator.
+This replaces the raw field dump with structured sections:
+
+- **Context**: session id, stage, allowed decisions.
+- **Candidates**: id, method, ref path, existence check, status.
+- **Evidence**: metrics (from `candidate_comparison_context`), report refs,
+  notes and signals from the review request artifact.
+- **Relevant refs**: pointers to artifacts the operator should inspect.
+
+Functions:
+- `build_decision_brief(summary, data_dir)` → structured dict.
+- `render_decision_brief(brief)` → prints formatted brief to stdout.
+
+The brief is built from the same `inspect_session()` summary already loaded by
+`collect_gate_decision`, plus the review request artifact JSON when available.
+No additional I/O or state mutation is introduced.
+
+This is the preparation layer for a future feature where the TUI will aggregate
+multi-stage results (e.g. QC metrics, assembly stats, annotation completeness)
+into a single view before asking the operator to make a judgment call. The brief
+structure is designed to be extensible: additional evidence sections can be added
+per-stage without changing the rendering contract.

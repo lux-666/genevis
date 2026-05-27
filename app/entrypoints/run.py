@@ -420,7 +420,7 @@ def _interactive_gate_loop(
         ResumeValidationError,
         resume_review_state,
     )
-    from app.entrypoints.review_interactive import collect_gate_decision
+    from app.entrypoints.review_interactive import collect_gate_decision, persist_decision_artifact
 
     ledger = Ledger(data_dir)
 
@@ -430,7 +430,7 @@ def _interactive_gate_loop(
             print("review skipped; session remains blocked")
             break
 
-        request, decision_path = gate_result
+        request, raw_decision = gate_result
 
         snapshot = graph.get_state(config)
         if not snapshot or not snapshot.values:
@@ -438,19 +438,27 @@ def _interactive_gate_loop(
             break
 
         state = snapshot.values
+
+        try:
+            update = resume_review_state(state, request)
+        except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+            ledger.record_event(session_id, "resume_rejected", {
+                "source": "interactive_gate",
+                "error": str(exc),
+                "decision": {"stage": request.stage, "decision": request.decision},
+            })
+            print(f"error: resume rejected: {exc}", file=sys.stderr)
+            break
+
+        decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+        print(f"decision_artifact: {decision_path}")
+
         resume_payload = {
             "source": "interactive_gate",
             "decision_artifact_ref": str(decision_path),
             "decision": {"stage": request.stage, "decision": request.decision},
         }
         ledger.record_event(session_id, "resume_started", resume_payload)
-
-        try:
-            update = resume_review_state(state, request)
-        except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-            ledger.record_event(session_id, "resume_failed", {**resume_payload, "error": str(exc)})
-            print(f"error: resume rejected: {exc}", file=sys.stderr)
-            break
 
         graph.update_state(config, update)
         try:
