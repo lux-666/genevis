@@ -27,4 +27,6 @@ def execute_confirmed_plan(plan: AskPlanState, args: argparse.Namespace) -> int:
     if getattr(args, "checkpointer", None):
         argv.extend(["--checkpointer", args.checkpointer])
     structured_args = _parse_args(argv)
+    if getattr(args, "_interactive_gate", None) is not None:
+        structured_args._interactive_gate = args._interactive_gate
     return _run_session(structured_args)

@@ -961,12 +961,6 @@ def _run_tui(args: argparse.Namespace) -> int:
     return run_tui(data_dir)
 
 
-def _run_session_core(args: argparse.Namespace, *, interactive_gate: bool = False) -> int:
-    """Wrapper that sets the interactive gate flag and delegates to _run_session."""
-    args._interactive_gate = interactive_gate
-    return _run_session(args)
-
-
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
     args = _parse_args(argv)
