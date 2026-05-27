@@ -42,6 +42,10 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "genome_survey": "choose_many",
     "assembly": "choose_many",
     "assembly_review": "choose_many",
+    "hic_scaffolding": "choose_one",
+    "repeat_annotation": "choose_many",
+    "gene_annotation": "choose_many",
+    "function_annotation": "choose_many",
 }
 
 READ_QC_STATS_METHOD = "read_qc.long_read_stats.seqkit_stats"
@@ -200,6 +204,122 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
             "parameter_defaults": {},
         },
     ],
+    "hic_scaffolding": [
+        {
+            "method_name": "hic_scaffolding.candidate.yahs",
+            "execution_support": "executable",
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 8},
+        },
+        {
+            "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "repeat_annotation": [
+        {
+            "method_name": "repeat_annotation.masking.repeatmasker",
+            "execution_support": "executable",
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 8},
+        },
+        {
+            "method_name": "repeat_annotation.library.edta",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "repeat_annotation.library.repeatmodeler",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "repeat_annotation.helper.trf",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "gene_annotation": [
+        {
+            "method_name": "gene_annotation.candidate.braker3",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.candidate.maker",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.candidate.augustus",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.candidate.miniprot",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.helper.hisat2",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.helper.stringtie",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.helper.isoquant",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "gene_annotation.helper.gemoma",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
+    "function_annotation": [
+        {
+            "method_name": "function_annotation.candidate.interproscan",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "function_annotation.candidate.eggnog_mapper",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "function_annotation.candidate.diamond",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+        {
+            "method_name": "function_annotation.candidate.kofamscan",
+            "execution_support": "planned_only",
+            "required_parameters": [],
+            "parameter_defaults": {},
+        },
+    ],
 }
 
 _AR_RUN_CONFIG_METHODS: dict[str, tuple[str, list[str], dict[str, Any]]] = {
@@ -272,6 +392,14 @@ def _auto_fill_pipeline_methods(execution_order: list[str]) -> dict[str, str | l
 def _default_methods_for_stage(stage: str) -> str | list[str] | None:
     if stage == "read_qc":
         return list(READ_QC_DEFAULT_METHODS)
+    if stage == "hic_scaffolding":
+        return "hic_scaffolding.candidate.yahs"
+    if stage == "repeat_annotation":
+        return ["repeat_annotation.masking.repeatmasker"]
+    if stage == "gene_annotation":
+        return ["gene_annotation.candidate.braker3"]
+    if stage == "function_annotation":
+        return ["function_annotation.candidate.interproscan", "function_annotation.candidate.eggnog_mapper"]
     if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
         methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
         return methods or None
@@ -424,7 +552,7 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
 
 
 def _stage_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
-    available = _available_stages_from_manifest(plan.manifest_ref)
+    available = _all_selectable_stages()
     suggested = _suggested_stages(plan, available)
     return AskClarificationRequest(
         status="clarification_required",
@@ -543,7 +671,14 @@ def _build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
     if plan.method_parameters:
         summary["method_parameters"] = plan.method_parameters
-    _, _, _, warnings = _missing_parameters_and_defaults(plan)
+    method_status: dict[str, str] = {}
+    for stage, method in _iter_selected_methods(plan):
+        cap = _get_method_descriptor(method)
+        method_status[method] = cap["execution_support"] if cap else "unknown"
+    if method_status:
+        summary["method_execution_status"] = method_status
+    _, _, _, param_warnings = _missing_parameters_and_defaults(plan)
+    warnings = [*param_warnings, *_plan_validation_warnings(plan)]
     if warnings:
         summary["warnings"] = warnings
     try:
@@ -561,26 +696,38 @@ def _next_action(ask_plan_ref: str) -> dict[str, Any]:
     }
 
 
-def _available_stages_from_manifest(manifest_ref: str) -> list[str]:
+def _all_selectable_stages() -> list[str]:
+    return [s for s in STAGE_ORDER if s != "inventory"]
+
+
+def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
     manifest = _load_manifest(manifest_ref)
     if manifest is None:
         return []
     asset_types = {asset.asset_type for asset in manifest.assets}
-    available = []
+    recommended: list[str] = []
     if "raw_long_reads" in asset_types:
-        available.extend(["read_qc", "genome_survey", "assembly", "assembly_review"])
+        recommended.extend(["read_qc", "genome_survey", "assembly", "assembly_review"])
     if "assembly_fasta_registered" in asset_types:
-        available.extend(["assembly_review"])
+        recommended.append("assembly_review")
     if "hic_reads_registered" in asset_types or "hic_alignment_bam" in asset_types:
-        available.append("hic_scaffolding")
+        recommended.append("hic_scaffolding")
+    has_assembly_path = "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types
+    if has_assembly_path:
+        recommended.extend(["repeat_annotation", "gene_annotation", "function_annotation"])
     if "repeat_library" in asset_types:
-        available.append("repeat_annotation")
-    return list(dict.fromkeys(available))
+        recommended.append("repeat_annotation")
+    if "raw_rnaseq_reads" in asset_types or "raw_isoseq_or_long_rna_reads" in asset_types:
+        recommended.append("gene_annotation")
+    if "gene_models" in asset_types or "predicted_proteins" in asset_types:
+        recommended.extend(["gene_annotation", "function_annotation"])
+    return list(dict.fromkeys(recommended))
 
 
 def _suggested_stages(plan: AskPlanState, available: list[str]) -> list[str]:
-    if "assembly" in available:
-        return ["read_qc", "assembly", "assembly_review"]
+    recommended = _recommended_stages_from_manifest(plan.manifest_ref)
+    if recommended:
+        return [s for s in recommended if s in available]
     return available[:2] if available else []
 
 
@@ -603,6 +750,10 @@ def _can_skip_dependency(dep_stage: str, manifest_asset_types: set[str]) -> bool
     if dep_stage == "read_qc" and "clean_long_reads" in manifest_asset_types:
         return True
     if dep_stage in ("assembly", "assembly_review") and "assembly_fasta_registered" in manifest_asset_types:
+        return True
+    if dep_stage == "repeat_annotation" and "repeat_library" in manifest_asset_types:
+        return True
+    if dep_stage == "gene_annotation" and "gene_models" in manifest_asset_types and "predicted_proteins" in manifest_asset_types:
         return True
     return False
 
@@ -872,6 +1023,34 @@ def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
             else:
                 roles[stage] = "executable"
     return roles
+
+
+def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
+    warnings: list[str] = []
+    manifest = _load_manifest(plan.manifest_ref)
+    asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
+    order = plan.resolved_execution_order or []
+    if "hic_scaffolding" in order:
+        if "hic_reads_registered" not in asset_types and "hic_alignment_bam" not in asset_types:
+            warnings.append("hic_scaffolding: no Hi-C reads in manifest; stage will skip at runtime")
+    if "function_annotation" in order and "gene_annotation" not in order:
+        if "predicted_proteins" not in asset_types and "gene_models" not in asset_types:
+            warnings.append(
+                "function_annotation: no gene_annotation upstream and no "
+                "predicted_proteins/gene_models in manifest; stage will fail without protein input"
+            )
+    for stage in order:
+        methods = (plan.selected_methods or {}).get(stage)
+        if not methods:
+            continue
+        method_list = methods if isinstance(methods, list) else [methods]
+        all_planned = all(
+            (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "planned_only"
+            for m in method_list
+        )
+        if all_planned:
+            warnings.append(f"{stage}: all selected methods are planned_only (execution deferred, not local)")
+    return warnings
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest | None:

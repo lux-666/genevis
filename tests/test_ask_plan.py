@@ -13,6 +13,9 @@ from app.entrypoints.ask_planner import (
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
     _STAGE_METHODS,
+    _all_selectable_stages,
+    _plan_validation_warnings,
+    _recommended_stages_from_manifest,
     build_run_config_payload,
     merge_clarification_response,
     next_clarification,
@@ -579,6 +582,189 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
         self.assertTrue(
             any("does not exist" in w for w in result.summary["warnings"]),
         )
+
+
+class AskPlannerStageAvailabilityTests(unittest.TestCase):
+    def test_all_stages_available_regardless_of_manifest(self):
+        available = _all_selectable_stages()
+        expected = [
+            "read_qc", "genome_survey", "assembly", "assembly_review",
+            "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
+        ]
+        self.assertEqual(available, expected)
+
+    def test_all_stages_excludes_inventory(self):
+        available = _all_selectable_stages()
+        expected = [
+            "read_qc", "genome_survey", "assembly", "assembly_review",
+            "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
+        ]
+        self.assertEqual(available, expected)
+
+    def test_recommended_stages_for_raw_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            recommended = _recommended_stages_from_manifest(str(manifest))
+            self.assertIn("read_qc", recommended)
+            self.assertIn("assembly", recommended)
+            self.assertIn("repeat_annotation", recommended)
+            self.assertIn("gene_annotation", recommended)
+            self.assertIn("function_annotation", recommended)
+
+    def test_recommended_stages_for_gene_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gff = Path(tmp) / "genes.gff3"
+            gff.write_text("##gff-version 3\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: gene_models\n    paths:\n      - {gff}\n    format: gff3\n",
+                encoding="utf-8",
+            )
+            recommended = _recommended_stages_from_manifest(str(manifest))
+            self.assertIn("gene_annotation", recommended)
+            self.assertIn("function_annotation", recommended)
+
+    def test_recommended_stages_empty_for_missing_manifest(self):
+        recommended = _recommended_stages_from_manifest("/nonexistent/manifest.yaml")
+        self.assertEqual(recommended, [])
+
+
+class AskPlannerAnnotationMethodTests(unittest.TestCase):
+    def test_gene_annotation_method_selection(self):
+        plan = _base_plan(
+            selected_stages=["gene_annotation"],
+            resolved_execution_order=["gene_annotation"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "method_selection")
+        self.assertIn("gene_annotation", result.choices["methods_by_stage"])
+        methods = {m["method_name"] for m in result.choices["methods_by_stage"]["gene_annotation"]}
+        self.assertIn("gene_annotation.candidate.braker3", methods)
+        self.assertIn("gene_annotation.helper.hisat2", methods)
+        for m in result.choices["methods_by_stage"]["gene_annotation"]:
+            self.assertEqual(m["execution_support"], "planned_only")
+
+    def test_function_annotation_method_selection(self):
+        plan = _base_plan(
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "method_selection")
+        self.assertIn("function_annotation", result.choices["methods_by_stage"])
+        defaults = result.choices["defaults"]["function_annotation"]
+        self.assertIn("function_annotation.candidate.interproscan", defaults)
+        self.assertIn("function_annotation.candidate.eggnog_mapper", defaults)
+
+    def test_hic_scaffolding_method_selection(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "method_selection")
+        methods = result.choices["methods_by_stage"]["hic_scaffolding"]
+        yahs = next(m for m in methods if m["method_name"] == "hic_scaffolding.candidate.yahs")
+        self.assertEqual(yahs["execution_support"], "executable")
+        self.assertEqual(result.choices["defaults"]["hic_scaffolding"], "hic_scaffolding.candidate.yahs")
+
+    def test_repeat_annotation_method_selection(self):
+        plan = _base_plan(
+            selected_stages=["repeat_annotation"],
+            resolved_execution_order=["repeat_annotation"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "method_selection")
+        methods = {m["method_name"] for m in result.choices["methods_by_stage"]["repeat_annotation"]}
+        self.assertIn("repeat_annotation.masking.repeatmasker", methods)
+        self.assertIn("repeat_annotation.helper.trf", methods)
+
+    def test_no_function_annotation_in_run_config(self):
+        plan = _base_plan(
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={
+                "function_annotation": ["function_annotation.candidate.interproscan"],
+            },
+            confirmed=True,
+        )
+        payload = build_run_config_payload(plan)
+        self.assertNotIn("function_annotation", payload)
+        self.assertNotIn("function_annotation", payload.get("local_exec", []))
+
+
+class AskPlannerValidationWarningTests(unittest.TestCase):
+    def test_function_annotation_without_protein_input_warns(self):
+        plan = _base_plan(
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={
+                "function_annotation": ["function_annotation.candidate.interproscan"],
+            },
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertTrue(any("function_annotation" in w and "protein input" in w for w in warnings))
+
+    def test_function_annotation_with_gene_annotation_no_warning(self):
+        plan = _base_plan(
+            selected_stages=["gene_annotation", "function_annotation"],
+            resolved_execution_order=["gene_annotation", "function_annotation"],
+            selected_methods={
+                "gene_annotation": ["gene_annotation.candidate.braker3"],
+                "function_annotation": ["function_annotation.candidate.interproscan"],
+            },
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertFalse(any("protein input" in w for w in warnings))
+
+    def test_planned_only_stages_warned(self):
+        plan = _base_plan(
+            selected_stages=["gene_annotation"],
+            resolved_execution_order=["gene_annotation"],
+            selected_methods={
+                "gene_annotation": ["gene_annotation.candidate.braker3"],
+            },
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertTrue(any("planned_only" in w and "gene_annotation" in w for w in warnings))
+
+    def test_hic_without_reads_warns(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={
+                "hic_scaffolding": "hic_scaffolding.candidate.yahs",
+            },
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertTrue(any("hic_scaffolding" in w and "Hi-C reads" in w for w in warnings))
+
+    def test_method_execution_status_in_summary(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding", "gene_annotation"],
+            resolved_execution_order=["hic_scaffolding", "gene_annotation"],
+            selected_methods={
+                "hic_scaffolding": "hic_scaffolding.candidate.yahs",
+                "gene_annotation": ["gene_annotation.candidate.braker3"],
+            },
+            method_parameters={
+                "hic_scaffolding.candidate.yahs": {"threads": 8},
+            },
+            confirmed=True,
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertIsNone(result)
+        from app.entrypoints.ask_planner import _build_run_plan_summary
+        summary = _build_run_plan_summary(plan)
+        status = summary["method_execution_status"]
+        self.assertEqual(status["hic_scaffolding.candidate.yahs"], "executable")
+        self.assertEqual(status["gene_annotation.candidate.braker3"], "planned_only")
 
 
 if __name__ == "__main__":
