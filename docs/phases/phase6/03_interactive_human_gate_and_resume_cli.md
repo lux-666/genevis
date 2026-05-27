@@ -1,6 +1,6 @@
 # 03 Interactive Human Gate And Resume CLI
 
-Task status: not started.
+Task status: in progress (code complete, pending HPC validation).
 
 ## Goal
 
@@ -136,24 +136,24 @@ The CLI should fail clearly when:
 
 ## Tasks
 
-- [ ] Decide the final CLI spelling for the interactive flow.
-- [ ] Add parser support for the interactive human-gate/resume command or flag.
-- [ ] Reuse durable inspect output to load active interrupt, decision
+- [x] Decide the final CLI spelling for the interactive flow.
+- [x] Add parser support for the interactive human-gate/resume command or flag.
+- [x] Reuse durable inspect output to load active interrupt, decision
   requirements, candidate refs, report refs, and next-action context.
-- [ ] Add prompt rendering for `assembly_review` decisions.
-- [ ] Add prompt rendering for `hic_scaffolding` decisions.
-- [ ] Build a `ResumeReviewRequest` from operator selections.
-- [ ] Validate the request through the existing resume validation path before
+- [x] Add prompt rendering for `assembly_review` decisions.
+- [x] Add prompt rendering for `hic_scaffolding` decisions.
+- [x] Build a `ResumeReviewRequest` from operator selections.
+- [x] Validate the request through the existing resume validation path before
   mutation.
-- [ ] Persist the generated decision payload or decision-file artifact.
-- [ ] Resume through the existing durable sqlite resume implementation.
-- [ ] Preserve the current explicit decision-file workflow for scripts.
-- [ ] Add tests for successful assembly-review selection, invalid input,
+- [x] Persist the generated decision payload or decision-file artifact.
+- [x] Resume through the existing durable sqlite resume implementation.
+- [x] Preserve the current explicit decision-file workflow for scripts.
+- [x] Add tests for successful assembly-review selection, invalid input,
   unsupported stage, missing checkpoint, declined/cancelled interaction, and no
   duplicate side effects after resume.
-- [ ] Add tests for Hi-C skip/select prompts and required contact-map policy
+- [x] Add tests for Hi-C skip/select prompts and required contact-map policy
   notes.
-- [ ] Update `README.md` and `docs/handoff.md` with the new operator workflow.
+- [x] Update `README.md` and `docs/handoff.md` with the new operator workflow.
 - [ ] Validate the interactive path against an existing Phase 6 blocked-session
   smoke or a fresh HPC smoke.
 
@@ -186,3 +186,18 @@ After validation, update `docs/handoff.md` with:
 - resume result and terminal/current state;
 - duplicate-attempt check result;
 - any UX gaps or follow-up tasks.
+
+## Implementation
+
+- CLI command: `gene-agent review --session-id ... --data-dir ... [--dry-run]`
+- Module: `app/entrypoints/review_interactive.py`
+- Tests: `tests/test_review_interactive.py` (16 tests)
+- Reuses: `inspect_session()` for gate detection, `ResumeReviewRequest` for
+  validation, `resume_review_state()` for state mutation, `build_graph()` +
+  `graph.invoke()` for continuation.
+- Decision artifact: persisted at
+  `<data_dir>/artifacts/<stage>/<session>/<stage>_interactive_decision.json`
+- Ledger events: `resume_started` with `source: "interactive_review"`,
+  `resume_completed` or `resume_failed`.
+- `--dry-run` validates and writes the decision artifact without checkpoint
+  mutation — useful for testing the prompt flow in isolation.

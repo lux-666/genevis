@@ -156,6 +156,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "back to GENE_AGENT_CHECKPOINTER env var, then 'sqlite'."
         ),
     )
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Interactively review and resume a blocked human gate",
+    )
+    review_parser.add_argument("--session-id", required=True, help="Session identifier to review")
+    review_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    review_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Validate and write decision artifact without resuming",
+    )
     return parser.parse_args(argv)
 
 
@@ -823,6 +836,17 @@ def _run_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_review(args: argparse.Namespace) -> int:
+    from app.entrypoints.review_interactive import run_interactive_review
+
+    data_dir = _resolve_data_dir(args.data_dir)
+    return run_interactive_review(
+        args.session_id,
+        data_dir,
+        dry_run=getattr(args, "dry_run", False),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
     args = _parse_args(argv)
@@ -839,6 +863,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_inspect(args)
     if args.command == "resume":
         return _run_resume(args)
+    if args.command == "review":
+        return _run_review(args)
     _parse_args(["--help"])
     return 0
 

@@ -428,9 +428,11 @@ Issues found: none. LLM intent path works end-to-end without code fixes.
 
 ## Next Best Task
 
-Phase 6 task 02 is fully complete: both `gene-agent run` and
-`gene-agent ask` paths validated on HPC with durable resume.
-Phase 6 task 03 (interactive human gate and resume CLI) is the next task.
+Phase 6 task 03 (interactive human gate and resume CLI) is code-complete.
+The `gene-agent review` command is implemented and tested (16 unit tests).
+HPC validation is pending — run `gene-agent review` against a blocked session
+on the server to close the task. After that, Phase 6 task 04 (session
+observability and run trace) is next.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
@@ -441,8 +443,10 @@ server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
 Operator workflow for blocked review gates:
 
 ```bash
-gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data
-gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --json
+# Interactive (recommended):
+gene-agent review --session-id <SESSION> --data-dir /absolute/path/to/data
+
+# Scripted / automation:
 gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --write-decision-template /absolute/path/to/decision.json
 gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --decision-file /absolute/path/to/decision.json --checkpointer sqlite
 ```

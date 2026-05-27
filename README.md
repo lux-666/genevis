@@ -125,6 +125,16 @@ gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --wr
 gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --decision-file /absolute/path/to/decision.json --checkpointer sqlite
 ```
 
+Or use the interactive review command to inspect, decide, and resume in one step:
+
+```bash
+gene-agent review --session-id <SESSION> --data-dir /absolute/path/to/data
+```
+
+The `review` command shows the blocked gate, allowed decisions, candidate refs,
+and report refs, then prompts the operator to choose. Use `--dry-run` to
+validate and write the decision artifact without resuming.
+
 The default checkpointer is sqlite unless overridden by `--checkpointer` or
 `GENE_AGENT_CHECKPOINTER`; memory checkpoints are for tests and do not support
 cross-process resume.
