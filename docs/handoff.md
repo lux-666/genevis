@@ -381,10 +381,55 @@ Duplicate-attempt check: PASS (no duplicates after resume).
 
 Issues found: none. Script ran to completion without code fixes.
 
+## Phase 6 Ask Acceptance Run Record
+
+- host: HPC (`/data/work/genevis`)
+- git commit: `b33411c` (feature/hic-scaffolding)
+- session_id: `phase6-ask-20260527-a`
+- script: `scripts/server_phase6_ask_acceptance.sh`
+- reads: `/data/work/genevis/data/test/bht.Nanopore.pass.first500.fa`
+- run-config: `/data/work/genevis/data/phase6_e2e/run_config.json`
+- data_dir: `/data/work/genevis/data/phase6_e2e/out_ask`
+- request_text: `对 .../bht.Nanopore.pass.first500.fa 进行基因组组装和注释，这是CycloneSEQ纳米孔测序数据`
+
+LLM intent parsing:
+
+- LLM parsed natural-language request into structured `EntryRequest`
+- Manifest materialized from `source_paths` at
+  `out_ask/manifests/phase6-ask-20260527-a/manifest.yaml`
+- `llm_manifest_created: True`
+
+Terminal state:
+
+- `current_stage: done`
+- `supervision_state: completed`
+- `checkpoint_persistence: sqlite`
+- `route_trace`: inventory → read_qc → genome_survey → assembly →
+  assembly_review → hic_scaffolding → repeat_annotation →
+  gene_annotation → function_annotation (all 9 stages)
+- `ledger_events: 32`
+
+Review gate exercised:
+
+- assembly_review blocked with strict policy
+- durable sqlite resume with structured decision file
+- candidate: `phase6-ask-20260527-a:assembly.candidate.flye` (executed)
+- QUAST ran (3 contigs, N50=6135, total=15971bp)
+- Decision: `accept` via human decision file
+
+Key artifact refs:
+
+- final_report: `out_ask/artifacts/final_report/phase6-ask-20260527-a/review_decision_report.json`
+- function_bundle: `out_ask/artifacts/function_annotation/phase6-ask-20260527-a/function_annotation_bundle.json`
+
+Duplicate-attempt check: PASS.
+
+Issues found: none. LLM intent path works end-to-end without code fixes.
+
 ## Next Best Task
 
-Phase 6 task 02 end-to-end acceptance is complete. The `gene-agent ask`
-acceptance script is ready to run on HPC (requires `GENE_AGENT_LLM_API_KEY`).
+Phase 6 task 02 is fully complete: both `gene-agent run` and
+`gene-agent ask` paths validated on HPC with durable resume.
 Phase 6 task 03 (session observability and run trace) is the next task.
 
 Do not implement broad assembly, annotation, requested-stage routing,

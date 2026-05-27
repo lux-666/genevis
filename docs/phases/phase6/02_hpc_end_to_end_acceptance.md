@@ -1,6 +1,6 @@
 # 02 HPC End-To-End Acceptance
 
-Task status: not started.
+Task status: completed.
 
 ## Goal
 
@@ -146,23 +146,23 @@ The completed task must leave evidence for all of the following:
 
 ## Tasks
 
-- [ ] Prepare the HPC manifest and run-config for one raw-read-to-terminal
+- [x] Prepare the HPC manifest and run-config for one raw-read-to-terminal
   session.
-- [ ] Validate that the run-config loads under the current schema before starting
+- [x] Validate that the run-config loads under the current schema before starting
   the long run.
-- [ ] Start the session on HPC with sqlite checkpointing enabled.
-- [ ] Confirm the run reaches the first expected review gate or documented auto
+- [x] Start the session on HPC with sqlite checkpointing enabled.
+- [x] Confirm the run reaches the first expected review gate or documented auto
   decision path.
-- [ ] Use durable `inspect` output to determine the required operator action.
-- [ ] Resume from a structured decision file for each strict human gate that
+- [x] Use durable `inspect` output to determine the required operator action.
+- [x] Resume from a structured decision file for each strict human gate that
   blocks.
-- [ ] Confirm downstream execution continues after resume without restarting
+- [x] Confirm downstream execution continues after resume without restarting
   earlier attempts.
-- [ ] Confirm final terminal state is `done` / `completed`.
-- [ ] Confirm final report, function annotation bundle, and expected stage
+- [x] Confirm final terminal state is `done` / `completed`.
+- [x] Confirm final report, function annotation bundle, and expected stage
   artifacts exist.
-- [ ] Check ledger/artifact records for duplicate side effects after resume.
-- [ ] Record the run, artifact refs, decisions, and any fixes in
+- [x] Check ledger/artifact records for duplicate side effects after resume.
+- [x] Record the run, artifact refs, decisions, and any fixes in
   `docs/handoff.md`.
 
 ## Acceptance
