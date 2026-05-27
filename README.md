@@ -117,6 +117,23 @@ gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data
 gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --json
 ```
 
+### Interactive TUI
+
+The guided TUI helps assemble parameters and handles human gates automatically:
+
+```bash
+gene-agent tui --data-dir /absolute/path/to/data
+```
+
+It offers two modes: assembly from raw reads (full pipeline) or annotation from
+an existing assembly (skips read_qc/genome_survey/assembly). When the graph
+blocks at a human gate, the TUI prompts for the decision and resumes in-process.
+
+When running `gene-agent run` directly in a TTY, human gates are also handled
+interactively without exiting the process.
+
+### Scripted / automation workflow
+
 For a blocked `assembly_review` or `hic_scaffolding` gate, generate and edit a
 structured decision file, then resume against the same sqlite checkpoint store:
 

@@ -13,7 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
@@ -169,6 +169,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Validate and write decision artifact without resuming",
     )
+
+    tui_parser = subparsers.add_parser(
+        "tui",
+        help="Interactive workflow launcher with automatic human-gate handling",
+    )
+    tui_parser.add_argument("--data-dir", default="data", help="Output data directory")
     return parser.parse_args(argv)
 
 
@@ -354,14 +360,20 @@ def _run_session(args: argparse.Namespace) -> int:
         state["stage_outputs"] = stage_outputs
 
     graph = build_graph(backend=backend, data_dir=request.data_dir)
-    result = graph.invoke(
-        state,
-        config={"configurable": {"thread_id": request.session_id}},
-    )
+    config = {"configurable": {"thread_id": request.session_id}}
+    result = graph.invoke(state, config=config)
+
+    interactive_gate = getattr(args, "_interactive_gate", None)
+    if interactive_gate is None:
+        interactive_gate = sys.stdin.isatty()
+    supervision = result.get("supervision_state", "unknown")
+
+    if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
+        result = _interactive_gate_loop(graph, config, result, request.session_id, request.data_dir)
+        supervision = result.get("supervision_state", "unknown")
 
     current_stage = result.get("current_stage", "unknown")
     route_trace = result.get("route_trace", [])
-    supervision = result.get("supervision_state", "unknown")
     registry_ref = result.get("asset_registry_ref")
     stage_plan_ref = result.get("stage_plan_ref")
     active_interrupt = result.get("active_interrupt")
@@ -370,13 +382,13 @@ def _run_session(args: argparse.Namespace) -> int:
     print(f"current_stage: {current_stage}")
     print(f"supervision_state: {supervision}")
     print(f"checkpoint_persistence: {backend}")
-    if backend == "sqlite":
-        print(
-            "resume_note: pass --decision-file to `gene-agent resume` to "
-            "continue a blocked session"
-        )
-    else:
-        print("resume_note: durable cross-process resume requires --checkpointer sqlite")
+    if supervision == "blocked_human":
+        if backend == "sqlite":
+            print(
+                "resume_note: use `gene-agent review` or `gene-agent resume` to continue"
+            )
+        else:
+            print("resume_note: durable cross-process resume requires --checkpointer sqlite")
     print(f"route_trace: {route_trace}")
     if active_interrupt:
         print(f"active_interrupt: {active_interrupt}")
@@ -393,6 +405,101 @@ def _run_session(args: argparse.Namespace) -> int:
         return 1
 
     return 0
+
+
+def _interactive_gate_loop(
+    graph: Any,
+    config: dict,
+    result: dict,
+    session_id: str,
+    data_dir: str,
+) -> dict:
+    """Loop on human gates: prompt operator, resume, repeat until not blocked."""
+    from app.control.lifecycle import (
+        DurableResumeUnavailableError,
+        ResumeValidationError,
+        inspect_session,
+        resume_review_state,
+    )
+    from app.entrypoints.review_interactive import (
+        prompt_assembly_review_decision,
+        prompt_hic_scaffolding_decision,
+        render_blocked_summary,
+    )
+    from app.review.base import ResumeReviewRequest
+
+    while result.get("supervision_state") == "blocked_human":
+        summary = inspect_session(session_id, data_dir)
+        requirements = summary.get("decision_requirements") or {}
+        stage = requirements.get("stage")
+
+        if stage not in ("assembly_review", "hic_scaffolding"):
+            break
+
+        render_blocked_summary(summary)
+
+        if stage == "assembly_review":
+            raw_decision = prompt_assembly_review_decision(requirements)
+        else:
+            raw_decision = prompt_hic_scaffolding_decision(requirements)
+
+        if raw_decision is None:
+            print("review skipped; session remains blocked")
+            break
+
+        raw_decision["session_id"] = session_id
+        try:
+            request = ResumeReviewRequest.model_validate(raw_decision)
+        except Exception as exc:
+            print(f"error: invalid decision: {exc}", file=sys.stderr)
+            break
+
+        # Persist decision artifact
+        decision_dir = Path(data_dir) / "artifacts" / stage / session_id
+        decision_dir.mkdir(parents=True, exist_ok=True)
+        decision_path = decision_dir / f"{stage}_interactive_decision.json"
+        decision_path.write_text(
+            json.dumps(raw_decision, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        snapshot = graph.get_state(config)
+        if not snapshot or not snapshot.values:
+            print("error: checkpoint lost", file=sys.stderr)
+            break
+
+        state = snapshot.values
+        ledger = Ledger(data_dir)
+        resume_payload = {
+            "source": "interactive_gate",
+            "decision_artifact_ref": str(decision_path),
+            "decision": {"stage": request.stage, "decision": request.decision},
+        }
+        ledger.record_event(session_id, "resume_started", resume_payload)
+
+        try:
+            update = resume_review_state(state, request)
+        except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+            ledger.record_event(session_id, "resume_failed", {**resume_payload, "error": str(exc)})
+            print(f"error: resume rejected: {exc}", file=sys.stderr)
+            break
+
+        graph.update_state(config, update)
+        try:
+            result = graph.invoke(None, config=config)
+        except Exception as exc:
+            ledger.record_event(session_id, "resume_failed", {**resume_payload, "error": str(exc)})
+            print(f"error: resume invoke failed: {exc}", file=sys.stderr)
+            break
+
+        ledger.record_event(session_id, "resume_completed", {
+            **resume_payload,
+            "current_stage": result.get("current_stage"),
+            "supervision_state": result.get("supervision_state"),
+        })
+        print(f"\nresumed → stage={result.get('current_stage')} state={result.get('supervision_state')}")
+
+    return result
 
 
 def _run_ask(args: argparse.Namespace) -> int:
@@ -847,6 +954,19 @@ def _run_review(args: argparse.Namespace) -> int:
     )
 
 
+def _run_tui(args: argparse.Namespace) -> int:
+    from app.entrypoints.tui import run_tui
+
+    data_dir = _resolve_data_dir(args.data_dir)
+    return run_tui(data_dir)
+
+
+def _run_session_core(args: argparse.Namespace, *, interactive_gate: bool = False) -> int:
+    """Wrapper that sets the interactive gate flag and delegates to _run_session."""
+    args._interactive_gate = interactive_gate
+    return _run_session(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
     args = _parse_args(argv)
@@ -865,6 +985,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_resume(args)
     if args.command == "review":
         return _run_review(args)
+    if args.command == "tui":
+        return _run_tui(args)
     _parse_args(["--help"])
     return 0
 

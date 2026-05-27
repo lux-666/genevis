@@ -284,10 +284,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             self.assertIn("checkpoint_persistence: sqlite", stdout)
-            self.assertIn(
-                "resume_note: pass --decision-file to `gene-agent resume`",
-                stdout,
-            )
+            self.assertIn("supervision_state: completed", stdout)
             self.assertEqual(
                 captured,
                 {

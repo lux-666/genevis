@@ -429,10 +429,15 @@ Issues found: none. LLM intent path works end-to-end without code fixes.
 ## Next Best Task
 
 Phase 6 task 03 (interactive human gate and resume CLI) is code-complete.
-The `gene-agent review` command is implemented and tested (16 unit tests).
-HPC validation is pending — run `gene-agent review` against a blocked session
-on the server to close the task. After that, Phase 6 task 04 (session
-observability and run trace) is next.
+Implemented:
+- `gene-agent tui` — guided workflow launcher (assembly or annotation mode)
+- `gene-agent run` in TTY auto-enters interactive gate mode at human gates
+- `gene-agent review` — standalone interactive review for blocked sessions
+- Assembly/annotation decoupled: annotation can start from existing assembly
+
+HPC validation is pending — run `gene-agent tui` or `gene-agent run` in a
+TTY on the server to verify the interactive gate loop works end-to-end.
+After that, Phase 6 task 04 (session observability and run trace) is next.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
@@ -440,13 +445,19 @@ corresponding human decision is explicit in the task docs. Do not
 reintroduce in-agent remote execution; the workflow is Mac dev →
 server `git pull` (see `docs/deployment/mac_dev_server_pull.md`).
 
-Operator workflow for blocked review gates:
+Operator workflow:
 
 ```bash
-# Interactive (recommended):
+# Guided TUI (assembly or annotation, handles gates automatically):
+gene-agent tui --data-dir /absolute/path/to/data
+
+# Direct run (auto-prompts at gates when in TTY):
+gene-agent run --manifest <m> --run-config <rc> --data-dir <d> --checkpointer sqlite
+
+# Standalone review for an already-blocked session:
 gene-agent review --session-id <SESSION> --data-dir /absolute/path/to/data
 
-# Scripted / automation:
+# Scripted / automation (no TTY):
 gene-agent inspect --session-id <SESSION> --data-dir /absolute/path/to/data --write-decision-template /absolute/path/to/decision.json
 gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --decision-file /absolute/path/to/decision.json --checkpointer sqlite
 ```
