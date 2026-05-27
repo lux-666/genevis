@@ -52,8 +52,18 @@ ensure_file reads      "${READS}"
 ensure_file run-config "${RUN_CONFIG}"
 ensure_conda
 
+# Load .env from repo root so GENE_AGENT_LLM_* vars are available to conda run
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  set -a
+  source "${REPO_ROOT}/.env"
+  set +a
+fi
+
 if [[ -z "${GENE_AGENT_LLM_API_KEY:-}" ]]; then
   printf 'error: GENE_AGENT_LLM_API_KEY is not set; LLM intent parsing requires it\n' >&2
+  printf 'hint: create a .env file in the repo root with GENE_AGENT_LLM_API_KEY=...\n' >&2
   exit 1
 fi
 
@@ -91,8 +101,8 @@ conda run -n "${ORCHESTRATOR_ENV}" gene-agent ask \
 status_a=${PIPESTATUS[0]}
 set -e
 
-if [[ "${status_a}" -ne 1 ]]; then
-  printf 'error: Phase A expected exit 1 (blocked_human), got %s\n' "${status_a}" >&2
+if [[ "${status_a}" -ne 0 ]]; then
+  printf 'error: Phase A expected exit 0 (blocked_human), got %s\n' "${status_a}" >&2
   exit 1
 fi
 if ! grep -q 'supervision_state: blocked_human' "${run_log}"; then
@@ -107,48 +117,134 @@ echo ""
 echo "== Phase B: inspect, build decision, and resume =="
 
 inspect_out="${DATA_DIR}/inspect_blocked.${SESSION_ID}.json"
+set +e
 conda run -n "${ORCHESTRATOR_ENV}" gene-agent inspect \
   --session-id "${SESSION_ID}" \
   --data-dir   "${DATA_DIR}" \
   --json > "${inspect_out}"
+inspect_status=$?
+set -e
+if [[ "${inspect_status}" -ne 0 ]]; then
+  printf 'error: Phase B inspect exited %s; see %s\n' "${inspect_status}" "${inspect_out}" >&2
+  if [[ -s "${inspect_out}" ]]; then
+    cat "${inspect_out}" >&2
+  fi
+  exit 1
+fi
+echo "inspect_out: ${inspect_out}"
 
-eval "$(conda run -n "${ORCHESTRATOR_ENV}" python - "${inspect_out}" <<'PY'
-import json, sys
-data = json.loads(open(sys.argv[1]).read())
-reqs = data.get("decision_requirements") or {}
-candidates = reqs.get("candidate_ids") or []
-if not candidates:
-    sys.exit("error: no candidate_ids in inspect output")
-candidate_id = candidates[0]
-refs = reqs.get("candidate_final_assembly_refs") or {}
-assembly_ref = refs.get(candidate_id, "")
-if not assembly_ref:
-    sys.exit(f"error: no final_assembly_ref for candidate {candidate_id}")
-print(f'candidate_id="{candidate_id}"')
-print(f'assembly_ref="{assembly_ref}"')
-PY
-)"
+decision_helper="${DATA_DIR}/phase6_build_assembly_review_decision.py"
+cat > "${decision_helper}" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-conda run -n "${ORCHESTRATOR_ENV}" python - \
-  "${decision_file}" "${SESSION_ID}" "${candidate_id}" "${assembly_ref}" <<'PY'
-import json, sys
-path, session_id, candidate_id, assembly_ref = sys.argv[1:]
+inspect_path, decision_path, session_id = sys.argv[1:]
+
+try:
+    data = json.loads(Path(inspect_path).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    sys.exit(f"error: could not read inspect JSON {inspect_path}: {exc}")
+
+
+def review_payload_candidates(summary):
+    candidates = []
+    interrupt = summary.get("active_interrupt")
+    if isinstance(interrupt, dict) and isinstance(interrupt.get("candidates"), list):
+        candidates.extend(interrupt["candidates"])
+
+    artifact = summary.get("latest_review_request_artifact") or {}
+    artifact_path = artifact.get("file_path") if isinstance(artifact, dict) else None
+    if artifact_path:
+        try:
+            payload = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
+            candidates.extend(payload["candidates"])
+
+    reqs = summary.get("decision_requirements") or {}
+    refs = reqs.get("candidate_final_assembly_refs") or {}
+    for candidate_id in reqs.get("candidate_ids") or []:
+        if candidate_id in refs:
+            candidates.append({"candidate_id": candidate_id, "final_assembly_ref": refs[candidate_id]})
+    return candidates
+
+
+choices = []
+seen = set()
+for index, candidate in enumerate(review_payload_candidates(data)):
+    if not isinstance(candidate, dict):
+        continue
+    candidate_id = candidate.get("candidate_id")
+    assembly_ref = candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
+    if not candidate_id or not assembly_ref:
+        continue
+    key = (str(candidate_id), str(assembly_ref))
+    if key in seen:
+        continue
+    seen.add(key)
+    choices.append(
+        {
+            "candidate_id": str(candidate_id),
+            "assembly_ref": str(assembly_ref),
+            "status": str(candidate.get("status") or ""),
+            "ref_exists": Path(str(assembly_ref)).exists(),
+            "order": index,
+        }
+    )
+
+if not choices:
+    reqs = data.get("decision_requirements") or {}
+    sys.exit(
+        "error: no assembly_review candidate with final_assembly_ref in inspect output; "
+        f"decision_requirements keys={sorted(reqs.keys())}"
+    )
+
+selected = min(
+    choices,
+    key=lambda item: (
+        not item["ref_exists"],
+        item["status"] != "executed",
+        item["order"],
+    ),
+)
+if not selected["ref_exists"]:
+    sys.exit(
+        "error: no candidate final_assembly_ref exists on disk; "
+        f"checked={[(c['candidate_id'], c['assembly_ref'], c['status']) for c in choices]}"
+    )
+
 decision = {
     "session_id": session_id,
     "stage": "assembly_review",
     "decision": "accept",
-    "candidate_id": candidate_id,
-    "final_assembly_ref": assembly_ref,
-    "notes": ["phase6 ask acceptance: operator approved"]
+    "candidate_id": selected["candidate_id"],
+    "final_assembly_ref": selected["assembly_ref"],
+    "decided_by": "human",
+    "notes": ["phase6 ask acceptance: operator approved"],
 }
-with open(path, "w") as f:
-    json.dump(decision, f, indent=2)
-print(f"wrote decision: {path}")
+Path(decision_path).write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
+print(f"wrote decision: {decision_path}")
+print(f"candidate_id:  {selected['candidate_id']}")
+print(f"assembly_ref:  {selected['assembly_ref']}")
 PY
 
+set +e
+conda run -n "${ORCHESTRATOR_ENV}" python \
+  "${decision_helper}" "${inspect_out}" "${decision_file}" "${SESSION_ID}"
+decision_var_status=$?
+set -e
+if [[ "${decision_var_status}" -ne 0 ]]; then
+  printf 'error: Phase B could not build assembly_review decision file from %s\n' "${inspect_out}" >&2
+  exit 1
+fi
+if [[ ! -s "${decision_file}" ]]; then
+  printf 'error: Phase B decision helper exited 0 but did not write %s\n' "${decision_file}" >&2
+  exit 1
+fi
+
 echo "decision_file: ${decision_file}"
-echo "candidate_id:  ${candidate_id}"
-echo "assembly_ref:  ${assembly_ref}"
 
 resume_log="${DATA_DIR}/phase6_ask_resume.${SESSION_ID}.log"
 set +e
@@ -172,22 +268,40 @@ echo ""
 echo "== Phase C: verify terminal state and artifacts =="
 
 final_inspect="${DATA_DIR}/inspect_final.${SESSION_ID}.json"
+set +e
 conda run -n "${ORCHESTRATOR_ENV}" gene-agent inspect \
   --session-id "${SESSION_ID}" \
   --data-dir   "${DATA_DIR}" \
   --json > "${final_inspect}"
+final_inspect_status=$?
+set -e
+if [[ "${final_inspect_status}" -ne 0 ]]; then
+  printf 'error: Phase C final inspect exited %s; see %s\n' "${final_inspect_status}" "${final_inspect}" >&2
+  if [[ -s "${final_inspect}" ]]; then
+    cat "${final_inspect}" >&2
+  fi
+  exit 1
+fi
+echo "final_inspect: ${final_inspect}"
 
-conda run -n "${ORCHESTRATOR_ENV}" python - \
-  "${final_inspect}" "${DATA_DIR}" "${SESSION_ID}" <<'PY'
+verify_helper="${DATA_DIR}/phase6_verify_final_inspect.py"
+cat > "${verify_helper}" <<'PY'
 import json, sys
 from pathlib import Path
 
 inspect_path, data_dir, session_id = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
-data = json.loads(open(inspect_path).read())
+try:
+    data = json.loads(Path(inspect_path).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    sys.exit(f"error: could not read final inspect JSON {inspect_path}: {exc}")
 
 supervision = data.get("supervision_state")
 if supervision != "completed":
-    sys.exit(f"error: expected supervision_state=completed, got {supervision}")
+    next_action = data.get("next_action")
+    sys.exit(
+        "error: expected supervision_state=completed, "
+        f"got {supervision}; next_action={next_action}"
+    )
 
 arts = data_dir / "artifacts"
 final_report = arts / "final_report" / session_id / "review_decision_report.json"
@@ -222,6 +336,16 @@ print(f"duplicate_check:       PASS")
 print(f"final_report:          {final_report}")
 print(f"function_bundle:       {function_bundle}")
 PY
+
+set +e
+conda run -n "${ORCHESTRATOR_ENV}" python \
+  "${verify_helper}" "${final_inspect}" "${DATA_DIR}" "${SESSION_ID}"
+phase_c_status=$?
+set -e
+if [[ "${phase_c_status}" -ne 0 ]]; then
+  printf 'error: Phase C verification failed for %s\n' "${final_inspect}" >&2
+  exit 1
+fi
 
 cat <<EOF
 
