@@ -177,14 +177,32 @@ def _extract_balanced_json_objects(text: str) -> list[str]:
     return payloads
 
 
+def _make_schema_strict(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively enforce OpenAI strict structured output requirements."""
+    if "properties" in schema:
+        schema["additionalProperties"] = False
+        schema["required"] = list(schema["properties"].keys())
+        for prop in schema["properties"].values():
+            _make_schema_strict(prop)
+    if "$defs" in schema:
+        for defn in schema["$defs"].values():
+            _make_schema_strict(defn)
+    if "items" in schema and isinstance(schema["items"], dict):
+        _make_schema_strict(schema["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in schema:
+            for variant in schema[key]:
+                if isinstance(variant, dict):
+                    _make_schema_strict(variant)
+    return schema
+
+
 def _bind_intent_response_format(chat_model: Any) -> Any:
     bind = getattr(chat_model, "bind", None)
     if not callable(bind):
         return chat_model
 
-    schema = EntryRequest.model_json_schema()
-    schema["additionalProperties"] = False
-    schema["required"] = list(schema.get("properties", {}).keys())
+    schema = _make_schema_strict(EntryRequest.model_json_schema())
     try:
         return bind(
             response_format={

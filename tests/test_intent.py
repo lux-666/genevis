@@ -6,7 +6,12 @@ import json
 import unittest
 from typing import get_args
 
-from app.entrypoints.intent import parse_intent_response, parse_request_with_llm, reject_lifecycle_request
+from app.entrypoints.intent import (
+    _make_schema_strict,
+    parse_intent_response,
+    parse_request_with_llm,
+    reject_lifecycle_request,
+)
 from app.llm.config import load_llm_profile
 from app.llm.prompts import load_prompt_bundle
 from app.schemas.entry import EntryAssetTypeHint, EntryRequest
@@ -197,6 +202,34 @@ class IntentParsingTests(unittest.TestCase):
         self.assertTrue(model.bound_formats)
         self.assertEqual(model.messages[0]["role"], "system")
         self.assertEqual(model.messages[1]["role"], "user")
+
+    def test_strict_response_schema_recursively_forbids_extra_properties(self):
+        schema = _make_schema_strict(
+            {
+                "type": "object",
+                "properties": {
+                    "outer": {
+                        "type": "object",
+                        "properties": {"inner": {"type": "string"}},
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                        },
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["required"], ["outer", "items"])
+        self.assertFalse(schema["properties"]["outer"]["additionalProperties"])
+        self.assertEqual(schema["properties"]["outer"]["required"], ["inner"])
+        item_schema = schema["properties"]["items"]["items"]
+        self.assertFalse(item_schema["additionalProperties"])
+        self.assertEqual(item_schema["required"], ["name"])
 
     def test_llm_profile_uses_gene_agent_namespace_only(self):
         profile = load_llm_profile(

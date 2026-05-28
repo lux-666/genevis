@@ -339,6 +339,41 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
             self.assertIn("read_qc.filtered_long_reads.fofn", artifact_types)
 
+    def test_approved_min_length_filter_names_fasta_output_with_fasta_extension(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fasta = Path(tmpdir) / "reads.fna"
+            fasta.write_text(">r1\nACGT\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads.fna",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fasta),
+                        "format": "fasta",
+                    }
+                ],
+            )
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            filtered_ref = Path(result["stage_outputs"]["read_qc"]["filtered_long_reads_ref"])
+            self.assertEqual(filtered_ref.name, "filtered_long_reads.fasta")
+            self.assertEqual(filtered_ref.read_text(encoding="utf-8"), fasta.read_text(encoding="utf-8"))
+
     def test_unapproved_filter_thresholds_skip_filter_with_decision_reason(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "reads.fastq"

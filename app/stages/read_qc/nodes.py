@@ -13,7 +13,6 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
-from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS,
     READ_QC_FILTERED_LONG_READS_FOFN,
@@ -23,7 +22,9 @@ from app.schemas.artifacts import (
     ArtifactMeta,
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.manifest import _detect_format
 from app.schemas.state import TopLevelState
+from app.stages.base import absolute_data_dir
 
 METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
 LENGTH_FILTER_METHOD_NAME = "read_qc.length_filter.seqkit_seq"
@@ -505,7 +506,9 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     input_path = Path(read_qc_out["raw_long_reads_path"])
-    filtered_path = artifact_dir / "filtered_long_reads.fastq"
+    fmt = read_qc_out.get("format") or _detect_format(input_path)
+    ext = ".fasta" if fmt == "fasta" else ".fastq"
+    filtered_path = artifact_dir / f"filtered_long_reads{ext}"
     script_path = working_dir / "run_length_filter.sh"
     script_path.write_text(
         "set -e\n"
