@@ -928,13 +928,29 @@ def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, An
     warnings: list[str] = []
     if method == "assembly_review.eval.busco":
         provided = (plan.method_parameters or {}).get(method, {})
-        lineage_path = provided.get("lineage_path")
-        if lineage_path and not Path(lineage_path).exists():
-            warnings.append(
-                f"assembly_review.eval.busco: lineage_path '{lineage_path}' does not exist; "
-                "BUSCO will be skipped at runtime"
-            )
+        lineage_path = provided.get("lineage_path") or inferred.get("lineage_path")
+        if lineage_path:
+            if not Path(lineage_path).exists():
+                warnings.append(
+                    f"assembly_review.eval.busco: lineage_path '{lineage_path}' does not exist; "
+                    "BUSCO will be skipped at runtime"
+                )
+            lp = Path(lineage_path)
+            name = lp.name
+            if "lineage_name" not in inferred:
+                inferred["lineage_name"] = name
+            version = _extract_busco_version(name)
+            if version and "lineage_version" not in inferred:
+                inferred["lineage_version"] = version
+            if "lineage_source" not in inferred:
+                inferred["lineage_source"] = "local"
     return inferred, warnings
+
+
+def _extract_busco_version(lineage_name: str) -> str:
+    import re
+    m = re.search(r"(odb\d+)", lineage_name)
+    return m.group(1) if m else ""
 
 
 def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any], list[str]]:

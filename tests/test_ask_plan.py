@@ -14,6 +14,8 @@ from app.entrypoints.ask_planner import (
     READ_QC_STATS_METHOD,
     _STAGE_METHODS,
     _all_selectable_stages,
+    _extract_busco_version,
+    _infer_parameter_defaults,
     _plan_validation_warnings,
     _recommended_stages_from_manifest,
     build_run_config_payload,
@@ -582,6 +584,50 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
         self.assertTrue(
             any("does not exist" in w for w in result.summary["warnings"]),
         )
+
+    def test_busco_defaults_derived_from_lineage_path(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/data/busco/insecta_odb10",
+                },
+            },
+        )
+        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}, "execution_support": "executable"}
+        inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
+        self.assertEqual(inferred["lineage_name"], "insecta_odb10")
+        self.assertEqual(inferred["lineage_version"], "odb10")
+        self.assertEqual(inferred["lineage_source"], "local")
+        self.assertEqual(inferred["threads"], 8)
+
+    def test_busco_defaults_no_version_when_undetectable(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={
+                "assembly_review": ["assembly_review.eval.busco"],
+            },
+            method_parameters={
+                "assembly_review.eval.busco": {
+                    "lineage_path": "/data/busco/custom_lineage",
+                },
+            },
+        )
+        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}, "execution_support": "executable"}
+        inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
+        self.assertEqual(inferred["lineage_name"], "custom_lineage")
+        self.assertNotIn("lineage_version", inferred)
+        self.assertEqual(inferred["lineage_source"], "local")
+
+    def test_extract_busco_version_variants(self):
+        self.assertEqual(_extract_busco_version("insecta_odb10"), "odb10")
+        self.assertEqual(_extract_busco_version("vertebrata_odb11"), "odb11")
+        self.assertEqual(_extract_busco_version("no_version_here"), "")
 
 
 class AskPlannerStageAvailabilityTests(unittest.TestCase):

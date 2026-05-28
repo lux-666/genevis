@@ -18,6 +18,7 @@ from app.entrypoints.ask_interactive import (
     _parse_genome_size,
     _prompt_parameter_values,
     _render_confirm,
+    _update_derived_defaults,
 )
 from app.entrypoints.ask_planner import (
     auto_resolve_plan,
@@ -358,6 +359,31 @@ class NonInteractiveProtocolTests(unittest.TestCase):
             self.assertIsNotNone(clarification)
             self.assertEqual(clarification.status, "clarification_required")
             self.assertIn("ask_plan_ref", type(clarification).model_fields)
+
+
+class DerivedDefaultsTests(unittest.TestCase):
+    def test_busco_lineage_path_derives_name_version_source(self):
+        defaults: dict = {}
+        _update_derived_defaults("assembly_review.eval.busco", "lineage_path", "/db/busco/insecta_odb10", defaults)
+        self.assertEqual(defaults["assembly_review.eval.busco"]["lineage_name"], "insecta_odb10")
+        self.assertEqual(defaults["assembly_review.eval.busco"]["lineage_version"], "odb10")
+        self.assertEqual(defaults["assembly_review.eval.busco"]["lineage_source"], "local")
+
+    def test_busco_lineage_path_no_odb_version(self):
+        defaults: dict = {}
+        _update_derived_defaults("assembly_review.eval.busco", "lineage_path", "/db/custom_lineage", defaults)
+        self.assertEqual(defaults["assembly_review.eval.busco"]["lineage_name"], "custom_lineage")
+        self.assertNotIn("lineage_version", defaults["assembly_review.eval.busco"])
+
+    def test_busco_does_not_overwrite_existing_defaults(self):
+        defaults: dict = {"assembly_review.eval.busco": {"lineage_name": "manual_name"}}
+        _update_derived_defaults("assembly_review.eval.busco", "lineage_path", "/db/insecta_odb10", defaults)
+        self.assertEqual(defaults["assembly_review.eval.busco"]["lineage_name"], "manual_name")
+
+    def test_non_busco_method_is_noop(self):
+        defaults: dict = {}
+        _update_derived_defaults("assembly.candidate.flye", "threads", "8", defaults)
+        self.assertEqual(defaults, {})
 
 
 if __name__ == "__main__":
