@@ -184,6 +184,7 @@ def _bind_intent_response_format(chat_model: Any) -> Any:
 
     schema = EntryRequest.model_json_schema()
     schema["additionalProperties"] = False
+    schema["required"] = list(schema.get("properties", {}).keys())
     try:
         return bind(
             response_format={
