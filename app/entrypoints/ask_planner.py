@@ -494,6 +494,8 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             local_stages.append(stage)
 
     payload: dict[str, Any] = {"local_exec": local_stages}
+    if plan.resolved_execution_order:
+        payload["requested_stages"] = plan.resolved_execution_order
     if plan.shared_parameters:
         payload["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
     flye_params = dict((plan.method_parameters or {}).get("assembly.candidate.flye") or {})

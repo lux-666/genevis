@@ -21,6 +21,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.shared_parameters import SharedParameters
 
+RequestableStage = Literal[
+    "read_qc",
+    "genome_survey",
+    "assembly",
+    "assembly_review",
+    "hic_scaffolding",
+    "repeat_annotation",
+    "gene_annotation",
+    "function_annotation",
+]
+
 LocalExecStage = Literal[
     "read_qc",
     "genome_survey",
@@ -178,6 +189,7 @@ class RunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     local_exec: list[LocalExecStage] = Field(default_factory=list)
+    requested_stages: list[RequestableStage] | None = None
     shared_parameters: SharedParameters | None = None
     read_qc: ReadQCRunConfig | None = None
     assembly: AssemblyRunConfig | None = None

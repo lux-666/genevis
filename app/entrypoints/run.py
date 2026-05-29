@@ -309,10 +309,12 @@ def _run_session(args: argparse.Namespace) -> int:
 
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
+    requested_stages = list(run_config.requested_stages) if run_config and run_config.requested_stages else None
     state = initial_state(
         session_id=request.session_id,
         input_manifest_ref=str(manifest_path),
         data_dir=request.data_dir,
+        requested_stages=requested_stages,
     )
 
     stage_outputs = dict(state.get("stage_outputs") or {})
