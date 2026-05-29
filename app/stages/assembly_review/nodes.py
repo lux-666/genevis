@@ -733,12 +733,7 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
 
 
 def evaluate_review_rules(state: TopLevelState) -> dict:
-    """Evaluate structural rules without inventing thresholds.
-
-    Returns:
-    - deterministic_safe: True only for existing-assembly-only input
-    - needs_human: True when multiple candidates or any candidate needs evaluation
-    """
+    """Evaluate structural rules and record candidate count for routing."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
 
@@ -746,29 +741,7 @@ def evaluate_review_rules(state: TopLevelState) -> dict:
         return {}
 
     candidates = ar_out.get("candidates", [])
-    entry_mode = (stage_outputs.get("inventory", {})).get("entry_mode")
-
-    # Deterministic safe path: only existing assembly, no candidates from
-    # assembly stage
-    only_existing = (
-        entry_mode == "existing_assembly"
-        and len(candidates) == 1
-        and candidates[0].get("source") == "inventory"
-    )
-
-    # Multiple candidates always need review
-    multiple_candidates = len(candidates) > 1
-
-    # Any candidate from assembly stage needs review
-    has_assembly_candidates = any(
-        c.get("source") == "assembly_stage" for c in candidates
-    )
-
-    needs_human = multiple_candidates or has_assembly_candidates
-    deterministic_safe = only_existing and not needs_human
-
-    ar_out["deterministic_safe"] = deterministic_safe
-    ar_out["needs_human"] = needs_human
+    ar_out["candidate_count"] = len(candidates)
 
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = ar_out
@@ -901,45 +874,27 @@ def human_review_gate(state: TopLevelState) -> dict:
 
 
 def commit_assembly_review(state: TopLevelState) -> dict:
-    """Commit the assembly review decision and advance routing.
-
-    For deterministic safe path (existing assembly only), auto-accepts.
-    For human-gated paths, reads the decision from stage_outputs.
-    """
+    """Commit the assembly review decision and advance routing."""
     from app.graph.routing import next_stage_name
 
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
-    candidates = ar_out.get("candidates", [])
 
-    deterministic_safe = ar_out.get("deterministic_safe", False)
-    if deterministic_safe and candidates:
-        decision = "accept"
-        selected_candidate_id = candidates[0]["candidate_id"]
-        rejected_candidates: list[str] = []
-        final_assembly_ref = candidates[0].get("final_assembly_ref")
-        pre_action_ref = final_assembly_ref
-        action_type = "pass"
-        action_execution_mode = "none"
-        method_name = candidates[0].get("method_name")
-        evidence_refs: list[str] = []
-        evidence_notes: list[str] = []
-    else:
-        decision = ar_out.get("decision", "stop_human_review")
-        selected_candidate_id = ar_out.get("selected_candidate_id")
-        rejected_candidates = ar_out.get("rejected_candidates", [])
-        final_assembly_ref = ar_out.get("final_assembly_ref")
-        pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
-        action_type = ar_out.get("action_type", "pass")
-        action_execution_mode = ar_out.get("action_execution_mode", "none")
-        method_name = ar_out.get("action_method_name")
-        evidence_refs = list(ar_out.get("evidence_refs") or [])
-        evidence_notes = list(ar_out.get("evidence_notes") or [])
+    decision = ar_out.get("decision", "stop_human_review")
+    selected_candidate_id = ar_out.get("selected_candidate_id")
+    rejected_candidates = ar_out.get("rejected_candidates", [])
+    final_assembly_ref = ar_out.get("final_assembly_ref")
+    pre_action_ref = ar_out.get("pre_action_assembly_ref") or final_assembly_ref
+    action_type = ar_out.get("action_type", "pass")
+    action_execution_mode = ar_out.get("action_execution_mode", "none")
+    method_name = ar_out.get("action_method_name")
+    evidence_refs = list(ar_out.get("evidence_refs") or [])
+    evidence_notes = list(ar_out.get("evidence_notes") or [])
 
     final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
     trace = [*state.get("route_trace", []), "assembly_review_stage"]
     next_stage = next_stage_name("assembly_review")
-    decided_by = ar_out.get("decided_by") or ("auto_rule" if deterministic_safe else "human")
+    decided_by = ar_out.get("decided_by", "human")
     rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
     action_metadata = {
         "action_type": action_type,

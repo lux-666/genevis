@@ -1,7 +1,7 @@
 """Assembly review stage builder.
 
 Builds the assembly review subgraph with candidate resolution,
-metric planning, rule evaluation, human gate, and commit.
+metric planning, rule evaluation, and human gate.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from app.schemas.state import TopLevelState
 from app.stages.assembly_review.nodes import (
     collect_busco_artifacts,
     collect_quast_artifacts,
-    commit_assembly_review,
     enter_assembly_review,
     evaluate_review_rules,
     fail_assembly_review,
@@ -54,7 +53,6 @@ def build_stage():
     graph.add_node("evaluate_rules", evaluate_review_rules)
     graph.add_node("generate_comparison", generate_candidate_comparison)
     graph.add_node("human_gate", human_review_gate)
-    graph.add_node("commit", commit_assembly_review)
     graph.add_node("fail", fail_assembly_review)
 
     graph.add_edge(START, "enter")
@@ -111,7 +109,6 @@ def build_stage():
         "evaluate_rules",
         route_from_evaluation,
         {
-            "commit": "commit",
             "generate_comparison": "generate_comparison",
             "human_gate": "human_gate",
             "fail": "fail",
@@ -123,7 +120,6 @@ def build_stage():
         {"human_gate": "human_gate", "fail": "fail"},
     )
     graph.add_edge("human_gate", END)
-    graph.add_edge("commit", END)
     graph.add_edge("fail", END)
 
     return graph.compile()

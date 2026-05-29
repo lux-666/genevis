@@ -1,8 +1,7 @@
 """Assembly review stage routing.
 
 Routes to:
-- "commit"      : deterministic safe path (existing assembly only)
-- "human_gate"  : multiple candidates or assembly-stage candidates
+- "human_gate"  : candidates available for review
 - "fail"        : no assembly candidates available
 """
 
@@ -75,18 +74,10 @@ def route_from_evaluation(state: TopLevelState) -> str:
     if ar_out.get("status") in FAIL_STATUSES:
         return "fail"
 
-    if ar_out.get("deterministic_safe"):
-        return "commit"
-
     candidates = ar_out.get("candidates", [])
     if len(candidates) >= 2:
         return "generate_comparison"
 
-    if ar_out.get("needs_human"):
-        return "human_gate"
-
-    # Fallback: if there is at least one candidate but no clear rule,
-    # block for human review rather than auto-advancing
     if ar_out.get("candidate_count", 0) > 0:
         return "human_gate"
 
