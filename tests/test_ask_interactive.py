@@ -15,9 +15,11 @@ from app.entrypoints.ask_interactive import (
     parse_set_params,
     run_interactive_loop,
     _apply_set_params,
+    _confirm_auto_resolve,
     _parse_genome_size,
     _prompt_parameter_values,
     _render_confirm,
+    _render_plan_summary,
     _update_derived_defaults,
 )
 from app.entrypoints.ask_planner import (
@@ -384,6 +386,104 @@ class DerivedDefaultsTests(unittest.TestCase):
         defaults: dict = {}
         _update_derived_defaults("assembly.candidate.flye", "threads", "8", defaults)
         self.assertEqual(defaults, {})
+
+
+class PlanPreviewRenderTests(unittest.TestCase):
+    def test_preview_marks_pending_methods_and_params(self):
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "source_paths": ["/in/reads.fastq"],
+            "resolved_execution_order": ["read_qc", "assembly"],
+            "stage_roles": {"read_qc": "dependency", "assembly": "executable"},
+            "selected_methods": {"assembly": "assembly.candidate.flye"},
+            "method_execution_status": {"assembly.candidate.flye": "executable"},
+        }
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Plan Preview", preview=True)
+        rendered = stdout.getvalue()
+        self.assertIn("Plan Preview", rendered)
+        self.assertIn("Input:    /in/reads.fastq", rendered)
+        self.assertIn("read_qc", rendered)
+        self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
+        # read_qc has no selected method yet -> pending
+        self.assertIn("read_qc: pending", rendered)
+        self.assertIn("Shared parameters: pending", rendered)
+        self.assertIn("Parameters: pending", rendered)
+        self.assertIn("Advisory preview.", rendered)
+
+    def test_preview_shows_deferred_warnings_and_preview_error(self):
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "resolved_execution_order": ["gene_annotation"],
+            "stage_roles": {"gene_annotation": "planned_only"},
+            "selected_methods": {"gene_annotation": ["gene_annotation.candidate.braker3"]},
+            "method_execution_status": {"gene_annotation.candidate.braker3": "planned_only"},
+            "shared_parameters": {"read_type": "ont_raw"},
+            "method_parameters": {"gene_annotation.candidate.braker3": {"threads": 8}},
+            "warnings": ["gene_annotation: all selected methods are planned_only"],
+            "run_config_preview_error": "no local_exec stages",
+        }
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Plan Preview", preview=True)
+        rendered = stdout.getvalue()
+        self.assertIn("[plan-only] gene_annotation", rendered)
+        self.assertIn("gene_annotation.candidate.braker3 [deferred]", rendered)
+        self.assertIn("read_type: ont_raw", rendered)
+        self.assertIn("[braker3] threads: 8", rendered)
+        self.assertIn("warning: gene_annotation: all selected methods are planned_only", rendered)
+        self.assertIn("Run-config error: no local_exec stages", rendered)
+
+    def test_confirm_render_output_unchanged_for_final_plan(self):
+        """Final Run Plan output keeps its exact shape (no pending lines)."""
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "resolved_execution_order": ["assembly"],
+            "stage_roles": {"assembly": "executable"},
+            "selected_methods": {"assembly": "assembly.candidate.flye"},
+            "method_execution_status": {"assembly.candidate.flye": "executable"},
+        }
+        req = AskClarificationRequest(
+            status="confirm_required", kind="confirm", session_id="s1",
+            ask_plan_ref="/tmp/plan.json", manifest_ref="test.yaml",
+            question="Proceed?", summary=summary, response_schema={}, next_action={},
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_confirm(req)
+        rendered = stdout.getvalue()
+        self.assertIn("Run Plan", rendered)
+        self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
+        self.assertNotIn("pending", rendered)
+        self.assertNotIn("Advisory preview.", rendered)
+
+    def test_auto_resolve_preview_appears_and_does_not_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp,
+                             entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
+            resolved = auto_resolve_plan(plan)
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                 patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("builtins.input", return_value="n"), \
+                 patch("app.entrypoints.ask_interactive._execute_confirmed_plan") as mock_exec:
+                accepted = _confirm_auto_resolve(resolved)
+            rendered = stdout.getvalue()
+            self.assertFalse(accepted)
+            mock_exec.assert_not_called()
+            self.assertIn("Plan Preview", rendered)
+            self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
+            self.assertIn("read_qc: pending", rendered)
 
 
 if __name__ == "__main__":

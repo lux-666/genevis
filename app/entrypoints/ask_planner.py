@@ -640,7 +640,7 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 
 
 def _confirm_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
-    summary = _build_run_plan_summary(plan)
+    summary = build_run_plan_summary(plan)
     return AskClarificationRequest(
         status="confirm_required",
         kind="confirm",
@@ -655,7 +655,7 @@ def _confirm_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationR
     )
 
 
-def _build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
+def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "session_id": plan.session_id,
         "data_dir": plan.data_dir,

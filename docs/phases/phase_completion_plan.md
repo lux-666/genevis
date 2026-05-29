@@ -68,9 +68,12 @@ Tasks in `docs/phases/phase6/`:
    decision JSON or assembling the command sequence.
 4. Session observability and run trace: structured stage-by-stage trace
    artifact from ledger data, exposed via `gene-agent inspect --trace`.
-5. Hardening beyond the current sqlite resume minimum, including optional
+5. TUI initial ask plan preview: show a detailed early plan preview that
+   matches the final `Run Plan` confirmation style before accepting an
+   auto-resolved ask plan.
+6. Hardening beyond the current sqlite resume minimum, including optional
    postgres/backend work if long-running deployments require it.
-6. Lifecycle commands beyond the current structured review resume path, such as
+7. Lifecycle commands beyond the current structured review resume path, such as
    pause, retry, abort, or rebuild, once their semantics are explicitly scoped.
 
 Exit criteria:

@@ -806,8 +806,8 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertIsNone(result)
-        from app.entrypoints.ask_planner import _build_run_plan_summary
-        summary = _build_run_plan_summary(plan)
+        from app.entrypoints.ask_planner import build_run_plan_summary
+        summary = build_run_plan_summary(plan)
         status = summary["method_execution_status"]
         self.assertEqual(status["hic_scaffolding.candidate.yahs"], "executable")
         self.assertEqual(status["gene_annotation.candidate.braker3"], "planned_only")

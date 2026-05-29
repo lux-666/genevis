@@ -15,6 +15,7 @@ from app.entrypoints.ask_planner import (
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
     auto_resolve_plan,
+    build_run_plan_summary,
     merge_clarification_response,
     next_clarification,
     save_plan_to_default_path,
@@ -172,10 +173,13 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
 
 
 def _render_confirm(req: AskClarificationRequest) -> None:
-    summary = req.summary or {}
+    _render_plan_summary(req.summary or {}, title="Run Plan")
+
+
+def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool = False) -> None:
     print()
     print("=" * 50)
-    print("Run Plan")
+    print(title)
     print("=" * 50)
 
     print(f"\nSession:  {summary.get('session_id', '?')}")
@@ -196,20 +200,30 @@ def _render_confirm(req: AskClarificationRequest) -> None:
 
     methods = summary.get("selected_methods", {})
     exec_status = summary.get("method_execution_status", {})
-    if methods:
+    if preview and order:
+        print("\nMethods:")
+        for stage in order:
+            value = methods.get(stage)
+            if not value:
+                print(f"  {stage}: pending")
+                continue
+            method_list = value if isinstance(value, list) else [value]
+            for m in method_list:
+                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}")
+    elif methods:
         print("\nMethods:")
         for stage, value in methods.items():
             method_list = value if isinstance(value, list) else [value]
             for m in method_list:
-                status = exec_status.get(m, "")
-                tag = " [local]" if status == "executable" else " [deferred]" if status == "planned_only" else ""
-                print(f"  {stage}: {m}{tag}")
+                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}")
 
     shared = summary.get("shared_parameters", {})
     if shared:
         print("\nShared parameters:")
         for k, v in shared.items():
             print(f"  {k}: {v}")
+    elif preview:
+        print("\nShared parameters: pending")
 
     params = summary.get("method_parameters", {})
     if params:
@@ -218,6 +232,8 @@ def _render_confirm(req: AskClarificationRequest) -> None:
             short = method.rsplit(".", 1)[-1]
             for k, v in pdict.items():
                 print(f"  [{short}] {k}: {v}")
+    elif preview:
+        print("\nParameters: pending")
 
     warnings = summary.get("warnings", [])
     for w in warnings:
@@ -228,6 +244,16 @@ def _render_confirm(req: AskClarificationRequest) -> None:
         print(f"\nRun-config error: {preview_error}")
 
     print("=" * 50)
+    if preview:
+        print("Advisory preview. Remaining choices and a final confirmation follow.")
+
+
+def _method_tag(status: str) -> str:
+    if status == "executable":
+        return " [local]"
+    if status == "planned_only":
+        return " [deferred]"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -263,23 +289,8 @@ def _prompt_confirm(message: str) -> bool:
 
 
 def _confirm_auto_resolve(plan: AskPlanState) -> bool:
-    stages = ", ".join(plan.selected_stages or [])
-    methods = ""
-    if plan.selected_methods:
-        all_methods = []
-        for v in plan.selected_methods.values():
-            if isinstance(v, list):
-                all_methods.extend(v)
-            else:
-                all_methods.append(v)
-        methods = ", ".join(all_methods)
-    deps = [s for s in (plan.resolved_execution_order or []) if s not in (plan.selected_stages or [])]
-    dep_str = f" (deps: {', '.join(deps)})" if deps else ""
-
-    print(f"\nAuto-detected: {stages}{dep_str}")
-    if methods:
-        print(f"  Method: {methods}")
-    return _prompt_confirm("Accept?")
+    _render_plan_summary(build_run_plan_summary(plan), title="Plan Preview", preview=True)
+    return _prompt_confirm("Accept this auto-detected plan?")
 
 
 def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationResponse:
