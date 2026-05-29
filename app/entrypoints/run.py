@@ -125,6 +125,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inspect_parser.add_argument("--filter", action="append", default=[], help="Filter inspect output, currently supports decided_by=<origin>")
     inspect_parser.add_argument("--json", action="store_true", help="Emit a machine-readable inspect summary")
     inspect_parser.add_argument(
+        "--trace",
+        action="store_true",
+        default=False,
+        help="Generate and register a stage-by-stage run trace from durable records",
+    )
+    inspect_parser.add_argument(
         "--write-decision-template",
         help="Write a JSON decision-file template for the active review gate",
     )
@@ -668,10 +674,26 @@ def _run_inspect(args: argparse.Namespace) -> int:
             print(f"decision_template: {out_path}")
             print(f"resume_command: {resume_command}")
 
+    trace_markdown: str | None = None
+    if getattr(args, "trace", False):
+        from app.reports.trace_writer import write_session_trace
+
+        trace_result = write_session_trace(data_dir, args.session_id)
+        summary["trace"] = trace_result["trace"]
+        summary["trace_json_ref"] = trace_result["json_ref"]
+        summary["trace_markdown_ref"] = trace_result["markdown_ref"]
+        trace_markdown = trace_result["markdown"]
+
     if getattr(args, "json", False):
         print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     else:
         _print_inspect_text(summary, filters)
+        if trace_markdown is not None:
+            if summary.get("trace_json_ref"):
+                print(f"trace_json: {summary['trace_json_ref']}")
+                print(f"trace_markdown: {summary['trace_markdown_ref']}")
+            print()
+            print(trace_markdown)
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return 1

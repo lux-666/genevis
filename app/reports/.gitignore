@@ -1,7 +1,8 @@
-# Only track the two files needed for the review-policy feature.
-# The other placeholder files (events.py, notebook_builder.py, trace_writer.py,
+# Only track the implemented report modules.
+# The remaining placeholder files (events.py, notebook_builder.py,
 # renderers/) are pre-existing stubs and are not part of this commit boundary.
 *
 !.gitignore
 !__init__.py
 !review_report.py
+!trace_writer.py

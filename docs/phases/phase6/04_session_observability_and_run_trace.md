@@ -1,6 +1,6 @@
 # 04 Session Observability And Run Trace
 
-Task status: not started.
+Task status: code-complete; local-validated. HPC validation pending.
 
 ## Goal
 
@@ -15,12 +15,30 @@ stage-specific reports to answer "what happened?"
 
 ## Relationship To Tasks 02 And 03
 
-Task 02 proves that one real HPC session can reach terminal completion. This
-Task 03 makes the human-gate and resume interaction usable without manual
-command assembly. This task turns durable evidence from those sessions into a
-user-facing trace. It should be validated against the Phase 6 task 02 acceptance
-run once that run exists, and against a blocked/resumed session that exercises
-the Phase 6 task 03 operator flow.
+Task 02 has produced a real HPC session that reaches terminal completion.
+Task 03 is code-complete for the interactive human-gate and resume flow, with
+HPC validation still pending. This task turns durable evidence from those
+sessions into a user-facing trace. It should be validated against the Phase 6
+task 02 acceptance run and against a blocked/resumed session that exercises the
+Phase 6 task 03 operator flow.
+
+## Current Baseline
+
+The current project already writes several durable records that the trace should
+reuse rather than duplicate:
+
+- session metadata and business events under `<data_dir>/ledger/<session>/`;
+- artifact metadata under `<data_dir>/artifacts/<session>/artifacts.jsonl`;
+- blocked/failed operator reports;
+- final review decision reports on completed terminal paths;
+- sqlite checkpoints when the run used the durable checkpoint backend.
+
+The existing `inspect` workflow infers session state from these records. A trace
+implementation should build on that durable surface, but it must also expose
+where current records are incomplete. For example, some completed sessions may
+not have a fully persisted route trace outside checkpoint or operator-report
+payloads, and current review records are mostly stage-scoped rather than
+per-request scoped.
 
 ## Scope
 
@@ -31,6 +49,8 @@ the Phase 6 task 03 operator flow.
   underlying evidence.
 - The trace must be available from the existing inspect workflow.
 - The trace must have both machine-readable and human-readable output.
+- The trace must surface durable-record gaps explicitly instead of pretending
+  that unavailable details are known.
 
 ## Non-Goals
 
@@ -38,8 +58,11 @@ the Phase 6 task 03 operator flow.
 - Do not add real-time streaming.
 - Do not introduce an external tracing backend.
 - Do not require the original Python process to still be alive.
+- Do not require a checkpoint to reconstruct facts that are already present in
+  ledger or artifact records.
 - Do not invent biological conclusions that are not present in existing
   artifacts, ledger events, or review records.
+- Do not retrofit broad runtime telemetry or streaming logs into this task.
 - Do not prescribe exact internal module names or test file names in this task
   document.
 
@@ -50,7 +73,7 @@ The trace must answer these session-level questions:
 - What session was inspected?
 - What manifest and data dir were used?
 - What commit/run context is known, if recorded?
-- What is the final or current stage?
+- What is the final or current stage, if it can be reconstructed?
 - What is the final or current supervision state?
 - Which stages were traversed?
 - Which stages executed real methods?
@@ -93,6 +116,11 @@ The trace output should degrade gracefully. If a field cannot be reconstructed
 from durable records, it should be shown as missing or unavailable rather than
 fabricated.
 
+Idempotent generation matters. Re-running trace generation for unchanged durable
+records should either reuse the existing trace artifact paths or update them in
+place without adding duplicate artifact registrations or misleading ledger
+events.
+
 ## Operator Experience Requirements
 
 An operator should be able to:
@@ -118,17 +146,22 @@ An operator should be able to:
 
 ## Tasks
 
-- [ ] Define the stable trace fields and status vocabulary.
-- [ ] Add trace generation from durable session records.
-- [ ] Add machine-readable and human-readable trace outputs.
-- [ ] Register trace outputs as artifacts.
-- [ ] Expose trace generation through inspect.
-- [ ] Ensure completed, blocked, and failed sessions all produce useful output.
-- [ ] Ensure repeated trace generation is idempotent.
-- [ ] Add verification coverage for completed, blocked, skipped, failed, and
+- [x] Define the stable trace fields and status vocabulary.
+- [x] Define a durable-record gap vocabulary for unavailable, checkpoint-only,
+  and unsupported details.
+- [x] Add trace generation from durable session records.
+- [x] Add machine-readable and human-readable trace outputs.
+- [x] Register trace outputs as artifacts.
+- [x] Expose trace generation through inspect.
+- [x] Ensure completed, blocked, and failed sessions all produce useful output.
+- [x] Ensure repeated trace generation is idempotent, including artifact and
+  ledger registration.
+- [x] Add verification coverage for completed, blocked, skipped, failed, and
   decision-containing sessions.
 - [ ] Validate the trace against the Phase 6 task 02 HPC acceptance run.
-- [ ] Record an example trace artifact path in `docs/handoff.md`.
+- [ ] Validate the trace against a Phase 6 task 03 interactive-review
+  blocked/resumed session once HPC validation exists.
+- [x] Record an example trace artifact path in `docs/handoff.md`.
 
 ## Acceptance
 
@@ -152,3 +185,75 @@ After validation, update `docs/handoff.md` with:
 - summary of what the trace reported;
 - any durable-record gaps discovered during trace generation;
 - follow-up tasks if the trace cannot represent a needed fact reliably.
+
+## Implemented State
+
+Trace generation lives in `app/reports/trace_writer.py` (previously an empty
+placeholder; no new module added):
+
+- Status vocabulary (`app/reports/trace_writer.py:33`): `executed`,
+  `planned_only`, `blocked_human`, `failed`, `completed`,
+  `no_durable_evidence`.
+- Gap vocabulary (`app/reports/trace_writer.py:44`): `unavailable`,
+  `checkpoint_only`, `unsupported`.
+- `build_session_trace(data_dir, session_id)` reconstructs the trace purely
+  from durable records: `Ledger.read_session` / `read_events`,
+  `read_artifact_records`, and `inspect_session` for terminal supervision
+  state, checkpoint persistence, decisions, and `next_action`. Per-stage
+  status is derived from attempt events + candidate/artifact evidence + review
+  events; method outcomes, timing (event timestamps), candidate methods, and
+  review/decision refs are attached per stage.
+- `render_trace_markdown(trace)` produces the operator-readable text; failures
+  drop the conda wrapper line (`_first_error_line`) so the real tool error
+  shows.
+- `write_session_trace(data_dir, session_id)` writes `run_trace.json` +
+  `run_trace.md` under `artifacts/run_trace/<session>/`, registers both as
+  artifacts (`run_trace.session`, `run_trace.session_markdown`) and ledger
+  `artifact_registered` events. Regeneration is idempotent via
+  content-equality + existing-index-row checks (same pattern as
+  `write_operator_report`). The trace's own `run_trace.*` artifacts are
+  excluded from `artifact_count`, `stage_path_observed`, and `open_first`, so
+  re-running `--trace` does not inflate the operator-facing artifact total. A
+  session with no durable ledger record builds and returns the trace for
+  display but writes nothing to disk (`json_ref`/`markdown_ref` are `None`) —
+  there is no session to attach artifacts to, so persisting would only leave
+  orphans.
+
+Key durable-record gap (always surfaced): the authoritative ordered
+`route_trace` and per-stage `skip_reasons` live only in checkpoint/in-memory
+state. The trace reconstructs an evidence-based `stage_path_observed` and
+marks the authoritative ordering `checkpoint_only` rather than fabricating it.
+A stage emitting multiple `review_requested` events is flagged `unsupported`
+(decisions bind at stage granularity), and a missing session.json yields an
+`error: session_not_found` plus an `unavailable` gap.
+
+CLI: `gene-agent inspect --session-id <s> --data-dir <d> --trace` generates
+and registers the trace, prints the readable markdown (or embeds `trace`,
+`trace_json_ref`, `trace_markdown_ref` in `--json`). Wired in
+`app/entrypoints/run.py` `_run_inspect`.
+
+Tests: `tests/test_run_trace.py` (11 tests) cover executed/decision,
+planned-only, failed (clean error), blocked (pending action), the
+checkpoint-only/unsupported/unavailable gaps, artifact registration,
+idempotent regeneration, trace-artifact exclusion from the count across
+repeated runs, and the missing-session no-write path.
+
+Local example (failed-terminal session, regenerated from durable records on a
+Mac dev checkout):
+
+- session id: `gene-20260527-000002`
+- command: `gene-agent inspect --session-id gene-20260527-000002
+  --data-dir data --trace`
+- json: `data/artifacts/run_trace/gene-20260527-000002/run_trace.json`
+- markdown: `data/artifacts/run_trace/gene-20260527-000002/run_trace.md`
+- reported: `supervision_state=failed_terminal`,
+  `final_or_current_stage=assembly` (source: operator_report),
+  `stage_path_observed=[read_qc, genome_survey, assembly]`, assembly `failed`
+  on `assembly.candidate.flye`, open-first
+  `operator_report.failed_terminal`, gaps `route_trace` /
+  `skip_reasons` (both `checkpoint_only`).
+
+HPC validation against the Phase 6 task 02 acceptance run
+(`phase6-e2e-20260526-a`) and a task 03 blocked/resumed session is still
+pending; run `gene-agent inspect --trace` against those sessions on the
+server and record the refs in `docs/handoff.md`.

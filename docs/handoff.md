@@ -30,6 +30,20 @@ execution is opt-in per stage and is currently wired for: `read_qc`
 `hic_scaffolding` (YaHS), `repeat_annotation` (RepeatMasker for provided
 libraries). All other methods are planning-only contracts.
 
+Phase 6 task 04 (session observability and run trace) is code-complete and
+locally validated: `gene-agent inspect --trace` reconstructs a stage-by-stage
+trace (JSON + Markdown artifacts) from durable ledger/artifact records. HPC
+validation against the task 02/03 sessions is pending. See the Phase 6 task 04
+doc for the implemented state and the run-trace example record below.
+
+KNOWN PRE-EXISTING BREAKAGE (not from task 04): commit `efc73fa`
+("Add requested_stages to skip unrequested workflow stages") leaves the graph
+smoke returning `current_stage=inventory` / empty `route_trace` instead of
+advancing, and 8 routing/E2E tests fail on a clean checkout
+(`test_assembly_review` ×2, `test_entrypoints` ×6). The task 04 change is
+additive and introduces no new failures; the run trace itself handles these
+sessions correctly from their durable records.
+
 Stage details and contracts live in `docs/stage_contracts.md`.
 Per-phase task records live under `docs/phases/`. The full implemented
 vs. not-implemented bullet list lives in the top-level `README.md`
@@ -426,7 +440,53 @@ Duplicate-attempt check: PASS.
 
 Issues found: none. LLM intent path works end-to-end without code fixes.
 
+Operator-facing output change (Phase 6 task 05): the interactive ask
+auto-resolve step now prints a full `Plan Preview` (same sections as the
+final `Run Plan`: session, data dir, manifest, inputs, stage roles,
+methods with `[local]`/`[deferred]` tags, shared/method params, warnings,
+run-config preview error) before the accept prompt, marking not-yet-selected
+values as `pending`. It is advisory and read-only; the final `Run Plan`
+confirmation before execution is unchanged.
+
+## Phase 6 Run Trace Example Record
+
+Local Mac-dev example of `gene-agent inspect --trace` regenerated from durable
+records (Phase 6 task 04). HPC validation against the task 02/03 sessions is
+still pending.
+
+- session id: `gene-20260527-000002` (a failed-terminal session)
+- command: `gene-agent inspect --session-id gene-20260527-000002
+  --data-dir data --trace`
+- trace artifacts:
+  - `data/artifacts/run_trace/gene-20260527-000002/run_trace.json`
+  - `data/artifacts/run_trace/gene-20260527-000002/run_trace.md`
+- reported: `supervision_state=failed_terminal`,
+  `final_or_current_stage=assembly` (source: operator_report),
+  `stage_path_observed=[read_qc, genome_survey, assembly]`;
+  `read_qc` executed, `genome_survey` planned_only, `assembly` failed on
+  `assembly.candidate.flye`; open-first `operator_report.failed_terminal`.
+- durable-record gaps surfaced: `route_trace` and `skip_reasons` are
+  `checkpoint_only` (authoritative ordering lives in checkpoint/in-memory
+  state; the trace reconstructs an evidence-based path instead).
+- follow-up: validate `--trace` on the HPC `phase6-e2e-20260526-a` completed
+  run and on a task 03 blocked/resumed session, then record those refs here.
+
 ## Next Best Task
+
+Phase 6 task 04 (session observability and run trace) is code-complete and
+locally validated; `gene-agent inspect --trace` is wired and tested. Two
+things remain open:
+
+1. HPC validation: run `gene-agent inspect --trace` against the completed
+   `phase6-e2e-20260526-a` run and a task 03 blocked/resumed session, then
+   record the trace refs in the Phase 6 Run Trace Example Record above.
+2. The pre-existing routing breakage from commit `efc73fa` (graph smoke stuck
+   at `inventory`, 8 failing tests) is unrelated to task 04 but blocks the
+   clean-suite gate — fix `route_controller` / `requested_stages` handling so
+   a `None` `requested_stages` advances stages normally.
+
+After that, Phase 6 task 05 (TUI initial ask plan preview) is next; see
+`docs/phases/phase6/05_tui_initial_ask_plan_preview.md`.
 
 Phase 6 task 03 (interactive human gate and resume CLI) is code-complete.
 Implemented:
@@ -437,7 +497,6 @@ Implemented:
 
 HPC validation is pending — run `gene-agent tui` or `gene-agent run` in a
 TTY on the server to verify the interactive gate loop works end-to-end.
-After that, Phase 6 task 04 (session observability and run trace) is next.
 
 Do not implement broad assembly, annotation, requested-stage routing,
 database downloads, or genome-size conflict thresholds before the
