@@ -13,28 +13,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-ReviewDecision = Literal[
-    "pending",
-    "accept",
-    "pass",
-    "rerun",
-    "purge",
-    "polish",
-    "continue_low_confidence",
-    "stop_human_review",
-]
-ReviewResumeStage = Literal["assembly_review", "hic_scaffolding"]
-ResumeReviewDecision = Literal[
-    "accept",
-    "pass",
-    "purge",
-    "polish",
-    "continue_low_confidence",
-    "stop_human_review",
-    "select_method",
-    "skip",
-    "rerun",
-]
 ReviewDecisionOrigin = Literal["human", "llm_provisional", "auto_rule"]
 
 
@@ -54,10 +32,11 @@ class ReviewPayload(BaseModel):
     """Payload for a human review interrupt."""
 
     stage: str
+    gate_id: str | None = None
     reason: str
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     signals: list[ReviewSignal] = Field(default_factory=list)
-    decisions_allowed: list[ResumeReviewDecision] = Field(default_factory=list)
+    decisions_allowed: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     auto_decidable: bool = True
     report_refs: dict[str, str] = Field(default_factory=dict)
@@ -70,8 +49,9 @@ class ResumeReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: str
-    stage: ReviewResumeStage
-    decision: ResumeReviewDecision
+    stage: str
+    gate_id: str | None = None
+    decision: str
     candidate_id: str | None = None
     method_name: str | None = None
     final_assembly_ref: str | None = None

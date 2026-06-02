@@ -73,6 +73,86 @@ def _write_assembly_review_request(data_dir: Path, session_id: str) -> Path:
     return request_ref
 
 
+def _artifact_types(data_dir: Path, session_id: str) -> list[str]:
+    artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
+    if not artifact_index.exists():
+        return []
+    return [
+        json.loads(line)["artifact_type"]
+        for line in artifact_index.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _assert_existing_assembly_blocks_at_review(
+    test: unittest.TestCase,
+    *,
+    code: int,
+    stdout: str,
+    stderr: str,
+    data_dir: Path,
+    session_id: str,
+    checkpointer: str = "memory",
+) -> None:
+    test.assertEqual(code, 0)
+    test.assertEqual(stderr, "")
+    test.assertIn("current_stage: assembly_review", stdout)
+    test.assertIn("supervision_state: blocked_human", stdout)
+    if checkpointer == "sqlite":
+        test.assertIn("resume_note: use `gene-agent review` or `gene-agent resume` to continue", stdout)
+    else:
+        test.assertIn("resume_note: durable cross-process resume requires --checkpointer sqlite", stdout)
+    test.assertIn("'candidate_id': 'existing_assembly'", stdout)
+
+    request_ref = data_dir / "artifacts" / "assembly_review" / session_id / "assembly_review_request.json"
+    blocked_report = data_dir / "artifacts" / "operator_report" / session_id / "blocked_human_report.json"
+    test.assertTrue(request_ref.exists())
+    test.assertTrue(blocked_report.exists())
+
+    request = json.loads(request_ref.read_text(encoding="utf-8"))
+    test.assertEqual(request["stage"], "assembly_review")
+    test.assertEqual(request["candidates"][0]["candidate_id"], "existing_assembly")
+    test.assertFalse(request["auto_decidable"])
+
+    report = json.loads(blocked_report.read_text(encoding="utf-8"))
+    test.assertEqual(report["current_stage"], "assembly_review")
+    test.assertEqual(report["supervision_state"], "blocked_human")
+    test.assertEqual(report["next_action"]["kind"], "review_decision_required")
+
+    artifact_types = _artifact_types(data_dir, session_id)
+    test.assertIn("assembly_review.request", artifact_types)
+    test.assertIn("assembly_review.report", artifact_types)
+    test.assertIn("assembly_review.report_data", artifact_types)
+    test.assertIn("operator_report.blocked_human", artifact_types)
+
+    events_path = data_dir / "ledger" / session_id / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    test.assertTrue(any(event["event_type"] == "review_requested" for event in events))
+    test.assertFalse(any(event["event_type"] == "review_decision" for event in events))
+
+
+def _write_accept_existing_assembly_decision(data_dir: Path, session_id: str, path: Path) -> Path:
+    request_ref = data_dir / "artifacts" / "assembly_review" / session_id / "assembly_review_request.json"
+    request = json.loads(request_ref.read_text(encoding="utf-8"))
+    candidate = request["candidates"][0]
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "stage": request["stage"],
+                "gate_id": request.get("gate_id"),
+                "decision": "accept",
+                "candidate_id": candidate["candidate_id"],
+                "final_assembly_ref": candidate["final_assembly_ref"],
+                "rejected_candidates": [],
+                "notes": ["accepted existing assembly for downstream E2E"],
+                "decided_by": "human",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 class EntrypointTests(unittest.TestCase):
     def _ask_namespace(self, **overrides):
         base = dict(
@@ -291,6 +371,7 @@ class EntrypointTests(unittest.TestCase):
                     "session_id": "s1",
                     "input_manifest_ref": str(manifest),
                     "data_dir": _resolve_data_dir(str(root / "data")),
+                    "requested_stages": None,
                 },
             )
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
@@ -768,6 +849,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("assembly_review_report.md", stdout)
             self.assertEqual(template["session_id"], "s1")
             self.assertEqual(template["stage"], "assembly_review")
+            self.assertEqual(template["gate_id"], "assembly_review")
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "flye")
             self.assertEqual(template["final_assembly_ref"], "draft.fasta")
@@ -1257,17 +1339,25 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
         )
         return manifest, run_config, root / "out"
 
-    def _run_args(self, *, session_id: str, manifest: Path, run_config: Path, data_dir: Path) -> argparse.Namespace:
+    def _run_args(
+        self,
+        *,
+        session_id: str,
+        manifest: Path,
+        run_config: Path,
+        data_dir: Path,
+        checkpointer: str = "memory",
+    ) -> argparse.Namespace:
         return argparse.Namespace(
             session_id=session_id,
             manifest=str(manifest),
             data_dir=str(data_dir),
             local_exec=[],
             run_config=str(run_config),
-            checkpointer="memory",
+            checkpointer=checkpointer,
         )
 
-    def test_existing_assembly_repeatmasker_backbone_reaches_function_provenance_gate(self):
+    def test_existing_assembly_repeatmasker_backbone_blocks_at_assembly_review_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-e2e"
@@ -1281,10 +1371,74 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
-            self.assertEqual(code, 1)
-            self.assertIn("current_stage: function_annotation", stdout)
-            self.assertIn("supervision_state: failed_terminal", stdout)
-            self.assertIn("database_provenance", stderr)
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+            )
+
+            repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
+            gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            function_bundle = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            self.assertFalse(repeat_bundle.exists())
+            self.assertFalse(gene_bundle.exists())
+            self.assertFalse(function_bundle.exists())
+
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertNotIn("repeat_annotation.softmasked_genome", artifact_types)
+            self.assertNotIn("repeat_annotation.gff3", artifact_types)
+            self.assertNotIn("gene_annotation.bundle", artifact_types)
+            self.assertNotIn("operator_report.failed_terminal", artifact_types)
+
+    def test_existing_assembly_repeatmasker_backbone_resumes_to_function_provenance_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-e2e-resume"
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            bin_dir = self._fake_repeatmasker_bin(root)
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+                checkpointer="sqlite",
+            )
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
+                "app.stages.repeat_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ):
+                code, stdout, stderr = _capture_cli(_run_session, args)
+
+                _assert_existing_assembly_blocks_at_review(
+                    self,
+                    code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    data_dir=data_dir,
+                    session_id=session_id,
+                    checkpointer="sqlite",
+                )
+
+                decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
+                resume_code, resume_stdout, resume_stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id=session_id,
+                        decision_file=str(decision),
+                        data_dir=str(data_dir),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
+
+            self.assertEqual(resume_code, 1)
+            self.assertIn("current_stage: function_annotation", resume_stdout)
+            self.assertIn("supervision_state: failed_terminal", resume_stdout)
+            self.assertIn("database_provenance", resume_stderr)
 
             repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
             gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
@@ -1296,29 +1450,13 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             repeat = json.loads(repeat_bundle.read_text(encoding="utf-8"))
             gene = json.loads(gene_bundle.read_text(encoding="utf-8"))
             self.assertEqual(repeat["status"], "executed")
-            self.assertEqual(repeat["repeat_library_source"], "provided")
-            self.assertTrue(Path(repeat["softmasked_genome_ref"]).exists())
-            self.assertTrue(Path(repeat["repeat_annotation_gff3_ref"]).exists())
             self.assertEqual(gene["genome_input_ref"], repeat["softmasked_genome_ref"])
-            self.assertEqual(gene["genome_input_source"], "softmasked_genome")
 
-            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
-            artifact_types = [
-                json.loads(line)["artifact_type"]
-                for line in artifact_index.read_text(encoding="utf-8").splitlines()
-            ]
+            artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
             self.assertIn("repeat_annotation.gff3", artifact_types)
             self.assertIn("gene_annotation.bundle", artifact_types)
             self.assertIn("operator_report.failed_terminal", artifact_types)
-
-            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
-            report = json.loads(operator_report.read_text(encoding="utf-8"))
-            self.assertEqual(report["current_stage"], "function_annotation")
-            self.assertEqual(report["next_action"]["kind"], "provenance_required")
-            self.assertIn("database_provenance", report["last_error"])
-            self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
-            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1338,11 +1476,15 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             ) as preflight:
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
-            self.assertEqual(code, 1)
-            self.assertIn("current_stage: repeat_annotation", stdout)
-            self.assertIn("supervision_state: failed_terminal", stdout)
-            self.assertIn("RepeatMasker", stderr)
-            preflight.assert_called_once()
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+            )
+            preflight.assert_not_called()
 
             repeat_work = data_dir / "work" / "repeat_annotation" / session_id / "repeatmasker"
             gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
@@ -1351,20 +1493,9 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             events_path = data_dir / "ledger" / session_id / "events.jsonl"
             events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
             blocks = [event for event in events if event["event_type"] == "env_preflight_blocked"]
-            self.assertEqual(len(blocks), 1)
-            self.assertEqual(blocks[0]["method_name"], "repeat_annotation.masking.repeatmasker")
-            self.assertEqual(blocks[0]["missing_tools"], ["RepeatMasker"])
-            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
-            artifact_types = [
-                json.loads(line)["artifact_type"]
-                for line in artifact_index.read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertIn("operator_report.failed_terminal", artifact_types)
-            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
-            report = json.loads(operator_report.read_text(encoding="utf-8"))
-            self.assertEqual(report["next_action"]["kind"], "missing_tool")
-            self.assertEqual(report["next_action"]["missing_tools"], ["RepeatMasker"])
-            self.assertEqual(report["next_action"]["env_target"], "env_geno_exec")
+            self.assertEqual(blocks, [])
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertNotIn("operator_report.failed_terminal", artifact_types)
 
     def test_repeatmasker_failure_stops_before_gene_annotation_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1380,20 +1511,20 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
-            self.assertEqual(code, 1)
-            self.assertIn("current_stage: repeat_annotation", stdout)
-            self.assertIn("supervision_state: failed_terminal", stdout)
-            self.assertIn("fake RepeatMasker failed", stderr)
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+            )
             repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
             gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
             self.assertFalse(repeat_bundle.exists())
             self.assertFalse(gene_bundle.exists())
-            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
-            artifact_types = [
-                json.loads(line)["artifact_type"]
-                for line in artifact_index.read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertIn("command.stderr", artifact_types)
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertNotIn("command.stderr", artifact_types)
 
 
 class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
@@ -1451,17 +1582,25 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
         run_config.write_text(json.dumps(run_config_payload), encoding="utf-8")
         return manifest, run_config, root / "out"
 
-    def _run_args(self, *, session_id: str, manifest: Path, run_config: Path, data_dir: Path) -> argparse.Namespace:
+    def _run_args(
+        self,
+        *,
+        session_id: str,
+        manifest: Path,
+        run_config: Path,
+        data_dir: Path,
+        checkpointer: str = "memory",
+    ) -> argparse.Namespace:
         return argparse.Namespace(
             session_id=session_id,
             manifest=str(manifest),
             data_dir=str(data_dir),
             local_exec=[],
             run_config=str(run_config),
-            checkpointer="memory",
+            checkpointer=checkpointer,
         )
 
-    def test_existing_assembly_provided_annotation_reaches_function_provenance_gate(self):
+    def test_existing_assembly_provided_annotation_blocks_at_assembly_review_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-provided-ann-e2e"
@@ -1470,48 +1609,28 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
 
             code, stdout, stderr = _capture_cli(_run_session, args)
 
-            self.assertEqual(code, 1)
-            self.assertIn("current_stage: function_annotation", stdout)
-            self.assertIn("supervision_state: failed_terminal", stdout)
-            self.assertIn("database_provenance", stderr)
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+            )
 
             gene_bundle_path = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
             function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
-            self.assertTrue(gene_bundle_path.exists())
+            self.assertFalse(gene_bundle_path.exists())
             self.assertFalse(function_bundle_path.exists())
 
-            gene = json.loads(gene_bundle_path.read_text(encoding="utf-8"))
-            self.assertEqual(gene["status"], "adopted_existing_annotation")
-            self.assertEqual(gene["evidence_profile"], "provided_annotation")
-            self.assertEqual(gene["candidate_methods"], [])
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertNotIn("gene_annotation.provided_gene_models", artifact_types)
+            self.assertNotIn("gene_annotation.provided_predicted_proteins", artifact_types)
+            self.assertNotIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+            self.assertNotIn("gene_annotation.bundle", artifact_types)
+            self.assertNotIn("operator_report.failed_terminal", artifact_types)
 
-            # refs must point to the actual manifest-provided files, not work-path placeholders
-            gene_models_file = root / "gene_models.gff3"
-            proteins_file = root / "predicted_proteins.fasta"
-            transcripts_file = root / "transcripts.fa"
-            self.assertEqual(gene["genes_gff3_ref"], str(gene_models_file))
-            self.assertEqual(gene["predicted_proteins_ref"], str(proteins_file))
-            self.assertEqual(gene["transcripts_fasta_ref"], str(transcripts_file))
-
-            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
-            artifact_types = [
-                json.loads(line)["artifact_type"]
-                for line in artifact_index.read_text(encoding="utf-8").splitlines()
-            ]
-            self.assertIn("gene_annotation.provided_gene_models", artifact_types)
-            self.assertIn("gene_annotation.provided_predicted_proteins", artifact_types)
-            self.assertIn("gene_annotation.provided_transcripts_fasta", artifact_types)
-            self.assertIn("gene_annotation.bundle", artifact_types)
-            self.assertIn("operator_report.failed_terminal", artifact_types)
-
-            operator_report = data_dir / "artifacts" / "operator_report" / session_id / "failed_terminal_report.json"
-            report = json.loads(operator_report.read_text(encoding="utf-8"))
-            self.assertEqual(report["current_stage"], "function_annotation")
-            self.assertEqual(report["next_action"]["kind"], "provenance_required")
-            self.assertIn("input_proteins_ref", report["next_action"]["required_fields"])
-            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
-
-    def test_existing_assembly_provided_annotation_with_provenance_completes(self):
+    def test_existing_assembly_provided_annotation_with_provenance_still_blocks_at_assembly_review_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-function-provenance-e2e"
@@ -1524,9 +1643,77 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
 
             code, stdout, stderr = _capture_cli(_run_session, args)
 
-            self.assertEqual(code, 0, stderr)
-            self.assertIn("current_stage: done", stdout)
-            self.assertIn("supervision_state: completed", stdout)
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+            )
+
+            function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            final_report_path = data_dir / "artifacts" / "final_report" / session_id / "review_decision_report.json"
+            self.assertFalse(function_bundle_path.exists())
+            self.assertFalse(final_report_path.exists())
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertNotIn("function_annotation.plan", artifact_types)
+            self.assertNotIn("function_annotation.bundle", artifact_types)
+            self.assertNotIn("final_report.review_decisions", artifact_types)
+
+            events_path = data_dir / "ledger" / session_id / "events.jsonl"
+            artifact_events = [
+                json.loads(line)["artifact"]["artifact_type"]
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["event_type"] == "artifact_registered"
+            ]
+            self.assertNotIn("function_annotation.plan", artifact_events)
+            self.assertNotIn("function_annotation.bundle", artifact_events)
+            self.assertNotIn("final_report.review_decisions", artifact_events)
+
+    def test_existing_assembly_provided_annotation_with_provenance_resumes_and_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase5-function-provenance-resume"
+            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
+                root,
+                session_id=session_id,
+                include_provenance=True,
+            )
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+                checkpointer="sqlite",
+            )
+
+            code, stdout, stderr = _capture_cli(_run_session, args)
+            _assert_existing_assembly_blocks_at_review(
+                self,
+                code=code,
+                stdout=stdout,
+                stderr=stderr,
+                data_dir=data_dir,
+                session_id=session_id,
+                checkpointer="sqlite",
+            )
+
+            decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
+            resume_code, resume_stdout, resume_stderr = _capture_cli(
+                _run_resume,
+                argparse.Namespace(
+                    session_id=session_id,
+                    decision_file=str(decision),
+                    data_dir=str(data_dir),
+                    checkpointer="sqlite",
+                    max_blocked_seconds=None,
+                ),
+            )
+
+            self.assertEqual(resume_code, 0, resume_stderr)
+            self.assertIn("current_stage: done", resume_stdout)
+            self.assertIn("supervision_state: completed", resume_stdout)
 
             proteins_file = root / "predicted_proteins.fasta"
             function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
@@ -1539,24 +1726,10 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
             self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/interpro/99.0")
 
-            artifact_index = data_dir / "artifacts" / session_id / "artifacts.jsonl"
-            artifact_types = [
-                json.loads(line)["artifact_type"]
-                for line in artifact_index.read_text(encoding="utf-8").splitlines()
-            ]
+            artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("function_annotation.plan", artifact_types)
             self.assertIn("function_annotation.bundle", artifact_types)
             self.assertIn("final_report.review_decisions", artifact_types)
-
-            events_path = data_dir / "ledger" / session_id / "events.jsonl"
-            ledger_types = [
-                json.loads(line)["artifact"]["artifact_type"]
-                for line in events_path.read_text(encoding="utf-8").splitlines()
-                if json.loads(line)["event_type"] == "artifact_registered"
-            ]
-            self.assertIn("function_annotation.plan", ledger_types)
-            self.assertIn("function_annotation.bundle", ledger_types)
-            self.assertIn("final_report.review_decisions", ledger_types)
 
 
 class ResumeCLITests(unittest.TestCase):

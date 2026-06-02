@@ -387,7 +387,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
-    def test_invalid_decision_value_fails(self):
+    def test_unknown_decision_value_is_schema_valid(self):
         raw = {
             "session_id": "s1",
             "stage": "assembly_review",
@@ -395,8 +395,8 @@ class ValidationTests(unittest.TestCase):
             "candidate_id": "flye",
             "decided_by": "human",
         }
-        with self.assertRaises(Exception):
-            ResumeReviewRequest.model_validate(raw)
+        request = ResumeReviewRequest.model_validate(raw)
+        self.assertEqual(request.decision, "invalid_decision")
 
     def test_unsupported_stage_fails(self):
         raw = {
@@ -405,8 +405,8 @@ class ValidationTests(unittest.TestCase):
             "decision": "accept",
             "decided_by": "human",
         }
-        with self.assertRaises(Exception):
-            ResumeReviewRequest.model_validate(raw)
+        request = ResumeReviewRequest.model_validate(raw)
+        self.assertEqual(request.stage, "genome_survey")
 
 
 class DecisionBriefTests(unittest.TestCase):

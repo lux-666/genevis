@@ -464,7 +464,7 @@ def _interactive_gate_loop(
         resume_payload = {
             "source": "interactive_gate",
             "decision_artifact_ref": str(decision_path),
-            "decision": {"stage": request.stage, "decision": request.decision},
+            "decision": {"stage": request.stage, "gate_id": request.gate_id, "decision": request.decision},
         }
         ledger.record_event(session_id, "resume_started", resume_payload)
 
@@ -866,6 +866,7 @@ def _run_resume(args: argparse.Namespace) -> int:
         "max_blocked_seconds": getattr(args, "max_blocked_seconds", None),
         "decision": {
             "stage": decision.stage,
+            "gate_id": decision.gate_id,
             "decision": decision.decision,
             "candidate_id": decision.candidate_id,
             "method_name": decision.method_name,

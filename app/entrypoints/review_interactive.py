@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.review.gates import find_review_gate, registered_review_stage_label
+
 
 # ---------------------------------------------------------------------------
 # Rendering
@@ -32,7 +34,7 @@ def render_blocked_summary(summary: dict[str, Any]) -> None:
     elif stage == "hic_scaffolding":
         _render_hic_scaffolding(requirements, summary)
     else:
-        print(f"decisions_allowed: {requirements.get('decisions_allowed', [])}")
+        _render_generic_gate(requirements)
 
     report = summary.get("latest_review_request_artifact")
     if isinstance(report, dict) and report.get("file_path"):
@@ -87,6 +89,21 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
         val = interrupt.get(key) or requirements.get(key)
         if val:
             print(f"{key}: {val}")
+
+
+def _render_generic_gate(requirements: dict) -> None:
+    decisions = requirements.get("decisions_allowed", [])
+    print(f"decisions_allowed: {decisions}")
+    candidate_ids = requirements.get("candidate_ids") or []
+    if candidate_ids:
+        print("\ncandidates:")
+        for cid in candidate_ids:
+            print(f"  - {cid}")
+    methods = requirements.get("candidate_methods") or []
+    if methods:
+        print("\ncandidate_methods:")
+        for method in methods:
+            print(f"  - {method}")
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +226,58 @@ def prompt_hic_scaffolding_decision(
         "notes": [notes_raw] if notes_raw else ["interactive review"],
         "decided_by": "human",
     }
+
+
+def prompt_generic_gate_decision(
+    requirements: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Prompt for a registered gate without a specialized adapter."""
+    stage = requirements.get("stage")
+    decisions = requirements.get("decisions_allowed", [])
+    candidate_ids = requirements.get("candidate_ids") or []
+    methods = requirements.get("candidate_methods") or []
+
+    decision = _prompt_choice("decision", decisions)
+    if decision is None:
+        return None
+
+    candidate_id = None
+    method_name = None
+    if candidate_ids and decision not in {"skip", "stop_human_review"}:
+        if len(candidate_ids) == 1:
+            candidate_id = candidate_ids[0]
+            print(f"  auto-selected candidate: {candidate_id}")
+        else:
+            candidate_id = _prompt_choice("candidate", candidate_ids)
+            if candidate_id is None:
+                return None
+    if methods and decision == "select_method":
+        if len(methods) == 1:
+            method_name = methods[0]
+            print(f"  auto-selected method: {method_name}")
+        else:
+            method_name = _prompt_choice("method", methods)
+            if method_name is None:
+                return None
+
+    try:
+        notes_raw = input("notes (optional): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        notes_raw = ""
+
+    result: dict[str, Any] = {
+        "stage": stage,
+        "gate_id": requirements.get("gate_id"),
+        "decision": decision,
+        "notes": [notes_raw] if notes_raw else ["interactive review"],
+        "decided_by": "human",
+    }
+    if candidate_id:
+        result["candidate_id"] = candidate_id
+        result["rejected_candidates"] = [candidate for candidate in candidate_ids if candidate != candidate_id]
+    if method_name:
+        result["method_name"] = method_name
+    return result
 
 
 def _prompt_choice(label: str, options: list[str]) -> str | None:
@@ -341,6 +410,9 @@ def build_decision_brief(
     elif stage == "hic_scaffolding":
         brief["candidates"] = _brief_hic_candidates(requirements, request_payload)
         brief["evidence"] = _brief_hic_evidence(requirements, request_payload, summary)
+    else:
+        brief["candidates"] = _brief_generic_candidates(requirements, request_payload)
+        brief["evidence"] = _brief_generic_evidence(requirements, request_payload)
 
     next_action = summary.get("next_action") or {}
     if next_action.get("relevant_refs"):
@@ -504,6 +576,42 @@ def _brief_hic_evidence(
     return evidence
 
 
+def _brief_generic_candidates(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    payload_candidates = (request_payload or {}).get("candidates") or []
+    candidates = payload_candidates if isinstance(payload_candidates, list) else []
+    result: list[dict[str, Any]] = []
+    for cid in requirements.get("candidate_ids") or []:
+        entry: dict[str, Any] = {"id": cid}
+        match = next((c for c in candidates if isinstance(c, dict) and c.get("candidate_id") == cid), {})
+        if isinstance(match, dict):
+            entry["status"] = match.get("status")
+            if match.get("method_name"):
+                entry["method"] = match["method_name"]
+        result.append(entry)
+    for method in requirements.get("candidate_methods") or []:
+        if any(candidate.get("method") == method for candidate in result):
+            continue
+        result.append({"id": method, "method": method})
+    return result
+
+
+def _brief_generic_evidence(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    report_refs = requirements.get("report_refs") or {}
+    if report_refs:
+        evidence["report_refs"] = report_refs
+    notes = (request_payload or {}).get("notes") or []
+    if notes:
+        evidence["notes"] = notes
+    return evidence
+
+
 # ---------------------------------------------------------------------------
 # Shared: inspect → prompt → validate → persist
 # ---------------------------------------------------------------------------
@@ -538,10 +646,11 @@ def collect_gate_decision(
 
     requirements = summary.get("decision_requirements") or {}
     stage = requirements.get("stage")
-    if stage not in ("assembly_review", "hic_scaffolding"):
+    gate = find_review_gate(stage, requirements.get("gate_id"))
+    if gate is None:
         print(
             f"error: unsupported review stage {stage!r}; "
-            "only assembly_review and hic_scaffolding are supported",
+            f"registered review stages: {registered_review_stage_label()}",
             file=sys.stderr,
         )
         return None
@@ -549,15 +658,18 @@ def collect_gate_decision(
     brief = build_decision_brief(summary, data_dir)
     render_decision_brief(brief)
 
-    if stage == "assembly_review":
+    if gate.prompt_adapter == "assembly_review":
         raw_decision = prompt_assembly_review_decision(requirements)
-    else:
+    elif gate.prompt_adapter == "hic_scaffolding":
         raw_decision = prompt_hic_scaffolding_decision(requirements)
+    else:
+        raw_decision = prompt_generic_gate_decision(requirements)
 
     if raw_decision is None:
         print("review cancelled")
         return None
 
+    raw_decision["gate_id"] = requirements.get("gate_id") or gate.gate_id
     raw_decision["session_id"] = session_id
     try:
         request = ResumeReviewRequest.model_validate(raw_decision)

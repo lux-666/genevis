@@ -473,9 +473,12 @@ class ReviewResumeTests(unittest.TestCase):
                 unexpected=True,
             )
 
-    def test_resume_request_rejects_impossible_decision(self):
-        with self.assertRaises(ValidationError):
-            ResumeReviewRequest(session_id="s1", stage="assembly_review", decision="approve")
+    def test_resume_rejects_decision_not_allowed_by_gate(self):
+        state = _assembly_blocked_state()
+        request = ResumeReviewRequest(session_id="s1", stage="assembly_review", decision="approve")
+
+        with self.assertRaisesRegex(ResumeValidationError, "not allowed"):
+            resume_review_state(state, request)
 
     def test_inspect_session_reads_durable_records(self):
         state = _assembly_blocked_state()
@@ -514,6 +517,7 @@ class ReviewResumeTests(unittest.TestCase):
         summary = inspect_session("s1", state["data_dir"])
         template = build_resume_decision_template(summary)
 
+        self.assertEqual(template["gate_id"], "assembly_review")
         guidance = template["metadata"]["template_guidance"]
         self.assertEqual(guidance["report_refs"]["assembly_review_report"], "reports/assembly_review_report.md")
         self.assertEqual(guidance["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
@@ -653,15 +657,15 @@ class LoadResumeReviewRequestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "validation"):
                 load_resume_review_request(path)
 
-    def test_unknown_decision_raises_value_error(self):
+    def test_unknown_decision_loads_for_registry_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decision.json"
             path.write_text(
                 json.dumps({"session_id": "s1", "stage": "assembly_review", "decision": "approve"}),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "validation"):
-                load_resume_review_request(path)
+            request = load_resume_review_request(path)
+            self.assertEqual(request.decision, "approve")
 
 
 def _assembly_blocked_state() -> dict:

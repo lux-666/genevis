@@ -11,6 +11,12 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
+from app.review.gates import (
+    apply_review_gate_decision,
+    find_review_gate,
+    get_review_gate,
+    registered_review_stage_label,
+)
 from app.review.records import counts_by_origin, decision_records
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.state import TopLevelState
@@ -169,15 +175,10 @@ def resume_review_state(
     if timeout and timeout.get("expired"):
         return _timeout_failed_update(state, request, timeout)
 
-    if request.stage == "assembly_review":
-        from app.stages.assembly_review.nodes import apply_assembly_review_resume_decision
-
-        return apply_assembly_review_resume_decision(state, request)
-    if request.stage == "hic_scaffolding":
-        from app.stages.hic_scaffolding.nodes import apply_hic_scaffolding_resume_decision
-
-        return apply_hic_scaffolding_resume_decision(state, request)
-    raise ResumeValidationError(f"Unsupported resume stage: {request.stage}")
+    try:
+        return apply_review_gate_decision(state, request)
+    except KeyError as exc:
+        raise ResumeValidationError(f"Unsupported resume stage: {request.stage}") from exc
 
 
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
@@ -197,13 +198,18 @@ def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewReq
         raise ResumeValidationError("resume requires an active_interrupt")
     if active_interrupt.get("stage") != request.stage:
         raise ResumeValidationError("resume stage does not match active_interrupt.stage")
+    active_gate_id = active_interrupt.get("gate_id")
+    if request.gate_id and active_gate_id and request.gate_id != active_gate_id:
+        raise ResumeValidationError("resume gate_id does not match active_interrupt.gate_id")
     _ensure_decision_allowed_by_interrupt(active_interrupt, request)
 
 
 def _ensure_decision_allowed_by_interrupt(active_interrupt: dict[str, Any], request: ResumeReviewRequest) -> None:
     allowed = active_interrupt.get("decisions_allowed")
-    if allowed is None and request.stage == "hic_scaffolding":
-        allowed = ["select_method", "skip", "stop_human_review"]
+    if allowed is None:
+        gate = find_review_gate(request.stage, active_interrupt.get("gate_id"))
+        if gate is not None:
+            allowed = list(gate.decisions_allowed)
     if allowed is not None and request.decision not in allowed:
         raise ResumeValidationError(f"decision {request.decision!r} is not allowed by active_interrupt")
 
@@ -216,16 +222,10 @@ def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, t
             "metadata": {**request.metadata, "blocked_timeout": timeout},
         }
     )
-    if request.stage == "assembly_review":
-        from app.stages.assembly_review.nodes import apply_assembly_review_resume_decision
-
-        update = apply_assembly_review_resume_decision(state, timeout_request)
-    elif request.stage == "hic_scaffolding":
-        from app.stages.hic_scaffolding.nodes import apply_hic_scaffolding_resume_decision
-
-        update = apply_hic_scaffolding_resume_decision(state, timeout_request)
-    else:
-        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}")
+    try:
+        update = apply_review_gate_decision(state, timeout_request)
+    except KeyError as exc:
+        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
     return {**update, "last_error": f"{request.stage} blocked timeout expired"}
 
 
@@ -255,12 +255,17 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
     if not active_interrupt:
         return None
     stage = active_interrupt.get("stage")
+    gate = find_review_gate(stage, active_interrupt.get("gate_id"))
+    decisions_allowed = active_interrupt.get("decisions_allowed")
+    if decisions_allowed is None and gate is not None:
+        decisions_allowed = list(gate.decisions_allowed)
     if stage == "assembly_review":
         return _with_review_policy_requirements(
             active_interrupt,
             {
                 "stage": stage,
-                "decisions_allowed": active_interrupt.get("decisions_allowed", []),
+                "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+                "decisions_allowed": decisions_allowed or [],
                 "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
                 "candidate_final_assembly_refs": _candidate_final_assembly_refs(active_interrupt.get("candidates", [])),
                 "report_refs": dict(active_interrupt.get("report_refs") or {}),
@@ -273,12 +278,23 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
             active_interrupt,
             {
                 "stage": stage,
-                "decisions_allowed": active_interrupt.get("decisions_allowed", ["select_method", "skip", "stop_human_review"]),
-                "candidate_methods": active_interrupt.get("candidate_methods", []),
+                "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+                "decisions_allowed": decisions_allowed or [],
+                "candidate_methods": _candidate_methods(active_interrupt),
                 "requires_structured_resume": True,
             },
         )
-    return _with_review_policy_requirements(active_interrupt, {"stage": stage, "requires_structured_resume": True})
+    return _with_review_policy_requirements(
+        active_interrupt,
+        {
+            "stage": stage,
+            "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+            "decisions_allowed": decisions_allowed or [],
+            "candidate_ids": _candidate_ids(active_interrupt),
+            "candidate_methods": _candidate_methods(active_interrupt),
+            "requires_structured_resume": True,
+        },
+    )
 
 
 def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
@@ -293,6 +309,31 @@ def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
         if candidate_id and final_ref:
             refs[str(candidate_id)] = str(final_ref)
     return refs
+
+
+def _candidate_ids(payload: dict[str, Any]) -> list[str]:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [
+        str(candidate.get("candidate_id"))
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("candidate_id") is not None
+    ]
+
+
+def _candidate_methods(payload: dict[str, Any]) -> list[str]:
+    methods = payload.get("candidate_methods")
+    if isinstance(methods, list):
+        return [str(method) for method in methods]
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [
+        str(candidate.get("method_name"))
+        for candidate in candidates
+        if isinstance(candidate, dict) and candidate.get("method_name") is not None
+    ]
 
 
 def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
@@ -508,11 +549,16 @@ def build_result_next_action(result: dict[str, Any]) -> dict[str, Any]:
 def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     requirements = summary.get("decision_requirements") or {}
     stage = requirements.get("stage")
-    if stage not in {"assembly_review", "hic_scaffolding"}:
-        raise ResumeValidationError("no active assembly_review or hic_scaffolding decision requirements")
+    gate_id = requirements.get("gate_id")
+    try:
+        gate = get_review_gate(stage, gate_id)
+    except KeyError as exc:
+        raise ResumeValidationError(
+            f"no active registered review decision requirements; registered stages: {registered_review_stage_label()}"
+        ) from exc
 
     decisions_allowed = list(requirements.get("decisions_allowed") or [])
-    decision = _preferred_template_decision(stage, decisions_allowed)
+    decision = _preferred_template_decision(gate, decisions_allowed)
     guidance = {
         "decisions_allowed": decisions_allowed,
         "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
@@ -524,34 +570,34 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     template: dict[str, Any] = {
         "session_id": summary.get("session_id"),
         "stage": stage,
+        "gate_id": gate.gate_id,
         "decision": decision,
         "notes": ["replace this note with the operator rationale"],
         "metadata": {"template_guidance": guidance},
         "decided_by": "human",
         "rationale_artifact_ref": None,
     }
-    if stage == "assembly_review":
+    if requirements.get("candidate_ids"):
         candidate_ids = list(requirements.get("candidate_ids") or [])
         candidate_refs = dict(requirements.get("candidate_final_assembly_refs") or {})
         selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
         guidance["candidate_ids"] = candidate_ids
         guidance["candidate_final_assembly_refs"] = candidate_refs
         template["candidate_id"] = selected_candidate
-        template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
+        if "final_assembly_ref" in gate.required_resume_fields or candidate_refs:
+            template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
         template["rejected_candidates"] = []
-    else:
+    if requirements.get("candidate_methods"):
         candidate_methods = list(requirements.get("candidate_methods") or [])
         guidance["candidate_methods"] = candidate_methods
         template["method_name"] = candidate_methods[0] if candidate_methods else "<method_name>"
     return template
 
 
-def _preferred_template_decision(stage: str, decisions_allowed: list[str]) -> str:
-    if stage == "hic_scaffolding" and "select_method" in decisions_allowed:
-        return "select_method"
-    if stage == "assembly_review" and "accept" in decisions_allowed:
-        return "accept"
-    return decisions_allowed[0] if decisions_allowed else ("select_method" if stage == "hic_scaffolding" else "accept")
+def _preferred_template_decision(gate, decisions_allowed: list[str]) -> str:
+    if gate.template_preferred_decision in decisions_allowed:
+        return str(gate.template_preferred_decision)
+    return decisions_allowed[0] if decisions_allowed else (gate.template_preferred_decision or gate.decisions_allowed[0])
 
 
 def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -> dict[str, Any]:
@@ -575,10 +621,9 @@ def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -
     else:
         resume_summary = f"Human review is required for {stage}; write and edit a decision file, then resume."
     fields = ["session_id", "stage", "decision", "decided_by"]
-    if stage == "assembly_review":
-        fields.extend(["candidate_id", "final_assembly_ref"])
-    if stage == "hic_scaffolding":
-        fields.append("method_name")
+    gate = find_review_gate(stage, requirements.get("gate_id"))
+    if gate is not None:
+        fields.extend(field for field in gate.required_resume_fields if field not in fields)
     return {
         "kind": "review_decision_required",
         "summary": resume_summary,
@@ -841,9 +886,15 @@ def _decision_requirements_from_artifact(
     if not isinstance(payload, dict):
         return None
     stage = payload.get("stage")
+    gate_id = payload.get("gate_id")
+    gate = find_review_gate(stage, gate_id)
+    decisions_allowed = list(payload.get("decisions_allowed") or [])
+    if not decisions_allowed and gate is not None:
+        decisions_allowed = list(gate.decisions_allowed)
     requirements: dict[str, Any] = {
         "stage": stage,
-        "decisions_allowed": list(payload.get("decisions_allowed") or []),
+        "gate_id": gate_id or (gate.gate_id if gate else None),
+        "decisions_allowed": decisions_allowed,
         "requires_structured_resume": True,
     }
     candidates = payload.get("candidates")
@@ -854,9 +905,9 @@ def _decision_requirements_from_artifact(
             if isinstance(c, dict) and c.get("candidate_id") is not None
         ]
         requirements["candidate_final_assembly_refs"] = _candidate_final_assembly_refs(candidates)
-    candidate_methods = payload.get("candidate_methods")
-    if isinstance(candidate_methods, list):
-        requirements["candidate_methods"] = list(candidate_methods)
+    candidate_methods = _candidate_methods(payload)
+    if candidate_methods:
+        requirements["candidate_methods"] = candidate_methods
     report_refs = payload.get("report_refs")
     if isinstance(report_refs, dict):
         requirements["report_refs"] = dict(report_refs)

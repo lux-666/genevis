@@ -180,7 +180,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         busco.chmod(0o755)
         return bin_dir
 
-    def test_existing_assembly_auto_advances_deterministically(self):
+    def test_existing_assembly_blocks_for_human_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly_fasta = Path(tmpdir) / "existing.fa"
             assembly_fasta.write_text(">ctg1\nACGT\n", encoding="utf-8")
@@ -199,27 +199,26 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 registry_ref=str(registry),
                 data_dir=tmpdir,
             )
+            state["current_stage"] = "assembly_review"
             graph = build_stage()
             result = graph.invoke(state)
-            self.assertEqual(result["current_stage"], "hic_scaffolding")
-            self.assertEqual(result["supervision_state"], "running_stage")
+            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertIsNotNone(result.get("active_interrupt"))
+            self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
+            self.assertIn("accept", result["active_interrupt"]["decisions_allowed"])
+            self.assertIn("pass", result["active_interrupt"]["decisions_allowed"])
             ar_out = result["stage_outputs"]["assembly_review"]
-            self.assertEqual(ar_out["status"], "completed")
-            self.assertEqual(ar_out["decision"], "accept")
-            self.assertEqual(ar_out["action_type"], "pass")
-            self.assertEqual(ar_out["selected_candidate_id"], "existing_assembly")
-            self.assertEqual(ar_out["final_assembly_ref"], str(assembly_fasta))
-            self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], str(assembly_fasta))
-            decision_ref = Path(ar_out["review_decision_artifact_ref"])
-            self.assertTrue(decision_ref.exists())
-            decision_payload = json.loads(decision_ref.read_text(encoding="utf-8"))
-            self.assertEqual(decision_payload["decision"], "accept")
-            self.assertEqual(decision_payload["final_assembly_ref"], str(assembly_fasta))
-            action_ref = Path(ar_out["assembly_review_action_artifact_ref"])
-            self.assertTrue(action_ref.exists())
-            action_payload = json.loads(action_ref.read_text(encoding="utf-8"))
-            self.assertEqual(action_payload["action_type"], "pass")
-            self.assertEqual(action_payload["final_assembly_for_scaffolding_or_annotation"], str(assembly_fasta))
+            self.assertEqual(ar_out["status"], "blocked_human")
+            self.assertEqual(ar_out["candidates"][0]["candidate_id"], "existing_assembly")
+            self.assertEqual(ar_out["candidates"][0]["final_assembly_ref"], str(assembly_fasta))
+            self.assertFalse(ar_out["auto_decidable"])
+            request_ref = Path(ar_out["review_request_artifact_ref"])
+            self.assertTrue(request_ref.exists())
+            request_payload = json.loads(request_ref.read_text(encoding="utf-8"))
+            self.assertEqual(request_payload["stage"], "assembly_review")
+            self.assertEqual(request_payload["candidates"][0]["candidate_id"], "existing_assembly")
+            self.assertFalse(request_payload["auto_decidable"])
 
     def test_review_decision_artifact_allows_post_review_actions(self):
         for decision in ["pass", "polish"]:
@@ -798,24 +797,40 @@ class AssemblyReviewStageTests(unittest.TestCase):
             eval_payload = json.loads(Path(ar_out["eval_bundle_ref"]).read_text(encoding="utf-8"))
             self.assertIn("clean_short_dna_reads", eval_payload["available_inputs"])
 
-    def test_existing_assembly_writes_review_decision_ledger(self):
+    def test_existing_assembly_writes_review_requested_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_fasta = Path(tmpdir) / "existing.fa"
+            assembly_fasta.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "test-session:assembly_fasta_registered:existing.fa",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_fasta),
+                    }
+                ],
+            )
             state = self._build_state(
                 entry_mode="existing_assembly",
-                registry_ref=f"{tmpdir}/registry.json",
+                registry_ref=str(registry),
                 data_dir=tmpdir,
             )
+            state["current_stage"] = "assembly_review"
             graph = build_stage()
             result = graph.invoke(state)
+            self.assertEqual(result["supervision_state"], "blocked_human")
             events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")
             events = [json.loads(line) for line in lines]
+            requested_events = [e for e in events if e["event_type"] == "review_requested"]
             decision_events = [e for e in events if e["event_type"] == "review_decision"]
-            self.assertEqual(len(decision_events), 1)
-            self.assertEqual(decision_events[0]["decision"], "accept")
-            self.assertEqual(decision_events[0]["candidate_id"], "existing_assembly")
-            self.assertEqual(decision_events[0]["decided_by"], "auto_rule")
+            self.assertEqual(len(requested_events), 1)
+            self.assertEqual(requested_events[0]["stage"], "assembly_review")
+            self.assertEqual(requested_events[0]["candidates"][0]["candidate_id"], "existing_assembly")
+            self.assertFalse(requested_events[0]["auto_decidable"])
+            self.assertEqual(decision_events, [])
 
     def test_human_gate_writes_review_requested_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:

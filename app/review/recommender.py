@@ -12,16 +12,12 @@ from app.execution.artifacts import append_artifact_records
 from app.llm.factory import build_chat_model
 from app.llm.prompts import PROMPT_ROOT, load_prompt_bundle, render_prompt_messages
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.gates import review_prompt_bundle
 from app.schemas.artifacts import ArtifactMeta
 
 
 class RecommendationError(ValueError):
     """Raised when an LLM recommendation cannot be used."""
-
-
-_REVIEW_RECOMMENDATION_BUNDLES = {
-    "assembly_review": "review.assembly_review_recommend",
-}
 
 
 class RecommendationDraft(BaseModel):
@@ -46,7 +42,7 @@ def recommend_review_decision(
     data_dir: str | Path,
     chat_model: Any | None = None,
 ) -> ResumeReviewRequest:
-    bundle = _load_stage_prompt_bundle(stage)
+    bundle = _load_stage_prompt_bundle(stage, request.gate_id)
     messages = render_prompt_messages(
         bundle,
         {
@@ -95,8 +91,11 @@ def recommend_review_decision(
         raise RecommendationError(f"recommendation failed resume schema validation: {exc}") from exc
 
 
-def _load_stage_prompt_bundle(stage: str):
-    bundle_name = _REVIEW_RECOMMENDATION_BUNDLES.get(stage)
+def _load_stage_prompt_bundle(stage: str, gate_id: str | None = None):
+    try:
+        bundle_name = review_prompt_bundle(stage, gate_id)
+    except KeyError as exc:
+        raise RecommendationError(f"review gate is not registered for stage: {stage}") from exc
     if not bundle_name:
         raise RecommendationError(f"review recommendation prompt not found for stage: {stage}")
     return load_prompt_bundle(bundle_name)

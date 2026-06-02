@@ -71,9 +71,15 @@ Tasks in `docs/phases/phase6/`:
 5. TUI initial ask plan preview: show a detailed early plan preview that
    matches the final `Run Plan` confirmation style before accepting an
    auto-resolved ask plan.
-6. Hardening beyond the current sqlite resume minimum, including optional
+6. Replan after assembly review (assembly→annotation agent boundary): treat the
+   `assembly_review` gate as the handoff from a virtual assembly agent to a
+   virtual annotation agent, where the continue-downstream decision is the
+   annotation agent making its own intake plan (stages, methods, parameters, or
+   bounce back for a rerun). A future interpretation agent is noted but out of
+   scope.
+7. Hardening beyond the current sqlite resume minimum, including optional
    postgres/backend work if long-running deployments require it.
-7. Lifecycle commands beyond the current structured review resume path, such as
+8. Lifecycle commands beyond the current structured review resume path, such as
    pause, retry, abort, or rebuild, once their semantics are explicitly scoped.
 
 Exit criteria:
@@ -82,3 +88,66 @@ Exit criteria:
   duplicate side effects.
 - User-facing reports explain what was run, what was skipped, and what
   requires human attention.
+
+## Phase 7: Annotation Execution And The Review-Driven Annotation Agent
+
+Goal: make the annotation half of the workflow real. Today `gene_annotation`
+and `function_annotation` are planning-only, `repeat_annotation` executes only
+RepeatMasker against a provided library, `assembly_review` has the full review
+path, and `hic_scaffolding` already has a partial gate/resume path. Phase 7
+turns the downstream stages into a **review-driven annotation agent**: real tool
+execution behind a chain of review gates, each gate using one shared
+policy/recommender/resume mechanism.
+
+This phase carries the three-agent direction recorded in Phase 6 task 06: the
+`assembly_review` gate is the assembly→annotation handoff, it produces the
+`annotation.intake_plan`, and the annotation agent owns everything from
+`hic_scaffolding` onward as a sequence of plan→run→review steps rather than one
+plan that runs to the end.
+
+Unifying idea (the "wait time" model): there are not two separate "auto" and
+"plan" modes. There is **one gate mechanism** with a configurable wait. Wait 0 =
+auto-advance on the recommendation; wait ∞ = plan mode (block until a human
+decides); wait N = block with timeout then auto-advance. A per-gate trigger
+(`auto_decidable=False`) forces a human stop regardless of wait. All of this
+already exists in `policy.py` (`AUTO_DECIDE_NOW` / `BLOCK_INDEFINITE` /
+`BLOCK_WITH_TIMEOUT` / `BLOCK_PENDING_CONFIRM`) and is wired through the current
+assembly-review path; Phase 7 extends it across the annotation chain and folds
+the existing `hic_scaffolding` gate into the same registry.
+
+Tasks in `docs/phases/phase7/` (subjects first; specifics deferred):
+
+1. Generalize the review-gate mechanism beyond hard-coded `assembly_review` /
+   `hic_scaffolding` branches: make the policy/timeout/recommender/resume chain
+   reusable so any annotation gate can declare a recommender prompt bundle and an
+   `auto_decidable` trigger.
+2. Repeat/mask execution end-to-end: run RepeatMasker against an existing repeat
+   library (e.g. Dfam-derived) to produce a masked genome for a real genome,
+   plus a mask-completion review gate that reports what ran, what did not, and
+   the recommended gene-annotation input.
+3. The annotation review chain: consume Phase 6 task 06's
+   `annotation.intake_plan`, then stand up the gate skeleton for the full path —
+   mask review → gene-method planning review → candidate-evidence review →
+   merge/EVM-weight review → final-gene-set + BUSCO review — initially over
+   planning-only methods so the chain is exercised before execution lands.
+4. Gene annotation execution slices: real runners for the gene predictors one
+   method at a time (e.g. an ab-initio path first), mirroring the Flye/YaHS
+   runner pattern, each flipping its registry `execution_support` to executable.
+5. Candidate merge and final gene set: EVM/MAKER-style merge of candidate gene
+   models, gated by the candidate-evidence and merge reviews, producing a final
+   gene set validated by BUSCO.
+6. Function annotation execution slices: real runners for InterProScan / DIAMOND
+   / eggNOG-mapper / KofamScan one method at a time, with database provenance
+   gating retained.
+7. (Stretch / direction) Interpretation agent (agent 3): a new terminal
+   capability that synthesizes assembly + annotation outputs into a biological
+   interpretation. Out of scope until the annotation agent lands.
+
+Exit criteria:
+
+- A real genome can run assembly → masked genome → at least one executed gene
+  prediction → at least one executed function annotation, through the review
+  chain, with each gate honoring its wait/trigger policy.
+- Every newly executed method runs through the same runner/freeze/collect pattern
+  and durable resume as the assembly mainline.
+- The annotation review gates reuse one shared mechanism, not per-stage forks.
