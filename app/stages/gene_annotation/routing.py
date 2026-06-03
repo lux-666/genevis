@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
 
 TERMINAL_STATES = frozenset({"blocked_human", "failed_terminal"})
+
+# Built from GENE_EXECUTABLE_METHODS so adding a new method entry
+# automatically includes its intermediate statuses here.
+_METHOD_EXEC = GENE_EXECUTABLE_METHODS
+
+_INTERMEDIATE_STATUSES = frozenset({"pending_execution"}).union(
+    *(cfg["frozen_status"] for cfg in _METHOD_EXEC.values()),
+    *(cfg["ran_status"] for cfg in _METHOD_EXEC.values()),
+)
 
 
 def _output(state: TopLevelState) -> dict:
@@ -13,6 +23,25 @@ def _output(state: TopLevelState) -> dict:
 
 def _supervision(state: TopLevelState) -> str:
     return str(state.get("supervision_state") or "")
+
+
+def _next_pending_method(state: TopLevelState) -> str | None:
+    """Return the next confirmed executable method not yet executed."""
+    gene_out = _output(state)
+    confirmed = set(gene_out.get("confirmed_methods") or [])
+    executed = set(gene_out.get("executed_methods") or [])
+    pending = (confirmed & set(_METHOD_EXEC.keys())) - executed
+    return sorted(pending)[0] if pending else None
+
+
+def _route_method_status(status: str) -> str | None:
+    """Map a method-specific frozen/ran status to the next routing label."""
+    for cfg in _METHOD_EXEC.values():
+        if status == cfg["frozen_status"]:
+            return f"{cfg['suffix']}_run"
+        if status == cfg["ran_status"]:
+            return f"{cfg['suffix']}_collect"
+    return None
 
 
 def route_after_enter(state: TopLevelState) -> str:
@@ -44,12 +73,10 @@ def route_after_method_plan(state: TopLevelState) -> str:
         return "block_method"
     if status == "methods_confirmed":
         return "run_methods"
-    if status in ("miniprot_frozen", "miniprot_ran"):
+    # All intermediate execution statuses re-enter via the planning stub.
+    if status in _INTERMEDIATE_STATUSES:
         return "run_methods"
     if status == "candidates_ready":
-        confirmed = _output(state).get("confirmed_methods") or []
-        if "gene_annotation.candidate.miniprot" in confirmed:
-            return "run_methods"
         return "block_candidates"
     if status == "candidates_accepted":
         return "merge_prep"
@@ -72,34 +99,61 @@ def route_after_method_planning_gate(state: TopLevelState) -> str:
 
 
 def route_after_run_methods(state: TopLevelState) -> str:
-    """After planning-only stub: proceed to candidate-evidence gate or miniprot execution."""
+    """After planning-only stub: dispatch to next executable method or review."""
     status = _output(state).get("status")
     if status == "failed":
         return "fail"
-    if status == "miniprot_frozen":
-        return "miniprot_run"
-    if status == "miniprot_ran":
-        return "miniprot_collect"
+    # Crash recovery: intermediate method status → route to the right step.
+    routed = _route_method_status(status)
+    if routed:
+        return routed
+    # pending_execution → find the next unexecuted method.
+    if status == "pending_execution":
+        next_method = _next_pending_method(state)
+        if next_method:
+            return f"{_METHOD_EXEC[next_method]['suffix']}_freeze"
     if status == "candidates_ready":
-        confirmed = _output(state).get("confirmed_methods") or []
-        if "gene_annotation.candidate.miniprot" in confirmed:
-            return "miniprot_freeze"
+        return "block_candidates"
+    return "block_candidates"
+
+
+# --- per-method freeze / run / collect routing ----------------------------------
+# Each freeze and run has a per-method router (trivial fail-check).
+# All collect nodes share a single router that can loop back to the next
+# pending method's freeze when multiple executable methods are confirmed.
+
+def _route_after_freeze(state: TopLevelState, suffix: str) -> str:
+    return "fail" if _output(state).get("status") == "failed" else f"{suffix}_run"
+
+
+def _route_after_run(state: TopLevelState, suffix: str) -> str:
+    return "fail" if _output(state).get("status") == "failed" else f"{suffix}_collect"
+
+
+def route_after_method_collect(state: TopLevelState) -> str:
+    """After any method collect: loop to next pending method or proceed to review."""
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "pending_execution":
+        return "run_methods"
     return "block_candidates"
 
 
 def route_after_miniprot_freeze(state: TopLevelState) -> str:
-    """After freezing miniprot: proceed to run or fail."""
-    return "fail" if _output(state).get("status") == "failed" else "miniprot_run"
+    return _route_after_freeze(state, "miniprot")
 
 
 def route_after_miniprot_run(state: TopLevelState) -> str:
-    """After running miniprot: proceed to collect or fail."""
-    return "fail" if _output(state).get("status") == "failed" else "miniprot_collect"
+    return _route_after_run(state, "miniprot")
 
 
-def route_after_miniprot_collect(state: TopLevelState) -> str:
-    """After collecting miniprot artifacts: proceed to candidate-evidence gate."""
-    return "fail" if _output(state).get("status") == "failed" else "block_candidates"
+def route_after_augustus_freeze(state: TopLevelState) -> str:
+    return _route_after_freeze(state, "augustus")
+
+
+def route_after_augustus_run(state: TopLevelState) -> str:
+    return _route_after_run(state, "augustus")
 
 
 def route_after_candidate_gate(state: TopLevelState) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,25 @@ from app.stages.gene_annotation.nodes import (
     build_merge_review_payload,
     _review_triggers,
 )
+
+
+def _fake_gene_method_bins(tmpdir: str) -> Path:
+    """Create fake miniprot and augustus binaries for testing the execution path."""
+    bin_dir = Path(tmpdir) / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    for name, gff_line in [
+        ("miniprot", "ctg1\tminiprot\tgene\t1\t100\t.\t+\t.\tID=g1\n"),
+        ("augustus", "ctg1\tAUGUSTUS\tgene\t1\t500\t.\t+\t.\tID=g1\n"),
+    ]:
+        bin_path = bin_dir / name
+        if not bin_path.exists():
+            bin_path.write_text(
+                "#!/bin/sh\n"
+                f"printf '##gff-version 3\\n{gff_line}'\n",
+                encoding="utf-8",
+            )
+            bin_path.chmod(0o755)
+    return bin_dir
 
 
 def _write_intake_plan(tmpdir: str) -> str:
@@ -96,6 +116,10 @@ class GeneAnnotationStageTests(unittest.TestCase):
             "status": "completed",
             "softmasked_genome_ref": str(softmasked),
             "repeat_annotation_gff3_ref": str(repeats),
+        }
+        bin_dir = _fake_gene_method_bins(tmpdir)
+        state["stage_outputs"]["gene_annotation"] = {
+            "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
         }
         return state
 
@@ -335,6 +359,10 @@ class GeneAnnotationStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["skip_reasons"] = {"repeat_annotation": "repeat_annotation_skipped_by_user"}
             state["stage_outputs"]["hic_scaffolding"] = {"final_assembly_for_annotation": str(assembly)}
+            bin_dir = _fake_gene_method_bins(tmpdir)
+            state["stage_outputs"]["gene_annotation"] = {
+                "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            }
 
             result = build_stage().invoke(state)
 
@@ -389,6 +417,10 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             "repeat_annotation_gff3_ref": str(repeats),
         }
         state["stage_outputs"]["hic_scaffolding"] = {"status": "completed", "final_assembly_for_annotation": str(softmasked)}
+        bin_dir = _fake_gene_method_bins(tmpdir)
+        state["stage_outputs"]["gene_annotation"] = {
+            "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+        }
         return state
 
     def test_enter_rejects_missing_intake_plan_ref(self):

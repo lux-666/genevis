@@ -78,3 +78,7 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - miniprot
+  gene_annotation.candidate.augustus:
+    conda_env: env_geno_exec
+    required_tools:
+      - augustus

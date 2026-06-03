@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -213,6 +214,12 @@ class RunTraceAnnotationChainTests(unittest.TestCase):
             registry.write_text(json.dumps({"session_id": "s1", "assets": []}), encoding="utf-8")
             softmasked = tmp_path / "softmasked.fa"
             softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
+            # Fake gene method binaries so augustus execution succeeds.
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir(exist_ok=True)
+            aug = bin_dir / "augustus"
+            aug.write_text("#!/bin/sh\nprintf '##gff-version 3\\nctg1\\tAUGUSTUS\\tgene\\t1\\t500\\t.\\t+\\t.\\tID=g1\\n'\n", encoding="utf-8")
+            aug.chmod(0o755)
             # The annotation intake artifact is recorded at assembly_review.
             _register_artifact(
                 tmp,
@@ -229,6 +236,9 @@ class RunTraceAnnotationChainTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": self._intake_plan(tmp_path)},
                 "repeat_annotation": {"status": "completed", "softmasked_genome_ref": str(softmasked)},
+                "gene_annotation": {
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+                },
             }
 
             result = build_stage().invoke(state)

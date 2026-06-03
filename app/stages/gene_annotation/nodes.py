@@ -745,13 +745,25 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
 # --- planning-only method runner stub ------------------------------------------
 
 def run_gene_methods_planning_only(state: TopLevelState) -> dict:
-    """Planning-only stub: record expected candidate outputs without execution."""
+    """Record expected candidate outputs and gate to execution or review."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "methods_confirmed":
         return {}
     methods = list(gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or [])
     work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
     candidate_refs = {method: str(work_dir / f"{method.split('.')[-1]}.gff3") for method in methods}
+
+    executable = [m for m in methods if m in GENE_EXECUTABLE_METHODS]
+    if executable:
+        return _update_gene_output(
+            state,
+            {
+                "status": "pending_execution",
+                "candidate_refs": candidate_refs,
+                "candidate_gene_counts": {method: 0 for method in methods},
+                "executed_methods": [],
+            },
+        )
     return _update_gene_output(
         state,
         {
@@ -978,28 +990,42 @@ def apply_final_gene_set_review_decision(state: TopLevelState, request: ResumeRe
     return own
 
 
-# --- miniprot execution (Phase 7 task 04 slice 1) ------------------------------
+# --- method execution (Phase 7 task 04) ---------------------------------------
 
-MINIPROT_METHOD = "gene_annotation.candidate.miniprot"
+# Each entry maps a confirmed method to its execution statuses and naming
+# conventions.  Adding a new executable method only requires a new entry here,
+# the corresponding freeze / run / collect nodes, and the builder edge wiring.
+GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
+    "gene_annotation.candidate.miniprot": {
+        "suffix": "miniprot",
+        "frozen_status": "miniprot_frozen",
+        "ran_status": "miniprot_ran",
+    },
+    "gene_annotation.candidate.augustus": {
+        "suffix": "augustus",
+        "frozen_status": "augustus_frozen",
+        "ran_status": "augustus_ran",
+    },
+}
+
 CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
+AUGUSTUS_METHOD = "gene_annotation.candidate.augustus"
+AUGUSTUS_DEFAULT_SPECIES = "fly"
 
 
-def freeze_miniprot_attempt(state: TopLevelState) -> dict:
-    """Freeze a miniprot attempt from confirmed methods and protein evidence."""
+def _freeze_gene_method_attempt(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    cfg: dict[str, str],
+    script_body: str,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict:
+    """Shared freeze path: resolve env, write script, produce FrozenAttemptSpec."""
     gene_out = _gene_output(state)
-    if gene_out.get("status") != "candidates_ready":
-        return {}
-    confirmed = list(gene_out.get("confirmed_methods") or [])
-    if MINIPROT_METHOD not in confirmed:
-        return {}
-
     genome_ref = gene_out.get("genome_input_ref")
     if not genome_ref:
-        return _fail_update(state, "miniprot requires genome_input_ref")
-
-    protein_refs = gene_out.get("protein_evidence_refs") or []
-    if not protein_refs:
-        return _fail_update(state, "miniprot requires protein_evidence_refs")
+        return _fail_update(state, f"{cfg['suffix']} requires genome_input_ref")
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -1007,7 +1033,7 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
     env_spec, blocked = resolve_method_env(
         gene_out,
         stage="gene_annotation",
-        method_name=MINIPROT_METHOD,
+        method_name=method_name,
         session_id=session_id,
         data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
@@ -1015,31 +1041,23 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
-    working_dir = data_dir / "work" / "gene_annotation" / session_id / "miniprot"
-    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "miniprot"
+    working_dir = data_dir / "work" / "gene_annotation" / session_id / cfg["suffix"]
+    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / cfg["suffix"]
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
-    output_gff3 = Path(candidate_refs.get(MINIPROT_METHOD, str(artifact_dir / "miniprot.gff3")))
+    output_gff3 = Path(candidate_refs.get(method_name, str(artifact_dir / f"{cfg['suffix']}.gff3")))
 
-    script_path = working_dir / "run_miniprot.sh"
-    genome_arg = shlex.quote(str(genome_ref))
-    protein_args = " ".join(shlex.quote(str(ref)) for ref in protein_refs)
-    output_arg = shlex.quote(str(output_gff3))
-    script_path.write_text(
-        "set -e\n"
-        f"miniprot --gff {genome_arg} {protein_args} > {output_arg}\n"
-        f"test -f {output_arg}\n",
-        encoding="utf-8",
-    )
+    script_path = working_dir / f"run_{cfg['suffix']}.sh"
+    script_path.write_text(script_body, encoding="utf-8")
     script_path.chmod(0o755)
 
     attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:gene_annotation:miniprot",
+        "attempt_id": f"{session_id}:gene_annotation:{cfg['suffix']}",
         "session_id": session_id,
         "stage": "gene_annotation",
-        "method_name": MINIPROT_METHOD,
+        "method_name": method_name,
         "script_path": script_path,
         "working_dir": working_dir,
         "interpreter": "/bin/bash",
@@ -1047,8 +1065,8 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
         "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
         "metadata": {
             "genome_input_ref": str(genome_ref),
-            "protein_evidence_refs": [str(ref) for ref in protein_refs],
             "output_gff3": str(output_gff3),
+            **(extra_metadata or {}),
         },
     }
     attach_conda_fields(env_spec, attempt_kwargs)
@@ -1057,19 +1075,16 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
     return _update_gene_output(
         state,
         {
-            "status": "miniprot_frozen",
-            "miniprot_frozen_attempt": attempt.model_dump(mode="json"),
+            "status": cfg["frozen_status"],
+            f"{cfg['suffix']}_frozen_attempt": attempt.model_dump(mode="json"),
         },
     )
 
 
-def run_miniprot_attempt(state: TopLevelState) -> dict:
-    """Run the frozen miniprot attempt locally."""
+def _run_gene_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> dict:
+    """Shared run path: deserialize FrozenAttemptSpec and execute via LocalRunner."""
     gene_out = _gene_output(state)
-    if gene_out.get("status") != "miniprot_frozen":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(gene_out["miniprot_frozen_attempt"])
+    attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
     data_dir = Path(state.get("data_dir", "data"))
     ledger = Ledger(data_dir)
     ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
@@ -1081,69 +1096,58 @@ def run_miniprot_attempt(state: TopLevelState) -> dict:
             if path.exists() and path.is_file():
                 path.unlink()
         stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"miniprot failed with return code {result.return_code}"
+        error = stderr.strip() or f"{cfg['suffix']} failed with return code {result.return_code}"
         ledger.record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=result.return_code,
-            error=error,
+            attempt.session_id, attempt, return_code=result.return_code, error=error,
         )
         return _update_gene_output(
             state,
             {
                 "status": "failed",
                 "reason": error,
-                "miniprot_execution_result": result.model_dump(mode="json"),
+                f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
             },
         )
-
     return _update_gene_output(
         state,
         {
-            "status": "miniprot_ran",
-            "miniprot_execution_result": result.model_dump(mode="json"),
+            "status": cfg["ran_status"],
+            f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
         },
     )
 
 
-def collect_miniprot_artifacts(state: TopLevelState) -> dict:
-    """Collect miniprot GFF3 output and register as candidate_gff artifact."""
+def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cfg: dict[str, str]) -> dict:
+    """Shared collect path: register GFF3 artifact and advance execution state."""
     gene_out = _gene_output(state)
-    if gene_out.get("status") != "miniprot_ran":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(gene_out["miniprot_frozen_attempt"])
+    attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_gff3 = Path(str(attempt.metadata["output_gff3"]))
 
     if not output_gff3.exists():
-        reason = f"expected miniprot GFF3 missing: {output_gff3}"
+        reason = f"expected {cfg['suffix']} GFF3 missing: {output_gff3}"
         Ledger(data_dir).record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=0,
-            error=reason,
+            attempt.session_id, attempt, return_code=0, error=reason,
         )
         return _update_gene_output(state, {"status": "failed", "reason": reason})
 
     artifact = ArtifactMeta.from_file(
         output_gff3,
         stage="gene_annotation",
-        method_name=MINIPROT_METHOD,
+        method_name=method_name,
         artifact_type=CANDIDATE_GFF_TYPE,
         metadata={"attempt_id": attempt.attempt_id},
     )
     append_artifact_records(data_dir, session_id, [artifact])
 
     Ledger(data_dir).record_attempt_succeeded(
-        attempt.session_id,
-        attempt,
+        attempt.session_id, attempt,
         artifacts=[{"path": str(output_gff3), "artifact_type": CANDIDATE_GFF_TYPE}],
     )
 
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
-    candidate_refs[MINIPROT_METHOD] = str(output_gff3)
+    candidate_refs[method_name] = str(output_gff3)
 
     gene_count = 0
     try:
@@ -1157,17 +1161,118 @@ def collect_miniprot_artifacts(state: TopLevelState) -> dict:
         gene_count = 0
 
     candidate_gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
-    candidate_gene_counts[MINIPROT_METHOD] = gene_count
+    candidate_gene_counts[method_name] = gene_count
+
+    executed = list(gene_out.get("executed_methods") or [])
+    executed.append(method_name)
+    confirmed = list(gene_out.get("confirmed_methods") or [])
+    executable = [m for m in confirmed if m in GENE_EXECUTABLE_METHODS]
+    pending = [m for m in executable if m not in executed]
 
     return _update_gene_output(
         state,
         {
-            "status": "candidates_ready",
+            "status": "pending_execution" if pending else "candidates_ready",
             "candidate_refs": candidate_refs,
             "candidate_gene_counts": candidate_gene_counts,
             "candidate_gff_ref": str(output_gff3),
-            "miniprot_gene_count": gene_count,
+            f"{cfg['suffix']}_gene_count": gene_count,
+            "executed_methods": executed,
         },
+    )
+
+
+# --- miniprot freeze / run / collect ------------------------------------------
+
+MINIPROT_METHOD = "gene_annotation.candidate.miniprot"
+
+
+def freeze_miniprot_attempt(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "pending_execution":
+        return {}
+    if MINIPROT_METHOD not in (gene_out.get("confirmed_methods") or []):
+        return {}
+    if MINIPROT_METHOD in (gene_out.get("executed_methods") or []):
+        return {}
+    protein_refs = gene_out.get("protein_evidence_refs") or []
+    if not protein_refs:
+        return _fail_update(state, "miniprot requires protein_evidence_refs")
+    genome_arg = shlex.quote(str(gene_out["genome_input_ref"]))
+    protein_args = " ".join(shlex.quote(str(ref)) for ref in protein_refs)
+    output_arg = shlex.quote(str(Path(gene_out.get("candidate_refs", {}).get(MINIPROT_METHOD, "")) or "miniprot.gff3"))
+    script = (
+        "set -e\n"
+        f"miniprot --gff {genome_arg} {protein_args} > {output_arg}\n"
+        f"test -f {output_arg}\n"
+    )
+    return _freeze_gene_method_attempt(
+        state,
+        method_name=MINIPROT_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
+        script_body=script,
+        extra_metadata={"protein_evidence_refs": [str(ref) for ref in protein_refs]},
+    )
+
+
+def run_miniprot_attempt(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "miniprot_frozen":
+        return {}
+    return _run_gene_method_attempt(state, cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD])
+
+
+def collect_miniprot_artifacts(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "miniprot_ran":
+        return {}
+    return _collect_gene_method_artifacts(
+        state, method_name=MINIPROT_METHOD, cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
+    )
+
+
+# --- augustus freeze / run / collect ------------------------------------------
+
+def freeze_augustus_attempt(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "pending_execution":
+        return {}
+    if AUGUSTUS_METHOD not in (gene_out.get("confirmed_methods") or []):
+        return {}
+    if AUGUSTUS_METHOD in (gene_out.get("executed_methods") or []):
+        return {}
+    hints = gene_out.get("lineage_or_species_hints") or {}
+    species = hints.get("species", AUGUSTUS_DEFAULT_SPECIES)
+    genome_arg = shlex.quote(str(gene_out["genome_input_ref"]))
+    species_arg = shlex.quote(str(species))
+    output_arg = shlex.quote(str(Path(gene_out.get("candidate_refs", {}).get(AUGUSTUS_METHOD, "")) or "augustus.gff3"))
+    script = (
+        "set -e\n"
+        f"augustus --species={species_arg} {genome_arg} > {output_arg}\n"
+        f"test -f {output_arg}\n"
+    )
+    return _freeze_gene_method_attempt(
+        state,
+        method_name=AUGUSTUS_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
+        script_body=script,
+        extra_metadata={"species": str(species)},
+    )
+
+
+def run_augustus_attempt(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "augustus_frozen":
+        return {}
+    return _run_gene_method_attempt(state, cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD])
+
+
+def collect_augustus_artifacts(state: TopLevelState) -> dict:
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "augustus_ran":
+        return {}
+    return _collect_gene_method_artifacts(
+        state, method_name=AUGUSTUS_METHOD, cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
     )
 
 
