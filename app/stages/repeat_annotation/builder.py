@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.repeat_annotation.nodes import (
+    block_mask_review,
     collect_repeatmasker_artifacts,
     commit_repeat_annotation,
     enter_repeat_annotation,
@@ -40,6 +41,7 @@ def build_stage():
     graph.add_node("freeze_repeatmasker", freeze_repeatmasker_attempt)
     graph.add_node("run_repeatmasker", run_repeatmasker_attempt)
     graph.add_node("collect_repeatmasker", collect_repeatmasker_artifacts)
+    graph.add_node("block", block_mask_review)
     graph.add_node("commit", commit_repeat_annotation)
     graph.add_node("fail", fail_repeat_annotation)
 
@@ -78,8 +80,9 @@ def build_stage():
     graph.add_conditional_edges(
         "collect_repeatmasker",
         route_after_repeatmasker_collect,
-        {"commit": "commit", "fail": "fail"},
+        {"block": "block", "fail": "fail"},
     )
+    graph.add_edge("block", END)
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)
 

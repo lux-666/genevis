@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
+from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
 from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.policy import evaluate
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
@@ -400,6 +404,8 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
     for artifact in artifact_payloads:
         ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
 
+    tbl_path = Path(attempt.working_dir) / "assembly.fasta.tbl"
+    repeat_percentage = _parse_tbl_repeat_percentage(tbl_path)
     artifact_refs = _unique_refs([*repeat_out.get("artifact_refs", []), *[str(artifact.file_path) for artifact in artifacts]])
     notes = _unique_refs([*repeat_out.get("notes", []), "repeatmasker_executed"])
     return _update_repeat_output(
@@ -409,6 +415,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
             "repeat_annotation_gff3_ref": str(attempt.metadata["repeat_annotation_gff3"]),
             "softmasked_genome_ref": str(attempt.metadata["softmasked_genome"]),
             "hardmasked_genome_ref": str(attempt.metadata["hardmasked_genome"]) if hardmasked.exists() else None,
+            "repeat_percentage": repeat_percentage,
             "artifact_refs": artifact_refs,
             "notes": notes,
             "execution_enabled": True,
@@ -481,6 +488,191 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
         "current_stage": next_stage_name("repeat_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
+    }
+
+
+def block_mask_review(state: TopLevelState) -> dict:
+    """Gate after RepeatMasker execution for mask-completion traceability."""
+    repeat_out = _repeat_output(state)
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+
+    payload = ReviewPayload(
+        stage="repeat_annotation",
+        gate_id="mask_review",
+        reason="mask_review_traceability",
+        candidates=[{
+            "softmasked_genome_ref": repeat_out.get("softmasked_genome_ref"),
+            "repeat_percentage": repeat_out.get("repeat_percentage"),
+            "library_source": repeat_out.get("repeat_library_source"),
+            "steps_run": ["repeatmasker"],
+            "steps_skipped": ["trf", "de_novo_library"],
+        }],
+        decisions_allowed=["accept", "skip"],
+        notes=repeat_out.get("notes", []),
+        auto_decidable=True,
+    )
+    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    request_ref = out_dir / "mask_review_request.json"
+    request_ref.write_text(
+        json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifact = ArtifactMeta.from_file(
+        request_ref,
+        stage="repeat_annotation",
+        method_name=REPEAT_CONTRACT_METHOD,
+        artifact_type="repeat_annotation.mask_review_request",
+        metadata={"auto_decidable": True},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+
+    review_policy = repeat_out.get("review_policy") or {"mode": "auto"}
+    outcome = evaluate("repeat_annotation", payload, review_policy)
+    pending_confirmation = outcome.action == "BLOCK_PENDING_CONFIRM"
+
+    Ledger(data_dir).record_review_requested(
+        session_id,
+        "repeat_annotation",
+        reason="mask_review_traceability",
+        candidates=payload.candidates,
+        review_request_artifact_ref=str(request_ref),
+        auto_decidable=True,
+        policy_mode=outcome.mode,
+        pending_human_confirmation=pending_confirmation,
+    )
+    if outcome.action == "BLOCK_WITH_TIMEOUT":
+        Ledger(data_dir).record_event(
+            session_id,
+            "blocked_with_timeout",
+            {
+                "stage": "repeat_annotation",
+                "gate_id": "mask_review",
+                "max_blocked_seconds": outcome.max_blocked_seconds,
+                "review_request_artifact_ref": str(request_ref),
+                "policy_mode": outcome.mode,
+            },
+        )
+
+    if outcome.action == "AUTO_DECIDE_NOW":
+        auto_request = ResumeReviewRequest(
+            session_id=session_id,
+            stage="repeat_annotation",
+            gate_id="mask_review",
+            decision="accept",
+            decided_by="auto_rule",
+            rationale_artifact_ref=str(request_ref),
+        )
+        return apply_mask_review_decision(state, auto_request)
+
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["repeat_annotation"] = {
+        **repeat_out,
+        "status": "blocked_human",
+        "review_request_artifact_ref": str(request_ref),
+        "review_policy_outcome": outcome.model_dump(mode="json"),
+        "auto_decidable": True,
+        "pending_human_confirmation": pending_confirmation,
+    }
+    return {
+        "current_stage": "repeat_annotation",
+        "supervision_state": "blocked_human",
+        "stage_outputs": outputs,
+        "active_interrupt": {
+            "stage": "repeat_annotation",
+            "gate_id": "mask_review",
+            "reason": "mask_review_traceability",
+            "decisions_allowed": payload.decisions_allowed,
+            "auto_decidable": True,
+            "pending_human_confirmation": pending_confirmation,
+            "review_policy": review_policy,
+            "review_request_artifact_ref": str(request_ref),
+            "softmasked_genome_ref": repeat_out.get("softmasked_genome_ref"),
+            "repeat_percentage": repeat_out.get("repeat_percentage"),
+            "repeat_library_source": repeat_out.get("repeat_library_source"),
+            "final_assembly_for_annotation": repeat_out.get("final_assembly_for_annotation"),
+            "notes": repeat_out.get("notes", []),
+            "blocked_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
+def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    """Apply a validated mask-review decision to advance repeat annotation."""
+    if request.stage != "repeat_annotation":
+        raise ResumeValidationError("mask_review resume requires stage repeat_annotation")
+    repeat_out = _repeat_output(state)
+    if request.decision not in {"accept", "skip"}:
+        raise ResumeValidationError(f"unsupported mask_review decision: {request.decision!r}")
+
+    softmasked_genome_ref = repeat_out.get("softmasked_genome_ref")
+    if not softmasked_genome_ref:
+        raise ResumeValidationError("mask_review resume requires softmasked_genome_ref in repeat_annotation output")
+
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if request.decision == "skip":
+        softmasked_genome_ref = repeat_out.get("final_assembly_for_annotation") or softmasked_genome_ref
+
+    decision_payload = {
+        "session_id": session_id,
+        "stage": "repeat_annotation",
+        "gate_id": "mask_review",
+        "decision": request.decision,
+        "softmasked_genome_ref": softmasked_genome_ref,
+        "repeat_percentage": repeat_out.get("repeat_percentage"),
+        "repeat_library_source": repeat_out.get("repeat_library_source"),
+        "notes": list(request.notes),
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
+        "metadata": request.metadata,
+    }
+    decision_ref = out_dir / "mask_review_decision.json"
+    decision_ref.write_text(
+        json.dumps(decision_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifact = ArtifactMeta.from_file(
+        decision_ref,
+        stage="repeat_annotation",
+        method_name=REPEAT_CONTRACT_METHOD,
+        artifact_type="repeat_annotation.mask_review_decision",
+        metadata={"decision": request.decision},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_review_decision(
+        session_id,
+        "repeat_annotation",
+        decision=request.decision,
+        notes=list(request.notes),
+        artifact_ref=str(artifact.file_path),
+        metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+    )
+
+    updated_repeat_out = {**repeat_out, "softmasked_genome_ref": softmasked_genome_ref}
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["repeat_annotation"] = updated_repeat_out
+    updated_state: TopLevelState = {**state, "stage_outputs": outputs}  # type: ignore[return-value]
+    commit_result = commit_repeat_annotation(updated_state)
+
+    stage_outputs = dict(commit_result.get("stage_outputs") or {})
+    stage_outputs["repeat_annotation"] = {
+        **stage_outputs.get("repeat_annotation", {}),
+        "decision": request.decision,
+        "mask_review_decision_ref": str(artifact.file_path),
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
+    }
+    return {
+        **commit_result,
+        "active_interrupt": None,
+        "stage_outputs": stage_outputs,
     }
 
 
@@ -573,6 +765,17 @@ def _final_assembly_for_annotation(state: TopLevelState) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _parse_tbl_repeat_percentage(tbl_path: Path) -> float | None:
+    if not tbl_path.exists():
+        return None
+    try:
+        text = tbl_path.read_text(encoding="utf-8")
+        match = re.search(r"Bases masked:\s+[\d,]+ bp \(\s*([\d.]+) %\)", text)
+        return float(match.group(1)) if match else None
+    except Exception:
+        return None
 
 
 def _repeat_library_assets(state: TopLevelState) -> list[dict[str, Any]]:

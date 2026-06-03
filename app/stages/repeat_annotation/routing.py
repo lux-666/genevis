@@ -52,4 +52,4 @@ def route_after_repeatmasker_run(state: TopLevelState) -> str:
 
 def route_after_repeatmasker_collect(state: TopLevelState) -> str:
     """Route after collecting RepeatMasker artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "commit"
+    return "fail" if _output(state).get("status") in FAIL_STATUSES else "block"

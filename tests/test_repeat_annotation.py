@@ -8,9 +8,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.control.ledger import Ledger
+from app.execution.artifacts import read_artifact_records
+from app.review.gates import get_review_gate
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.repeat_annotation.builder import build_stage
+from app.stages.repeat_annotation.nodes import (
+    apply_mask_review_decision,
+    block_mask_review,
+    _parse_tbl_repeat_percentage,
+)
+from app.review.base import ResumeReviewRequest
 
 
 class RepeatAnnotationDescriptorTests(unittest.TestCase):
@@ -351,6 +360,211 @@ class RepeatAnnotationStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertIn("repeat_annotation_stage", result["route_trace"])
+
+
+class MaskReviewGateTests(unittest.TestCase):
+    def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
+        path = Path(tmpdir) / "registry.json"
+        path.write_text(json.dumps({"session_id": "s1", "assets": assets}), encoding="utf-8")
+        return path
+
+    def _state(self, tmpdir: str, registry_ref: str | None) -> dict:
+        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state["current_stage"] = "repeat_annotation"
+        state["asset_registry_ref"] = registry_ref
+        return state
+
+    def _fake_repeatmasker_bin(self, tmpdir: str) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "RepeatMasker"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "assembly = pathlib.Path(sys.argv[-1])\n"
+            "assembly.with_name(assembly.name + '.masked').write_text('>ctg1\\nacgt\\n', encoding='utf-8')\n"
+            "assembly.with_name(assembly.name + '.out.gff').write_text('##gff-version 3\\n', encoding='utf-8')\n"
+            "assembly.with_name(assembly.name + '.tbl').write_text(\n"
+            "    'RepeatMasker Results\\n'\n"
+            "    'Bases masked:   1234 bp ( 30.50 %)\\n',\n"
+            "    encoding='utf-8'\n"
+            ")\n"
+            "print('ok')\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return bin_dir
+
+    def test_gate_is_registered_in_registry(self):
+        gate = get_review_gate("repeat_annotation", "mask_review")
+        self.assertEqual(gate.stage, "repeat_annotation")
+        self.assertEqual(gate.gate_id, "mask_review")
+        self.assertIn("accept", gate.decisions_allowed)
+        self.assertIn("skip", gate.decisions_allowed)
+
+    def test_parse_tbl_repeat_percentage_extracts_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tbl = Path(tmp) / "assembly.fasta.tbl"
+            tbl.write_text("Bases masked:   1234 bp ( 30.50 %)\n", encoding="utf-8")
+            self.assertAlmostEqual(_parse_tbl_repeat_percentage(tbl), 30.50)
+
+    def test_parse_tbl_repeat_percentage_returns_none_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(_parse_tbl_repeat_percentage(Path(tmp) / "missing.tbl"))
+
+    def test_execution_path_auto_accepts_and_registers_gate_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            library = Path(tmpdir) / "lib.fa"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            library.write_text(">repeat1\nACAC\n", encoding="utf-8")
+            bin_dir = self._fake_repeatmasker_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[{"asset_id": "s1:repeat_library:lib", "asset_type": "repeat_library", "path": str(library)}],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "repeat_annotation": {
+                    "execution_mode": "local",
+                    "primary_method": "repeat_annotation.masking.repeatmasker",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "gene_annotation")
+            repeat = result["stage_outputs"]["repeat_annotation"]
+            self.assertEqual(repeat["status"], "completed")
+            self.assertEqual(repeat["decision"], "accept")
+            self.assertEqual(repeat["decided_by"], "auto_rule")
+            self.assertAlmostEqual(repeat["repeat_percentage"], 30.50)
+
+            data_dir = Path(tmpdir)
+            artifact_types = {rec["artifact_type"] for rec in read_artifact_records(data_dir, "s1")}
+            self.assertIn("repeat_annotation.mask_review_request", artifact_types)
+            self.assertIn("repeat_annotation.mask_review_decision", artifact_types)
+
+            events = Ledger(data_dir).read_events("s1")
+            event_types = [e["event_type"] for e in events]
+            self.assertIn("review_requested", event_types)
+            self.assertIn("review_decision", event_types)
+
+    def test_strict_mode_policy_blocks_for_human_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            library = Path(tmpdir) / "lib.fa"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            library.write_text(">repeat1\nACAC\n", encoding="utf-8")
+            bin_dir = self._fake_repeatmasker_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[{"asset_id": "s1:repeat_library:lib", "asset_type": "repeat_library", "path": str(library)}],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "repeat_annotation": {
+                    "execution_mode": "local",
+                    "primary_method": "repeat_annotation.masking.repeatmasker",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                    "review_policy": {"mode": "strict"},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(result["current_stage"], "repeat_annotation")
+            interrupt = result["active_interrupt"]
+            self.assertEqual(interrupt["stage"], "repeat_annotation")
+            self.assertEqual(interrupt["gate_id"], "mask_review")
+            self.assertIn("accept", interrupt["decisions_allowed"])
+
+    def test_resume_with_accept_completes_stage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Ledger(tmpdir).create_session("s1", "manifest.yaml")
+            softmasked = Path(tmpdir) / "softmasked.fasta"
+            softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
+            state = self._state(tmpdir, None)
+            state["supervision_state"] = "blocked_human"
+            state["stage_outputs"] = {
+                "repeat_annotation": {
+                    "status": "masking_executed",
+                    "softmasked_genome_ref": str(softmasked),
+                    "repeat_annotation_gff3_ref": str(softmasked),
+                    "repeat_percentage": 25.0,
+                    "strategy": "provided",
+                    "repeat_library_source": "provided",
+                    "final_assembly_for_annotation": str(softmasked),
+                    "repeat_library_ref": str(softmasked),
+                    "confidence": "high",
+                    "low_confidence_reasons": [],
+                    "candidate_methods": [],
+                    "notes": [],
+                    "execution_enabled": True,
+                }
+            }
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="repeat_annotation",
+                gate_id="mask_review",
+                decision="accept",
+                decided_by="human",
+            )
+
+            result = apply_mask_review_decision(state, request)
+
+            self.assertEqual(result["current_stage"], "gene_annotation")
+            self.assertEqual(result["supervision_state"], "running_stage")
+            self.assertIsNone(result["active_interrupt"])
+            repeat = result["stage_outputs"]["repeat_annotation"]
+            self.assertEqual(repeat["status"], "completed")
+            self.assertEqual(repeat["decision"], "accept")
+            self.assertTrue(Path(repeat["bundle_artifact_ref"]).exists())
+
+    def test_resume_with_skip_uses_unmasked_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Ledger(tmpdir).create_session("s1", "manifest.yaml")
+            unmasked = Path(tmpdir) / "unmasked.fasta"
+            softmasked = Path(tmpdir) / "softmasked.fasta"
+            unmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
+            state = self._state(tmpdir, None)
+            state["supervision_state"] = "blocked_human"
+            state["stage_outputs"] = {
+                "repeat_annotation": {
+                    "status": "masking_executed",
+                    "softmasked_genome_ref": str(softmasked),
+                    "repeat_annotation_gff3_ref": str(softmasked),
+                    "repeat_percentage": 5.0,
+                    "strategy": "provided",
+                    "repeat_library_source": "provided",
+                    "final_assembly_for_annotation": str(unmasked),
+                    "repeat_library_ref": str(unmasked),
+                    "confidence": "high",
+                    "low_confidence_reasons": [],
+                    "candidate_methods": [],
+                    "notes": [],
+                    "execution_enabled": True,
+                }
+            }
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="repeat_annotation",
+                gate_id="mask_review",
+                decision="skip",
+                decided_by="human",
+            )
+
+            result = apply_mask_review_decision(state, request)
+
+            self.assertEqual(result["current_stage"], "gene_annotation")
+            repeat = result["stage_outputs"]["repeat_annotation"]
+            self.assertEqual(repeat["softmasked_genome_ref"], str(unmasked))
+            self.assertEqual(repeat["decision"], "skip")
 
 
 if __name__ == "__main__":

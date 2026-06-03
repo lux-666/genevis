@@ -132,3 +132,13 @@ register_review_gate(
         required_resume_fields=("method_name",),
     )
 )
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="repeat_annotation",
+        gate_id="mask_review",
+        decisions_allowed=("accept", "skip"),
+        decision_applier="app.stages.repeat_annotation.nodes:apply_mask_review_decision",
+        template_preferred_decision="accept",
+    )
+)
