@@ -1968,32 +1968,62 @@ class ResumeCLITests(unittest.TestCase):
         self.assertFalse((data_dir / "checkpoints").exists())
         self.assertFalse((data_dir / "ledger").exists())
 
-    def test_resume_decision_file_does_not_call_annotation_intake(self):
+    def test_resume_decision_file_records_recommended_intake_without_prompting(self):
+        # A continue-downstream (assembly_review accept) decision-file resume is
+        # non-interactive but must still record the RECOMMENDED annotation intake
+        # plan that the gene_annotation chain requires at entry. It must not call
+        # the interactive prompt.
+        from app.execution.artifacts import read_artifact_records
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
             db_path.parent.mkdir(parents=True)
             db_path.write_text("", encoding="utf-8")
+            session_id = "s1"
+            Ledger(data_dir).create_session(session_id, "manifest.json")
+
+            manifest_ref = root / "manifest.json"
+            manifest_ref.write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "assets": [
+                            {
+                                "asset_type": "raw_long_reads",
+                                "paths": [str(root / "reads.fastq")],
+                                "platform": "ont",
+                                "format": "fastq",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             decision = self._write_decision(root / "decision.json")
             state = {
-                "session_id": "s1",
+                "session_id": session_id,
                 "data_dir": str(data_dir),
+                "input_manifest_ref": str(manifest_ref),
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
+                "requested_stages": ["read_qc", "assembly", "assembly_review"],
                 "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
-                "stage_outputs": {},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
             }
             graph = _FakeResumeGraph(state)
 
             with patch("app.entrypoints.run.build_graph", return_value=graph), \
-                    patch("app.control.lifecycle.resume_review_state", return_value={"current_stage": "done", "supervision_state": "completed"}), \
-                    patch("app.review.annotation_intake.collect_annotation_intake_selection") as intake_prompt, \
-                    patch("app.review.annotation_intake.persist_annotation_intake_plan") as intake_persist:
+                    patch(
+                        "app.control.lifecycle.resume_review_state",
+                        return_value={"current_stage": "done", "supervision_state": "completed"},
+                    ), \
+                    patch("app.review.annotation_intake.prompt_annotation_intake_plan") as intake_prompt:
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
-                        session_id="s1",
+                        session_id=session_id,
                         decision_file=str(decision),
                         data_dir=str(data_dir),
                         checkpointer="sqlite",
@@ -2004,7 +2034,8 @@ class ResumeCLITests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             intake_prompt.assert_not_called()
-            intake_persist.assert_not_called()
+            artifact_types = [record["artifact_type"] for record in read_artifact_records(data_dir, session_id)]
+            self.assertIn("annotation.intake_plan", artifact_types)
             self.assertEqual(len(graph.updated), 1)
 
 

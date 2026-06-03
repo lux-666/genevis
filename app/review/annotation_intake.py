@@ -263,6 +263,29 @@ def persist_annotation_intake_plan(
     )
 
 
+def load_annotation_intake_plan(state: TopLevelState) -> dict[str, Any]:
+    """Load and validate the annotation intake plan recorded at assembly_review.
+
+    The intake plan is the start and plan-of-record for the annotation chain.
+    Raises ``ValueError`` when the reference is missing or the file cannot be
+    read as a JSON object so the gene_annotation entry node can fail before any
+    gate runs.
+    """
+    ref = ((state.get("stage_outputs") or {}).get(ASSEMBLY_REVIEW_STAGE) or {}).get("annotation_intake_plan_ref")
+    if not ref:
+        raise ValueError("annotation.intake_plan missing: assembly_review.annotation_intake_plan_ref is not set")
+    path = Path(str(ref))
+    if not path.exists():
+        raise ValueError(f"annotation.intake_plan missing: file not found at {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"annotation.intake_plan invalid: cannot read {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("annotation.intake_plan invalid: top-level JSON is not an object")
+    return payload
+
+
 def rewrite_requested_stages_after_assembly_review(
     current_requested: list[str] | tuple[str, ...] | None,
     downstream_stages: list[str] | tuple[str, ...],
@@ -351,10 +374,15 @@ def _checkpoint_update_from_plan(
     local_exec = set(run_config_preview.get("local_exec") or [])
     selected_methods = dict(plan.selected_methods or {})
 
+    existing_downstream = state.get("stage_outputs") or {}
     for stage in DOWNSTREAM_STAGES:
         if stage not in selected_methods and stage not in requested_stages:
             continue
-        stage_out: dict[str, Any] = {}
+        # Preserve any existing downstream stage output (e.g. function_annotation
+        # database_provenance seeded from run_config) and only overlay the
+        # method-selection fields from the intake plan. Stages dropped from the
+        # suffix are still omitted by the guard above.
+        stage_out: dict[str, Any] = dict(existing_downstream.get(stage) or {})
         methods = selected_methods.get(stage)
         method_list = methods if isinstance(methods, list) else [methods] if methods else []
         if method_list:

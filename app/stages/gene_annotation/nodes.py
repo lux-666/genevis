@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from app.control.ledger import Ledger
+from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
+from app.review.annotation_intake import (
+    DOWNSTREAM_STAGES,
+    load_annotation_intake_plan,
+    rewrite_requested_stages_after_assembly_review,
+)
+from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.review.policy import evaluate
 from app.schemas.artifacts import ArtifactMeta, GeneAnnotationBundle, GeneAnnotationPlan
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.base import absolute_data_dir
 
 GENE_CANDIDATE_METHODS = [
     "gene_annotation.candidate.braker3",
@@ -42,12 +53,18 @@ def _fail_update(state: TopLevelState, reason: str) -> dict:
 
 
 def enter_gene_annotation(state: TopLevelState) -> dict:
-    """Mark gene annotation as running."""
+    """Validate the annotation intake plan and mark gene annotation running."""
+    try:
+        load_annotation_intake_plan(state)
+    except ValueError as exc:
+        return _fail_update(state, str(exc))
     return {"supervision_state": "running_stage"}
 
 
 def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
     """Resolve masked genome and optional annotation evidence."""
+    if _gene_output(state).get("status", ""):
+        return {}
     genome_ref = _softmasked_genome_ref(state)
     genome_source = "softmasked_genome"
     fallback_reason = None
@@ -194,9 +211,9 @@ def plan_gene_methods(state: TopLevelState) -> dict:
 
 
 def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
-    """Write a gene annotation plan and record review triggers."""
+    """Write a gene annotation plan and record review triggers (merge prep)."""
     gene_out = _gene_output(state)
-    if gene_out.get("status") != "methods_planned":
+    if gene_out.get("status") != "candidates_accepted":
         return {}
 
     review_triggers = _review_triggers(gene_out)
@@ -247,11 +264,11 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
     return _update_gene_output(
         state,
         {
-            "status": "review_planned",
+            "status": "merge_ready",
             "review_required": review_required,
             "review_triggers": review_triggers,
             "plan_artifact_ref": str(plan_ref),
-            "artifact_refs": [str(artifact.file_path)],
+            "artifact_refs": [*gene_out.get("artifact_refs", []), str(artifact.file_path)],
         },
     )
 
@@ -437,6 +454,525 @@ def fail_gene_annotation(state: TopLevelState) -> dict:
         "supervision_state": "failed_terminal",
         "last_error": gene_out.get("reason", "gene_annotation failed"),
     }
+
+
+# --- Annotation review chain (Phase 7 task 03) ---------------------------------
+#
+# Each gate follows the single-gate architecture already used by mask_review and
+# hic_scaffolding: ``block_<gate>`` writes a request artifact, evaluates policy,
+# and either auto-decides (calling its applier inline) or blocks. The applier
+# records the decision then continues the chain inline through the next node(s)
+# until the next gate blocks or ``commit_gene_annotation`` advances the stage.
+
+GENE_REVIEW_GATES = (
+    "gene_method_planning_review",
+    "candidate_evidence_review",
+    "merge_review",
+    "final_gene_set_review",
+)
+
+
+
+def _gene_review_policy(state: TopLevelState) -> dict[str, Any]:
+    return _gene_output(state).get("review_policy") or {"mode": "auto"}
+
+
+def _write_gene_gate_request(state: TopLevelState, gate_id: str, payload: ReviewPayload) -> str:
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    request_ref = out_dir / f"{gate_id}_request.json"
+    request_ref.write_text(
+        json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifact = ArtifactMeta.from_file(
+        request_ref,
+        stage="gene_annotation",
+        method_name=GENE_CONTRACT_METHOD,
+        artifact_type=f"gene_annotation.{gate_id}_request",
+        metadata={"auto_decidable": payload.auto_decidable},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    return str(request_ref)
+
+
+def _run_gene_gate(
+    state: TopLevelState,
+    *,
+    gate_id: str,
+    reason: str,
+    payload: ReviewPayload,
+    applier: Callable[[TopLevelState, ResumeReviewRequest], dict],
+    auto_decision: str,
+) -> dict:
+    """Write the request, evaluate policy, then auto-decide or block."""
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    request_ref = _write_gene_gate_request(state, gate_id, payload)
+
+    review_policy = _gene_review_policy(state)
+    outcome = evaluate("gene_annotation", payload, review_policy)
+    pending = outcome.action == "BLOCK_PENDING_CONFIRM"
+
+    Ledger(data_dir).record_review_requested(
+        session_id,
+        "gene_annotation",
+        reason=reason,
+        signals=[signal.model_dump(mode="json") for signal in payload.signals],
+        candidates=payload.candidates,
+        review_request_artifact_ref=request_ref,
+        auto_decidable=payload.auto_decidable,
+        policy_mode=outcome.mode,
+        pending_human_confirmation=pending,
+    )
+
+    if outcome.action == "AUTO_DECIDE_NOW":
+        auto_request = ResumeReviewRequest(
+            session_id=session_id,
+            stage="gene_annotation",
+            gate_id=gate_id,
+            decision=auto_decision,
+            decided_by="auto_rule",
+            rationale_artifact_ref=request_ref,
+        )
+        return applier(state, auto_request)
+
+    gene_out = _gene_output(state)
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["gene_annotation"] = {
+        **gene_out,
+        "status": "blocked_human",
+        "active_gate_id": gate_id,
+        "review_request_artifact_ref": request_ref,
+        "review_policy_outcome": outcome.model_dump(mode="json"),
+        "auto_decidable": payload.auto_decidable,
+        "pending_human_confirmation": pending,
+    }
+    return {
+        "current_stage": "gene_annotation",
+        "supervision_state": "blocked_human",
+        "stage_outputs": outputs,
+        "active_interrupt": {
+            "stage": "gene_annotation",
+            "gate_id": gate_id,
+            "reason": reason,
+            "decisions_allowed": payload.decisions_allowed,
+            "auto_decidable": payload.auto_decidable,
+            "pending_human_confirmation": pending,
+            "review_policy": review_policy,
+            "review_request_artifact_ref": request_ref,
+            "candidates": payload.candidates,
+            "signals": [signal.model_dump(mode="json") for signal in payload.signals],
+            "blocked_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
+def _record_gene_gate_decision(
+    state: TopLevelState,
+    gate_id: str,
+    request: ResumeReviewRequest,
+    payload_extra: dict[str, Any],
+) -> str:
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    decision_payload = {
+        "session_id": session_id,
+        "stage": "gene_annotation",
+        "gate_id": gate_id,
+        "decision": request.decision,
+        "notes": list(request.notes),
+        "decided_by": request.decided_by,
+        "rationale_artifact_ref": request.rationale_artifact_ref,
+        "metadata": request.metadata,
+        **payload_extra,
+    }
+    decision_ref = out_dir / f"{gate_id}_decision.json"
+    decision_ref.write_text(
+        json.dumps(decision_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifact = ArtifactMeta.from_file(
+        decision_ref,
+        stage="gene_annotation",
+        method_name=GENE_CONTRACT_METHOD,
+        artifact_type=f"gene_annotation.{gate_id}_decision",
+        metadata={"decision": request.decision},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_review_decision(
+        session_id,
+        "gene_annotation",
+        decision=request.decision,
+        notes=list(request.notes),
+        artifact_ref=str(artifact.file_path),
+        metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+        gate_id=gate_id,
+    )
+    return str(artifact.file_path)
+
+
+def _gene_gate_own_update(
+    state: TopLevelState,
+    gate_id: str,
+    request: ResumeReviewRequest,
+    gene_fields: dict[str, Any],
+    decision_ref: str,
+) -> dict:
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["gene_annotation"] = {
+        **_gene_output(state),
+        **gene_fields,
+        "decision": request.decision,
+        "decided_by": request.decided_by,
+        f"{gate_id}_decision_ref": decision_ref,
+        "active_gate_id": None,
+    }
+    return {
+        "stage_outputs": outputs,
+        "route_trace": [*state.get("route_trace", []), gate_id],
+        "active_interrupt": None,
+    }
+
+
+def _gene_gate_stop(state: TopLevelState, gate_id: str, request: ResumeReviewRequest) -> dict:
+    decision_ref = _record_gene_gate_decision(state, gate_id, request, {})
+    own = _gene_gate_own_update(state, gate_id, request, {"status": "stopped"}, decision_ref)
+    return {
+        **own,
+        "current_stage": "gene_annotation",
+        "supervision_state": "failed_terminal",
+        "last_error": f"{gate_id} stopped by reviewer",
+    }
+
+
+def _require_gene_stage(request: ResumeReviewRequest, gate_id: str) -> None:
+    if request.stage != "gene_annotation":
+        raise ResumeValidationError(f"{gate_id} resume requires stage gene_annotation")
+
+
+# --- gate 1: gene method planning ----------------------------------------------
+
+def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPayload:
+    gene_out = _gene_output(state)
+    candidate_methods = list(gene_out.get("candidate_methods") or [])
+    triggers = _review_triggers(gene_out)
+    conflict = "rna_protein_evidence_conflict_review" in triggers
+    candidates = [
+        {"method_id": method, "evidence_profile": gene_out.get("evidence_profile")}
+        for method in candidate_methods
+    ]
+    signals = [
+        ReviewSignal(
+            signal_name="evidence_profile",
+            method_name=GENE_CONTRACT_METHOD,
+            status="available" if gene_out.get("evidence_profile") else "missing",
+            metadata={"evidence_profile": gene_out.get("evidence_profile")},
+        )
+    ]
+    return ReviewPayload(
+        stage="gene_annotation",
+        gate_id="gene_method_planning_review",
+        reason="gene_method_planning_review",
+        candidates=candidates,
+        signals=signals,
+        decisions_allowed=["select_methods", "accept", "stop"],
+        auto_decidable=len(candidate_methods) == 1 and not conflict,
+        notes=list(gene_out.get("notes", [])),
+    )
+
+
+def block_gene_method_planning_review(state: TopLevelState) -> dict:
+    if _gene_output(state).get("status") != "methods_planned":
+        return {}
+    return _run_gene_gate(
+        state,
+        gate_id="gene_method_planning_review",
+        reason="gene_method_planning_review",
+        payload=build_gene_method_planning_review_payload(state),
+        applier=apply_gene_method_planning_review_decision,
+        auto_decision="accept",
+    )
+
+
+def apply_gene_method_planning_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    _require_gene_stage(request, "gene_method_planning_review")
+    if request.decision not in {"select_methods", "accept", "stop"}:
+        raise ResumeValidationError(f"unsupported gene_method_planning_review decision: {request.decision!r}")
+    if request.decision == "stop":
+        return _gene_gate_stop(state, "gene_method_planning_review", request)
+
+    gene_out = _gene_output(state)
+    candidate_methods = list(gene_out.get("candidate_methods") or [])
+    if request.decision == "select_methods":
+        confirmed = list(request.metadata.get("selected_methods") or [])
+        if not confirmed:
+            raise ResumeValidationError("select_methods requires metadata.selected_methods")
+    else:
+        confirmed = candidate_methods
+
+    decision_ref = _record_gene_gate_decision(
+        state,
+        "gene_method_planning_review",
+        request,
+        {"confirmed_methods": confirmed},
+    )
+    own = _gene_gate_own_update(
+        state,
+        "gene_method_planning_review",
+        request,
+        {"status": "methods_confirmed", "confirmed_methods": confirmed},
+        decision_ref,
+    )
+    # Only this gate may rewrite the downstream stage suffix.
+    if request.decision == "select_methods" and state.get("requested_stages"):
+        downstream = [stage for stage in state.get("requested_stages", []) if stage in DOWNSTREAM_STAGES]
+        own["requested_stages"] = rewrite_requested_stages_after_assembly_review(
+            state.get("requested_stages"), downstream
+        )
+    return own
+
+
+# --- planning-only method runner stub ------------------------------------------
+
+def run_gene_methods_planning_only(state: TopLevelState) -> dict:
+    """Planning-only stub: record expected candidate outputs without execution."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "methods_confirmed":
+        return {}
+    methods = list(gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or [])
+    work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
+    candidate_refs = {method: str(work_dir / f"{method.split('.')[-1]}.gff3") for method in methods}
+    return _update_gene_output(
+        state,
+        {
+            "status": "candidates_ready",
+            "candidate_refs": candidate_refs,
+            "candidate_gene_counts": {method: 0 for method in methods},
+            "execution_support": "planning_only",
+        },
+    )
+
+
+# --- gate 2: candidate evidence ------------------------------------------------
+
+def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPayload:
+    gene_out = _gene_output(state)
+    candidate_refs = dict(gene_out.get("candidate_refs") or {})
+    gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
+    triggers = _review_triggers(gene_out)
+    conflict = "rna_protein_evidence_conflict_review" in triggers
+    candidates = [
+        {
+            "method_id": method,
+            "candidate_ref": ref,
+            "gene_count": gene_counts.get(method, 0),
+            "conflict_signals": ["rna_protein_evidence_conflict_review"] if conflict else [],
+        }
+        for method, ref in candidate_refs.items()
+    ]
+    return ReviewPayload(
+        stage="gene_annotation",
+        gate_id="candidate_evidence_review",
+        reason="candidate_evidence_review",
+        candidates=candidates,
+        decisions_allowed=["proceed_merge", "request_rerun", "stop"],
+        auto_decidable=not conflict,
+        notes=["execution_support=planning_only"],
+    )
+
+
+def block_candidate_evidence_review(state: TopLevelState) -> dict:
+    if _gene_output(state).get("status") != "candidates_ready":
+        return {}
+    return _run_gene_gate(
+        state,
+        gate_id="candidate_evidence_review",
+        reason="candidate_evidence_review",
+        payload=build_candidate_evidence_review_payload(state),
+        applier=apply_candidate_evidence_review_decision,
+        auto_decision="proceed_merge",
+    )
+
+
+def apply_candidate_evidence_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    _require_gene_stage(request, "candidate_evidence_review")
+    if request.decision not in {"proceed_merge", "request_rerun", "stop"}:
+        raise ResumeValidationError(f"unsupported candidate_evidence_review decision: {request.decision!r}")
+    if request.decision == "stop":
+        return _gene_gate_stop(state, "candidate_evidence_review", request)
+
+    gene_out = _gene_output(state)
+    candidate_refs = dict(gene_out.get("candidate_refs") or {})
+    if request.decision == "request_rerun":
+        decision_ref = _record_gene_gate_decision(state, "candidate_evidence_review", request, {})
+        own = _gene_gate_own_update(
+            state,
+            "candidate_evidence_review",
+            request,
+            {"status": "methods_confirmed", "candidate_refs": {}, "accepted_candidate_refs": {}},
+            decision_ref,
+        )
+        return own
+
+    decision_ref = _record_gene_gate_decision(
+        state,
+        "candidate_evidence_review",
+        request,
+        {"accepted_candidate_refs": candidate_refs},
+    )
+    own = _gene_gate_own_update(
+        state,
+        "candidate_evidence_review",
+        request,
+        {"status": "candidates_accepted", "accepted_candidate_refs": candidate_refs},
+        decision_ref,
+    )
+    return own
+
+
+# --- gate 3: merge / EVM weights -----------------------------------------------
+
+_DEFAULT_MERGE_WEIGHTS = {"ab_initio": 1, "rnaseq": 5, "protein": 5}
+
+
+def build_merge_review_payload(state: TopLevelState) -> ReviewPayload:
+    gene_out = _gene_output(state)
+    triggers = _review_triggers(gene_out)
+    merge_policy = "evidence_merge_policy_required" in triggers
+    available = set(gene_out.get("available_evidence", []))
+    signals = [
+        ReviewSignal(
+            signal_name=f"evidence_class.{evidence_class}",
+            method_name=GENE_CONTRACT_METHOD,
+            status="available" if evidence_class in available else "missing",
+        )
+        for evidence_class in ("rnaseq", "long_rna", "protein")
+    ]
+    return ReviewPayload(
+        stage="gene_annotation",
+        gate_id="merge_review",
+        reason="merge_review",
+        signals=signals,
+        decisions_allowed=["accept_weights", "adjust_weights", "stop"],
+        auto_decidable=not merge_policy,
+        candidate_comparison_context={"evm_weight_table": dict(_DEFAULT_MERGE_WEIGHTS), "execution_support": "planning_only"},
+    )
+
+
+def block_merge_review(state: TopLevelState) -> dict:
+    if _gene_output(state).get("status") != "merge_ready":
+        return {}
+    return _run_gene_gate(
+        state,
+        gate_id="merge_review",
+        reason="merge_review",
+        payload=build_merge_review_payload(state),
+        applier=apply_merge_review_decision,
+        auto_decision="accept_weights",
+    )
+
+
+def apply_merge_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    _require_gene_stage(request, "merge_review")
+    if request.decision not in {"accept_weights", "adjust_weights", "stop"}:
+        raise ResumeValidationError(f"unsupported merge_review decision: {request.decision!r}")
+    if request.decision == "stop":
+        return _gene_gate_stop(state, "merge_review", request)
+
+    if request.decision == "adjust_weights":
+        merge_weights = dict(request.metadata.get("merge_weights") or {})
+        if not merge_weights:
+            raise ResumeValidationError("adjust_weights requires metadata.merge_weights")
+    else:
+        merge_weights = dict(_DEFAULT_MERGE_WEIGHTS)
+
+    decision_ref = _record_gene_gate_decision(
+        state,
+        "merge_review",
+        request,
+        {"merge_weights": merge_weights},
+    )
+    own = _gene_gate_own_update(
+        state,
+        "merge_review",
+        request,
+        {"status": "merge_accepted", "merge_weights": merge_weights},
+        decision_ref,
+    )
+    return own
+
+
+# --- gate 4: final gene set + BUSCO --------------------------------------------
+
+def build_final_gene_set_review_payload(state: TopLevelState) -> ReviewPayload:
+    gene_out = _gene_output(state)
+    busco_score = gene_out.get("busco_completeness")
+    busco_status = gene_out.get("busco_completeness_status", "missing")
+    busco = ReviewSignal(
+        signal_name="busco_completeness",
+        method_name=GENE_CONTRACT_METHOD,
+        status=busco_status,
+        metadata={"score": busco_score} if busco_score is not None else {},
+    )
+    auto_decidable = busco_status == "missing" or (isinstance(busco_score, (int, float)) and busco_score >= 80.0)
+    return ReviewPayload(
+        stage="gene_annotation",
+        gate_id="final_gene_set_review",
+        reason="final_gene_set_review",
+        signals=[busco],
+        decisions_allowed=["accept", "reject", "stop"],
+        auto_decidable=auto_decidable,
+        notes=["execution_support=planning_only"],
+    )
+
+
+def block_final_gene_set_review(state: TopLevelState) -> dict:
+    if _gene_output(state).get("status") != "merge_accepted":
+        return {}
+    return _run_gene_gate(
+        state,
+        gate_id="final_gene_set_review",
+        reason="final_gene_set_review",
+        payload=build_final_gene_set_review_payload(state),
+        applier=apply_final_gene_set_review_decision,
+        auto_decision="accept",
+    )
+
+
+def apply_final_gene_set_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+    _require_gene_stage(request, "final_gene_set_review")
+    if request.decision not in {"accept", "reject", "stop"}:
+        raise ResumeValidationError(f"unsupported final_gene_set_review decision: {request.decision!r}")
+    if request.decision == "stop":
+        return _gene_gate_stop(state, "final_gene_set_review", request)
+
+    if request.decision == "reject":
+        decision_ref = _record_gene_gate_decision(state, "final_gene_set_review", request, {})
+        own = _gene_gate_own_update(
+            state,
+            "final_gene_set_review",
+            request,
+            {"status": "candidates_accepted", "merge_weights": {}},
+            decision_ref,
+        )
+        return own
+
+    decision_ref = _record_gene_gate_decision(state, "final_gene_set_review", request, {})
+    own = _gene_gate_own_update(
+        state,
+        "final_gene_set_review",
+        request,
+        {"status": "review_passed"},
+        decision_ref,
+    )
+    return own
 
 
 def _softmasked_genome_ref(state: TopLevelState) -> str | None:

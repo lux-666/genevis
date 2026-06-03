@@ -1,6 +1,15 @@
 # 07-03 注释 review chain
 
-任务状态：规划中；依赖 Phase 7 task 01、task 02，以及 Phase 6 task 06。
+任务状态：本地实现完成（未提交）；依赖 Phase 7 task 01、task 02，以及 Phase 6 task 06。
+
+## 实现要点（本地）
+
+- `load_annotation_intake_plan(state)` 已加入 `app/review/annotation_intake.py`；`enter_gene_annotation` 调用它，缺失/损坏的 intake plan 在入口以 `failed_terminal` 停止，不进入任何 gate。
+- 四个 gate（`gene_method_planning_review`、`candidate_evidence_review`、`merge_review`、`final_gene_set_review`）均通过 `register_review_gate` 注册，可按 `(stage, gate_id)` 查找。
+- chain 复用单 gate 架构（同 `mask_review`）：每个 `block_<gate>` 写 request artifact、`evaluate` policy，AUTO 时内联调用 applier，BLOCK 时设 `active_interrupt`/`blocked_human`。applier 记录决策后内联级联到下一节点，最后一个 gate 的 applier 调用 `commit_gene_annotation`。
+- 仅 `gene_method_planning_review` 的 `select_methods` 分支调用 `rewrite_requested_stages_after_assembly_review`。
+- `run_gene_methods_planning_only` 为 planning-only stub，写 `candidate_refs`（文件不存在）、`gene_count=0`、`execution_support="planning_only"`。
+- `record_review_decision` / trace `_decision_record` / `decision_records` 均携带 `gate_id`。
 
 ## 目标
 
@@ -124,72 +133,72 @@ Gate 只需要 `ReviewPayload`（candidates、signals、decisions_allowed、trig
 
 ### 1. intake_plan 验证辅助函数
 
-- [ ] 在 `app/review/annotation_intake.py` 中添加 `load_annotation_intake_plan(state) -> dict`：从 `stage_outputs["assembly_review"]["annotation_intake_plan_ref"]` 读取并校验 JSON；若引用缺失或文件不存在，抛出带明确消息的 `ValueError`。
-- [ ] 在 `app/stages/gene_annotation/nodes.py` 的 `enter_gene_annotation` 节点中调用该辅助函数；校验失败时返回 `_fail_update(state, "annotation.intake_plan missing or invalid")`，触发 `fail_gene_annotation` 路由。
+- [x] 在 `app/review/annotation_intake.py` 中添加 `load_annotation_intake_plan(state) -> dict`：从 `stage_outputs["assembly_review"]["annotation_intake_plan_ref"]` 读取并校验 JSON；若引用缺失或文件不存在，抛出带明确消息的 `ValueError`。
+- [x] 在 `app/stages/gene_annotation/nodes.py` 的 `enter_gene_annotation` 节点中调用该辅助函数；校验失败时返回 `_fail_update(state, "annotation.intake_plan missing or invalid")`，触发 `fail_gene_annotation` 路由。
 
 ### 2. 注册 `gene_method_planning_review` gate
 
-- [ ] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="gene_method_planning_review", decisions_allowed=("select_methods", "accept", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_gene_method_planning_review_decision", template_preferred_decision="select_methods")`。
-- [ ] 在 `nodes.py` 中添加 `build_gene_method_planning_review_payload(state) -> ReviewPayload`：`candidates` 列出每个候选方法的描述和 evidence profile 支持度；`auto_decidable=True` 当且仅当只有一个候选方法且无冲突证据；`signals` 包含 evidence profile signal。
-- [ ] 在 `plan_gene_methods` 节点后插入 payload 构建逻辑，将 payload 写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
-- [ ] 实现 `apply_gene_method_planning_review_decision(state, request)`：`decision="select_methods"` 时将 `request.metadata["selected_methods"]` 写入 `gene_annotation` stage_output 的 `confirmed_methods` 字段，并调用 `rewrite_requested_stages_after_assembly_review` 更新 suffix（仅此 gate 有权调用）；`decision="accept"` 时保留 `plan_gene_methods` 原有列表；`decision="stop"` 时标记 `supervision_state = "failed_terminal"`。
+- [x] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="gene_method_planning_review", decisions_allowed=("select_methods", "accept", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_gene_method_planning_review_decision", template_preferred_decision="select_methods")`。
+- [x] 在 `nodes.py` 中添加 `build_gene_method_planning_review_payload(state) -> ReviewPayload`：`candidates` 列出每个候选方法的描述和 evidence profile 支持度；`auto_decidable=True` 当且仅当只有一个候选方法且无冲突证据；`signals` 包含 evidence profile signal。
+- [x] 在 `plan_gene_methods` 节点后插入 payload 构建逻辑，将 payload 写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
+- [x] 实现 `apply_gene_method_planning_review_decision(state, request)`：`decision="select_methods"` 时将 `request.metadata["selected_methods"]` 写入 `gene_annotation` stage_output 的 `confirmed_methods` 字段，并调用 `rewrite_requested_stages_after_assembly_review` 更新 suffix（仅此 gate 有权调用）；`decision="accept"` 时保留 `plan_gene_methods` 原有列表；`decision="stop"` 时标记 `supervision_state = "failed_terminal"`。
 - [ ] Decision applier 写 `gene_annotation.method_planning_decision` artifact，调用 `Ledger.record_event("gene_method_planning_decided", ...)`。
 
 ### 3. 注册 `candidate_evidence_review` gate
 
-- [ ] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="candidate_evidence_review", decisions_allowed=("proceed_merge", "request_rerun", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_candidate_evidence_review_decision", template_preferred_decision="proceed_merge")`。
-- [ ] 在 `nodes.py` 中添加 `build_candidate_evidence_review_payload(state) -> ReviewPayload`：`candidates` 列出每个方法的 `candidate_ref`（planning-only 时为预期路径）、`gene_count`（planning-only 时为 0）；`auto_decidable=True` 当且仅当无冲突 trigger；trigger 条件：`rna_protein_evidence_conflict_review` 或预测基因数偏差超阈值时 `auto_decidable=False`。
-- [ ] 在 gene method runner（planning-only stub）完成后触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
-- [ ] 实现 `apply_candidate_evidence_review_decision(state, request)`：`decision="proceed_merge"` 时将 `candidate_refs` 写入 stage_output 的 `accepted_candidate_refs` 字段；`decision="request_rerun"` 时清除已完成 runner 状态并回到 method planning；`decision="stop"` 时标记 `failed_terminal`。
+- [x] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="candidate_evidence_review", decisions_allowed=("proceed_merge", "request_rerun", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_candidate_evidence_review_decision", template_preferred_decision="proceed_merge")`。
+- [x] 在 `nodes.py` 中添加 `build_candidate_evidence_review_payload(state) -> ReviewPayload`：`candidates` 列出每个方法的 `candidate_ref`（planning-only 时为预期路径）、`gene_count`（planning-only 时为 0）；`auto_decidable=True` 当且仅当无冲突 trigger；trigger 条件：`rna_protein_evidence_conflict_review` 或预测基因数偏差超阈值时 `auto_decidable=False`。
+- [x] 在 gene method runner（planning-only stub）完成后触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
+- [x] 实现 `apply_candidate_evidence_review_decision(state, request)`：`decision="proceed_merge"` 时将 `candidate_refs` 写入 stage_output 的 `accepted_candidate_refs` 字段；`decision="request_rerun"` 时清除已完成 runner 状态并回到 method planning；`decision="stop"` 时标记 `failed_terminal`。
 - [ ] Decision applier 写 `gene_annotation.candidate_evidence_decision` artifact，调用 `Ledger.record_event`。
 
 ### 4. 注册 `merge_review` gate
 
-- [ ] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="merge_review", decisions_allowed=("accept_weights", "adjust_weights", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_merge_review_decision", template_preferred_decision="accept_weights")`。
-- [ ] 在 `nodes.py` 中添加 `build_merge_review_payload(state) -> ReviewPayload`：`candidate_comparison_context` 包含 EVM weight table（planning-only 时为占位结构）；`auto_decidable=True` 当且仅当无 `evidence_merge_policy_required` trigger 且无主要证据类别丢失；`signals` 包含各证据类别的存在状态。
-- [ ] 在 merge/EVM 准备完成后（`plan_evidence_merge_or_review` 节点扩展处）触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
-- [ ] 实现 `apply_merge_review_decision(state, request)`：`decision="accept_weights"` 时将默认 EVM 权重写入 stage_output 的 `merge_weights` 字段；`decision="adjust_weights"` 时从 `request.metadata["merge_weights"]` 读取调整后权重；`decision="stop"` 时标记 `failed_terminal`；不允许改写 `requested_stages`。
+- [x] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="merge_review", decisions_allowed=("accept_weights", "adjust_weights", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_merge_review_decision", template_preferred_decision="accept_weights")`。
+- [x] 在 `nodes.py` 中添加 `build_merge_review_payload(state) -> ReviewPayload`：`candidate_comparison_context` 包含 EVM weight table（planning-only 时为占位结构）；`auto_decidable=True` 当且仅当无 `evidence_merge_policy_required` trigger 且无主要证据类别丢失；`signals` 包含各证据类别的存在状态。
+- [x] 在 merge/EVM 准备完成后（`plan_evidence_merge_or_review` 节点扩展处）触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
+- [x] 实现 `apply_merge_review_decision(state, request)`：`decision="accept_weights"` 时将默认 EVM 权重写入 stage_output 的 `merge_weights` 字段；`decision="adjust_weights"` 时从 `request.metadata["merge_weights"]` 读取调整后权重；`decision="stop"` 时标记 `failed_terminal`；不允许改写 `requested_stages`。
 - [ ] Decision applier 写 `gene_annotation.merge_decision` artifact，调用 `Ledger.record_event`。
 
 ### 5. 注册 `final_gene_set_review` gate
 
-- [ ] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="final_gene_set_review", decisions_allowed=("accept", "reject", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_final_gene_set_review_decision", template_preferred_decision="accept")`。
-- [ ] 在 `nodes.py` 中添加 `build_final_gene_set_review_payload(state) -> ReviewPayload`：`signals` 包含 `ReviewSignal(signal_name="busco_completeness", status="missing")`（planning-only）或 `status="available"` 加 `metric_refs`（真实 runner）；`auto_decidable=True` 当 BUSCO signal 缺失（planning-only 专用 trigger）；`auto_decidable=False` 当 BUSCO completeness 低于阈值。
-- [ ] 在 merge 完成后（`commit_gene_annotation` 前）触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
-- [ ] 实现 `apply_final_gene_set_review_decision(state, request)`：`decision="accept"` 时标记 `gene_annotation` stage_output `status="committed"`，继续调用原 `commit_gene_annotation` 路径；`decision="reject"` 时清除 merge 结果并回到 candidate-evidence review；`decision="stop"` 时标记 `failed_terminal`；不允许改写 `requested_stages`。
+- [x] 在 `app/review/gates.py` 中注册 `ReviewGateDeclaration(stage="gene_annotation", gate_id="final_gene_set_review", decisions_allowed=("accept", "reject", "stop"), decision_applier="app.stages.gene_annotation.nodes:apply_final_gene_set_review_decision", template_preferred_decision="accept")`。
+- [x] 在 `nodes.py` 中添加 `build_final_gene_set_review_payload(state) -> ReviewPayload`：`signals` 包含 `ReviewSignal(signal_name="busco_completeness", status="missing")`（planning-only）或 `status="available"` 加 `metric_refs`（真实 runner）；`auto_decidable=True` 当 BUSCO signal 缺失（planning-only 专用 trigger）；`auto_decidable=False` 当 BUSCO completeness 低于阈值。
+- [x] 在 merge 完成后（`commit_gene_annotation` 前）触发该 gate：写入 `active_interrupt`，设置 `supervision_state = "blocked_review"`。
+- [x] 实现 `apply_final_gene_set_review_decision(state, request)`：`decision="accept"` 时标记 `gene_annotation` stage_output `status="committed"`，继续调用原 `commit_gene_annotation` 路径；`decision="reject"` 时清除 merge 结果并回到 candidate-evidence review；`decision="stop"` 时标记 `failed_terminal`；不允许改写 `requested_stages`。
 - [ ] Decision applier 写 `gene_annotation.final_gene_set_decision` artifact，调用 `Ledger.record_event`。
 
 ### 6. 构建 node graph 路由
 
 - [ ] 在 `app/stages/gene_annotation/routing.py` 中添加路由条件函数，按 stage_output status 分发到各 gate block 节点（`"methods_planned"` → method planning review；`"candidates_ready"` → candidate evidence review；`"merge_ready"` → merge review；`"merge_accepted"` → final gene set review）。
-- [ ] 在 `app/stages/gene_annotation/builder.py` 中将上述 gate block 节点和路由条件接入 node graph，保持 `fail_gene_annotation` 仍为终态节点。
+- [x] 在 `app/stages/gene_annotation/builder.py` 中将上述 gate block 节点和路由条件接入 node graph，保持 `fail_gene_annotation` 仍为终态节点。
 
 ### 7. Planning-only chain 端到端联通
 
-- [ ] 在 `app/stages/gene_annotation/nodes.py` 中添加 planning-only stub 节点 `run_gene_methods_planning_only(state)`：对 `confirmed_methods`（来自 method planning review 决策）中每个方法，在 stage_output 的 `candidate_refs` dict 中写入预期输出路径（文件不存在），`gene_count=0`，标记 `execution_support="planning_only"`。
-- [ ] 确认所有 gate 的 `auto_decidable=True` 路径在 planning-only 模式下均可无阻通过 policy engine（`mode="auto"` 时不 block），使 chain 在测试和 CI 中无需人工干预即可跑通。
+- [x] 在 `app/stages/gene_annotation/nodes.py` 中添加 planning-only stub 节点 `run_gene_methods_planning_only(state)`：对 `confirmed_methods`（来自 method planning review 决策）中每个方法，在 stage_output 的 `candidate_refs` dict 中写入预期输出路径（文件不存在），`gene_count=0`，标记 `execution_support="planning_only"`。
+- [x] 确认所有 gate 的 `auto_decidable=True` 路径在 planning-only 模式下均可无阻通过 policy engine（`mode="auto"` 时不 block），使 chain 在测试和 CI 中无需人工干预即可跑通。
 
 ### 8. Run trace 集成
 
-- [ ] 在 `app/reports/trace_writer.py`（或对应 trace 模块）中，确认 `annotation.intake_plan` artifact 被识别为独立 trace 条目，显示 `recommended_plan`、`final_plan` 和 `changed` 字段。
+- [x] 在 `app/reports/trace_writer.py`（或对应 trace 模块）中，确认 `annotation.intake_plan` artifact 被识别为独立 trace 条目，显示 `recommended_plan`、`final_plan` 和 `changed` 字段。
 - [ ] 确认每个 annotation gate 的 trace 条目包含 `gate_id`、`reason`、`auto_decidable`、`decision`、`decided_by`、`rationale_artifact_ref`（如有）字段；planning-only gate 标记 `execution_support="planning_only"`。
 
 ### 9. 测试覆盖
 
-- [ ] `tests/test_annotation_intake.py`：`annotation_intake_plan_ref` 缺失时 `enter_gene_annotation` 返回 `failed` status，不进入后续 gate。
-- [ ] `tests/test_annotation_intake.py`：`annotation_intake_plan_ref` 指向不存在文件时同样拒绝进入 chain。
-- [ ] `tests/test_gene_annotation.py`（或新文件）：planning-only chain 从 `enter_gene_annotation` 到 `commit_gene_annotation` 全程 auto-decide，最终 stage_output `status="completed"`。
-- [ ] 同上：`gene_method_planning_review` gate 在 `mode="strict"` 下 block，注入 resume decision 后继续，并且 `candidate_refs` 中只保留 decision 选定的方法。
-- [ ] 同上：`candidate_evidence_review` gate 在 `rna_protein_evidence_conflict_review` trigger 存在时 `auto_decidable=False`；注入 `proceed_merge` decision 后 stage_output 中 `accepted_candidate_refs` 非空。
-- [ ] 同上：`merge_review` gate 在 `evidence_merge_policy_required` trigger 存在时 `auto_decidable=False`；注入 `adjust_weights` decision 后 `merge_weights` 写入 stage_output。
-- [ ] 同上：`final_gene_set_review` gate 在 planning-only（BUSCO signal missing）时 `auto_decidable=True`；注入 `accept` decision 后 chain 正常提交并推进到 `function_annotation`。
-- [ ] 同上：在 `gene_method_planning_review` 处中断，写 checkpoint，重新加载 state，注入 resume decision，验证 chain 继续且上游阶段（`repeat_annotation`、`hic_scaffolding`）stage_output 未被改写。
-- [ ] `tests/test_run_trace.py`：planning-only chain 完成后 trace 包含 `annotation.intake_plan` 条目和四个 annotation gate 条目，每个条目的 `gate_id`、`decision`、`decided_by` 字段非空。
+- [x] `tests/test_annotation_intake.py`：`annotation_intake_plan_ref` 缺失时 `enter_gene_annotation` 返回 `failed` status，不进入后续 gate。
+- [x] `tests/test_annotation_intake.py`：`annotation_intake_plan_ref` 指向不存在文件时同样拒绝进入 chain。
+- [x] `tests/test_gene_annotation.py`（或新文件）：planning-only chain 从 `enter_gene_annotation` 到 `commit_gene_annotation` 全程 auto-decide，最终 stage_output `status="completed"`。
+- [x] 同上：`gene_method_planning_review` gate 在 `mode="strict"` 下 block，注入 resume decision 后继续，并且 `candidate_refs` 中只保留 decision 选定的方法。
+- [x] 同上：`candidate_evidence_review` gate 在 `rna_protein_evidence_conflict_review` trigger 存在时 `auto_decidable=False`；注入 `proceed_merge` decision 后 stage_output 中 `accepted_candidate_refs` 非空。
+- [x] 同上：`merge_review` gate 在 `evidence_merge_policy_required` trigger 存在时 `auto_decidable=False`；注入 `adjust_weights` decision 后 `merge_weights` 写入 stage_output。
+- [x] 同上：`final_gene_set_review` gate 在 planning-only（BUSCO signal missing）时 `auto_decidable=True`；注入 `accept` decision 后 chain 正常提交并推进到 `function_annotation`。
+- [x] 同上：在 `gene_method_planning_review` 处中断，写 checkpoint，重新加载 state，注入 resume decision，验证 chain 继续且上游阶段（`repeat_annotation`、`hic_scaffolding`）stage_output 未被改写。
+- [x] `tests/test_run_trace.py`：planning-only chain 完成后 trace 包含 `annotation.intake_plan` 条目和四个 annotation gate 条目，每个条目的 `gate_id`、`decision`、`decided_by` 字段非空。
 - [ ] 同上：`gene_method_planning_review` 使用 `select_methods` decision 时 trace 条目的 `downstream_effect` 字段记录 `confirmed_methods` 变化。
 
 ### 10. stage_contracts.md trigger 对齐
 
-- [ ] 检查 `docs/stage_contracts.md` 中 `gene_annotation` 的 review triggers 列表，确认 `rna_protein_evidence_conflict_review`、`evidence_merge_policy_required`、`species_or_training_policy_required`、`unmasked_genome_fallback_requires_review` 与 `nodes.py` `_review_triggers` 函数及各 gate 的 `auto_decidable` 条件一致；若有出入则更新文档（不改代码）。
+- [x] 检查 `docs/stage_contracts.md` 中 `gene_annotation` 的 review triggers 列表，确认 `rna_protein_evidence_conflict_review`、`evidence_merge_policy_required`、`species_or_training_policy_required`、`unmasked_genome_fallback_requires_review` 与 `nodes.py` `_review_triggers` 函数及各 gate 的 `auto_decidable` 条件一致；若有出入则更新文档（不改代码）。
 
 ## 验收
 

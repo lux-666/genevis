@@ -22,6 +22,7 @@ def decision_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "timestamp": event.get("timestamp"),
                 "stage": event.get("stage"),
+                "gate_id": event.get("gate_id"),
                 "decision": event.get("decision"),
                 "candidate_id": event.get("candidate_id"),
                 "method_name": event.get("method_name"),

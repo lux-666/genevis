@@ -142,3 +142,43 @@ register_review_gate(
         template_preferred_decision="accept",
     )
 )
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="gene_annotation",
+        gate_id="gene_method_planning_review",
+        decisions_allowed=("select_methods", "accept", "stop"),
+        decision_applier="app.stages.gene_annotation.nodes:apply_gene_method_planning_review_decision",
+        template_preferred_decision="select_methods",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="gene_annotation",
+        gate_id="candidate_evidence_review",
+        decisions_allowed=("proceed_merge", "request_rerun", "stop"),
+        decision_applier="app.stages.gene_annotation.nodes:apply_candidate_evidence_review_decision",
+        template_preferred_decision="proceed_merge",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="gene_annotation",
+        gate_id="merge_review",
+        decisions_allowed=("accept_weights", "adjust_weights", "stop"),
+        decision_applier="app.stages.gene_annotation.nodes:apply_merge_review_decision",
+        template_preferred_decision="accept_weights",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="gene_annotation",
+        gate_id="final_gene_set_review",
+        decisions_allowed=("accept", "reject", "stop"),
+        decision_applier="app.stages.gene_annotation.nodes:apply_final_gene_set_review_decision",
+        template_preferred_decision="accept",
+    )
+)

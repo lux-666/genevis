@@ -184,6 +184,70 @@ class RunTraceBlockedTests(unittest.TestCase):
             self.assertIn("accept", trace["blocked"]["decisions_allowed"])
 
 
+class RunTraceAnnotationChainTests(unittest.TestCase):
+    def _intake_plan(self, tmp: Path) -> str:
+        path = tmp / "annotation_intake_plan.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "artifact_type": "annotation.intake_plan",
+                    "recommended_plan": {},
+                    "final_plan": {},
+                    "final_requested_stages": ["gene_annotation", "function_annotation"],
+                    "changed": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def test_completed_auto_chain_records_four_gate_decisions_and_intake(self):
+        from app.schemas.state import initial_state
+        from app.stages.gene_annotation.builder import build_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ledger = Ledger(tmp)
+            ledger.create_session("s1", "manifest.yaml")
+            registry = tmp_path / "registry.json"
+            registry.write_text(json.dumps({"session_id": "s1", "assets": []}), encoding="utf-8")
+            softmasked = tmp_path / "softmasked.fa"
+            softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
+            # The annotation intake artifact is recorded at assembly_review.
+            _register_artifact(
+                tmp,
+                "s1",
+                stage="assembly_review",
+                method="annotation.intake",
+                artifact_type="annotation.intake_plan",
+            )
+
+            state = initial_state(session_id="s1", input_manifest_ref=str(tmp_path / "manifest.yaml"), data_dir=tmp)
+            state["current_stage"] = "gene_annotation"
+            state["asset_registry_ref"] = str(registry)
+            state["requested_stages"] = ["assembly_review", "gene_annotation", "function_annotation"]
+            state["stage_outputs"] = {
+                "assembly_review": {"annotation_intake_plan_ref": self._intake_plan(tmp_path)},
+                "repeat_annotation": {"status": "completed", "softmasked_genome_ref": str(softmasked)},
+            }
+
+            result = build_stage().invoke(state)
+            self.assertEqual(result["current_stage"], "function_annotation")
+
+            trace = build_session_trace(tmp, "s1")
+            gene_decisions = [d for d in trace["decisions"] if d["stage"] == "gene_annotation"]
+            self.assertEqual(len(gene_decisions), 4)
+            for decision in gene_decisions:
+                self.assertTrue(decision["gate_id"])
+                self.assertTrue(decision["decision"])
+                self.assertTrue(decision["decided_by"])
+            assembly_review = _stage(trace, "assembly_review")
+            self.assertIn(
+                "annotation.intake_plan",
+                {artifact["artifact_type"] for artifact in assembly_review["artifact_refs"]},
+            )
+
+
 class RunTraceGapTests(unittest.TestCase):
     def test_route_trace_and_skip_reason_are_flagged_checkpoint_only(self):
         with tempfile.TemporaryDirectory() as tmp:

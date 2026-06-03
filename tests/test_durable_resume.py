@@ -158,8 +158,13 @@ class DurableResumeTests(unittest.TestCase):
             ledger_events = Ledger(data_dir).read_events("s1")
             decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
             self.assertTrue(decision_events, "expected review_decision ledger event")
-            self.assertEqual(decision_events[-1]["decision"], "accept")
-            self.assertEqual(decision_events[-1]["candidate_id"], "flye")
+            # The accepted assembly_review decision advances downstream into the
+            # annotation chain, which records its own gate decisions; assert on
+            # the assembly_review decision specifically rather than the last one.
+            assembly_decisions = [e for e in decision_events if e["stage"] == "assembly_review"]
+            self.assertTrue(assembly_decisions, "expected assembly_review review_decision ledger event")
+            self.assertEqual(assembly_decisions[-1]["decision"], "accept")
+            self.assertEqual(assembly_decisions[-1]["candidate_id"], "flye")
 
             # F3: lifecycle continuation events around the resume.
             resume_started = [e for e in ledger_events if e["event_type"] == "resume_started"]

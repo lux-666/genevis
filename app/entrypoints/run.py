@@ -925,6 +925,22 @@ def _run_resume(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    # Continue-downstream at assembly_review hands off to the annotation agent
+    # via annotation.intake_plan. A non-interactive decision-file resume must
+    # still record the recommended intake plan so gene_annotation can enter.
+    from app.review.annotation_intake import maybe_collect_annotation_intake
+
+    intake = maybe_collect_annotation_intake(
+        state=state,
+        resume_update=update,
+        request=decision,
+        source="cli",
+        interactive=False,
+    )
+    if intake is not None:
+        update = {**update, **intake.update}
+        print(f"annotation_intake_plan: {intake.artifact_ref}")
+
     graph.update_state(config, update)
     try:
         result = graph.invoke(None, config=config)

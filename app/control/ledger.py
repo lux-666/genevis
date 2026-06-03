@@ -190,6 +190,7 @@ class Ledger:
         stage: str,
         *,
         decision: str,
+        gate_id: str | None = None,
         candidate_id: str | None = None,
         rejected_candidates: list[str] | None = None,
         notes: list[str] | None = None,
@@ -205,6 +206,7 @@ class Ledger:
             "review_decision",
             {
                 "stage": stage,
+                "gate_id": gate_id,
                 "decision": decision,
                 "candidate_id": candidate_id,
                 "rejected_candidates": rejected_candidates or [],

@@ -309,6 +309,7 @@ def _stage_timing(methods: list[dict[str, Any]], review: dict[str, Any] | None) 
 def _decision_record(decision: dict[str, Any]) -> dict[str, Any]:
     return {
         "stage": decision.get("stage"),
+        "gate_id": decision.get("gate_id"),
         "decision": decision.get("decision"),
         "decided_by": decision.get("decided_by"),
         "candidate_id": decision.get("candidate_id"),

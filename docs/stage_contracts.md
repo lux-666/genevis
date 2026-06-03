@@ -321,11 +321,19 @@ Planning rules:
 - Mixed evidence requires a review/merge policy; do not select one by default.
 - Treat EVM as optional compatibility because maintenance status is a risk.
 
-Review triggers:
+Review triggers (named, emitted by `_review_triggers`):
 
-- RNA and homology evidence conflict
-- predicted gene count is far outside expected range
-- EVM fails or drops major evidence classes
+- `evidence_merge_policy_required` — mixed evidence profile; makes
+  `merge_review` not auto-decidable.
+- `rna_protein_evidence_conflict_review` — RNA and protein evidence both
+  present; makes `gene_method_planning_review` and `candidate_evidence_review`
+  not auto-decidable.
+- `unmasked_genome_fallback_requires_review` — genome input fell back to the
+  unmasked final assembly.
+- `species_or_training_policy_required` — no evidence profile (ab initio only).
+- predicted gene count far outside expected range and EVM failures/dropped
+  evidence classes are future real-runner triggers; planning-only does not emit
+  them.
 
 ### Adoption path (provided annotation assets present)
 
