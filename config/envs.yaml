@@ -82,6 +82,10 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - augustus
+  function_annotation.candidate.diamond:
+    conda_env: env_geno_exec
+    required_tools:
+      - diamond
   gene_annotation.evm:
     conda_env: env_geno_exec
     required_tools:

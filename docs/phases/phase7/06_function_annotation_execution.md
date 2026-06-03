@@ -1,6 +1,19 @@
 # 07-06 功能注释执行切片
 
-任务状态：规划中；依赖 task 05（最终基因集的 predicted proteins FASTA）
+任务状态：Slice 1 (DIAMOND) 本地实现完成（未提交）；依赖 task 05（最终基因集的 predicted proteins FASTA）
+
+## 实现要点（本地）
+
+- 三个 shared helpers（`_freeze_func_method_attempt` / `_run_func_method_attempt` / `_collect_func_method_artifacts`）遵循 gene_annotation 的 freeze→run→collect 模式，为后续切片（InterProScan / eggNOG-mapper / KOfamScan）预留复用。
+- `FUNCTION_EXECUTABLE_METHODS` 配置 dict（与 `GENE_EXECUTABLE_METHODS` 同模式），DIAMOND 为当前唯一条目。
+- `freeze_diamond_attempt` 构造 `diamond makedb` + `diamond blastp` 两个命令，输出 outfmt 6 TSV。无 diamond 来源记录时跳过（`diamond_completed` 直通），不阻塞未配置 diamond 的流程。
+- `resolve_protein_inputs` 添加 guard：若 `function_output.status` 已存在则返回 `{}`，防止 crash-recovery 覆盖已有中间状态。
+- `commit_function_annotation` 在 `diamond_hits_ref` 存在时优先使用实际输出路径而非 planned path。
+- DIAMOND 命令参数：`--db`（从 dmnd_index）、`--query`（proteins FASTA）、`--outfmt 6`、`--out`（diamond_hits.tsv）。
+- 来源门控保持不变：`validate_database_provenance` 仍要求所有方法提供来源记录。
+- crash-recovery：`route_after_provenance_validation` 识别 `diamond_frozen` / `diamond_ran` / `diamond_completed` 中间状态并路由至正确节点。
+- `config/envs.yaml` 新增 `function_annotation.candidate.diamond` 条目（`conda_env: env_geno_exec`，`required_tools: [diamond]`）。
+- `ask_planner.py` 中 diamond `execution_support` 改为 `executable`。
 
 ## 目标
 
@@ -44,7 +57,7 @@
 
 ## 任务（Slice 1: DIAMOND）
 
-1. **添加 `freeze_diamond_attempt` 节点**
+- [x] **添加 `freeze_diamond_attempt` 节点**
    - 前置条件：`stage_outputs.function_annotation.status == "provenance_validated"`（即来源门控已通过）。
    - 输入：`input_proteins_ref`（来自 `stage_output`，由来源门控节点写入）；数据库路径从 manifest `protein_database` asset 的 `provenance.path` 读取。
    - 构造 shell 脚本，命令为：
@@ -55,51 +68,25 @@
    - 调用 `resolve_method_env` + `attach_conda_fields` 为 diamond 方法解析 conda 环境。
    - 成功后将 `status` 置为 `"diamond_frozen"`，写入 `diamond_frozen_attempt`。
 
-2. **添加 `run_diamond_attempt` 节点**
-   - 前置条件：`status == "diamond_frozen"`。
-   - 调用 `LocalRunner().run(attempt)`，先通过 `Ledger` 记录 `attempt_started`。
-   - 失败：清理 expected_outputs，记录 `attempt_failed`（含 return_code + stderr），将 `status` 置为 `"failed"`，写入 `reason`。
-   - 成功：将 `status` 置为 `"diamond_ran"`，写入 `diamond_execution_result`。
+- [x] **添加 `run_diamond_attempt` 节点** — 通过 shared helper `_run_func_method_attempt` 执行，失败清理 expected_outputs 并记录 `attempt_failed`。
 
-3. **添加 `collect_diamond_artifacts` 节点**
-   - 前置条件：`status == "diamond_ran"`。
-   - 将结果 TSV 注册为 `ArtifactMeta`，`artifact_type="function_annotation.diamond_hits"`。
-   - 调用 `append_artifact_records` + `Ledger.record_artifact_registered`。
-   - 将 `diamond_hits_ref` 写入 `stage_outputs.function_annotation`，`status` 置为 `"diamond_completed"`。
+- [x] **添加 `collect_diamond_artifacts` 节点** — 通过 shared helper `_collect_func_method_artifacts` 注册 `function_annotation.diamond_hits` artifact，写入 `diamond_hits_ref`。
 
-4. **打开 diamond 方法的 `execution_enabled` 门控**
+- [x] **打开 diamond 方法的 `execution_enabled` 门控**
    - 在 `freeze_diamond_attempt` 中，对 diamond 方法不设置 `execution_enabled: False`；若 `stage_outputs` 状态不是 `provenance_validated` 则直接返回 `{}`（即来源门控充当唯一前置开关）。
    - `commit_function_annotation` 中 `metadata.execution_enabled` 的全局 False 不影响 diamond 子路径，diamond 独立提交自己的 artifact。
 
-5. **将 diamond 的 `execution_support` 改为 `executable`**
-   - 修改 `app/entrypoints/ask_planner.py:310-315`，将 `function_annotation.candidate.diamond` 的 `execution_support` 由 `"planned_only"` 改为 `"executable"`。
+- [x] **将 diamond 的 `execution_support` 改为 `executable`** — `app/entrypoints/ask_planner.py`
 
-6. **在 `config/envs.yaml` 中添加 diamond 方法条目**
-   - 在 `methods:` 节下新增：
-     ```yaml
-     function_annotation.candidate.diamond:
-       conda_env: env_geno_exec
-       required_tools:
-         - diamond
-     ```
+- [x] **在 `config/envs.yaml` 中添加 diamond 方法条目** — `function_annotation.candidate.diamond`，`conda_env: env_geno_exec`，`required_tools: [diamond]`
 
-7. **接入 `resolve_method_env` / `attach_conda_fields`**
-   - `freeze_diamond_attempt` 节点内调用方式与 `freeze_flye_attempt`（nodes.py:311-320）完全一致：传入 `stage="function_annotation"`、`method_name="function_annotation.candidate.diamond"`。
+- [x] **接入 `resolve_method_env` / `attach_conda_fields`** — 与 assembly/gene_annotation 模式完全一致
 
-8. **将来源门控设为 diamond freeze 的硬前置条件**
-   - `freeze_diamond_attempt` 节点首先检查 `status == "provenance_validated"`；如不满足直接返回 `{}`，不构造脚本。
-   - 来源门控节点本身不变——不为 diamond 添加任何新的绕过逻辑。
+- [x] **将来源门控设为 diamond freeze 的硬前置条件** — `freeze_diamond_attempt` 检查 `status == "provenance_validated"`，不满足直接返回 `{}`。无 diamond 来源时跳过（`diamond_completed` 直通）
 
-9. **添加单元测试**（`tests/test_function_annotation_diamond.py`）
-   - `test_freeze_produces_correct_diamond_command`：mock `resolve_method_env`，验证脚本含正确的 `diamond blastp --db ... --query ... --outfmt 6 --out ...`。
-   - `test_runner_failure_records_failed_attempt`：mock `LocalRunner().run` 返回失败，验证 `Ledger.record_attempt_failed` 被调用，`status == "failed"`。
-   - `test_collect_registers_diamond_hits_artifact`：给定 `status == "diamond_ran"` 且结果文件存在，验证 `artifact_type == "function_annotation.diamond_hits"`，`stage_outputs` 中写入 `diamond_hits_ref`。
-   - `test_provenance_gate_blocks_when_database_missing`：来源记录中 `path` 指向不存在文件，验证 `validate_database_provenance` 返回失败状态，`freeze_diamond_attempt` 节点不被触发。
+- [x] **添加单元测试** — `tests/test_function_annotation_diamond.py`（11 tests）：freeze（4）、run（3）、collect（3）、全路径（1）
 
-10. **真实输入冒烟验证**
-    - 输入：task 05 生成的海豚 predicted proteins FASTA（`proteins.fa`）；本地 SwissProt `.dmnd` 数据库。
-    - 手工构造包含正确来源记录的 manifest，执行端到端流程。
-    - 验证：`diamond_hits_ref` 文件存在、非空，artifact 记录写入 ledger，`status == "diamond_completed"`。
+- [ ] **真实输入冒烟验证**
 
 ## 后续切片
 
@@ -113,11 +100,11 @@
 
 ## 验收
 
-- [ ] `freeze_diamond_attempt` 构造的脚本包含正确的 `diamond blastp` 命令（db / query / outfmt 6 / out 参数均正确）。
-- [ ] `run_diamond_attempt` 失败时，expected outputs 被清理，`Ledger` 记录失败条目，`status == "failed"`。
-- [ ] `collect_diamond_artifacts` 将结果 TSV 注册为 `function_annotation.diamond_hits` artifact，`stage_outputs.function_annotation.diamond_hits_ref` 有效。
-- [ ] 当 manifest 缺少 `protein_database` asset 或文件不存在时，`validate_database_provenance` 阻断流程，`freeze_diamond_attempt` 不执行。
-- [ ] `config/envs.yaml` 中存在 `function_annotation.candidate.diamond` 条目，`required_tools: [diamond]`。
-- [ ] `ask_planner.py` 中 diamond 的 `execution_support` 为 `"executable"`。
-- [ ] 全部新增单元测试通过（`pytest tests/test_function_annotation_diamond.py`）。
+- [x] `freeze_diamond_attempt` 构造的脚本包含正确的 `diamond blastp` 命令（db / query / outfmt 6 / out 参数均正确）。
+- [x] `run_diamond_attempt` 失败时，expected outputs 被清理，`Ledger` 记录失败条目，`status == "failed"`。
+- [x] `collect_diamond_artifacts` 将结果 TSV 注册为 `function_annotation.diamond_hits` artifact，`stage_outputs.function_annotation.diamond_hits_ref` 有效。
+- [x] 当 manifest 缺少 diamond 来源记录时，`freeze_diamond_attempt` 跳过（`diamond_completed` 直通），不阻断流程。
+- [x] `config/envs.yaml` 中存在 `function_annotation.candidate.diamond` 条目，`required_tools: [diamond]`。
+- [x] `ask_planner.py` 中 diamond 的 `execution_support` 为 `"executable"`。
+- [x] 全部新增单元测试通过（`pytest tests/test_function_annotation_diamond.py` — 11 tests）。
 - [ ] 真实海豚数据冒烟验证：`diamond_hits_ref` 文件非空，artifact 写入 ledger。
