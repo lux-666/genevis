@@ -118,7 +118,7 @@ def enter_read_qc(state: TopLevelState) -> dict:
 
 
 def resolve_raw_long_reads(state: TopLevelState) -> dict:
-    """Resolve a single raw_long_reads asset from the asset registry."""
+    """Resolve all raw_long_reads assets from the asset registry as one read set."""
     registry_ref = state.get("asset_registry_ref")
     if not registry_ref:
         return _fail_update(state, "missing asset_registry_ref for read_qc")
@@ -131,27 +131,28 @@ def resolve_raw_long_reads(state: TopLevelState) -> dict:
     assets = [asset for asset in registry.get("assets", []) if asset.get("asset_type") == "raw_long_reads"]
     if not assets:
         return _fail_update(state, "raw_long_reads asset not found in registry")
-    if len(assets) > 1:
-        return _fail_update(state, "multiple raw_long_reads assets require explicit multi-input policy")
 
-    asset = assets[0]
-    path = Path(asset["path"])
-    if not path.exists():
+    paths = [Path(asset["path"]) for asset in assets]
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
         return _blocked_update(
             state,
             "blocked_input",
-            f"raw_long_reads path not found: {path}",
-            {"blocked_input_ref": str(path)},
+            f"raw_long_reads path not found: {missing[0]}",
+            {"blocked_input_ref": missing[0], "blocked_input_refs": missing},
         )
 
+    first_asset = assets[0]
     return _update_read_qc_output(
         state,
         {
             "status": "resolved",
-            "input_asset_ref": asset.get("asset_id"),
-            "raw_long_reads_path": str(path),
-            "platform": asset.get("platform"),
-            "format": asset.get("format"),
+            "input_asset_ref": first_asset.get("asset_id"),
+            "input_asset_refs": [asset.get("asset_id") for asset in assets if asset.get("asset_id")],
+            "raw_long_reads_path": str(paths[0]),
+            "raw_long_reads_paths": [str(path) for path in paths],
+            "platform": first_asset.get("platform"),
+            "format": first_asset.get("format"),
         },
     )
 
@@ -218,12 +219,13 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path = Path(read_qc_out["raw_long_reads_path"])
+    input_paths = _read_paths_from_output(read_qc_out, "raw_long_reads_paths", "raw_long_reads_path")
     stats_path = artifact_dir / "seqkit_stats.tsv"
     script_path = working_dir / "run_seqkit_stats.sh"
+    reads_arg = " ".join(shlex.quote(str(path)) for path in input_paths)
     script_path.write_text(
         "set -e\n"
-        f"seqkit stats -a -T {shlex.quote(str(input_path))} > {shlex.quote(str(stats_path))}\n",
+        f"seqkit stats -a -T {reads_arg} > {shlex.quote(str(stats_path))}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -240,7 +242,9 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
         "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
         "metadata": {
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
-            "raw_long_reads_path": str(input_path),
+            "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
+            "raw_long_reads_path": str(input_paths[0]),
+            "raw_long_reads_paths": [str(path) for path in input_paths],
             "stats_path": str(stats_path),
         },
     }
@@ -330,6 +334,7 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             metadata={
                 "attempt_id": attempt.attempt_id,
                 "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
                 "format": "tsv",
                 "tool": "seqkit",
             },
@@ -342,7 +347,9 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
         "session_id": attempt.session_id,
         "method_name": METHOD_NAME,
         "input_asset_ref": read_qc_out.get("input_asset_ref"),
+        "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
         "raw_long_reads_path": read_qc_out.get("raw_long_reads_path"),
+        "raw_long_reads_paths": read_qc_out.get("raw_long_reads_paths") or [],
         "summary": summary,
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
@@ -355,6 +362,7 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             metadata={
                 "attempt_id": attempt.attempt_id,
                 "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
                 "format": "json",
                 "tool": "seqkit",
             },
@@ -505,14 +513,18 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path = Path(read_qc_out["raw_long_reads_path"])
-    fmt = read_qc_out.get("format") or _detect_format(input_path)
-    ext = ".fasta" if fmt == "fasta" else ".fastq"
-    filtered_path = artifact_dir / f"filtered_long_reads{ext}"
+    input_paths = _read_paths_from_output(read_qc_out, "raw_long_reads_paths", "raw_long_reads_path")
+    filtered_paths = [
+        _filtered_long_reads_path(artifact_dir, input_path, index=index, total=len(input_paths), fmt=read_qc_out.get("format"))
+        for index, input_path in enumerate(input_paths, start=1)
+    ]
     script_path = working_dir / "run_length_filter.sh"
+    filter_commands = [
+        f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} > {shlex.quote(str(filtered_path))}"
+        for input_path, filtered_path in zip(input_paths, filtered_paths)
+    ]
     script_path.write_text(
-        "set -e\n"
-        f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} > {shlex.quote(str(filtered_path))}\n",
+        "set -e\n" + "\n".join(filter_commands) + "\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -525,12 +537,15 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         "script_path": script_path,
         "working_dir": working_dir,
         "interpreter": "/bin/bash",
-        "expected_outputs": [filtered_path],
+        "expected_outputs": filtered_paths,
         "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
         "metadata": {
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
-            "raw_long_reads_path": str(input_path),
-            "filtered_long_reads_path": str(filtered_path),
+            "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
+            "raw_long_reads_path": str(input_paths[0]),
+            "raw_long_reads_paths": [str(path) for path in input_paths],
+            "filtered_long_reads_path": str(filtered_paths[0]),
+            "filtered_long_reads_paths": [str(path) for path in filtered_paths],
             "thresholds": {"min_len": min_len},
         },
     }
@@ -550,6 +565,14 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         error = stderr.strip() or f"seqkit seq failed with return code {result.return_code}"
         ledger.record_attempt_failed(session_id, attempt, return_code=result.return_code, error=error)
         return _update_read_qc_output(state, {"status": "failed", "reason": error})
+    missing_outputs = [str(path) for path in attempt.expected_outputs if not path.exists()]
+    if missing_outputs:
+        stdout = result.stdout_path.read_text(encoding="utf-8") if result.stdout_path.exists() else ""
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        reason = f"seqkit seq expected outputs missing: {missing_outputs}"
+        detail = "\n".join(part for part in [reason, stdout.strip(), stderr.strip()] if part)
+        ledger.record_attempt_failed(session_id, attempt, return_code=0, error=detail)
+        return _update_read_qc_output(state, {"status": "failed", "reason": detail})
 
     artifacts = [
         ArtifactMeta.from_file(
@@ -560,10 +583,12 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
             metadata={
                 "attempt_id": attempt.attempt_id,
                 "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
                 "thresholds": {"min_len": min_len},
                 "tool": "seqkit",
             },
         )
+        for filtered_path in filtered_paths
     ]
     for path, artifact_type in [
         (result.stdout_path, "command.stdout"),
@@ -593,13 +618,15 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         "status": "executed",
         "method_name": LENGTH_FILTER_METHOD_NAME,
         "thresholds": {"min_len": min_len},
-        "artifact_ref": str(filtered_path),
+        "artifact_ref": str(filtered_paths[0]),
+        "artifact_refs": [str(path) for path in filtered_paths],
     }
     return _update_read_qc_output(
         state,
         {
             "status": "length_filter_executed",
-            "filtered_long_reads_ref": str(filtered_path),
+            "filtered_long_reads_ref": str(filtered_paths[0]),
+            "filtered_long_reads_refs": [str(path) for path in filtered_paths],
             "length_filter_method": LENGTH_FILTER_METHOD_NAME,
             "length_filter_decision": LENGTH_FILTER_DECISIONS[LENGTH_FILTER_METHOD_NAME],
             "substeps": substeps,
@@ -619,23 +646,26 @@ def make_fofn(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     if read_qc_out.get("filtered_long_reads_ref"):
-        input_path = Path(read_qc_out["filtered_long_reads_ref"])
+        input_paths = _read_paths_from_output(read_qc_out, "filtered_long_reads_refs", "filtered_long_reads_ref")
         fofn_path = artifact_dir / "filtered_long_reads.fofn"
         artifact_type = READ_QC_FILTERED_LONG_READS_FOFN
         ref_key = "filtered_long_reads_fofn_ref"
     else:
-        input_path = Path(read_qc_out["raw_long_reads_path"])
+        input_paths = _read_paths_from_output(read_qc_out, "raw_long_reads_paths", "raw_long_reads_path")
         fofn_path = artifact_dir / "long_reads.fofn"
         artifact_type = READ_QC_LONG_READS_FOFN
         ref_key = "long_reads_fofn_ref"
 
-    fofn_path.write_text(f"{input_path}\n", encoding="utf-8")
+    fofn_path.write_text("".join(f"{path}\n" for path in input_paths), encoding="utf-8")
     artifact = ArtifactMeta.from_file(
         fofn_path,
         stage="read_qc",
         method_name=MAKE_FOFN_METHOD_NAME,
         artifact_type=artifact_type,
-        metadata={"source_read_ref": str(input_path)},
+        metadata={
+            "source_read_ref": str(input_paths[0]),
+            "source_read_refs": [str(path) for path in input_paths],
+        },
     )
     append_artifact_records(data_dir, session_id, [artifact])
     ledger = Ledger(data_dir)
@@ -677,8 +707,10 @@ def commit_read_qc(state: TopLevelState) -> dict:
         "env_target",
         "filtered_long_reads_fofn_ref",
         "filtered_long_reads_ref",
+        "filtered_long_reads_refs",
         "format",
         "input_asset_ref",
+        "input_asset_refs",
         "long_reads_fofn_ref",
         "length_filter_decision",
         "length_filter_method",
@@ -686,6 +718,7 @@ def commit_read_qc(state: TopLevelState) -> dict:
         "missing_tools",
         "package_name",
         "platform",
+        "raw_long_reads_paths",
         "reason",
         "skip_reason",
         "stats_artifact_ref",
@@ -727,20 +760,62 @@ def _parse_seqkit_summary(stats_path: Path) -> dict[str, Any]:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     if not rows:
         return {}
-    row = rows[0]
-    sum_len = _parse_int(row.get("sum_len"))
+    if len(rows) == 1:
+        row = rows[0]
+        sum_len = _parse_int(row.get("sum_len"))
+        return {
+            "num_seqs": _parse_int(row.get("num_seqs")),
+            "sum_len": sum_len,
+            "total_bases": sum_len,
+            "min_len": _parse_int(row.get("min_len")),
+            "avg_len": _parse_float(row.get("avg_len")),
+            "max_len": _parse_int(row.get("max_len")),
+            "n50": _parse_int(_row_value(row, "N50", "n50")),
+            "q20_percent": _parse_float(_row_value(row, "Q20(%)", "q20_percent", "Q20")),
+            "q30_percent": _parse_float(_row_value(row, "Q30(%)", "q30_percent", "Q30")),
+            "avg_qual": _parse_float(_row_value(row, "AvgQual", "avg_qual")),
+        }
+
+    num_seqs = _sum_ints(row.get("num_seqs") for row in rows)
+    sum_len = _sum_ints(row.get("sum_len") for row in rows)
+    min_lens = [_parse_int(row.get("min_len")) for row in rows]
+    max_lens = [_parse_int(row.get("max_len")) for row in rows]
     return {
-        "num_seqs": _parse_int(row.get("num_seqs")),
+        "files": len(rows),
+        "num_seqs": num_seqs,
         "sum_len": sum_len,
         "total_bases": sum_len,
-        "min_len": _parse_int(row.get("min_len")),
-        "avg_len": _parse_float(row.get("avg_len")),
-        "max_len": _parse_int(row.get("max_len")),
-        "n50": _parse_int(_row_value(row, "N50", "n50")),
-        "q20_percent": _parse_float(_row_value(row, "Q20(%)", "q20_percent", "Q20")),
-        "q30_percent": _parse_float(_row_value(row, "Q30(%)", "q30_percent", "Q30")),
-        "avg_qual": _parse_float(_row_value(row, "AvgQual", "avg_qual")),
+        "min_len": min((value for value in min_lens if value is not None), default=None),
+        "avg_len": (sum_len / num_seqs) if num_seqs and sum_len is not None else None,
+        "max_len": max((value for value in max_lens if value is not None), default=None),
+        "n50": _max_int(_row_value(row, "N50", "n50") for row in rows),
+        "q20_percent": _weighted_average(rows, "Q20(%)", "q20_percent", "Q20"),
+        "q30_percent": _weighted_average(rows, "Q30(%)", "q30_percent", "Q30"),
+        "avg_qual": _weighted_average(rows, "AvgQual", "avg_qual"),
     }
+
+
+def _read_paths_from_output(read_qc_out: dict[str, Any], plural_key: str, single_key: str) -> list[Path]:
+    values = read_qc_out.get(plural_key)
+    if values:
+        return [Path(str(value)) for value in values]
+    value = read_qc_out.get(single_key)
+    return [Path(str(value))] if value else []
+
+
+def _filtered_long_reads_path(
+    artifact_dir: Path,
+    input_path: Path,
+    *,
+    index: int,
+    total: int,
+    fmt: str | None,
+) -> Path:
+    resolved_format = fmt or _detect_format(input_path)
+    ext = ".fasta" if resolved_format == "fasta" else ".fastq"
+    if total == 1:
+        return artifact_dir / f"filtered_long_reads{ext}"
+    return artifact_dir / f"filtered_long_reads_{index}{ext}"
 
 
 def _row_value(row: dict[str, str], *keys: str) -> str | None:
@@ -760,3 +835,34 @@ def _parse_float(value: str | None) -> float | None:
     if value is None or value == "":
         return None
     return float(value.replace(",", ""))
+
+
+def _sum_ints(values) -> int | None:
+    parsed = [_parse_int(value) for value in values]
+    present = [value for value in parsed if value is not None]
+    if not present:
+        return None
+    return sum(present)
+
+
+def _max_int(values) -> int | None:
+    parsed = [_parse_int(value) for value in values]
+    present = [value for value in parsed if value is not None]
+    if not present:
+        return None
+    return max(present)
+
+
+def _weighted_average(rows: list[dict[str, str]], *keys: str) -> float | None:
+    total_weight = 0
+    weighted_sum = 0.0
+    for row in rows:
+        value = _parse_float(_row_value(row, *keys))
+        weight = _parse_int(row.get("sum_len")) or _parse_int(row.get("num_seqs")) or 0
+        if value is None or weight <= 0:
+            continue
+        total_weight += weight
+        weighted_sum += value * weight
+    if total_weight == 0:
+        return None
+    return weighted_sum / total_weight

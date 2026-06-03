@@ -50,10 +50,12 @@ _TRACE_ARTIFACT_PREFIX = "run_trace."
 
 # Artifact types that are workflow plumbing, not operator-facing evidence.
 _NOISE_ARTIFACT_TYPES = frozenset({"command.stdout", "command.stderr"})
+_ANNOTATION_INTAKE_ARTIFACT_TYPE = "annotation.intake_plan"
 # Artifact-type prefixes the operator should open first, in priority order.
 _OPEN_FIRST_PREFIXES = (
     "operator_report.",
     "final_report.",
+    "annotation.",
     "function_annotation.",
     "assembly_review.",
     "repeat_annotation.",
@@ -137,7 +139,7 @@ def _build_stage_records(
             "stage": stage,
             "status": status,
             "methods": methods,
-            "artifact_refs": stage_artifacts[:5],
+            "artifact_refs": _stage_artifacts_for_trace(stage_artifacts),
             "timing": _stage_timing(methods, review),
         }
         if candidate_methods:
@@ -202,6 +204,23 @@ def _artifact_refs_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[d
             }
         )
     return by_stage
+
+
+def _stage_artifacts_for_trace(stage_artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected = list(stage_artifacts[:5])
+    if any(artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE for artifact in selected):
+        return selected
+    intake = next(
+        (
+            artifact
+            for artifact in reversed(stage_artifacts)
+            if artifact.get("artifact_type") == _ANNOTATION_INTAKE_ARTIFACT_TYPE
+        ),
+        None,
+    )
+    if intake is not None:
+        selected.append(intake)
+    return selected
 
 
 def _candidate_methods_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

@@ -36,6 +36,52 @@ trace (JSON + Markdown artifacts) from durable ledger/artifact records. HPC
 validation against the task 02/03 sessions is pending. See the Phase 6 task 04
 doc for the implemented state and the run-trace example record below.
 
+Phase 6 task 06 (annotation intake replan after `assembly_review`) is
+complete locally on top of the Phase 7 task 01 gate registry. Interactive
+continue-downstream decisions (`accept`, `pass`, `continue_low_confidence`) now
+render an annotation intake plan, allow accept-as-is or downstream override, and
+merge the selected plan into the same checkpoint update that continues the
+run. The selected plan is persisted as a separate `annotation.intake_plan`
+artifact plus `annotation_intake_planned` ledger event. Assembly-operation and
+terminate decisions do not replan.
+Annotation intake is collected before assembly-review resume side effects, so
+cancelling intake leaves the session blocked without durable assembly decision
+records. Downstream replan replaces the downstream suffix keyed checkpoint
+state (`stage_outputs`, `skip_reasons`) instead of carrying stale downstream
+state forward.
+
+Local validation for Phase 6 task 06:
+
+- session/data dir for unit artifact smoke: temporary unittest sessions
+  `s2` / `s3` under Python `tempfile.TemporaryDirectory()`
+- gate decision / replan choices:
+  - `s2`: `accept`, accept recommended manifest-derived downstream plan
+    `repeat_annotation -> gene_annotation -> function_annotation`,
+    `changed=false`
+  - `s3`: `accept`, edited downstream plan adds `hic_scaffolding` before
+    `repeat_annotation`, `changed=true`
+- verified resume update rewrites `requested_stages` only after
+  `assembly_review`, preserving `read_qc -> assembly -> assembly_review`
+- verified method state update writes downstream `primary_method` /
+  `selected_methods` fields for selected downstream stages
+- verified `annotation.intake_plan` artifact records and
+  `annotation_intake_planned` ledger events are independent from gate decision
+  artifacts
+- verified durable sqlite interactive `gene-agent review` smoke:
+  `phase6-intake-sqlite-smoke` accepted existing assembly, accepted the
+  recommended annotation intake plan, wrote `annotation.intake_plan`, and
+  resumed to the expected `function_annotation` database-provenance stop
+- verified `annotation.intake_plan` remains visible in trace stage artifacts,
+  trace `open_first`, and inspect `latest_relevant_artifacts` even when
+  assembly-review artifacts exceed the trace cap
+- commands:
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake -v`
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake tests.test_review_interactive tests.test_entrypoints tests.test_review_resume tests.test_review_gates -v`
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake tests.test_review_interactive tests.test_entrypoints tests.test_run_trace -v`
+  - `conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v`
+- remaining validation gap: repeat on HPC when Phase 6 task 03/04 HPC sessions
+  are available.
+
 KNOWN PRE-EXISTING BREAKAGE (not from task 04): commit `efc73fa`
 ("Add requested_stages to skip unrequested workflow stages") leaves the graph
 smoke returning `current_stage=inventory` / empty `route_trace` instead of

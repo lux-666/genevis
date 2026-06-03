@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from app.control.ledger import Ledger
+from app.control.lifecycle import inspect_session
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.reports.trace_writer import (
     STAGE_STATUS_BLOCKED_HUMAN,
@@ -63,6 +64,43 @@ class RunTraceBuildTests(unittest.TestCase):
             self.assertEqual(trace["decisions_by_origin"]["human"], 1)
             self.assertIn("read_qc", trace["stage_path_observed"])
             self.assertEqual(_stage(trace, "read_qc")["methods"][0]["outcome"], "succeeded")
+
+    def test_annotation_intake_artifact_survives_trace_cap_and_relevant_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(tmp)
+            ledger.create_session("s1", "manifest.yaml")
+            for index in range(6):
+                _register_artifact(
+                    tmp,
+                    "s1",
+                    stage="assembly_review",
+                    method="assembly_review.contract",
+                    artifact_type=f"assembly_review.extra_{index}",
+                )
+            intake_ref = _register_artifact(
+                tmp,
+                "s1",
+                stage="assembly_review",
+                method="annotation.intake",
+                artifact_type="annotation.intake_plan",
+            )
+
+            trace = build_session_trace(tmp, "s1")
+            assembly_review = _stage(trace, "assembly_review")
+
+            self.assertIn(
+                "annotation.intake_plan",
+                {artifact["artifact_type"] for artifact in assembly_review["artifact_refs"]},
+            )
+            self.assertIn(
+                "annotation.intake_plan",
+                {artifact["artifact_type"] for artifact in trace["open_first"]},
+            )
+            summary = inspect_session("s1", tmp)
+            self.assertIn(
+                str(intake_ref),
+                {str(artifact["file_path"]) for artifact in summary["latest_relevant_artifacts"]},
+            )
 
     def test_planned_only_when_candidate_without_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -464,6 +464,40 @@ class AssemblyStageTests(unittest.TestCase):
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
 
+    def test_local_flye_execution_from_multi_line_read_qc_fofn(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads_1 = Path(tmpdir) / "reads_1.fastq"
+            reads_2 = Path(tmpdir) / "reads_2.fastq"
+            reads_1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            reads_2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            fofn = Path(tmpdir) / "long_reads.fofn"
+            fofn.write_text(f"{reads_1}\n{reads_2}\n", encoding="utf-8")
+            fake_bin = self._fake_flye_bin(tmpdir)
+            registry = self._write_registry(tmpdir, assets=[])
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
+                "assembly": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "flye_parameters": {
+                        "read_type": "nano-raw",
+                        "estimated_genome_size": 2_000_000,
+                        "threads": 1,
+                    },
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            script_text = flye_script.read_text(encoding="utf-8")
+            self.assertIn(str(reads_1), script_text)
+            self.assertIn(str(reads_2), script_text)
+
     def test_failed_local_flye_records_failed_attempt_without_fallback_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"

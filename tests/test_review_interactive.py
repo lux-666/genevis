@@ -319,6 +319,56 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 code = run_interactive_review(session_id, data_dir)
             self.assertEqual(code, 1)
 
+    def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "review-cancel-intake"
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "requested_stages": ["read_qc", "assembly", "assembly_review"],
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "route_trace": [],
+            }
+            graph = type(
+                "FakeGraph",
+                (),
+                {
+                    "get_state": lambda self, config: type("Snapshot", (), {"values": state})(),
+                    "update_state": lambda self, config, update: None,
+                    "invoke": lambda self, state_arg, config: {"supervision_state": "completed"},
+                },
+            )()
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="draft.fasta",
+            )
+            raw_decision = request.model_dump(mode="json")
+
+            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
+                    patch("app.entrypoints.run.build_graph", return_value=graph), \
+                    patch("app.review.annotation_intake.collect_annotation_intake_selection", side_effect=RuntimeError("annotation intake cancelled")) as intake_prompt, \
+                    patch("app.control.lifecycle.resume_review_state") as resume_mock:
+                code = run_interactive_review(session_id, str(data_dir))
+
+            self.assertEqual(code, 1)
+            intake_prompt.assert_called_once()
+            resume_mock.assert_not_called()
+            decision_dir = data_dir / "artifacts" / "assembly_review" / session_id
+            self.assertFalse(list(decision_dir.glob("assembly_review_interactive_decision_*.json")) if decision_dir.exists() else [])
+            events = Ledger(data_dir).read_events(session_id)
+            self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
+
     def test_dry_run_writes_decision_without_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _assembly_blocked_session(tmp)

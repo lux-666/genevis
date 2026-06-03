@@ -82,11 +82,15 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             "#!/bin/sh\n"
             "if [ \"$1\" = \"stats\" ] && [ \"$2\" = \"-a\" ] && [ \"$3\" = \"-T\" ]; then\n"
             "  printf 'file\\tformat\\ttype\\tnum_seqs\\tsum_len\\tmin_len\\tavg_len\\tmax_len\\tN50\\tQ20(%%)\\tQ30(%%)\\tAvgQual\\n'\n"
-            "  printf '%s\\tFASTQ\\tDNA\\t1\\t4\\t4\\t4.0\\t4\\t4\\t75.0\\t50.0\\t18.5\\n' \"$4\"\n"
+            "  shift 3\n"
+            "  for input in \"$@\"; do\n"
+            "    printf '%s\\tFASTQ\\tDNA\\t1\\t4\\t4\\t4.0\\t4\\t4\\t75.0\\t50.0\\t18.5\\n' \"$input\"\n"
+            "  done\n"
             "  exit 0\n"
             "fi\n"
             "if [ \"$1\" = \"seq\" ] && [ \"$2\" = \"-m\" ]; then\n"
-            "  cat \"$4\"\n"
+            "  shift 3\n"
+            "  cat \"$@\"\n"
             "  exit 0\n"
             "fi\n"
             "exit 2\n",
@@ -280,6 +284,53 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.long_reads.fofn", artifact_types)
 
+    def test_multiple_raw_long_reads_write_multi_line_raw_fofn(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq1 = Path(tmpdir) / "reads_1.fastq"
+            fq2 = Path(tmpdir) / "reads_2.fastq"
+            fq1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fq2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads_1.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq1),
+                    },
+                    {
+                        "asset_id": "s1:raw_long_reads:reads_2.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq2),
+                    },
+                ],
+            )
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            read_qc = result["stage_outputs"]["read_qc"]
+            self.assertEqual(read_qc["summary"]["files"], 2)
+            self.assertEqual(read_qc["summary"]["num_seqs"], 2)
+            self.assertEqual(read_qc["summary"]["sum_len"], 8)
+            self.assertEqual(read_qc["input_asset_refs"], [
+                "s1:raw_long_reads:reads_1.fastq",
+                "s1:raw_long_reads:reads_2.fastq",
+            ])
+            fofn_ref = Path(read_qc["long_reads_fofn_ref"])
+            self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{fq1}\n{fq2}\n")
+            stats_script = Path(tmpdir) / "work" / "read_qc" / "s1" / "seqkit_stats" / "run_seqkit_stats.sh"
+            stats_script_text = stats_script.read_text(encoding="utf-8")
+            self.assertIn(str(fq1), stats_script_text)
+            self.assertIn(str(fq2), stats_script_text)
+
     def test_approved_min_length_filter_runs_and_writes_filtered_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "reads.fastq"
@@ -338,6 +389,59 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
             self.assertIn("read_qc.filtered_long_reads.fofn", artifact_types)
+
+    def test_multiple_raw_long_reads_filter_to_multi_line_filtered_fofn(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq1 = Path(tmpdir) / "reads_1.fastq"
+            fq2 = Path(tmpdir) / "reads_2.fastq"
+            fq1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fq2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:reads_1.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq1),
+                    },
+                    {
+                        "asset_id": "s1:raw_long_reads:reads_2.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(fq2),
+                    },
+                ],
+            )
+            fake_bin = self._fake_seqkit_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "length_filter_request": {
+                        "approved": True,
+                        "method_name": "read_qc.length_filter.seqkit_seq",
+                        "thresholds": {"min_len": 1000},
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            read_qc = result["stage_outputs"]["read_qc"]
+            filtered_refs = [Path(ref) for ref in read_qc["filtered_long_reads_refs"]]
+            self.assertEqual([path.name for path in filtered_refs], [
+                "filtered_long_reads_1.fastq",
+                "filtered_long_reads_2.fastq",
+            ])
+            self.assertEqual(filtered_refs[0].read_text(encoding="utf-8"), fq1.read_text(encoding="utf-8"))
+            self.assertEqual(filtered_refs[1].read_text(encoding="utf-8"), fq2.read_text(encoding="utf-8"))
+            fofn_ref = Path(read_qc["filtered_long_reads_fofn_ref"])
+            self.assertEqual(
+                fofn_ref.read_text(encoding="utf-8"),
+                "".join(f"{path}\n" for path in filtered_refs),
+            )
+            self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
+            self.assertEqual(read_qc["substeps"]["length_filter"]["artifact_refs"], [str(path) for path in filtered_refs])
 
     def test_approved_min_length_filter_names_fasta_output_with_fasta_extension(self):
         with tempfile.TemporaryDirectory() as tmpdir:

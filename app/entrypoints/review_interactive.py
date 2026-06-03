@@ -716,6 +716,7 @@ def run_interactive_review(
         resume_review_state,
     )
     from app.graph.checkpointer import checkpoint_db_path
+    from app.review.annotation_intake import collect_annotation_intake_selection, persist_annotation_intake_plan
 
     result = collect_gate_decision(session_id, data_dir)
     if result is None:
@@ -749,9 +750,34 @@ def run_interactive_review(
 
     state = snapshot.values
 
+    intake_selection = None
     try:
+        intake_selection = collect_annotation_intake_selection(
+            state=state,
+            request=request,
+        )
         update = resume_review_state(state, request)
+        intake = None
+        if intake_selection is not None:
+            merged_state = {**state, **update}
+            intake = persist_annotation_intake_plan(
+                state=merged_state,
+                recommended_plan=intake_selection.recommended_plan,
+                final_plan=intake_selection.final_plan,
+                request=request,
+                source="interactive_review",
+            )
+            update = {**update, **intake.update}
     except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+        from app.control.ledger import Ledger as _Ledger
+        _Ledger(data_dir).record_event(session_id, "resume_rejected", {
+            "source": "interactive_review",
+            "error": f"{type(exc).__name__}: {exc}",
+            "decision": {"stage": request.stage, "decision": request.decision},
+        })
+        print(f"error: resume rejected: {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
         from app.control.ledger import Ledger as _Ledger
         _Ledger(data_dir).record_event(session_id, "resume_rejected", {
             "source": "interactive_review",
@@ -763,6 +789,8 @@ def run_interactive_review(
 
     decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
     print(f"decision_artifact: {decision_path}")
+    if intake is not None:
+        print(f"annotation_intake_plan: {intake.artifact_ref}")
 
     ledger = Ledger(data_dir)
     resume_event_payload = {

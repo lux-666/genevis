@@ -429,6 +429,7 @@ def _interactive_gate_loop(
         resume_review_state,
     )
     from app.entrypoints.review_interactive import collect_gate_decision, persist_decision_artifact
+    from app.review.annotation_intake import collect_annotation_intake_selection, persist_annotation_intake_plan
 
     ledger = Ledger(data_dir)
 
@@ -447,9 +448,33 @@ def _interactive_gate_loop(
 
         state = snapshot.values
 
+        intake_selection = None
         try:
+            intake_selection = collect_annotation_intake_selection(
+                state=state,
+                request=request,
+            )
             update = resume_review_state(state, request)
+            intake = None
+            if intake_selection is not None:
+                merged_state = {**state, **update}
+                intake = persist_annotation_intake_plan(
+                    state=merged_state,
+                    recommended_plan=intake_selection.recommended_plan,
+                    final_plan=intake_selection.final_plan,
+                    request=request,
+                    source="interactive_gate",
+                )
+                update = {**update, **intake.update}
         except (ResumeValidationError, DurableResumeUnavailableError) as exc:
+            ledger.record_event(session_id, "resume_rejected", {
+                "source": "interactive_gate",
+                "error": str(exc),
+                "decision": {"stage": request.stage, "decision": request.decision},
+            })
+            print(f"error: resume rejected: {exc}", file=sys.stderr)
+            break
+        except RuntimeError as exc:
             ledger.record_event(session_id, "resume_rejected", {
                 "source": "interactive_gate",
                 "error": str(exc),
@@ -460,6 +485,8 @@ def _interactive_gate_loop(
 
         decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
         print(f"decision_artifact: {decision_path}")
+        if intake is not None:
+            print(f"annotation_intake_plan: {intake.artifact_ref}")
 
         resume_payload = {
             "source": "interactive_gate",

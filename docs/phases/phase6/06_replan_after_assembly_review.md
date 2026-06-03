@@ -1,6 +1,6 @@
 # 06 组装审阅后的重新规划（组装 -> 注释 agent 边界）
 
-任务状态：草稿；设计已与 Phase 7 task 01/03 耦合；暂缓到通用 gate 机制落地后实施。
+任务状态：本地实现完成；依赖 Phase 7 task 01 的通用 gate registry。
 
 ## 方向：三个虚拟 agent
 
@@ -116,18 +116,18 @@ Replan 步骤必须是**可跳过的**：原样接受推荐时，行为必须与
 
 ## 任务
 
-- [ ] 将 `assembly_review` 的 `decisions_allowed` 映射为 continue-downstream / assembly-operation / terminate 分支，并确认只有 continue-downstream 应进入 replan。
-- [ ] 确认下游 replan 必须重写的精确状态字段（`requested_stages` 后缀，加上 router 和 stages 读取的方法/参数字段），并确认在 blocked checkpoint 上重写这些字段后，resume 时会被 `route_controller` 遵守。
+- [x] 将 `assembly_review` 的 `decisions_allowed` 映射为 continue-downstream / assembly-operation / terminate 分支，并确认只有 continue-downstream 应进入 replan。
+- [x] 确认下游 replan 必须重写的精确状态字段（`requested_stages` 后缀，加上 router 和 stages 读取的方法/参数字段），并确认在 blocked checkpoint 上重写这些字段后，resume 时会被 `route_controller` 遵守。
 - [x] 决定并记录原样接受（accept-as-is）时写入 `annotation.intake_plan` artifact，标记 `changed: false`。
-- [ ] 添加只读的下游推荐构建器，复用 ask planner 推荐逻辑，并将范围限制在 `assembly_review` 之后的阶段。
-- [ ] 添加 replan 提示/预览，复用任务 05 渲染器和 ask 的交互式阶段/方法/参数提示，并采用覆盖语义。
-- [ ] 添加状态应用逻辑：替换 blocked checkpoint 上的下游 `requested_stages` 后缀 + 下游 method/param 状态，并通过现有持久 resume 路径继续。
-- [ ] 在 continue-downstream 分支中把 replan 接入进程内 gate 循环（`_interactive_gate_loop`），并限制为只对 `assembly_review` 生效。
-- [ ] 在同一分支中把 replan 接入跨进程 `review` 命令。
-- [ ] 让 replan 可跳过，原样接受时行为与今天完全一致；保持非交互/decision-file 路径没有 replan 提示。
-- [ ] 持久化独立的 `annotation.intake_plan` artifact + ledger event，并在 run trace 中展示（任务 04）。
-- [ ] 添加测试：推荐是下游专属且只读；accept-as-is 等同当前行为；覆盖式 replan 会改变下游 `requested_stages`（包括添加原本未请求的阶段）和下游 methods/params；上游/已执行阶段不会重新运行或被删除；非交互/decision-file 路径不变；`annotation.intake_plan` artifact + ledger event 被独立记录。
-- [ ] 针对持久 sqlite blocked `assembly_review` session 验证 replan 循环（先 local smoke，待任务 03/04 的 HPC 验证存在后再做 HPC）。
+- [x] 添加只读的下游推荐构建器，复用 ask planner 推荐逻辑，并将范围限制在 `assembly_review` 之后的阶段。
+- [x] 添加 replan 提示/预览，复用任务 05 渲染器和 ask 的交互式阶段/方法/参数提示，并采用覆盖语义。
+- [x] 添加状态应用逻辑：替换 blocked checkpoint 上的下游 `requested_stages` 后缀 + 下游 method/param 状态，并通过现有持久 resume 路径继续。
+- [x] 在 continue-downstream 分支中把 replan 接入进程内 gate 循环（`_interactive_gate_loop`），并限制为只对 `assembly_review` 生效。
+- [x] 在同一分支中把 replan 接入跨进程 `review` 命令。
+- [x] 让 replan 可跳过，原样接受时行为与今天完全一致；保持非交互/decision-file 路径没有 replan 提示。
+- [x] 持久化独立的 `annotation.intake_plan` artifact + ledger event，并在 run trace 中展示（任务 04）。
+- [x] 添加测试：推荐是下游专属且只读；accept-as-is 等同当前行为；覆盖式 replan 会改变下游 `requested_stages`（包括添加原本未请求的阶段）和下游 methods/params；上游/已执行阶段不会重新运行或被删除；非交互/decision-file 路径不变；`annotation.intake_plan` artifact + ledger event 被独立记录。
+- [x] 针对持久 sqlite blocked `assembly_review` session 验证 replan 循环（先 local smoke，待任务 03/04 的 HPC 验证存在后再做 HPC）。
 
 ## 验收
 
@@ -140,6 +140,20 @@ Replan 步骤必须是**可跳过的**：原样接受推荐时，行为必须与
 - 非交互和 decision-file resume 路径保持不变；
 - `annotation.intake_plan` 被记录为独立 artifact + ledger event，并在 run trace 中可见；
 - replan 同时支持进程内 gate 循环和 `review` 命令。
+
+## 本地实现记录（2026-06-02）
+
+- 新增 `app/review/annotation_intake.py`，集中实现分支分类、下游推荐构建、覆盖式 suffix rewrite、checkpoint update、`annotation.intake_plan` artifact 和 `annotation_intake_planned` ledger event。
+- `accept` / `pass` / `continue_low_confidence` 进入 annotation intake；`purge` / `polish` / `rerun` 和 `stop_human_review` 不进入 replan。
+- 进程内 `_interactive_gate_loop` 和跨进程 `gene-agent review` 都先无副作用收集 annotation intake；只有 intake 确认成功后才调用 `resume_review_state` 写入 gate 决策，并把计划 2 合并进同一次 `graph.update_state`。
+- `gene-agent resume --decision-file` 有显式回归测试覆盖：该路径不会调用 annotation intake helper，也不会误触发交互式计划 2。
+- 推荐计划严格限制为 `assembly_review` 之后的阶段。若原计划已有下游 suffix，则默认接受该 suffix 以保持当前行为；若原计划停在 `assembly_review`，则从 manifest 推荐下游 annotation 计划。
+- 修复记录（2026-06-02）：annotation intake 现在先以无副作用方式收集确认，只有确认成功才调用 `resume_review_state`，避免 intake 取消后留下 assembly review durable decision；下游 replan 会清理整个 downstream suffix keyed state（当前包括 `stage_outputs` 和 `skip_reasons`）；`annotation.intake_plan` 已加入 trace/inspect relevant artifact 路径，并在 trace artifact cap 下强制保留。
+- 本地验证：
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake -v`
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake tests.test_review_interactive tests.test_entrypoints tests.test_review_resume tests.test_review_gates -v`
+  - `conda run -n gene_agent python -m unittest tests.test_annotation_intake tests.test_review_interactive tests.test_entrypoints tests.test_run_trace -v`
+  - `conda run -n gene_agent python -m unittest discover -s tests -p 'test*.py' -v`
 
 ## 已决事项
 

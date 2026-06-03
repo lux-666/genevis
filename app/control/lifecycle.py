@@ -426,6 +426,7 @@ def _latest_relevant_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str
     relevant_prefixes = (
         "operator_report.",
         "final_report.",
+        "annotation.",
         "assembly_review.",
         "hic_scaffolding.",
         "repeat_annotation.",

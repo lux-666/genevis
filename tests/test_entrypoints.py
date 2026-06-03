@@ -11,12 +11,16 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
 
+from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_resolver import PreflightResult
-from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.entrypoints.review_interactive import run_interactive_review
+from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.entry import EntryRequest
 from app.schemas.run_config import LocalExecStage
@@ -26,6 +30,24 @@ class _FakeGraph:
     def __init__(self, result: dict) -> None:
         self.result = result
         self.invocations: list[tuple[dict, dict]] = []
+
+    def invoke(self, state, config):
+        self.invocations.append((state, config))
+        return self.result
+
+
+class _FakeResumeGraph:
+    def __init__(self, state: dict, result: dict | None = None) -> None:
+        self.state = state
+        self.result = result or {"current_stage": "done", "supervision_state": "completed", "route_trace": []}
+        self.updated: list[dict] = []
+        self.invocations: list[tuple[dict | None, dict]] = []
+
+    def get_state(self, config):
+        return SimpleNamespace(values=self.state)
+
+    def update_state(self, config, update):
+        self.updated.append(update)
 
     def invoke(self, state, config):
         self.invocations.append((state, config))
@@ -1458,6 +1480,60 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("gene_annotation.bundle", artifact_types)
             self.assertIn("operator_report.failed_terminal", artifact_types)
 
+    def test_existing_assembly_interactive_review_writes_annotation_intake_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session_id = "phase6-intake-sqlite-smoke"
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            bin_dir = self._fake_repeatmasker_bin(root)
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+                checkpointer="sqlite",
+            )
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
+                "app.stages.repeat_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ):
+                code, stdout, stderr = _capture_cli(_run_session, args)
+                _assert_existing_assembly_blocks_at_review(
+                    self,
+                    code=code,
+                    stdout=stdout,
+                    stderr=stderr,
+                    data_dir=data_dir,
+                    session_id=session_id,
+                    checkpointer="sqlite",
+                )
+
+                inputs = iter(["accept", "", "y"])
+                with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), patch(
+                    "builtins.input",
+                    side_effect=lambda _: next(inputs),
+                ):
+                    review_code, review_stdout, review_stderr = _capture_cli(
+                        run_interactive_review,
+                        session_id,
+                        str(data_dir),
+                    )
+
+            self.assertEqual(review_code, 1)
+            self.assertIn("annotation_intake_plan:", review_stdout)
+            self.assertIn("current_stage:     function_annotation", review_stdout)
+            self.assertIn("database_provenance", review_stderr)
+
+            artifact_types = _artifact_types(data_dir, session_id)
+            self.assertIn("annotation.intake_plan", artifact_types)
+            self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
+            self.assertIn("gene_annotation.bundle", artifact_types)
+
+            events = Ledger(data_dir).read_events(session_id)
+            self.assertTrue(any(event["event_type"] == "annotation_intake_planned" for event in events))
+            self.assertTrue(any(event["event_type"] == "review_decision" for event in events))
+
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1732,6 +1808,53 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             self.assertIn("final_report.review_decisions", artifact_types)
 
 
+class InteractiveGateLoopTests(unittest.TestCase):
+    def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "s1"
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "requested_stages": ["read_qc", "assembly", "assembly_review"],
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "route_trace": [],
+            }
+            graph = _FakeResumeGraph(state, result={"supervision_state": "blocked_human"})
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                gate_id="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="draft.fasta",
+            )
+            raw_decision = request.model_dump(mode="json")
+
+            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
+                    patch("app.review.annotation_intake.collect_annotation_intake_selection", side_effect=RuntimeError("annotation intake cancelled")) as intake_prompt, \
+                    patch("app.control.lifecycle.resume_review_state") as resume_mock:
+                result = _interactive_gate_loop(
+                    graph,
+                    {"configurable": {"thread_id": session_id}},
+                    {"supervision_state": "blocked_human"},
+                    session_id,
+                    str(data_dir),
+                )
+
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            intake_prompt.assert_called_once()
+            resume_mock.assert_not_called()
+            self.assertEqual(graph.updated, [])
+            decision_dir = data_dir / "artifacts" / "assembly_review" / session_id
+            self.assertFalse(list(decision_dir.glob("assembly_review_interactive_decision_*.json")) if decision_dir.exists() else [])
+            events = Ledger(data_dir).read_events(session_id)
+            self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
+
+
 class ResumeCLITests(unittest.TestCase):
     def _write_decision(self, path: Path, **overrides) -> Path:
         payload = {
@@ -1844,6 +1967,45 @@ class ResumeCLITests(unittest.TestCase):
         self.assertFalse(data_dir.exists())
         self.assertFalse((data_dir / "checkpoints").exists())
         self.assertFalse((data_dir / "ledger").exists())
+
+    def test_resume_decision_file_does_not_call_annotation_intake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            decision = self._write_decision(root / "decision.json")
+            state = {
+                "session_id": "s1",
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {},
+            }
+            graph = _FakeResumeGraph(state)
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), \
+                    patch("app.control.lifecycle.resume_review_state", return_value={"current_stage": "done", "supervision_state": "completed"}), \
+                    patch("app.review.annotation_intake.collect_annotation_intake_selection") as intake_prompt, \
+                    patch("app.review.annotation_intake.persist_annotation_intake_plan") as intake_persist:
+                code, _stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id="s1",
+                        decision_file=str(decision),
+                        data_dir=str(data_dir),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            intake_prompt.assert_not_called()
+            intake_persist.assert_not_called()
+            self.assertEqual(len(graph.updated), 1)
 
 
 class CheckpointerBackendResolutionTests(unittest.TestCase):
