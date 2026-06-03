@@ -83,7 +83,17 @@ def route_after_method_plan(state: TopLevelState) -> str:
     if status == "merge_ready":
         return "block_merge"
     if status == "merge_accepted":
-        return "block_final"
+        return "evm_freeze"
+    if status == "evm_frozen":
+        return "evm_run"
+    if status == "evm_ran":
+        return "evm_collect"
+    if status == "evm_collected":
+        return "busco_freeze"
+    if status == "busco_frozen":
+        return "busco_run"
+    if status == "busco_ran":
+        return "busco_collect"
     if status == "review_passed":
         return "commit"
     return "fail"
@@ -156,6 +166,47 @@ def route_after_augustus_run(state: TopLevelState) -> str:
     return _route_after_run(state, "augustus")
 
 
+# --- EVM / BUSCO routing (Phase 7 task 05) ------------------------------------
+
+def route_after_evm_freeze(state: TopLevelState) -> str:
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "evm_collected":
+        return "busco_freeze"
+    return "evm_run"
+
+
+def route_after_evm_run(state: TopLevelState) -> str:
+    return "fail" if _output(state).get("status") == "failed" else "evm_collect"
+
+
+def route_after_evm_collect(state: TopLevelState) -> str:
+    return "fail" if _output(state).get("status") == "failed" else "busco_freeze"
+
+
+def route_after_busco_freeze(state: TopLevelState) -> str:
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "merge_accepted":
+        return "block_final"
+    return "busco_run"
+
+
+def route_after_busco_run(state: TopLevelState) -> str:
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "merge_accepted":
+        return "block_final"
+    return "busco_collect"
+
+
+def route_after_busco_collect(state: TopLevelState) -> str:
+    return "block_final"
+
+
 def route_after_candidate_gate(state: TopLevelState) -> str:
     """After candidate-evidence gate: re-route on rerun, continue to merge prep."""
     if _supervision(state) in TERMINAL_STATES:
@@ -171,10 +222,10 @@ def route_after_merge_prep(state: TopLevelState) -> str:
 
 
 def route_after_merge_gate(state: TopLevelState) -> str:
-    """After merge gate: continue to final gene-set gate or stop."""
+    """After merge gate: proceed to EVM merge execution or stop."""
     if _supervision(state) in TERMINAL_STATES:
         return "end" if _supervision(state) == "blocked_human" else "fail"
-    return "block_final"
+    return "evm_freeze"
 
 
 def route_after_final_gate(state: TopLevelState) -> str:

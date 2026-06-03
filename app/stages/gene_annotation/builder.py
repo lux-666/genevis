@@ -11,16 +11,22 @@ from app.stages.gene_annotation.nodes import (
     block_gene_method_planning_review,
     block_merge_review,
     collect_augustus_artifacts,
+    collect_evm_artifacts,
+    collect_gene_busco_artifacts,
     collect_miniprot_artifacts,
     commit_gene_annotation,
     enter_gene_annotation,
     fail_gene_annotation,
     freeze_augustus_attempt,
+    freeze_evm_attempt,
+    freeze_gene_busco_attempt,
     freeze_miniprot_attempt,
     plan_evidence_merge_or_review,
     plan_gene_methods,
     resolve_gene_annotation_inputs,
     run_augustus_attempt,
+    run_evm_attempt,
+    run_gene_busco_attempt,
     run_gene_methods_planning_only,
     run_miniprot_attempt,
     select_evidence_profile,
@@ -28,8 +34,14 @@ from app.stages.gene_annotation.nodes import (
 from app.stages.gene_annotation.routing import (
     route_after_augustus_freeze,
     route_after_augustus_run,
+    route_after_busco_collect,
+    route_after_busco_freeze,
+    route_after_busco_run,
     route_after_candidate_gate,
     route_after_enter,
+    route_after_evm_collect,
+    route_after_evm_freeze,
+    route_after_evm_run,
     route_after_evidence_profile,
     route_after_final_gate,
     route_after_merge_gate,
@@ -70,6 +82,13 @@ def build_stage():
     graph.add_node("freeze_augustus_attempt", freeze_augustus_attempt)
     graph.add_node("run_augustus_attempt", run_augustus_attempt)
     graph.add_node("collect_augustus_artifacts", collect_augustus_artifacts)
+    # EVM merge + BUSCO execution
+    graph.add_node("freeze_evm_attempt", freeze_evm_attempt)
+    graph.add_node("run_evm_attempt", run_evm_attempt)
+    graph.add_node("collect_evm_artifacts", collect_evm_artifacts)
+    graph.add_node("freeze_gene_busco_attempt", freeze_gene_busco_attempt)
+    graph.add_node("run_gene_busco_attempt", run_gene_busco_attempt)
+    graph.add_node("collect_gene_busco_artifacts", collect_gene_busco_artifacts)
     # review chain
     graph.add_node("block_candidate_evidence_review", block_candidate_evidence_review)
     graph.add_node("plan_evidence_merge_or_review", plan_evidence_merge_or_review)
@@ -104,6 +123,12 @@ def build_stage():
             "merge_prep": "plan_evidence_merge_or_review",
             "block_merge": "block_merge_review",
             "block_final": "block_final_gene_set_review",
+            "evm_freeze": "freeze_evm_attempt",
+            "evm_run": "run_evm_attempt",
+            "evm_collect": "collect_evm_artifacts",
+            "busco_freeze": "freeze_gene_busco_attempt",
+            "busco_run": "run_gene_busco_attempt",
+            "busco_collect": "collect_gene_busco_artifacts",
             "commit": "commit",
             "fail": "fail",
         },
@@ -159,6 +184,37 @@ def build_stage():
         route_after_method_collect,
         {"block_candidates": "block_candidate_evidence_review", "run_methods": "run_gene_methods_planning_only", "fail": "fail"},
     )
+    # --- EVM / BUSCO edges ---
+    graph.add_conditional_edges(
+        "freeze_evm_attempt",
+        route_after_evm_freeze,
+        {"evm_run": "run_evm_attempt", "busco_freeze": "freeze_gene_busco_attempt", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "run_evm_attempt",
+        route_after_evm_run,
+        {"evm_collect": "collect_evm_artifacts", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "collect_evm_artifacts",
+        route_after_evm_collect,
+        {"busco_freeze": "freeze_gene_busco_attempt", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "freeze_gene_busco_attempt",
+        route_after_busco_freeze,
+        {"busco_run": "run_gene_busco_attempt", "block_final": "block_final_gene_set_review", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "run_gene_busco_attempt",
+        route_after_busco_run,
+        {"busco_collect": "collect_gene_busco_artifacts", "block_final": "block_final_gene_set_review", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "collect_gene_busco_artifacts",
+        route_after_busco_collect,
+        {"block_final": "block_final_gene_set_review"},
+    )
     # --- review chain ---
     graph.add_conditional_edges(
         "block_candidate_evidence_review",
@@ -173,7 +229,7 @@ def build_stage():
     graph.add_conditional_edges(
         "block_merge_review",
         route_after_merge_gate,
-        {"block_final": "block_final_gene_set_review", "end": END, "fail": "fail"},
+        {"evm_freeze": "freeze_evm_attempt", "block_final": "block_final_gene_set_review", "end": END, "fail": "fail"},
     )
     graph.add_conditional_edges(
         "block_final_gene_set_review",

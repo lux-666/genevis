@@ -1276,6 +1276,398 @@ def collect_augustus_artifacts(state: TopLevelState) -> dict:
     )
 
 
+# --- EVM merge + BUSCO execution (Phase 7 task 05) ----------------------------
+
+EVM_METHOD = "gene_annotation.evm"
+GENE_BUSCO_METHOD = "gene_annotation.busco"
+FINAL_GFF_TYPE = "gene_annotation.final_gff"
+BUSCO_SUMMARY_TYPE = "gene_annotation.busco_summary"
+
+
+def freeze_evm_attempt(state: TopLevelState) -> dict:
+    """Freeze EVM merge or short-circuit single-candidate passthrough."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "merge_accepted":
+        return {}
+
+    candidate_refs = dict(gene_out.get("accepted_candidate_refs") or gene_out.get("candidate_refs") or {})
+    merge_weights = dict(gene_out.get("merge_weights") or _DEFAULT_MERGE_WEIGHTS)
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+
+    # Single-candidate passthrough: no EVM script needed.
+    if len(candidate_refs) <= 1:
+        final_ref = list(candidate_refs.values())[0] if candidate_refs else None
+        return _update_gene_output(
+            state,
+            {
+                "status": "evm_collected",
+                "merge_method": "single_candidate_passthrough",
+                "final_gff_ref": final_ref,
+                "merge_weights": merge_weights,
+            },
+        )
+
+    # Multi-candidate: write EVM weights file and script.
+    genome_ref = gene_out.get("genome_input_ref")
+    if not genome_ref:
+        return _fail_update(state, "evm requires genome_input_ref")
+
+    working_dir = data_dir / "work" / "gene_annotation" / session_id / "evm"
+    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "evm"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    weights_path = working_dir / "weights.txt"
+    weight_lines = []
+    for method_ref in sorted(candidate_refs.values()):
+        # Map evidence class from method type; default ab_initio weight 1.
+        weight_lines.append(f"ABINITIO_PREDICTION\t{method_ref}\t1")
+    weight_lines.append(f"PROTEIN_PREDICTION\t{str(Path(genome_ref))}\t{merge_weights.get('protein', 5)}")
+    weights_path.write_text("\n".join(weight_lines) + "\n", encoding="utf-8")
+
+    output_gff3 = artifact_dir / "evm_merged.gff3"
+    script_path = working_dir / "run_evm.sh"
+    script_path.write_text(
+        "set -e\n"
+        f"evidence_modeler.pl --genome {shlex.quote(str(genome_ref))}"
+        f" --weights {shlex.quote(str(weights_path))}"
+        f" --gene_predictions {shlex.quote(','.join(candidate_refs.values()))}"
+        f" > {shlex.quote(str(output_gff3))}\n"
+        f"test -f {shlex.quote(str(output_gff3))}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    env_spec, blocked = resolve_method_env(
+        gene_out, stage="gene_annotation", method_name=EVM_METHOD,
+        session_id=session_id, data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_gene_output(state, blocked)
+
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:gene_annotation:evm",
+        "session_id": session_id,
+        "stage": "gene_annotation",
+        "method_name": EVM_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [output_gff3],
+        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
+        "metadata": {
+            "genome_input_ref": str(genome_ref),
+            "candidate_refs": candidate_refs,
+            "merge_weights": merge_weights,
+            "output_gff3": str(output_gff3),
+        },
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "evm_frozen",
+            "evm_frozen_attempt": attempt.model_dump(mode="json"),
+        },
+    )
+
+
+def run_evm_attempt(state: TopLevelState) -> dict:
+    """Run the frozen EVM attempt locally."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "evm_frozen":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    ledger = Ledger(data_dir)
+    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(attempt.session_id, attempt)
+
+    result = LocalRunner().run(attempt)
+    if not result.success:
+        for path in attempt.expected_outputs:
+            if path.exists() and path.is_file():
+                path.unlink()
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error = stderr.strip() or f"evm failed with return code {result.return_code}"
+        ledger.record_attempt_failed(attempt.session_id, attempt, return_code=result.return_code, error=error)
+        return _update_gene_output(state, {"status": "failed", "reason": error, "evm_execution_result": result.model_dump(mode="json")})
+
+    return _update_gene_output(state, {"status": "evm_ran", "evm_execution_result": result.model_dump(mode="json")})
+
+
+def collect_evm_artifacts(state: TopLevelState) -> dict:
+    """Collect EVM merged GFF3 and register as final_gff artifact."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "evm_ran":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    output_gff3 = Path(str(attempt.metadata["output_gff3"]))
+
+    if not output_gff3.exists():
+        reason = f"expected EVM merged GFF3 missing: {output_gff3}"
+        Ledger(data_dir).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=reason)
+        return _update_gene_output(state, {"status": "failed", "reason": reason})
+
+    artifact = ArtifactMeta.from_file(
+        output_gff3, stage="gene_annotation", method_name=EVM_METHOD,
+        artifact_type=FINAL_GFF_TYPE, metadata={"attempt_id": attempt.attempt_id},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_attempt_succeeded(
+        attempt.session_id, attempt,
+        artifacts=[{"path": str(output_gff3), "artifact_type": FINAL_GFF_TYPE}],
+    )
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "evm_collected",
+            "merge_method": "evm",
+            "final_gff_ref": str(output_gff3),
+        },
+    )
+
+
+def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
+    """Freeze a BUSCO attempt on the final gene set (proteins preferred)."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "evm_collected":
+        return {}
+
+    final_gff_ref = gene_out.get("final_gff_ref")
+    if not final_gff_ref:
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": "no final_gff_ref for BUSCO",
+            },
+        )
+
+    expected = gene_out.get("expected_outputs") or {}
+    protein_ref = expected.get("predicted_proteins") or gene_out.get("predicted_proteins_ref")
+    transcript_ref = expected.get("transcripts_fasta") or gene_out.get("transcripts_fasta_ref")
+
+    if protein_ref and Path(str(protein_ref)).exists():
+        busco_input = str(protein_ref)
+        busco_mode = "proteins"
+    elif transcript_ref and Path(str(transcript_ref)).exists():
+        busco_input = str(transcript_ref)
+        busco_mode = "transcriptome"
+    elif protein_ref:
+        busco_input = str(protein_ref)
+        busco_mode = "proteins"
+    elif transcript_ref:
+        busco_input = str(transcript_ref)
+        busco_mode = "transcriptome"
+    else:
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": "no protein or transcript sequences for BUSCO",
+            },
+        )
+
+    hints = gene_out.get("lineage_or_species_hints") or {}
+    busco_lineage = hints.get("busco_lineage")
+    if not busco_lineage:
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": "no busco_lineage in lineage_or_species_hints",
+            },
+        )
+
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+
+    env_spec, blocked = resolve_method_env(
+        gene_out, stage="gene_annotation", method_name=GENE_BUSCO_METHOD,
+        session_id=session_id, data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_gene_output(state, blocked)
+
+    working_dir = data_dir / "work" / "gene_annotation" / session_id / "busco"
+    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "busco"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    out_name = "busco_gene"
+    script_path = working_dir / "run_busco.sh"
+    script_path.write_text(
+        "set -e\n"
+        f"busco -i {shlex.quote(busco_input)}"
+        f" -o {shlex.quote(out_name)}"
+        f" -m {shlex.quote(busco_mode)}"
+        f" -l {shlex.quote(str(busco_lineage))}"
+        f" --offline --cpu 4\n"
+        f"test -f {shlex.quote(str(artifact_dir / out_name / 'short_summary.txt'))}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:gene_annotation:busco",
+        "session_id": session_id,
+        "stage": "gene_annotation",
+        "method_name": GENE_BUSCO_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [artifact_dir / out_name / "short_summary.txt"],
+        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
+        "metadata": {
+            "busco_input": busco_input,
+            "busco_mode": busco_mode,
+            "busco_lineage": str(busco_lineage),
+            "busco_output_dir": str(artifact_dir / out_name),
+            "short_summary_ref": str(artifact_dir / out_name / "short_summary.txt"),
+        },
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "busco_frozen",
+            "busco_frozen_attempt": attempt.model_dump(mode="json"),
+        },
+    )
+
+
+def run_gene_busco_attempt(state: TopLevelState) -> dict:
+    """Run the frozen BUSCO attempt locally."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "busco_frozen":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    ledger = Ledger(data_dir)
+    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(attempt.session_id, attempt)
+
+    result = LocalRunner().run(attempt)
+    if not result.success:
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error = stderr.strip() or f"busco failed with return code {result.return_code}"
+        ledger.record_attempt_failed(attempt.session_id, attempt, return_code=result.return_code, error=error)
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": f"busco failed: {error}",
+                "busco_execution_result": result.model_dump(mode="json"),
+            },
+        )
+
+    return _update_gene_output(state, {"status": "busco_ran", "busco_execution_result": result.model_dump(mode="json")})
+
+
+def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
+    """Collect BUSCO short summary and write completeness signal into gene_output."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "busco_ran":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    short_summary = Path(str(attempt.metadata["short_summary_ref"]))
+
+    if not short_summary.exists():
+        Ledger(data_dir).record_attempt_failed(
+            attempt.session_id, attempt, return_code=0,
+            error=f"BUSCO short summary missing: {short_summary}",
+        )
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": "busco short_summary.txt not found",
+            },
+        )
+
+    metrics = _parse_busco_short_summary(short_summary)
+    busco_score = metrics.get("complete_percent")
+
+    artifact = ArtifactMeta.from_file(
+        short_summary, stage="gene_annotation", method_name=GENE_BUSCO_METHOD,
+        artifact_type=BUSCO_SUMMARY_TYPE, metadata={"attempt_id": attempt.attempt_id},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    Ledger(data_dir).record_attempt_succeeded(
+        attempt.session_id, attempt,
+        artifacts=[{"path": str(short_summary), "artifact_type": BUSCO_SUMMARY_TYPE}],
+    )
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "merge_accepted",
+            "final_gff_ref": gene_out.get("final_gff_ref"),
+            "busco_completeness": busco_score,
+            "busco_completeness_status": "available" if busco_score is not None else "missing",
+            "busco_metrics": metrics,
+        },
+    )
+
+
+import re  # noqa: E402 — needed by _parse_busco_short_summary below
+
+
+def _parse_busco_short_summary(path: Path) -> dict[str, Any]:
+    """Parse a BUSCO short_summary.txt into a metrics dict."""
+    metrics: dict[str, Any] = {}
+    key_map = {
+        "complete buscos (c)": "complete_buscos",
+        "complete and single-copy buscos (s)": "single_copy_buscos",
+        "complete and duplicated buscos (d)": "duplicated_buscos",
+        "fragmented buscos (f)": "fragmented_buscos",
+        "missing buscos (m)": "missing_buscos",
+        "total busco groups searched": "total_busco_groups_searched",
+    }
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("C:"):
+            metrics["summary_line"] = stripped
+            for key, value in re.findall(r"([CSDFM]):([0-9.]+)%", stripped):
+                metrics[{
+                    "C": "complete_percent", "S": "single_copy_percent",
+                    "D": "duplicated_percent", "F": "fragmented_percent",
+                    "M": "missing_percent",
+                }[key]] = float(value)
+            continue
+        match = re.match(r"^(\d+)\s+(.+)$", stripped)
+        if not match:
+            continue
+        out_key = key_map.get(match.group(2).strip().lower())
+        if out_key:
+            metrics[out_key] = int(match.group(1))
+    return metrics
+
+
 def _softmasked_genome_ref(state: TopLevelState) -> str | None:
     repeat_out = (state.get("stage_outputs") or {}).get("repeat_annotation") or {}
     for key in ["softmasked_genome_ref", "softmasked_genome"]:

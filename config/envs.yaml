@@ -82,3 +82,11 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - augustus
+  gene_annotation.evm:
+    conda_env: env_geno_exec
+    required_tools:
+      - EVidenceModeler
+  gene_annotation.busco:
+    conda_env: env_geno_exec
+    required_tools:
+      - busco

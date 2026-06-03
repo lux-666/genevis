@@ -1,6 +1,17 @@
 # 07-05 候选基因模型合并与最终基因集
 
-任务状态：规划中；依赖 task 04（候选基因模型执行切片）和 task 03（merge review gate）。
+任务状态：本地实现完成（未提交）；依赖 task 04（候选基因模型执行切片）和 task 03（merge review gate）。
+
+## 实现要点（本地）
+
+- EVM+BUSCO 六个节点（freeze→run→collect × 2）插入在 gate3（merge_review）之后、gate4（final_gene_set_review）之前。`route_after_merge_gate` 改为返回 `evm_freeze`，BUSCO collect 之后返回 `block_final`。
+- 单候选直通：`freeze_evm_attempt` 检测 `candidate_refs` 数量 ≤ 1 时直接设置 `evm_collected` + `merge_method: single_candidate_passthrough`，跳过脚本生成和 run/collect。
+- 多候选：生成 EVM weights 文件和 `evidence_modeler.pl` 命令脚本，走完整 freeze→run→collect 路径。
+- `freeze_gene_busco_attempt`：优先 proteins 模式（从 `expected_outputs.predicted_proteins`），fallback transcriptome 模式；无 lineage 或序列途径时降级为 `busco_completeness_status: missing`。
+- BUSCO 失败不中止：run 失败时降级为 missing 信号并继续到 gate4。
+- `collect_gene_busco_artifacts` 解析 BUSCO short summary（复用 assembly_review 的 `_parse_busco_short_summary` 模式），写入 `busco_completeness` 和 `busco_metrics`，gate4 的 `build_final_gene_set_review_payload` 读取这些字段。
+- `route_after_method_plan` 新增 `evm_frozen/ran/collected` 和 `busco_frozen/ran` 的 crash-recovery 路由。
+- `config/envs.yaml` 新增 `gene_annotation.evm` 和 `gene_annotation.busco` 条目。
 
 ## 目标
 
@@ -51,17 +62,17 @@ task 06：功能注释
 
 ## 任务
 
-- [ ] 在 `gene_annotation/nodes.py` 中添加 `freeze_evm_attempt` 节点：输入为 merge review gate 决策中的 `candidate_gff_refs` 列表和权重表，生成 EVM pipeline 命令脚本，写入工作目录，冻结为 attempt payload（模式与 `freeze_busco_attempts` 保持一致）。
-- [ ] 实现单候选直通逻辑：`freeze_evm_attempt` 中检测 `candidate_gff_refs` 数量；若为 1，跳过脚本生成，在 attempt payload 中设 `merge_method: single_candidate_passthrough`，直接记录源路径。
-- [ ] 添加 `run_evm_attempt` 节点：使用 `LocalRunner` 执行冻结的 EVM 脚本，捕获 stdout/stderr，错误时在 stage_output 中记录失败原因（不抛异常）。
-- [ ] 添加 `collect_evm_artifacts` 节点：将合并后的 GFF3 注册为 `ArtifactMeta`（artifact_type `gene_annotation.final_gff`），将路径写入 `stage_output["final_gff_ref"]`，记录 `merge_method`（`evm` 或 `single_candidate_passthrough`）。
-- [ ] 添加 `freeze_gene_busco_attempt` 节点：从 `stage_output["final_gff_ref"]` 推断蛋白/转录本序列路径，按已决事项的模式选择策略，生成 BUSCO 命令脚本，冻结为 attempt payload；lineage 来自 `lineage_or_species_hints["busco_lineage"]`。
-- [ ] 添加 `run_gene_busco_attempt` 节点：使用 `LocalRunner` 执行冻结的 BUSCO 脚本，捕获结果；错误时降级为缺失信号，不中止。
-- [ ] 添加 `collect_gene_busco_artifacts` 节点：解析 BUSCO short summary，提取完整性分数（Complete/Single/Duplicated/Fragmented/Missing 百分比），注册为 `ArtifactMeta`（artifact_type `gene_annotation.busco_summary`），将指标写入 `stage_output["busco_completeness"]`。
-- [ ] 构建 `final_gene_set_review` ReviewPayload：将 `busco_completeness` 作为信号字段写入，`candidate_id` 设为 session_id，通过 gate registry 触发 review gate（与 task 03 的 merge review gate 对称）。
-- [ ] 将上述节点接入 `gene_annotation` node graph：在候选-证据 review gate accept 分支之后，依次连接 `freeze_evm_attempt` → `run_evm_attempt` → `collect_evm_artifacts` → `freeze_gene_busco_attempt` → `run_gene_busco_attempt` → `collect_gene_busco_artifacts` → `final_gene_set_review` gate。
-- [ ] 在 `config/envs.yaml` 中添加 `gene_annotation.evm` 和 `gene_annotation.busco` 方法条目，`required_tools` 分别指定 `EVidenceModeler` 和 `busco`，conda_env 均指向 `env_geno_exec`（或按实际 env 调整）。
-- [ ] 添加单元测试：`freeze_evm_attempt` 生成正确的权重表命令；单候选直通时不生成 EVM 脚本；`busco_completeness` 信号出现在 `final_gene_set_review` ReviewPayload 中；`final_gff_ref` 在合并成功后出现在 `stage_output` 中。
+- [x] 在 `gene_annotation/nodes.py` 中添加 `freeze_evm_attempt` 节点：输入为 merge review gate 决策中的 `candidate_gff_refs` 列表和权重表，生成 EVM pipeline 命令脚本，写入工作目录，冻结为 attempt payload（模式与 `freeze_busco_attempts` 保持一致）。
+- [x] 实现单候选直通逻辑：`freeze_evm_attempt` 中检测 `candidate_gff_refs` 数量；若为 1，跳过脚本生成，在 attempt payload 中设 `merge_method: single_candidate_passthrough`，直接记录源路径。
+- [x] 添加 `run_evm_attempt` 节点：使用 `LocalRunner` 执行冻结的 EVM 脚本，捕获 stdout/stderr，错误时在 stage_output 中记录失败原因（不抛异常）。
+- [x] 添加 `collect_evm_artifacts` 节点：将合并后的 GFF3 注册为 `ArtifactMeta`（artifact_type `gene_annotation.final_gff`），将路径写入 `stage_output["final_gff_ref"]`，记录 `merge_method`（`evm` 或 `single_candidate_passthrough`）。
+- [x] 添加 `freeze_gene_busco_attempt` 节点：从 `stage_output["final_gff_ref"]` 推断蛋白/转录本序列路径，按已决事项的模式选择策略，生成 BUSCO 命令脚本，冻结为 attempt payload；lineage 来自 `lineage_or_species_hints["busco_lineage"]`。
+- [x] 添加 `run_gene_busco_attempt` 节点：使用 `LocalRunner` 执行冻结的 BUSCO 脚本，捕获结果；错误时降级为缺失信号，不中止。
+- [x] 添加 `collect_gene_busco_artifacts` 节点：解析 BUSCO short summary，提取完整性分数（Complete/Single/Duplicated/Fragmented/Missing 百分比），注册为 `ArtifactMeta`（artifact_type `gene_annotation.busco_summary`），将指标写入 `stage_output["busco_completeness"]`。
+- [x] 构建 `final_gene_set_review` ReviewPayload：将 `busco_completeness` 作为信号字段写入（gate4 已由 task 03 实现，本任务填充 busco 信号数据）。
+- [x] 将上述节点接入 `gene_annotation` node graph：在 merge_review gate 之后，依次连接 `freeze_evm_attempt` → `run_evm_attempt` → `collect_evm_artifacts` → `freeze_gene_busco_attempt` → `run_gene_busco_attempt` → `collect_gene_busco_artifacts` → `final_gene_set_review` gate。
+- [x] 在 `config/envs.yaml` 中添加 `gene_annotation.evm` 和 `gene_annotation.busco` 方法条目，`required_tools` 分别指定 `EVidenceModeler` 和 `busco`，conda_env 均指向 `env_geno_exec`。
+- [x] 添加单元测试：`freeze_evm_attempt` 生成正确的权重表命令；单候选直通时不生成 EVM 脚本；`busco_completeness` 信号出现在 `final_gene_set_review` ReviewPayload 中；`final_gff_ref` 在合并成功后出现在 `stage_output` 中。
 - [ ] task 04 首个执行切片落地后，以真实候选文件执行本地冒烟验证（smoke test），确认 EVM 命令可运行并产出 GFF3。
 
 ## 验收
