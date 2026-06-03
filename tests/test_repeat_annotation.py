@@ -441,6 +441,12 @@ class MaskReviewGateTests(unittest.TestCase):
             self.assertEqual(repeat["decision"], "accept")
             self.assertEqual(repeat["decided_by"], "auto_rule")
             self.assertAlmostEqual(repeat["repeat_percentage"], 30.50)
+            self.assertIn("mask_review", result["route_trace"])
+            self.assertIn("repeat_annotation_stage", result["route_trace"])
+            self.assertLess(
+                result["route_trace"].index("mask_review"),
+                result["route_trace"].index("repeat_annotation_stage"),
+            )
 
             data_dir = Path(tmpdir)
             artifact_types = {rec["artifact_type"] for rec in read_artifact_records(data_dir, "s1")}
@@ -565,6 +571,8 @@ class MaskReviewGateTests(unittest.TestCase):
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(repeat["softmasked_genome_ref"], str(unmasked))
             self.assertEqual(repeat["decision"], "skip")
+            self.assertIn("mask_review_skipped", repeat.get("notes", []))
+            self.assertIn("mask_review", result["route_trace"])
 
 
 if __name__ == "__main__":

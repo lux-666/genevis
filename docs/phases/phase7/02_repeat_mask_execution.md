@@ -11,7 +11,7 @@
 - `run_repeatmasker_attempt`（`app/stages/repeat_annotation/nodes.py:312`）是真实 runner：它调用 `LocalRunner().run(attempt)`，并且已经接入图中。
 - 冻结后的命令是 `RepeatMasker -lib <library_ref> -gff -xsmall <asm>`（`nodes.py:273`）。`library_ref` 必须是一个**实际存在的本地 FASTA 文件**（`nodes.py:244`），并且来自 `asset_type == "repeat_library"` 的 manifest asset（`nodes.py:586 -> 110`）。
 - 执行受 `strategy == "provided"` 约束（`nodes.py:537`），而 `strategy` 只有在存在这类 asset 时才会是 `"provided"`（`nodes.py:87`）。
-- `collect_repeatmasker_artifacts`（`nodes.py:346`）已收集 `softmasked_genome`、`repeat_annotation_gff3`、可选的 `hardmasked_genome`，并写入 ledger；但**尚未收集 `.tbl` 摘要文件，也没有 `mask_review` gate**。
+- `collect_repeatmasker_artifacts` 已收集 `softmasked_genome`、`repeat_annotation_gff3`、可选的 `hardmasked_genome`，并写入 ledger；现已同步解析工作目录 `assembly.fasta.tbl` 提取 `repeat_percentage`，之后经 `block_mask_review` gate 自动通过并提交。
 - 从头构建重复序列库（EDTA / RepeatModeler）和 TRF 目前都只是规划态。
 
 ## 已决事项
@@ -45,19 +45,18 @@
 ## 任务
 
 - [ ] **Dfam 库准备（操作步骤，非代码改动）：** 使用 `famdb.py` 从本地 Dfam 数据库导出 Cetacea / Laurasiatheria 谱系为 FASTA，路径写入 manifest 的 `repeat_library` asset；确认 `select_repeat_strategy` 选出 `"provided"` 分支。
-- [ ] **解析 `.tbl` 摘要，提取 `repeat_percentage`：** 在 `collect_repeatmasker_artifacts` 内（或紧随其后的新节点）查找工作目录下的 `assembly.fasta.tbl`，用正则提取 `"bases masked"` 行百分比，写入 stage 输出字段 `repeat_percentage`（`float | None`）；`.tbl` 缺失时写 `None`，不阻断后续流程。
-- [ ] **在 `app/review/gates.py` 中注册 `mask_review` gate：** 调用 `register_review_gate(ReviewGateDeclaration(stage="repeat_annotation", gate_id="mask_review", decisions_allowed=("accept", "skip"), decision_applier="app.stages.repeat_annotation.nodes:apply_mask_review_decision", template_preferred_decision="accept"))`；不需要专用 `prompt_bundle`，走通用 prompt adapter。
-- [ ] **构建 `ReviewPayload` builder：** 在 `app/stages/repeat_annotation/nodes.py` 中新增 `build_mask_review_payload(state)` 函数，从 stage 输出收集 `softmasked_genome_ref`、`repeat_percentage`、`library_source` 标签、已运行/跳过步骤摘要，填充 `ReviewPayload`（`auto_decidable=True`，`decisions_allowed=["accept","skip"]`）并写入 `active_interrupt`。
-- [ ] **在图中接入 gate 触发点：** 在 `collect_repeatmasker_artifacts` 节点完成后、`commit_repeat_annotation` 之前，插入 `build_mask_review_payload` 调用；gate 状态写入 `active_interrupt`，由现有 policy engine 决定是否阻断或自动通过。
-- [ ] **实现 `apply_mask_review_decision`：** `accept` 分支确认 `softmasked_genome_ref` 传递给下游（保持现有路径）；`skip` 分支将 `softmasked_genome_ref` 置为原始组装 ref，并在 notes 中追加 `"mask_review_skipped"`；两条分支均清除 `active_interrupt`。
-- [ ] **持久化 `mask_review` 决策 artifact 和 ledger event：** 在 `apply_mask_review_decision` 中写入与 `assembly_review` / `hic_scaffolding` 相同格式的 ledger event；将决策 JSON 写为 artifact 并追加到 `artifact_refs`；`route_trace` 追加 `"mask_review"` 节点。
-- [ ] **添加测试：**
-  - `mask_review` gate 已在 registry 中声明，`get_review_gate("repeat_annotation", "mask_review")` 不抛出异常。
-  - `build_mask_review_payload` 在 `repeat_percentage` 为 `None` 时仍生成合法 payload。
-  - `auto_decidable=True` 时 policy engine 返回 `AUTO_DECIDE_NOW`，gate 不阻断流程。
-  - 手动 `accept` resume 后 `stage_outputs["repeat_annotation"]["softmasked_genome_ref"]` 保持掩蔽基因组路径。
-  - `skip` resume 后 `softmasked_genome_ref` 回退为原始组装 ref，notes 含 `"mask_review_skipped"`。
-  - trace 中包含 `"mask_review"` 节点。
+- [x] **解析 `.tbl` 摘要，提取 `repeat_percentage`：** `collect_repeatmasker_artifacts` 内调用 `_parse_tbl_repeat_percentage(working_dir / "assembly.fasta.tbl")`，写入 stage 输出字段 `repeat_percentage`（`float | None`）；`.tbl` 缺失时写 `None`，不阻断流程。
+- [x] **在 `app/review/gates.py` 中注册 `mask_review` gate：** `register_review_gate(ReviewGateDeclaration(stage="repeat_annotation", gate_id="mask_review", decisions_allowed=("accept", "skip"), decision_applier="...nodes:apply_mask_review_decision", template_preferred_decision="accept"))` 已加。
+- [x] **构建 `ReviewPayload` builder 并接入图：** `block_mask_review` 节点（`nodes.py:494`）构建 `ReviewPayload`，写入 `active_interrupt`，`builder.py` 在 `collect_repeatmasker` 后插入该节点，policy engine 决定自动通过或阻断。
+- [x] **实现 `apply_mask_review_decision`：** `accept` 分支透传掩蔽基因组 ref；`skip` 分支回退为 `final_assembly_for_annotation`，并在 notes 中追加 `"mask_review_skipped"`；两条分支均清除 `active_interrupt`。（`skip` notes 修复：commit 后补）
+- [x] **持久化 `mask_review` 决策 artifact 和 ledger event：** `apply_mask_review_decision` 写入决策 JSON artifact（`repeat_annotation.mask_review_decision`）、`review_decision` ledger event，`route_trace` 追加 `"mask_review"` 节点后再追加 `"repeat_annotation_stage"`。（`route_trace` 修复：commit 后补）
+- [x] **添加测试：**
+  - `get_review_gate("repeat_annotation", "mask_review")` 不抛出异常。✓
+  - `repeat_percentage` 为 `None` 时 gate payload 合法（`_parse_tbl_repeat_percentage` None 路径测试覆盖）。✓
+  - `auto_decidable=True` 时 policy engine 返回 `AUTO_DECIDE_NOW`，gate 不阻断流程。✓
+  - 手动 `accept` resume 后 `softmasked_genome_ref` 保持掩蔽路径。✓
+  - `skip` resume 后回退为原始 ref，notes 含 `"mask_review_skipped"`。✓
+  - `route_trace` 含 `"mask_review"` 节点，且在 `"repeat_annotation_stage"` 之前。✓
 - [ ] **本地烟雾测试（海豚组装）：** 以实际 Dfam FASTA 库和海豚组装为输入，端到端运行 `repeat_annotation` 阶段，确认 `softmasked_genome.fasta` 生成、`repeat_percentage` 非空、`mask_review` gate 自动通过，bundle artifact 写出。
 
 ## 验收

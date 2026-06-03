@@ -615,8 +615,10 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
     out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    notes = list(repeat_out.get("notes") or [])
     if request.decision == "skip":
         softmasked_genome_ref = repeat_out.get("final_assembly_for_annotation") or softmasked_genome_ref
+        notes = [*notes, "mask_review_skipped"]
 
     decision_payload = {
         "session_id": session_id,
@@ -655,7 +657,7 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
         rationale_artifact_ref=request.rationale_artifact_ref,
     )
 
-    updated_repeat_out = {**repeat_out, "softmasked_genome_ref": softmasked_genome_ref}
+    updated_repeat_out = {**repeat_out, "softmasked_genome_ref": softmasked_genome_ref, "notes": notes}
     outputs = dict(state.get("stage_outputs") or {})
     outputs["repeat_annotation"] = updated_repeat_out
     updated_state: TopLevelState = {**state, "stage_outputs": outputs}  # type: ignore[return-value]
@@ -669,10 +671,12 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
     }
+    original_trace = list(state.get("route_trace") or [])
     return {
         **commit_result,
         "active_interrupt": None,
         "stage_outputs": stage_outputs,
+        "route_trace": [*original_trace, "mask_review", "repeat_annotation_stage"],
     }
 
 
