@@ -265,7 +265,7 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": "gene_annotation.candidate.miniprot",
-            "execution_support": "planned_only",
+            "execution_support": "executable",
             "required_parameters": [],
             "parameter_defaults": {},
         },

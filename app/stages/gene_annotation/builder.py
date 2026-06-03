@@ -10,13 +10,16 @@ from app.stages.gene_annotation.nodes import (
     block_final_gene_set_review,
     block_gene_method_planning_review,
     block_merge_review,
+    collect_miniprot_artifacts,
     commit_gene_annotation,
     enter_gene_annotation,
     fail_gene_annotation,
+    freeze_miniprot_attempt,
     plan_evidence_merge_or_review,
     plan_gene_methods,
     resolve_gene_annotation_inputs,
     run_gene_methods_planning_only,
+    run_miniprot_attempt,
     select_evidence_profile,
 )
 from app.stages.gene_annotation.routing import (
@@ -28,6 +31,9 @@ from app.stages.gene_annotation.routing import (
     route_after_merge_prep,
     route_after_method_plan,
     route_after_method_planning_gate,
+    route_after_miniprot_collect,
+    route_after_miniprot_freeze,
+    route_after_miniprot_run,
     route_after_resolve,
     route_after_run_methods,
 )
@@ -52,6 +58,9 @@ def build_stage():
     graph.add_node("plan_gene_methods", plan_gene_methods)
     graph.add_node("block_gene_method_planning_review", block_gene_method_planning_review)
     graph.add_node("run_gene_methods_planning_only", run_gene_methods_planning_only)
+    graph.add_node("freeze_miniprot_attempt", freeze_miniprot_attempt)
+    graph.add_node("run_miniprot_attempt", run_miniprot_attempt)
+    graph.add_node("collect_miniprot_artifacts", collect_miniprot_artifacts)
     graph.add_node("block_candidate_evidence_review", block_candidate_evidence_review)
     graph.add_node("plan_evidence_merge_or_review", plan_evidence_merge_or_review)
     graph.add_node("block_merge_review", block_merge_review)
@@ -97,6 +106,27 @@ def build_stage():
     graph.add_conditional_edges(
         "run_gene_methods_planning_only",
         route_after_run_methods,
+        {
+            "block_candidates": "block_candidate_evidence_review",
+            "miniprot_freeze": "freeze_miniprot_attempt",
+            "miniprot_run": "run_miniprot_attempt",
+            "miniprot_collect": "collect_miniprot_artifacts",
+            "fail": "fail",
+        },
+    )
+    graph.add_conditional_edges(
+        "freeze_miniprot_attempt",
+        route_after_miniprot_freeze,
+        {"miniprot_run": "run_miniprot_attempt", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "run_miniprot_attempt",
+        route_after_miniprot_run,
+        {"miniprot_collect": "collect_miniprot_artifacts", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "collect_miniprot_artifacts",
+        route_after_miniprot_collect,
         {"block_candidates": "block_candidate_evidence_review", "fail": "fail"},
     )
     graph.add_conditional_edges(

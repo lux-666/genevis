@@ -74,3 +74,7 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - RepeatMasker
+  gene_annotation.candidate.miniprot:
+    conda_env: env_geno_exec
+    required_tools:
+      - miniprot

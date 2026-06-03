@@ -694,7 +694,10 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertIn("gene_annotation.candidate.braker3", methods)
         self.assertIn("gene_annotation.helper.hisat2", methods)
         for m in result.choices["methods_by_stage"]["gene_annotation"]:
-            self.assertEqual(m["execution_support"], "planned_only")
+            if m["method_name"] == "gene_annotation.candidate.miniprot":
+                self.assertEqual(m["execution_support"], "executable")
+            else:
+                self.assertEqual(m["execution_support"], "planned_only")
 
     def test_function_annotation_method_selection(self):
         plan = _base_plan(

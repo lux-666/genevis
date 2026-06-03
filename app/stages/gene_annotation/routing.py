@@ -44,7 +44,12 @@ def route_after_method_plan(state: TopLevelState) -> str:
         return "block_method"
     if status == "methods_confirmed":
         return "run_methods"
+    if status in ("miniprot_frozen", "miniprot_ran"):
+        return "run_methods"
     if status == "candidates_ready":
+        confirmed = _output(state).get("confirmed_methods") or []
+        if "gene_annotation.candidate.miniprot" in confirmed:
+            return "run_methods"
         return "block_candidates"
     if status == "candidates_accepted":
         return "merge_prep"
@@ -67,7 +72,33 @@ def route_after_method_planning_gate(state: TopLevelState) -> str:
 
 
 def route_after_run_methods(state: TopLevelState) -> str:
-    """After planning-only stub: proceed to candidate-evidence gate."""
+    """After planning-only stub: proceed to candidate-evidence gate or miniprot execution."""
+    status = _output(state).get("status")
+    if status == "failed":
+        return "fail"
+    if status == "miniprot_frozen":
+        return "miniprot_run"
+    if status == "miniprot_ran":
+        return "miniprot_collect"
+    if status == "candidates_ready":
+        confirmed = _output(state).get("confirmed_methods") or []
+        if "gene_annotation.candidate.miniprot" in confirmed:
+            return "miniprot_freeze"
+    return "block_candidates"
+
+
+def route_after_miniprot_freeze(state: TopLevelState) -> str:
+    """After freezing miniprot: proceed to run or fail."""
+    return "fail" if _output(state).get("status") == "failed" else "miniprot_run"
+
+
+def route_after_miniprot_run(state: TopLevelState) -> str:
+    """After running miniprot: proceed to collect or fail."""
+    return "fail" if _output(state).get("status") == "failed" else "miniprot_collect"
+
+
+def route_after_miniprot_collect(state: TopLevelState) -> str:
+    """After collecting miniprot artifacts: proceed to candidate-evidence gate."""
     return "fail" if _output(state).get("status") == "failed" else "block_candidates"
 
 

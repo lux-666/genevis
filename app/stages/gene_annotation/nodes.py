@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -10,6 +11,8 @@ from typing import Any, Callable
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
+from app.execution.local_runner import LocalRunner
 from app.graph.routing import next_stage_name
 from app.review.annotation_intake import (
     DOWNSTREAM_STAGES,
@@ -19,7 +22,7 @@ from app.review.annotation_intake import (
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
 from app.schemas.artifacts import ArtifactMeta, GeneAnnotationBundle, GeneAnnotationPlan
-from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir
 
@@ -973,6 +976,199 @@ def apply_final_gene_set_review_decision(state: TopLevelState, request: ResumeRe
         decision_ref,
     )
     return own
+
+
+# --- miniprot execution (Phase 7 task 04 slice 1) ------------------------------
+
+MINIPROT_METHOD = "gene_annotation.candidate.miniprot"
+CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
+
+
+def freeze_miniprot_attempt(state: TopLevelState) -> dict:
+    """Freeze a miniprot attempt from confirmed methods and protein evidence."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "candidates_ready":
+        return {}
+    confirmed = list(gene_out.get("confirmed_methods") or [])
+    if MINIPROT_METHOD not in confirmed:
+        return {}
+
+    genome_ref = gene_out.get("genome_input_ref")
+    if not genome_ref:
+        return _fail_update(state, "miniprot requires genome_input_ref")
+
+    protein_refs = gene_out.get("protein_evidence_refs") or []
+    if not protein_refs:
+        return _fail_update(state, "miniprot requires protein_evidence_refs")
+
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+
+    env_spec, blocked = resolve_method_env(
+        gene_out,
+        stage="gene_annotation",
+        method_name=MINIPROT_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return _update_gene_output(state, blocked)
+
+    working_dir = data_dir / "work" / "gene_annotation" / session_id / "miniprot"
+    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "miniprot"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    candidate_refs = dict(gene_out.get("candidate_refs") or {})
+    output_gff3 = Path(candidate_refs.get(MINIPROT_METHOD, str(artifact_dir / "miniprot.gff3")))
+
+    script_path = working_dir / "run_miniprot.sh"
+    genome_arg = shlex.quote(str(genome_ref))
+    protein_args = " ".join(shlex.quote(str(ref)) for ref in protein_refs)
+    output_arg = shlex.quote(str(output_gff3))
+    script_path.write_text(
+        "set -e\n"
+        f"miniprot --gff {genome_arg} {protein_args} > {output_arg}\n"
+        f"test -f {output_arg}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    attempt_kwargs: dict[str, Any] = {
+        "attempt_id": f"{session_id}:gene_annotation:miniprot",
+        "session_id": session_id,
+        "stage": "gene_annotation",
+        "method_name": MINIPROT_METHOD,
+        "script_path": script_path,
+        "working_dir": working_dir,
+        "interpreter": "/bin/bash",
+        "expected_outputs": [output_gff3],
+        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
+        "metadata": {
+            "genome_input_ref": str(genome_ref),
+            "protein_evidence_refs": [str(ref) for ref in protein_refs],
+            "output_gff3": str(output_gff3),
+        },
+    }
+    attach_conda_fields(env_spec, attempt_kwargs)
+    attempt = FrozenAttemptSpec(**attempt_kwargs)
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "miniprot_frozen",
+            "miniprot_frozen_attempt": attempt.model_dump(mode="json"),
+        },
+    )
+
+
+def run_miniprot_attempt(state: TopLevelState) -> dict:
+    """Run the frozen miniprot attempt locally."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "miniprot_frozen":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["miniprot_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    ledger = Ledger(data_dir)
+    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+    ledger.record_attempt_started(attempt.session_id, attempt)
+
+    result = LocalRunner().run(attempt)
+    if not result.success:
+        for path in attempt.expected_outputs:
+            if path.exists() and path.is_file():
+                path.unlink()
+        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
+        error = stderr.strip() or f"miniprot failed with return code {result.return_code}"
+        ledger.record_attempt_failed(
+            attempt.session_id,
+            attempt,
+            return_code=result.return_code,
+            error=error,
+        )
+        return _update_gene_output(
+            state,
+            {
+                "status": "failed",
+                "reason": error,
+                "miniprot_execution_result": result.model_dump(mode="json"),
+            },
+        )
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "miniprot_ran",
+            "miniprot_execution_result": result.model_dump(mode="json"),
+        },
+    )
+
+
+def collect_miniprot_artifacts(state: TopLevelState) -> dict:
+    """Collect miniprot GFF3 output and register as candidate_gff artifact."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "miniprot_ran":
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(gene_out["miniprot_frozen_attempt"])
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    output_gff3 = Path(str(attempt.metadata["output_gff3"]))
+
+    if not output_gff3.exists():
+        reason = f"expected miniprot GFF3 missing: {output_gff3}"
+        Ledger(data_dir).record_attempt_failed(
+            attempt.session_id,
+            attempt,
+            return_code=0,
+            error=reason,
+        )
+        return _update_gene_output(state, {"status": "failed", "reason": reason})
+
+    artifact = ArtifactMeta.from_file(
+        output_gff3,
+        stage="gene_annotation",
+        method_name=MINIPROT_METHOD,
+        artifact_type=CANDIDATE_GFF_TYPE,
+        metadata={"attempt_id": attempt.attempt_id},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+
+    Ledger(data_dir).record_attempt_succeeded(
+        attempt.session_id,
+        attempt,
+        artifacts=[{"path": str(output_gff3), "artifact_type": CANDIDATE_GFF_TYPE}],
+    )
+
+    candidate_refs = dict(gene_out.get("candidate_refs") or {})
+    candidate_refs[MINIPROT_METHOD] = str(output_gff3)
+
+    gene_count = 0
+    try:
+        for line in output_gff3.read_text(encoding="utf-8").splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            fields = line.split("\t")
+            if len(fields) >= 3 and fields[2] == "gene":
+                gene_count += 1
+    except (OSError, UnicodeDecodeError):
+        gene_count = 0
+
+    candidate_gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
+    candidate_gene_counts[MINIPROT_METHOD] = gene_count
+
+    return _update_gene_output(
+        state,
+        {
+            "status": "candidates_ready",
+            "candidate_refs": candidate_refs,
+            "candidate_gene_counts": candidate_gene_counts,
+            "candidate_gff_ref": str(output_gff3),
+            "miniprot_gene_count": gene_count,
+        },
+    )
 
 
 def _softmasked_genome_ref(state: TopLevelState) -> str | None:

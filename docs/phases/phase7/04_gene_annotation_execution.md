@@ -1,6 +1,15 @@
 # 07-04 基因注释执行切片
 
-任务状态：规划中；依赖 task 03 的注释 review chain。
+任务状态：Slice 1（Miniprot）本地实现完成（未提交）；依赖 task 03 的注释 review chain。
+
+## 实现要点（本地）
+
+- `freeze_miniprot_attempt` / `run_miniprot_attempt` / `collect_miniprot_artifacts` 三个节点遵循 flye/yahs 的 freeze→run→collect 模式，通过 PATH override 绕过 conda preflight 以支持 fake-binary 测试。
+- 三个节点插入在 `run_gene_methods_planning_only` 之后：当 miniprot 在 `confirmed_methods` 中时，`route_after_run_methods` 路由至 `freeze_miniprot_attempt` → `run_miniprot_attempt` → `collect_miniprot_artifacts` → `block_candidate_evidence_review`。
+- `route_after_method_plan` 新增 `miniprot_frozen`/`miniprot_ran` 和 `candidates_ready + miniprot confirmed` 的 crash-recovery 路由，确保重入时正确回到 miniprot 执行路径。
+- `collect_miniprot_artifacts` 将产出 GFF3 注册为 `gene_annotation.candidate_gff` artifact，更新 `candidate_refs` 和 `candidate_gene_counts`，最终状态 `candidates_ready` 汇入 candidate_evidence_review gate。
+- `config/envs.yaml` 新增 `gene_annotation.candidate.miniprot` 条目（`conda_env: env_geno_exec`，`required_tools: [miniprot]`）。
+- `ask_planner.py` 中 miniprot 的 `execution_support` 翻转为 `executable`。
 
 ## 目标
 
@@ -37,20 +46,20 @@
 
 ### Slice 1：Miniprot
 
-- [ ] **添加 `freeze_miniprot_attempt` 节点**：从 `stage_outputs.gene_annotation` 读取 `genome_input_ref`（mask_review 产出的软屏蔽基因组）与 manifest asset `protein_db` 路径；构造命令 `miniprot --gff <genome> <proteins>`；写入 shell 脚本；调用 `resolve_method_env` / `attach_conda_fields`；生成 `FrozenAttemptSpec`，状态置为 `miniprot_frozen`。
-- [ ] **添加 `run_miniprot_attempt` 节点**：校验状态 `miniprot_frozen`；调用 `LocalRunner().run(attempt)`；失败时清理预期输出文件、调用 `ledger.record_attempt_failed`、返回 `status: failed`；成功时状态置为 `miniprot_ran`。
-- [ ] **添加 `collect_miniprot_artifacts` 节点**：校验状态 `miniprot_ran`；将产出 GFF3 文件以 artifact 类型 `gene_annotation.candidate_gff` 注册到 artifact 账本；在 `stage_output` 中写入 `candidate_gff_ref`；状态置为 `miniprot_collected`。
-- [ ] **将三个节点连入 `gene_annotation` 图**：在现有规划阶段节点（`plan_evidence_merge_or_review`）之后按顺序连接 `freeze_miniprot_attempt` → `run_miniprot_attempt` → `collect_miniprot_artifacts`；仅当 selected method 为 miniprot 时路由进入此分支。
-- [ ] **将 `miniprot` 注册表条目 `execution_support` 翻转为 `executable`**：修改 `app/entrypoints/ask_planner.py` 中 `gene_annotation.candidate.miniprot` 对应条目。
-- [ ] **在 `config/envs.yaml` 中添加 `gene_annotation.candidate.miniprot` conda 环境条目**：在 `methods` 节新增条目，`conda_env: env_geno_exec`（或独立的 miniprot 专属环境），`required_tools: [miniprot]`。
-- [ ] **连接 `resolve_method_env` / `attach_conda_fields`**：在 `freeze_miniprot_attempt` 中调用方式与 `freeze_flye_attempt` 一致，确保 conda 环境字段正确注入 `FrozenAttemptSpec`。
-- [ ] **添加单元测试**（`tests/test_gene_annotation_miniprot.py` 或扩展现有测试文件）：
+- [x] **添加 `freeze_miniprot_attempt` 节点**：从 `stage_outputs.gene_annotation` 读取 `genome_input_ref`（mask_review 产出的软屏蔽基因组）与 manifest asset `protein_db` 路径；构造命令 `miniprot --gff <genome> <proteins>`；写入 shell 脚本；调用 `resolve_method_env` / `attach_conda_fields`；生成 `FrozenAttemptSpec`，状态置为 `miniprot_frozen`。
+- [x] **添加 `run_miniprot_attempt` 节点**：校验状态 `miniprot_frozen`；调用 `LocalRunner().run(attempt)`；失败时清理预期输出文件、调用 `ledger.record_attempt_failed`、返回 `status: failed`；成功时状态置为 `miniprot_ran`。
+- [x] **添加 `collect_miniprot_artifacts` 节点**：校验状态 `miniprot_ran`；将产出 GFF3 文件以 artifact 类型 `gene_annotation.candidate_gff` 注册到 artifact 账本；在 `stage_output` 中写入 `candidate_gff_ref`；状态置为 `candidates_ready`。
+- [x] **将三个节点连入 `gene_annotation` 图**：在 `run_gene_methods_planning_only` 之后按顺序连接 `freeze_miniprot_attempt` → `run_miniprot_attempt` → `collect_miniprot_artifacts`；仅当 `confirmed_methods` 包含 miniprot 时路由进入此分支。
+- [x] **将 `miniprot` 注册表条目 `execution_support` 翻转为 `executable`**：修改 `app/entrypoints/ask_planner.py` 中 `gene_annotation.candidate.miniprot` 对应条目。
+- [x] **在 `config/envs.yaml` 中添加 `gene_annotation.candidate.miniprot` conda 环境条目**：在 `methods` 节新增条目，`conda_env: env_geno_exec`，`required_tools: [miniprot]`。
+- [x] **连接 `resolve_method_env` / `attach_conda_fields`**：在 `freeze_miniprot_attempt` 中调用方式与 `freeze_flye_attempt` 一致，确保 conda 环境字段正确注入 `FrozenAttemptSpec`。
+- [x] **添加单元测试**（`tests/test_gene_annotation_miniprot.py`）：
   - `freeze_miniprot_attempt` 产出的 `FrozenAttemptSpec` 命令行包含正确的 `--gff <genome> <proteins>` 参数；
   - `run_miniprot_attempt` 在 runner 返回失败时记录 `attempt_failed` ledger 事件、`stage_output.status` 为 `failed`；
   - `collect_miniprot_artifacts` 正确注册 `gene_annotation.candidate_gff` artifact；
   - 执行完整 Slice 1 路径后 `stage_output` 含 `candidate_gff_ref`。
 - [ ] **本地冒烟验证**：在真实海豚软屏蔽基因组 + 真实蛋白数据库上执行完整 Slice 1 路径，确认 GFF3 产出并正确注册。
-- [ ] **记录后续切片入口**（见下方 ## 后续切片）。
+- [x] **记录后续切片入口**（见下方 ## 后续切片）。
 
 ## 后续切片
 
