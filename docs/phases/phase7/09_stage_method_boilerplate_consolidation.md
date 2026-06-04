@@ -1,6 +1,26 @@
 # 07-09 Stage 方法样板收敛（freeze/run/collect 节点 + 路由）
 
-任务状态：未开始。纯内部重构，行为保持不变，受测试保护。
+任务状态：切片 1 全 stage 完成 + 切片 2 gene_annotation 完成。纯内部重构，行为保持不变，613 passed（仅既有 Flye 环境失败的 7 个 AssemblyRerunTests 除外，与本重构无关）。
+
+## 实现要点（落地记录）
+
+- **落点已定：`app/execution/method_runner.py`**（不重建 forge）。提供
+  `build_frozen_attempt(...)`（组装 kwargs + `attach_conda_fields` + `FrozenAttemptSpec`）
+  与 `run_frozen_attempt(state, attempt, *, fail_label, cleanup_outputs=True) -> RunOutcome`
+  （ledger create/start + `LocalRunner` + 失败时按需 unlink + record_attempt_failed）。
+- **切片 1 已覆盖所有 method-bearing stage**：read_qc（seqkit/length_filter）、
+  assembly（flye）、genome_survey（jellyfish/genomescope2）、function_annotation
+  （diamond）、hic_scaffolding（yahs）、repeat_annotation（repeatmasker）、
+  assembly_review（quast/busco 复数 + flye rerun 的 spec 组装）、gene_annotation
+  （miniprot/augustus/evm/busco）。collect 路径保持 stage 专属。
+- **`cleanup_outputs=False` 的特例**：repeat_annotation（失败注册 log artifacts）、
+  hic_scaffolding（失败仍进 yahs_ran，由 collect 决定 fallback）、assembly_review
+  quast/busco（失败写入 result_payload["error"] 继续）、gene_annotation busco
+  （失败映射为 merge_accepted）。这些 caller 保留各自失败后处理，仅复用 run 核心。
+- **切片 2 仅 gene_annotation**：miniprot/augustus 的 4 个薄转发器删除，builder 改用
+  `functools.partial(_route_after_freeze, suffix=...)`。其余 stage 当前均为单方法
+  （每个 freeze/run/collect 只有一个 router），table 化无去重收益，按"避免过早抽象"
+  推迟到该 stage 真正新增第二个方法时再做。
 
 ## 目标
 
@@ -56,9 +76,8 @@ work/artifact → 写 script → `attach_conda_fields` → `FrozenAttemptSpec` �
 
 ## 已决 / 待定
 
-- **共享 helper 落点(待定):** 重建 `app/forge/freeze.py` 作为家(兑现
-  `docs/architecture.md:50,64` 对 forge 的归属描述),或放 `app/execution/`。倾向
-  forge,但实现时确认;无论选哪个,architecture.md 的 forge 段落需同步为真实状态。
+- **共享 helper 落点(已决):** `app/execution/method_runner.py`(不重建 forge)。
+  architecture.md / governance.md 的 forge 段落已同步为指向 execution。
 - **行为保持:** 本任务不改任何方法的执行语义、产物、ledger/trace 形态,纯收敛。
 
 ## 非目标
@@ -74,22 +93,16 @@ work/artifact → 写 script → `attach_conda_fields` → `FrozenAttemptSpec` �
 
 ## 任务
 
-- [ ] **切片 1:** 在选定落点实现共享 `freeze/run/collect` helper(以
-  `_freeze_gene_method_attempt` 等为蓝本,去掉 gene-specific 字段)。逐 stage 迁移:
-  `read_qc` → `genome_survey` → `assembly` → `repeat_annotation` →
-  `function_annotation` → `hic_scaffolding` → `assembly_review`。每迁移一个 stage
-  即跑该 stage 测试,确认零行为差异后再下一个。
-- [ ] **切片 2:** 在选定落点(或各 stage routing.py 内)实现共享
-  `_route_after_freeze/_run/_collect`,用 `functools.partial` + `{suffix}` 表替换
-  各 stage 的薄转发器,删除手写转发函数;仅替换薄转发,保留多分支路由器。
-- [ ] **`gene_annotation` 对齐:** 用同一共享 helper 替换其 stage 内私有
-  `_freeze_gene_method_attempt` 等与 `route_after_miniprot/augustus_*` 薄转发,使
-  模板与其余 stage 收敛到同一实现。
-- [ ] **architecture.md 同步:** 若落点为 forge,更新 `docs/architecture.md:50,64`
-  与 `docs/governance.md:120` 描述至真实状态;若落点为 execution,改这些段落不再
-  指向 forge。
-- [ ] **回归:** `pytest -q` 全绿(既有 `AssemblyRerunTests` 的 Flye 环境失败除外),
-  确认无新增回归。
+- [x] **切片 1:** `build_frozen_attempt` + `run_frozen_attempt` 实现于
+  `app/execution/method_runner.py`,逐 stage 迁移并按 stage 跑测试,零行为差异。
+- [x] **切片 2:** gene_annotation 用 `functools.partial(_route_after_freeze/_run, suffix=...)`
+  替换 4 个薄转发器。其余 stage 当前单方法,无去重收益,推迟到新增第二方法时再做。
+- [x] **`gene_annotation` 对齐:** 私有 `_freeze/_run_gene_method_attempt` 与 evm/busco
+  freeze/run 均改用共享 helper;miniprot/augustus 薄转发器删除。
+- [x] **architecture.md 同步:** forge 段落(architecture.md 模块表/原则 5、
+  governance.md 脚本生成节)已改为指向 `execution/method_runner`。
+- [x] **回归:** `pytest -q` 613 passed,仅既有 `AssemblyRerunTests` 的 7 个 Flye
+  环境失败(与本重构无关),无新增回归。
 
 ## 验收
 

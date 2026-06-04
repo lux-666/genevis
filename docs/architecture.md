@@ -12,7 +12,7 @@ stage-by-stage inputs and outputs, read `docs/stage_contracts.md`.
 2. Keep stage boundaries stable and move method choice inside each stage.
 3. Store large biological files, logs, scripts, and metric tables outside graph state.
 4. Let descriptors and review rules express method compatibility.
-5. Let Forge generate frozen attempt scripts only after descriptor context and validation.
+5. Generate frozen attempt scripts in stage nodes (via the shared `execution/method_runner` helpers) only after descriptor context and validation.
 6. Put human-in-the-loop gates at review boundaries, especially assembly evaluation and Hi-C review.
 
 ## Parent Flow
@@ -46,8 +46,7 @@ app/
   graph/       parent graph, route controller, checkpoint factory
   stages/      domain subgraphs and method-family routes
   schemas/     state, asset, plan, descriptor, artifact contracts
-  execution/   local subprocess runner (no in-agent remote execution)
-  forge/       context, codegen, validation, freezing
+  execution/   local subprocess runner + shared freeze/run helpers (no in-agent remote execution)
   review/      rule checks and interrupt-backed human gates
   control/     ledger and lifecycle commands
   reports/     JSONL trace and user/developer reports
@@ -60,8 +59,7 @@ Module ownership:
 | `graph/` | Parent LangGraph wiring, routing, checkpoint factory | Tool execution, biological method choice |
 | `stages/` | Stage subgraphs, stage planners, method-family routing | Package-level script generation internals |
 | `schemas/` | Cross-module contracts | Side effects |
-| `execution/` | Running frozen attempts locally and collecting declared outputs | In-agent remote orchestration (intentionally unsupported; see `docs/deployment/mac_dev_server_pull.md`) |
-| `forge/` | Generating, validating, and freezing attempt scripts | Mutating graph, ledger, lifecycle, or descriptors |
+| `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), collecting declared outputs | In-agent remote orchestration (intentionally unsupported; see `docs/deployment/mac_dev_server_pull.md`) |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
 | `control/` | Ledger and lifecycle semantics | Starting tools or reading huge data files |
 | `reports/` | Trace and notebook/report rendering | Workflow control decisions |

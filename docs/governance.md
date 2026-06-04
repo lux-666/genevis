@@ -117,9 +117,11 @@ Descriptors express compatibility and defaults:
 Descriptors should be readable by domain experts. Avoid hiding method selection
 rules inside Python when a descriptor or YAML policy is enough.
 
-### Forge
+### Script generation and freezing
 
-Forge can generate or template execution scripts. It must not mutate:
+Stage nodes generate or template execution scripts and freeze them into a
+`FrozenAttemptSpec` via the shared `execution/method_runner` helpers. Script
+generation and freezing must not mutate:
 
 - top-level graph routing
 - state schema
