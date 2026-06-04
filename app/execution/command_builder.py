@@ -1,1 +1,0 @@
-"""Command rendering helpers placeholder."""

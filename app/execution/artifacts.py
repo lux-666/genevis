@@ -19,13 +19,6 @@ def read_artifact_records(data_dir: Path | str, session_id: str) -> list[dict]:
     return records
 
 
-def latest_artifact_record(data_dir: Path | str, session_id: str, artifact_type: str) -> dict | None:
-    for record in reversed(read_artifact_records(data_dir, session_id)):
-        if record.get("artifact_type") == artifact_type:
-            return record
-    return None
-
-
 def append_artifact_records(
     data_dir: Path | str,
     session_id: str,

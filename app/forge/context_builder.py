@@ -1,1 +1,0 @@
-"""Forge context construction placeholder."""

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from app.schemas.artifacts import ArtifactMeta
-from app.schemas.descriptors import FrozenAttemptSpec
 
 
 ExecutionStatus = Literal["ok", "failed", "blocked_env", "missing_tool"]
@@ -38,20 +36,3 @@ class CollectResult(BaseModel):
 
     attempt_id: str
     artifacts: list[ArtifactMeta]
-
-
-class BaseRunner(ABC):
-    """Local subprocess runner interface.
-
-    In-agent remote execution is intentionally unsupported; server runs
-    happen by invoking the same CLI on the server checkout after `git pull`
-    (see ``docs/deployment/mac_dev_server_pull.md``).
-    """
-
-    @abstractmethod
-    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
-        """Run a frozen attempt."""
-
-    @abstractmethod
-    def collect(self, result: ExecutionResult, spec: FrozenAttemptSpec) -> CollectResult:
-        """Collect declared outputs for a frozen attempt."""

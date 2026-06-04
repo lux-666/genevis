@@ -5,12 +5,12 @@ from __future__ import annotations
 import os
 import subprocess
 
-from app.execution.base import BaseRunner, CollectResult, ExecutionResult
+from app.execution.base import CollectResult, ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 
 
-class LocalRunner(BaseRunner):
+class LocalRunner:
     """Run a frozen attempt in its declared working directory.
 
     When the frozen attempt declares `conda_env` or `conda_prefix`, the command
