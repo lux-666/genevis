@@ -81,6 +81,9 @@ See the numbered task docs in this folder:
   method by method.
 - `07_interpretation_agent.md` — direction note for agent 3 (out of scope until
   the annotation agent lands).
+- `09_stage_method_boilerplate_consolidation.md` — behavior-preserving refactor:
+  collapse per-method freeze/run/collect node + thin-router boilerplate into the
+  shared `gene_annotation` helper + `{suffix: cfg}` table pattern.
 
 ## Annotation review chain (target shape)
 
