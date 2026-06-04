@@ -1083,7 +1083,12 @@ def _run_gene_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> di
     """Shared run path: deserialize FrozenAttemptSpec and execute via LocalRunner."""
     gene_out = _gene_output(state)
     attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label=cfg["suffix"])
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label=cfg["suffix"],
+    )
     if not outcome.success:
         return _update_gene_output(
             state,
@@ -1366,7 +1371,12 @@ def run_evm_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="evm")
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="evm",
+    )
     if not outcome.success:
         return _update_gene_output(state, {"status": "failed", "reason": outcome.error, "evm_execution_result": outcome.result.model_dump(mode="json")})
 
@@ -1529,7 +1539,13 @@ def run_gene_busco_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="busco", cleanup_outputs=False)
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="busco",
+        cleanup_outputs=False,
+    )
     if not outcome.success:
         return _update_gene_output(
             state,

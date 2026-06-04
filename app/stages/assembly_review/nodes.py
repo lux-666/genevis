@@ -306,7 +306,13 @@ def run_quast_attempts(state: TopLevelState) -> dict:
     results = []
     for payload in ar_out.get("quast_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="QUAST", cleanup_outputs=False)
+        outcome = run_frozen_attempt(
+            attempt,
+            data_dir=state.get("data_dir", "data"),
+            input_manifest_ref=state.get("input_manifest_ref", ""),
+            fail_label="QUAST",
+            cleanup_outputs=False,
+        )
         result_payload = outcome.result.model_dump(mode="json")
         if not outcome.success:
             result_payload["error"] = outcome.error
@@ -422,7 +428,13 @@ def run_busco_attempts(state: TopLevelState) -> dict:
     results = []
     for payload in ar_out.get("busco_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="BUSCO", cleanup_outputs=False)
+        outcome = run_frozen_attempt(
+            attempt,
+            data_dir=state.get("data_dir", "data"),
+            input_manifest_ref=state.get("input_manifest_ref", ""),
+            fail_label="BUSCO",
+            cleanup_outputs=False,
+        )
         result_payload = outcome.result.model_dump(mode="json")
         if not outcome.success:
             result_payload["error"] = outcome.error

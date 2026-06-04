@@ -265,7 +265,12 @@ def run_seqkit_stats(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(read_qc_out["frozen_attempt"])
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="seqkit stats")
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="seqkit stats",
+    )
     if not outcome.success:
         return _update_read_qc_output(
             state,
@@ -532,7 +537,12 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         },
     )
 
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="seqkit seq")
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="seqkit seq",
+    )
     if not outcome.success:
         return _update_read_qc_output(state, {"status": "failed", "reason": outcome.error})
     result = outcome.result

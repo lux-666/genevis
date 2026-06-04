@@ -18,19 +18,17 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.control.ledger import Ledger
-from app.execution.results import CollectResult, ExecutionResult
+from app.execution.results import ExecutionResult
 from app.execution.env_dispatch import attach_conda_fields
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
 from app.schemas.descriptors import FrozenAttemptSpec
 
 
-class Runner(Protocol):
+class AttemptRunner(Protocol):
     """Minimal duck-typed runner contract used by ``run_frozen_attempt``."""
 
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult: ...
-
-    def collect(self, result: ExecutionResult, spec: FrozenAttemptSpec) -> CollectResult: ...
 
 
 def build_frozen_attempt(
@@ -80,7 +78,7 @@ def run_frozen_attempt(
     input_manifest_ref: str = "",
     fail_label: str,
     cleanup_outputs: bool = True,
-    runner: Runner | None = None,
+    runner: AttemptRunner | None = None,
     ledger: Ledger | None = None,
 ) -> RunOutcome:
     """Run a frozen attempt with shared ledger bookkeeping.

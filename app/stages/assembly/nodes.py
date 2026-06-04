@@ -383,7 +383,12 @@ def run_flye_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(assembly_out["flye_frozen_attempt"])
-    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="flye")
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="flye",
+    )
     if not outcome.success:
         return _update_assembly_output(
             state,
