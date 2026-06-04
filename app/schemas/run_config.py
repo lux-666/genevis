@@ -39,6 +39,8 @@ LocalExecStage = Literal[
     "assembly_review",
     "hic_scaffolding",
     "repeat_annotation",
+    "gene_annotation",
+    "function_annotation",
 ]
 
 FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]

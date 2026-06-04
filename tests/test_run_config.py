@@ -142,9 +142,14 @@ class RunConfigSchemaTests(unittest.TestCase):
 
     def test_unknown_stage_in_local_exec_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
-            RunConfig.model_validate({"local_exec": ["assembly", "gene_annotation"]})
+            RunConfig.model_validate({"local_exec": ["assembly", "not_a_real_stage"]})
 
-        self.assertIn("gene_annotation", str(ctx.exception))
+        self.assertIn("not_a_real_stage", str(ctx.exception))
+
+    def test_gene_annotation_and_function_annotation_accepted_in_local_exec(self):
+        config = RunConfig.model_validate({"local_exec": ["gene_annotation", "function_annotation"]})
+        self.assertIn("gene_annotation", config.local_exec)
+        self.assertIn("function_annotation", config.local_exec)
 
     def test_unknown_top_level_field_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
