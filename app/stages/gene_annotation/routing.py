@@ -128,16 +128,30 @@ def route_after_run_methods(state: TopLevelState) -> str:
 
 
 # --- per-method freeze / run / collect routing ----------------------------------
-# Each freeze and run has a per-method router (trivial fail-check).
+# Each freeze and run has a per-method router (trivial fail-check), built by a
+# factory so adding a method needs no new wrapper. The returned callables carry a
+# descriptive ``__name__`` so LangGraph traces read clearly.
 # All collect nodes share a single router that can loop back to the next
 # pending method's freeze when multiple executable methods are confirmed.
 
-def _route_after_freeze(state: TopLevelState, suffix: str) -> str:
-    return "fail" if _output(state).get("status") == "failed" else f"{suffix}_run"
+def route_after_freeze_for(suffix: str):
+    """Return a named router: fail on failure, else advance to ``{suffix}_run``."""
+    def router(state: TopLevelState) -> str:
+        return "fail" if _output(state).get("status") == "failed" else f"{suffix}_run"
+
+    router.__name__ = f"route_after_{suffix}_freeze"
+    router.__qualname__ = router.__name__
+    return router
 
 
-def _route_after_run(state: TopLevelState, suffix: str) -> str:
-    return "fail" if _output(state).get("status") == "failed" else f"{suffix}_collect"
+def route_after_run_for(suffix: str):
+    """Return a named router: fail on failure, else advance to ``{suffix}_collect``."""
+    def router(state: TopLevelState) -> str:
+        return "fail" if _output(state).get("status") == "failed" else f"{suffix}_collect"
+
+    router.__name__ = f"route_after_{suffix}_run"
+    router.__qualname__ = router.__name__
+    return router
 
 
 def route_after_method_collect(state: TopLevelState) -> str:

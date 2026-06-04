@@ -2,23 +2,35 @@
 
 任务状态：切片 1 全 stage 完成 + 切片 2 gene_annotation 完成。纯内部重构，行为保持不变，613 passed（仅既有 Flye 环境失败的 7 个 AssemblyRerunTests 除外，与本重构无关）。
 
+> **范围说明：** 本任务只解决「stage method freeze/run 样板重复」。它**不是**整体抽象债/placeholder 清理——后者由前置提交 `fbf184a`（删除 forge/*、reports placeholder、stages/*/state.py、schemas/events.py 等空模块）单独完成。`schemas/commands.py`（ControlCommand）是有意保留的 B 类（规划中的 CLI/API），不在本任务范围。
+
 ## 实现要点（落地记录）
 
-- **落点已定：`app/execution/method_runner.py`**（不重建 forge）。提供
-  `build_frozen_attempt(...)`（组装 kwargs + `attach_conda_fields` + `FrozenAttemptSpec`）
-  与 `run_frozen_attempt(state, attempt, *, fail_label, cleanup_outputs=True) -> RunOutcome`
-  （ledger create/start + `LocalRunner` + 失败时按需 unlink + record_attempt_failed）。
+- **落点：`app/execution/method_runner.py`**（不重建 forge）。提供
+  `build_frozen_attempt(..., env_spec: EnvSpec | None)`（组装 kwargs +
+  `attach_conda_fields` + `FrozenAttemptSpec`，`env_spec` 已类型化）与
+  `run_frozen_attempt(attempt, *, data_dir, input_manifest_ref="", fail_label,
+  cleanup_outputs=True, runner=None, ledger=None) -> RunOutcome`。该签名**不依赖
+  graph 的 TopLevelState**——只收 `data_dir`/`input_manifest_ref` 等普通值，
+  `runner`/`ledger` 可注入（默认 `LocalRunner` / 新建 `Ledger`），便于测试与替换。
+- **结果数据模型**：`app/execution/base.py` 改名为 `app/execution/results.py`
+  （ABC 砍掉后只剩 `ExecutionResult`/`CollectResult`，docstring 同步）。
 - **切片 1 已覆盖所有 method-bearing stage**：read_qc（seqkit/length_filter）、
   assembly（flye）、genome_survey（jellyfish/genomescope2）、function_annotation
   （diamond）、hic_scaffolding（yahs）、repeat_annotation（repeatmasker）、
-  assembly_review（quast/busco 复数 + flye rerun 的 spec 组装）、gene_annotation
+  assembly_review（quast/busco 复数 + flye rerun）、gene_annotation
   （miniprot/augustus/evm/busco）。collect 路径保持 stage 专属。
 - **`cleanup_outputs=False` 的特例**：repeat_annotation（失败注册 log artifacts）、
   hic_scaffolding（失败仍进 yahs_ran，由 collect 决定 fallback）、assembly_review
   quast/busco（失败写入 result_payload["error"] 继续）、gene_annotation busco
   （失败映射为 merge_accepted）。这些 caller 保留各自失败后处理，仅复用 run 核心。
-- **切片 2 仅 gene_annotation**：miniprot/augustus 的 4 个薄转发器删除，builder 改用
-  `functools.partial(_route_after_freeze, suffix=...)`。其余 stage 当前均为单方法
+- **assembly_review flye rerun**：也走 `run_frozen_attempt`（传入 caller 自己的
+  `ledger`、`cleanup_outputs=False`），失败后补 `rerun_failed` 事件并 raise
+  `ResumeValidationError`；代码注释明确标注这是 resume-path 特例。
+- **切片 2 仅 gene_annotation**：miniprot/augustus 的 4 个薄转发器删除，routing 暴露
+  公开工厂 `route_after_freeze_for(suffix)` / `route_after_run_for(suffix)`，返回带
+  描述性 `__name__`（如 `route_after_miniprot_freeze`）的具名 callable，使 LangGraph
+  trace 仍可读（优于裸 `functools.partial`）。其余 stage 当前均为单方法
   （每个 freeze/run/collect 只有一个 router），table 化无去重收益，按"避免过早抽象"
   推迟到该 stage 真正新增第二个方法时再做。
 

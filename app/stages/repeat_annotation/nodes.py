@@ -318,7 +318,7 @@ def run_repeatmasker_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
-    outcome = run_frozen_attempt(state, attempt, fail_label="RepeatMasker", cleanup_outputs=False)
+    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="RepeatMasker", cleanup_outputs=False)
     result_payload = outcome.result.model_dump(mode="json")
     if not outcome.success:
         _register_repeatmasker_log_artifacts(state, attempt, result_payload)

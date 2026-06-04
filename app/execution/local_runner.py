@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from app.execution.base import CollectResult, ExecutionResult
+from app.execution.results import CollectResult, ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 

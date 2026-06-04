@@ -1,4 +1,8 @@
-"""Runner contracts."""
+"""Execution result data models.
+
+Direct outcomes of running and collecting a frozen attempt, shared by the
+local runner and the method-runner helpers.
+"""
 
 from __future__ import annotations
 

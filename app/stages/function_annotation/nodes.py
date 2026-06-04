@@ -247,7 +247,7 @@ def _freeze_func_method_attempt(
 def _run_func_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> dict:
     function_out = _function_output(state)
     attempt = FrozenAttemptSpec.model_validate(function_out[f"{cfg['suffix']}_frozen_attempt"])
-    outcome = run_frozen_attempt(state, attempt, fail_label=cfg["suffix"])
+    outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label=cfg["suffix"])
     if not outcome.success:
         return _update_function_output(
             state,

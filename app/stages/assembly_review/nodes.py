@@ -20,7 +20,6 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.local_runner import LocalRunner
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
@@ -307,7 +306,7 @@ def run_quast_attempts(state: TopLevelState) -> dict:
     results = []
     for payload in ar_out.get("quast_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        outcome = run_frozen_attempt(state, attempt, fail_label="QUAST", cleanup_outputs=False)
+        outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="QUAST", cleanup_outputs=False)
         result_payload = outcome.result.model_dump(mode="json")
         if not outcome.success:
             result_payload["error"] = outcome.error
@@ -423,7 +422,7 @@ def run_busco_attempts(state: TopLevelState) -> dict:
     results = []
     for payload in ar_out.get("busco_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        outcome = run_frozen_attempt(state, attempt, fail_label="BUSCO", cleanup_outputs=False)
+        outcome = run_frozen_attempt(attempt, data_dir=state.get("data_dir", "data"), input_manifest_ref=state.get("input_manifest_ref", ""), fail_label="BUSCO", cleanup_outputs=False)
         result_payload = outcome.result.model_dump(mode="json")
         if not outcome.success:
             result_payload["error"] = outcome.error
@@ -1276,18 +1275,26 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         },
     )
 
-    ledger.create_session(session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(session_id, attempt)
-    result = LocalRunner().run(attempt)
+    # Rerun is a resume-path special case: it reuses the shared run core (so
+    # attempt_started/attempt_failed bookkeeping matches normal runs) but adds a
+    # rerun_failed event and raises ResumeValidationError instead of writing a
+    # failed stage status. cleanup_outputs=False preserves partial outputs for
+    # post-mortem, matching the pre-helper behavior.
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label="flye rerun",
+        cleanup_outputs=False,
+        ledger=ledger,
+    )
+    result = outcome.result
 
-    if not result.success:
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error_msg = stderr.strip() or f"flye rerun failed with return code {result.return_code}"
-        ledger.record_attempt_failed(session_id, attempt, return_code=result.return_code, error=error_msg)
+    if not outcome.success:
         ledger.record_event(session_id, "rerun_failed", {
-            "candidate_id": candidate_id, "error": error_msg, "rerun_index": rerun_index,
+            "candidate_id": candidate_id, "error": outcome.error, "rerun_index": rerun_index,
         })
-        raise ResumeValidationError(f"rerun Flye execution failed: {error_msg}")
+        raise ResumeValidationError(f"rerun Flye execution failed: {outcome.error}")
 
     if not draft_assembly.exists():
         error_msg = f"rerun Flye draft assembly missing: {draft_assembly}"

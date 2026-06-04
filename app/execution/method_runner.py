@@ -5,20 +5,32 @@ helpers so that adding a method is "build a script + spec" and "map an outcome
 to stage status", not a re-copy of the env/spec/ledger/runner boilerplate.
 Collect paths stay stage-specific (artifact types and status advancement
 differ per stage).
+
+These helpers take plain ``data_dir`` / ``input_manifest_ref`` values rather
+than the graph ``TopLevelState`` so the execution layer does not depend on the
+graph schema.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from app.control.ledger import Ledger
-from app.execution.base import ExecutionResult
+from app.execution.results import CollectResult, ExecutionResult
 from app.execution.env_dispatch import attach_conda_fields
+from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.state import TopLevelState
+
+
+class Runner(Protocol):
+    """Minimal duck-typed runner contract used by ``run_frozen_attempt``."""
+
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult: ...
+
+    def collect(self, result: ExecutionResult, spec: FrozenAttemptSpec) -> CollectResult: ...
 
 
 def build_frozen_attempt(
@@ -31,7 +43,7 @@ def build_frozen_attempt(
     working_dir: Path,
     expected_outputs: list[Path],
     env: dict[str, Any] | None,
-    env_spec: Any,
+    env_spec: EnvSpec | None,
     metadata: dict[str, Any] | None = None,
     interpreter: str = "/bin/bash",
 ) -> FrozenAttemptSpec:
@@ -62,24 +74,29 @@ class RunOutcome:
 
 
 def run_frozen_attempt(
-    state: TopLevelState,
     attempt: FrozenAttemptSpec,
     *,
+    data_dir: Path | str,
+    input_manifest_ref: str = "",
     fail_label: str,
     cleanup_outputs: bool = True,
+    runner: Runner | None = None,
+    ledger: Ledger | None = None,
 ) -> RunOutcome:
-    """Run a frozen attempt via LocalRunner with shared ledger bookkeeping.
+    """Run a frozen attempt with shared ledger bookkeeping.
 
     On failure, optionally removes partial expected outputs (``cleanup_outputs``)
     and records an ``attempt_failed`` ledger event. The caller maps the returned
     outcome onto its own stage status and any stage-specific post-processing
-    (e.g. log-artifact registration).
+    (e.g. log-artifact registration or rerun events). Pass ``ledger`` to reuse a
+    caller-owned ledger, or ``runner`` to substitute the executor (defaults to
+    ``LocalRunner``).
     """
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
+    ledger = ledger or Ledger(data_dir)
+    ledger.create_session(attempt.session_id, input_manifest_ref)
     ledger.record_attempt_started(attempt.session_id, attempt)
 
-    result = LocalRunner().run(attempt)
+    result = (runner or LocalRunner()).run(attempt)
     if not result.success:
         if cleanup_outputs:
             for path in attempt.expected_outputs:
