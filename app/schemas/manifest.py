@@ -30,6 +30,7 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "hic_alignment_bam",
     "assembly_fasta_registered",
     "repeat_library",
+    "reference_proteins",
     "gene_models",
     "predicted_proteins",
     "transcripts_fasta",

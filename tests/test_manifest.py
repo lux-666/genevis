@@ -61,6 +61,7 @@ class ManifestSchemaTests(unittest.TestCase):
             "hic_alignment_bam",
             "assembly_fasta_registered",
             "repeat_library",
+            "reference_proteins",
             "gene_models",
             "predicted_proteins",
             "transcripts_fasta",
