@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
@@ -32,8 +34,8 @@ from app.stages.gene_annotation.nodes import (
     select_evidence_profile,
 )
 from app.stages.gene_annotation.routing import (
-    route_after_augustus_freeze,
-    route_after_augustus_run,
+    _route_after_freeze,
+    _route_after_run,
     route_after_busco_collect,
     route_after_busco_freeze,
     route_after_busco_run,
@@ -49,8 +51,6 @@ from app.stages.gene_annotation.routing import (
     route_after_method_collect,
     route_after_method_plan,
     route_after_method_planning_gate,
-    route_after_miniprot_freeze,
-    route_after_miniprot_run,
     route_after_resolve,
     route_after_run_methods,
 )
@@ -155,12 +155,12 @@ def build_stage():
     # --- miniprot edges ---
     graph.add_conditional_edges(
         "freeze_miniprot_attempt",
-        route_after_miniprot_freeze,
+        partial(_route_after_freeze, suffix="miniprot"),
         {"miniprot_run": "run_miniprot_attempt", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "run_miniprot_attempt",
-        route_after_miniprot_run,
+        partial(_route_after_run, suffix="miniprot"),
         {"miniprot_collect": "collect_miniprot_artifacts", "fail": "fail"},
     )
     graph.add_conditional_edges(
@@ -171,12 +171,12 @@ def build_stage():
     # --- augustus edges ---
     graph.add_conditional_edges(
         "freeze_augustus_attempt",
-        route_after_augustus_freeze,
+        partial(_route_after_freeze, suffix="augustus"),
         {"augustus_run": "run_augustus_attempt", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "run_augustus_attempt",
-        route_after_augustus_run,
+        partial(_route_after_run, suffix="augustus"),
         {"augustus_collect": "collect_augustus_artifacts", "fail": "fail"},
     )
     graph.add_conditional_edges(

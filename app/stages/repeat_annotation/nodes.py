@@ -12,8 +12,8 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.policy import evaluate
@@ -284,26 +284,24 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:repeat_annotation:repeatmasker",
-        "session_id": session_id,
-        "stage": "repeat_annotation",
-        "method_name": REPEAT_MASKING_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [softmasked_genome, repeat_gff3],
-        "env": {str(k): str(v) for k, v in (repeat_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:repeat_annotation:repeatmasker",
+        session_id=session_id,
+        stage="repeat_annotation",
+        method_name=REPEAT_MASKING_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[softmasked_genome, repeat_gff3],
+        env=repeat_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "final_assembly_for_annotation": str(assembly_ref),
             "repeat_library_ref": str(library_ref),
             "softmasked_genome": str(softmasked_genome),
             "repeat_annotation_gff3": str(repeat_gff3),
             "hardmasked_genome": str(hardmasked_genome),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_repeat_output(
         state,
         {
@@ -320,27 +318,16 @@ def run_repeatmasker_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-    result = LocalRunner().run(attempt)
-    result_payload = result.model_dump(mode="json")
-    if not result.success:
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"RepeatMasker failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=result.return_code,
-            error=error,
-        )
+    outcome = run_frozen_attempt(state, attempt, fail_label="RepeatMasker", cleanup_outputs=False)
+    result_payload = outcome.result.model_dump(mode="json")
+    if not outcome.success:
         _register_repeatmasker_log_artifacts(state, attempt, result_payload)
-        result_payload["error"] = error
+        result_payload["error"] = outcome.error
         return _update_repeat_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
+                "reason": outcome.error,
                 "repeatmasker_execution_result": result_payload,
             },
         )

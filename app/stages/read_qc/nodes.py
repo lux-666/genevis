@@ -10,8 +10,8 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS,
@@ -230,27 +230,24 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": attempt_id,
-        "session_id": session_id,
-        "stage": "read_qc",
-        "method_name": METHOD_NAME,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [stats_path],
-        "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=attempt_id,
+        session_id=session_id,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[stats_path],
+        env=read_qc_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
             "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
             "raw_long_reads_path": str(input_paths[0]),
             "raw_long_reads_paths": [str(path) for path in input_paths],
             "stats_path": str(stats_path),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_read_qc_output(
         state,
         {
@@ -268,29 +265,14 @@ def run_seqkit_stats(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(read_qc_out["frozen_attempt"])
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"seqkit stats failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=result.return_code,
-            error=error,
-        )
+    outcome = run_frozen_attempt(state, attempt, fail_label="seqkit stats")
+    if not outcome.success:
         return _update_read_qc_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
-                "execution_result": result.model_dump(mode="json"),
+                "reason": outcome.error,
+                "execution_result": outcome.result.model_dump(mode="json"),
             },
         )
 
@@ -298,7 +280,7 @@ def run_seqkit_stats(state: TopLevelState) -> dict:
         state,
         {
             "status": "ran",
-            "execution_result": result.model_dump(mode="json"),
+            "execution_result": outcome.result.model_dump(mode="json"),
         },
     )
 
@@ -529,17 +511,17 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:read_qc:length_filter",
-        "session_id": session_id,
-        "stage": "read_qc",
-        "method_name": LENGTH_FILTER_METHOD_NAME,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": filtered_paths,
-        "env": {str(k): str(v) for k, v in (read_qc_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:read_qc:length_filter",
+        session_id=session_id,
+        stage="read_qc",
+        method_name=LENGTH_FILTER_METHOD_NAME,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=filtered_paths,
+        env=read_qc_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "input_asset_ref": read_qc_out.get("input_asset_ref"),
             "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
             "raw_long_reads_path": str(input_paths[0]),
@@ -548,23 +530,13 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
             "filtered_long_reads_paths": [str(path) for path in filtered_paths],
             "thresholds": {"min_len": min_len},
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
+    )
 
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
-
+    outcome = run_frozen_attempt(state, attempt, fail_label="seqkit seq")
+    if not outcome.success:
+        return _update_read_qc_output(state, {"status": "failed", "reason": outcome.error})
+    result = outcome.result
     ledger = Ledger(data_dir)
-    ledger.create_session(session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(session_id, attempt)
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"seqkit seq failed with return code {result.return_code}"
-        ledger.record_attempt_failed(session_id, attempt, return_code=result.return_code, error=error)
-        return _update_read_qc_output(state, {"status": "failed", "reason": error})
     missing_outputs = [str(path) for path in attempt.expected_outputs if not path.exists()]
     if missing_outputs:
         stdout = result.stdout_path.read_text(encoding="utf-8") if result.stdout_path.exists() else ""

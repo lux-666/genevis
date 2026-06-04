@@ -10,8 +10,8 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
@@ -228,26 +228,23 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:genome_survey:jellyfish",
-        "session_id": session_id,
-        "stage": "genome_survey",
-        "method_name": JELLYFISH_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [kmer_db, kmer_hist],
-        "env": {str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:genome_survey:jellyfish",
+        session_id=session_id,
+        stage="genome_survey",
+        method_name=JELLYFISH_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[kmer_db, kmer_hist],
+        env=survey_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "input_asset_refs": survey_out.get("clean_short_dna_read_refs", []),
             "kmer_size": params["kmer_size"],
             "kmer_db_path": str(kmer_db),
             "kmer_hist_path": str(kmer_hist),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_genome_survey_output(
         state,
         {
@@ -346,24 +343,21 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:genome_survey:genomescope2",
-        "session_id": session_id,
-        "stage": "genome_survey",
-        "method_name": GENOMESCOPE2_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [summary_path],
-        "env": {str(k): str(v) for k, v in (survey_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:genome_survey:genomescope2",
+        session_id=session_id,
+        stage="genome_survey",
+        method_name=GENOMESCOPE2_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[summary_path],
+        env=survey_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "kmer_hist_path": survey_out.get("kmer_hist_path"),
             "summary_path": str(summary_path),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_genome_survey_output(
         state,
         {
@@ -648,32 +642,20 @@ def _run_attempt(
 ) -> dict:
     survey_out = _genome_survey_output(state)
     attempt = FrozenAttemptSpec.model_validate(survey_out[attempt_key])
-    data_dir = Path(state.get("data_dir", "data"))
-    ledger = Ledger(data_dir)
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists():
-                if path.is_file():
-                    path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"{attempt.method_name} failed with return code {result.return_code}"
-        ledger.record_attempt_failed(attempt.session_id, attempt, return_code=result.return_code, error=error)
+    outcome = run_frozen_attempt(state, attempt, fail_label=attempt.method_name)
+    if not outcome.success:
         return _update_genome_survey_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
-                result_key: result.model_dump(mode="json"),
+                "reason": outcome.error,
+                result_key: outcome.result.model_dump(mode="json"),
             },
         )
 
     return _update_genome_survey_output(
         state,
-        {"status": next_status, result_key: result.model_dump(mode="json")},
+        {"status": next_status, result_key: outcome.result.model_dump(mode="json")},
     )
 
 

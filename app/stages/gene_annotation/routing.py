@@ -150,22 +150,6 @@ def route_after_method_collect(state: TopLevelState) -> str:
     return "block_candidates"
 
 
-def route_after_miniprot_freeze(state: TopLevelState) -> str:
-    return _route_after_freeze(state, "miniprot")
-
-
-def route_after_miniprot_run(state: TopLevelState) -> str:
-    return _route_after_run(state, "miniprot")
-
-
-def route_after_augustus_freeze(state: TopLevelState) -> str:
-    return _route_after_freeze(state, "augustus")
-
-
-def route_after_augustus_run(state: TopLevelState) -> str:
-    return _route_after_run(state, "augustus")
-
-
 # --- EVM / BUSCO routing (Phase 7 task 05) ------------------------------------
 
 def route_after_evm_freeze(state: TopLevelState) -> str:

@@ -19,8 +19,9 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records, read_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.local_runner import LocalRunner
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
@@ -267,26 +268,24 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
             encoding="utf-8",
         )
         script_path.chmod(0o755)
-        attempt_kwargs: dict[str, Any] = {
-            "attempt_id": f"{session_id}:assembly_review:quast:{safe_id}",
-            "session_id": session_id,
-            "stage": "assembly_review",
-            "method_name": QUAST_METHOD,
-            "script_path": script_path,
-            "working_dir": working_dir,
-            "interpreter": "/bin/bash",
-            "expected_outputs": [report_tsv],
-            "env": {str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
-            "metadata": {
+        attempt = build_frozen_attempt(
+            attempt_id=f"{session_id}:assembly_review:quast:{safe_id}",
+            session_id=session_id,
+            stage="assembly_review",
+            method_name=QUAST_METHOD,
+            script_path=script_path,
+            working_dir=working_dir,
+            expected_outputs=[report_tsv],
+            env=ar_out.get("env"),
+            env_spec=env_spec,
+            metadata={
                 "candidate_id": candidate_id,
                 "draft_assembly_ref": str(assembly_ref),
                 "quast_output_dir": str(out_dir),
                 "report_tsv": str(report_tsv),
                 "threads": threads,
             },
-        }
-        attach_conda_fields(env_spec, attempt_kwargs)
-        attempt = FrozenAttemptSpec(**attempt_kwargs)
+        )
         attempts.append(attempt.model_dump(mode="json"))
 
     return _update_assembly_review_output(
@@ -305,24 +304,13 @@ def run_quast_attempts(state: TopLevelState) -> dict:
     if ar_out.get("status") != "quast_frozen":
         return {}
 
-    ledger = Ledger(state.get("data_dir", "data"))
     results = []
     for payload in ar_out.get("quast_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-        ledger.record_attempt_started(attempt.session_id, attempt)
-        result = LocalRunner().run(attempt)
-        result_payload = result.model_dump(mode="json")
-        if not result.success:
-            stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-            error = stderr.strip() or f"QUAST failed with return code {result.return_code}"
-            ledger.record_attempt_failed(
-                attempt.session_id,
-                attempt,
-                return_code=result.return_code,
-                error=error,
-            )
-            result_payload["error"] = error
+        outcome = run_frozen_attempt(state, attempt, fail_label="QUAST", cleanup_outputs=False)
+        result_payload = outcome.result.model_dump(mode="json")
+        if not outcome.success:
+            result_payload["error"] = outcome.error
         results.append(result_payload)
 
     return _update_assembly_review_output(state, {"status": "quast_ran", "quast_execution_results": results})
@@ -395,17 +383,17 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
             encoding="utf-8",
         )
         script_path.chmod(0o755)
-        attempt_kwargs: dict[str, Any] = {
-            "attempt_id": f"{session_id}:assembly_review:busco:{safe_id}",
-            "session_id": session_id,
-            "stage": "assembly_review",
-            "method_name": BUSCO_METHOD,
-            "script_path": script_path,
-            "working_dir": working_dir,
-            "interpreter": "/bin/bash",
-            "expected_outputs": [short_summary],
-            "env": {str(k): str(v) for k, v in (ar_out.get("env") or {}).items()},
-            "metadata": {
+        attempt = build_frozen_attempt(
+            attempt_id=f"{session_id}:assembly_review:busco:{safe_id}",
+            session_id=session_id,
+            stage="assembly_review",
+            method_name=BUSCO_METHOD,
+            script_path=script_path,
+            working_dir=working_dir,
+            expected_outputs=[short_summary],
+            env=ar_out.get("env"),
+            env_spec=env_spec,
+            metadata={
                 "candidate_id": candidate_id,
                 "draft_assembly_ref": str(assembly_ref),
                 "busco_output_dir": str(artifact_dir / out_name),
@@ -417,9 +405,8 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
                 "mode": busco_params["mode"],
                 "threads": busco_params["threads"],
             },
-        }
-        attach_conda_fields(env_spec, attempt_kwargs)
-        attempts.append(FrozenAttemptSpec(**attempt_kwargs).model_dump(mode="json"))
+        )
+        attempts.append(attempt.model_dump(mode="json"))
 
     return _update_assembly_review_output(
         state,
@@ -433,24 +420,13 @@ def run_busco_attempts(state: TopLevelState) -> dict:
     if ar_out.get("status") != "busco_frozen":
         return {}
 
-    ledger = Ledger(state.get("data_dir", "data"))
     results = []
     for payload in ar_out.get("busco_frozen_attempts", []):
         attempt = FrozenAttemptSpec.model_validate(payload)
-        ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-        ledger.record_attempt_started(attempt.session_id, attempt)
-        result = LocalRunner().run(attempt)
-        result_payload = result.model_dump(mode="json")
-        if not result.success:
-            stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-            error = stderr.strip() or f"BUSCO failed with return code {result.return_code}"
-            ledger.record_attempt_failed(
-                attempt.session_id,
-                attempt,
-                return_code=result.return_code,
-                error=error,
-            )
-            result_payload["error"] = error
+        outcome = run_frozen_attempt(state, attempt, fail_label="BUSCO", cleanup_outputs=False)
+        result_payload = outcome.result.model_dump(mode="json")
+        if not outcome.success:
+            result_payload["error"] = outcome.error
         results.append(result_payload)
 
     return _update_assembly_review_output(state, {"status": "busco_ran", "busco_execution_results": results})
@@ -1276,17 +1252,17 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:assembly:flye:rerun_{rerun_index}",
-        "session_id": session_id,
-        "stage": "assembly",
-        "method_name": FLYE_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [draft_assembly],
-        "env": {str(k): str(v) for k, v in (assembly_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:assembly:flye:rerun_{rerun_index}",
+        session_id=session_id,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[draft_assembly],
+        env=assembly_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "input_ref": input_ref,
             "input_type": input_type,
             "read_paths": [str(p) for p in read_paths],
@@ -1298,9 +1274,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "rerun_index": rerun_index,
             "source_candidate_id": request.candidate_id,
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
 
     ledger.create_session(session_id, state.get("input_manifest_ref", ""))
     ledger.record_attempt_started(session_id, attempt)

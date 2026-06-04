@@ -12,8 +12,8 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.policy import evaluate
@@ -219,26 +219,24 @@ def freeze_yahs_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:hic_scaffolding:yahs",
-        "session_id": session_id,
-        "stage": "hic_scaffolding",
-        "method_name": HIC_YAHS_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [scaffold_fasta],
-        "env": {str(k): str(v) for k, v in (hic_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:hic_scaffolding:yahs",
+        session_id=session_id,
+        stage="hic_scaffolding",
+        method_name=HIC_YAHS_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[scaffold_fasta],
+        env=hic_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "pre_hic_assembly_ref": str(assembly_ref),
             "hic_alignment_ref": str(alignment_path),
             "scaffold_fasta": str(scaffold_fasta),
             "scaffold_agp": str(scaffold_agp),
             "out_prefix": str(out_prefix),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_hic_output(
         state,
         {
@@ -255,21 +253,10 @@ def run_yahs_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(hic_out["yahs_frozen_attempt"])
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-    result = LocalRunner().run(attempt)
-    result_payload = result.model_dump(mode="json")
-    if not result.success:
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"YaHS failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=result.return_code,
-            error=error,
-        )
-        result_payload["error"] = error
+    outcome = run_frozen_attempt(state, attempt, fail_label="YaHS", cleanup_outputs=False)
+    result_payload = outcome.result.model_dump(mode="json")
+    if not outcome.success:
+        result_payload["error"] = outcome.error
     return _update_hic_output(state, {"status": "yahs_ran", "yahs_execution_result": result_payload})
 
 

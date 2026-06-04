@@ -11,8 +11,8 @@ from pydantic import ValidationError
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.reports.review_report import write_final_review_report
 from app.schemas.artifacts import (
@@ -218,24 +218,22 @@ def _freeze_func_method_attempt(
     script_path.write_text(script_body, encoding="utf-8")
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:function_annotation:{cfg['suffix']}",
-        "session_id": session_id,
-        "stage": "function_annotation",
-        "method_name": method_name,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [output_tsv],
-        "env": {str(k): str(v) for k, v in (function_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:function_annotation:{cfg['suffix']}",
+        session_id=session_id,
+        stage="function_annotation",
+        method_name=method_name,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[output_tsv],
+        env=function_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "proteins_fasta_ref": str(function_out["proteins_fasta_ref"]),
             "output_tsv": str(output_tsv),
             **(extra_metadata or {}),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
 
     return _update_function_output(
         state,
@@ -249,34 +247,21 @@ def _freeze_func_method_attempt(
 def _run_func_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> dict:
     function_out = _function_output(state)
     attempt = FrozenAttemptSpec.model_validate(function_out[f"{cfg['suffix']}_frozen_attempt"])
-    data_dir = Path(state.get("data_dir", "data"))
-    ledger = Ledger(data_dir)
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists() and path.is_file():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"{cfg['suffix']} failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id, attempt, return_code=result.return_code, error=error,
-        )
+    outcome = run_frozen_attempt(state, attempt, fail_label=cfg["suffix"])
+    if not outcome.success:
         return _update_function_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
-                f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
+                "reason": outcome.error,
+                f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
             },
         )
     return _update_function_output(
         state,
         {
             "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
+            f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
         },
     )
 

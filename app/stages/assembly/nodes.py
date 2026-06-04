@@ -9,8 +9,8 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
@@ -344,17 +344,17 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:assembly:flye",
-        "session_id": session_id,
-        "stage": "assembly",
-        "method_name": FLYE_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [draft_assembly],
-        "env": {str(k): str(v) for k, v in (assembly_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:assembly:flye",
+        session_id=session_id,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[draft_assembly],
+        env=assembly_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "input_ref": assembly_out.get("input_ref"),
             "input_type": assembly_out.get("input_type"),
             "read_paths": [str(path) for path in read_paths],
@@ -364,9 +364,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "flye_output_dir": str(flye_out_dir),
             "draft_assembly_path": str(draft_assembly),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
     return _update_assembly_output(
         state,
         {
@@ -385,29 +383,14 @@ def run_flye_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(assembly_out["flye_frozen_attempt"])
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists() and path.is_file():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"flye failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=result.return_code,
-            error=error,
-        )
+    outcome = run_frozen_attempt(state, attempt, fail_label="flye")
+    if not outcome.success:
         return _update_assembly_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
-                "flye_execution_result": result.model_dump(mode="json"),
+                "reason": outcome.error,
+                "flye_execution_result": outcome.result.model_dump(mode="json"),
             },
         )
 
@@ -415,7 +398,7 @@ def run_flye_attempt(state: TopLevelState) -> dict:
         state,
         {
             "status": "flye_ran",
-            "flye_execution_result": result.model_dump(mode="json"),
+            "flye_execution_result": outcome.result.model_dump(mode="json"),
         },
     )
 

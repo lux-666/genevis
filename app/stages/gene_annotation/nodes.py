@@ -11,8 +11,8 @@ from typing import Any, Callable
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import attach_conda_fields, resolve_method_env
-from app.execution.local_runner import LocalRunner
+from app.execution.env_dispatch import resolve_method_env
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.annotation_intake import (
     DOWNSTREAM_STAGES,
@@ -1053,24 +1053,22 @@ def _freeze_gene_method_attempt(
     script_path.write_text(script_body, encoding="utf-8")
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:gene_annotation:{cfg['suffix']}",
-        "session_id": session_id,
-        "stage": "gene_annotation",
-        "method_name": method_name,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [output_gff3],
-        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:gene_annotation:{cfg['suffix']}",
+        session_id=session_id,
+        stage="gene_annotation",
+        method_name=method_name,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[output_gff3],
+        env=gene_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "genome_input_ref": str(genome_ref),
             "output_gff3": str(output_gff3),
             **(extra_metadata or {}),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
 
     return _update_gene_output(
         state,
@@ -1085,34 +1083,21 @@ def _run_gene_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> di
     """Shared run path: deserialize FrozenAttemptSpec and execute via LocalRunner."""
     gene_out = _gene_output(state)
     attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
-    data_dir = Path(state.get("data_dir", "data"))
-    ledger = Ledger(data_dir)
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists() and path.is_file():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"{cfg['suffix']} failed with return code {result.return_code}"
-        ledger.record_attempt_failed(
-            attempt.session_id, attempt, return_code=result.return_code, error=error,
-        )
+    outcome = run_frozen_attempt(state, attempt, fail_label=cfg["suffix"])
+    if not outcome.success:
         return _update_gene_output(
             state,
             {
                 "status": "failed",
-                "reason": error,
-                f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
+                "reason": outcome.error,
+                f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
             },
         )
     return _update_gene_output(
         state,
         {
             "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_result": result.model_dump(mode="json"),
+            f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
         },
     )
 
@@ -1347,25 +1332,23 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:gene_annotation:evm",
-        "session_id": session_id,
-        "stage": "gene_annotation",
-        "method_name": EVM_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [output_gff3],
-        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:gene_annotation:evm",
+        session_id=session_id,
+        stage="gene_annotation",
+        method_name=EVM_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[output_gff3],
+        env=gene_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "genome_input_ref": str(genome_ref),
             "candidate_refs": candidate_refs,
             "merge_weights": merge_weights,
             "output_gff3": str(output_gff3),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
 
     return _update_gene_output(
         state,
@@ -1383,22 +1366,11 @@ def run_evm_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
-    data_dir = Path(state.get("data_dir", "data"))
-    ledger = Ledger(data_dir)
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
+    outcome = run_frozen_attempt(state, attempt, fail_label="evm")
+    if not outcome.success:
+        return _update_gene_output(state, {"status": "failed", "reason": outcome.error, "evm_execution_result": outcome.result.model_dump(mode="json")})
 
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        for path in attempt.expected_outputs:
-            if path.exists() and path.is_file():
-                path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"evm failed with return code {result.return_code}"
-        ledger.record_attempt_failed(attempt.session_id, attempt, return_code=result.return_code, error=error)
-        return _update_gene_output(state, {"status": "failed", "reason": error, "evm_execution_result": result.model_dump(mode="json")})
-
-    return _update_gene_output(state, {"status": "evm_ran", "evm_execution_result": result.model_dump(mode="json")})
+    return _update_gene_output(state, {"status": "evm_ran", "evm_execution_result": outcome.result.model_dump(mode="json")})
 
 
 def collect_evm_artifacts(state: TopLevelState) -> dict:
@@ -1522,26 +1494,24 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    attempt_kwargs: dict[str, Any] = {
-        "attempt_id": f"{session_id}:gene_annotation:busco",
-        "session_id": session_id,
-        "stage": "gene_annotation",
-        "method_name": GENE_BUSCO_METHOD,
-        "script_path": script_path,
-        "working_dir": working_dir,
-        "interpreter": "/bin/bash",
-        "expected_outputs": [artifact_dir / out_name / "short_summary.txt"],
-        "env": {str(k): str(v) for k, v in (gene_out.get("env") or {}).items()},
-        "metadata": {
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:gene_annotation:busco",
+        session_id=session_id,
+        stage="gene_annotation",
+        method_name=GENE_BUSCO_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[artifact_dir / out_name / "short_summary.txt"],
+        env=gene_out.get("env"),
+        env_spec=env_spec,
+        metadata={
             "busco_input": busco_input,
             "busco_mode": busco_mode,
             "busco_lineage": str(busco_lineage),
             "busco_output_dir": str(artifact_dir / out_name),
             "short_summary_ref": str(artifact_dir / out_name / "short_summary.txt"),
         },
-    }
-    attach_conda_fields(env_spec, attempt_kwargs)
-    attempt = FrozenAttemptSpec(**attempt_kwargs)
+    )
 
     return _update_gene_output(
         state,
@@ -1559,27 +1529,19 @@ def run_gene_busco_attempt(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
-    data_dir = Path(state.get("data_dir", "data"))
-    ledger = Ledger(data_dir)
-    ledger.create_session(attempt.session_id, state.get("input_manifest_ref", ""))
-    ledger.record_attempt_started(attempt.session_id, attempt)
-
-    result = LocalRunner().run(attempt)
-    if not result.success:
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"busco failed with return code {result.return_code}"
-        ledger.record_attempt_failed(attempt.session_id, attempt, return_code=result.return_code, error=error)
+    outcome = run_frozen_attempt(state, attempt, fail_label="busco", cleanup_outputs=False)
+    if not outcome.success:
         return _update_gene_output(
             state,
             {
                 "status": "merge_accepted",
                 "busco_completeness_status": "missing",
-                "busco_note": f"busco failed: {error}",
-                "busco_execution_result": result.model_dump(mode="json"),
+                "busco_note": f"busco failed: {outcome.error}",
+                "busco_execution_result": outcome.result.model_dump(mode="json"),
             },
         )
 
-    return _update_gene_output(state, {"status": "busco_ran", "busco_execution_result": result.model_dump(mode="json")})
+    return _update_gene_output(state, {"status": "busco_ran", "busco_execution_result": outcome.result.model_dump(mode="json")})
 
 
 def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
