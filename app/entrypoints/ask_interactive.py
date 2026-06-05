@@ -151,7 +151,6 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "genome_survey.kmer_count.jellyfish.read_length": "average read length in bp",
     "hic_scaffolding.candidate.yahs.threads": "CPU threads for YaHS",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
@@ -501,7 +500,10 @@ def _prompt_shared_platform(label: str, default: Any) -> Any:
             instruction="(used for asset registry platform)",
         ))
 
-    print(f"    accepted: {', '.join(_SHARED_PLATFORM_VALUES)}")
+    print("    platform choices:")
+    for idx, value in enumerate(_SHARED_PLATFORM_VALUES, start=1):
+        default_marker = " [default]" if value == default_value else ""
+        print(f"      {idx}. {value}{default_marker}")
     while True:
         value = _prompt_text_value(label, default_value)
         normalized = _normalize_shared_platform(value)
@@ -549,6 +551,10 @@ def _normalize_shared_platform(value: Any) -> Any:
     if value is None:
         return None
     raw = str(value).strip().lower().replace("-", "_")
+    if raw.isdigit():
+        index = int(raw)
+        if 1 <= index <= len(_SHARED_PLATFORM_VALUES):
+            return _SHARED_PLATFORM_VALUES[index - 1]
     if raw in {"nanopore", "nano", "ont_raw", "ont_hq"}:
         return "ont"
     if raw in {"pacbio_hifi", "pacbio_hifi_reads", "hifi", "ccs"}:

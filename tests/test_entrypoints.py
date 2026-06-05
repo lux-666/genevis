@@ -1013,6 +1013,13 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                                 "thresholds": {},
                             }
                         },
+                        "genome_survey": {
+                            "survey_parameters": {
+                                "kmer_size": 21,
+                                "hash_size": "1G",
+                                "threads": 4,
+                            }
+                        },
                         "assembly": {
                             "flye_parameters": {
                                 "read_type": "nano-raw",
@@ -1057,6 +1064,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                     "approved": False,
                     "thresholds": {},
                 },
+            )
+            self.assertEqual(
+                stage_outputs["genome_survey"]["survey_parameters"],
+                {"kmer_size": 21, "hash_size": "1G", "threads": 4},
             )
             self.assertEqual(
                 stage_outputs["assembly"]["flye_parameters"],

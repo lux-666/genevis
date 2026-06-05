@@ -134,6 +134,31 @@ class ReadQCRunConfig(BaseModel):
     length_filter: ReadQCLengthFilterConfig | None = None
 
 
+class GenomeSurveyRunParameters(BaseModel):
+    """Explicit genome_survey parameters that cannot be inferred from read_qc."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kmer_size: int = Field(gt=0)
+    hash_size: str
+    threads: int = Field(default=4, gt=0)
+    read_length: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _hash_size_must_not_be_empty(self) -> "GenomeSurveyRunParameters":
+        if not self.hash_size.strip():
+            raise ValueError("genome_survey.survey_parameters.hash_size must be non-empty")
+        return self
+
+
+class GenomeSurveyRunConfig(BaseModel):
+    """Run-config block for the genome_survey stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    survey_parameters: GenomeSurveyRunParameters | None = None
+
+
 class BuscoRunParameters(BaseModel):
     """Explicit BUSCO parameters for assembly_review local execution."""
 
@@ -194,6 +219,7 @@ class RunConfig(BaseModel):
     requested_stages: list[RequestableStage] | None = None
     shared_parameters: SharedParameters | None = None
     read_qc: ReadQCRunConfig | None = None
+    genome_survey: GenomeSurveyRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None

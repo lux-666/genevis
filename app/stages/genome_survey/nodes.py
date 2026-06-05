@@ -127,7 +127,7 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
     assets = survey_out.get("resolved_assets", {})
     input_refs = _asset_ids(assets.get("clean_short_dna_reads") or [])
     if survey_out.get("execution_mode") == "local":
-        params, error = _survey_parameters(survey_out)
+        params, error = _survey_parameters(survey_out, state)
         if error:
             return _fail_update(state, error)
         substeps = dict(survey_out.get("substeps") or {})
@@ -717,14 +717,22 @@ def _validate_methods(method_names: list[str]) -> str | None:
     return None
 
 
-def _survey_parameters(survey_out: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _survey_parameters(survey_out: dict[str, Any], state: TopLevelState) -> tuple[dict[str, Any], str | None]:
     raw_params = dict(survey_out.get("survey_parameters") or {})
-    missing = [key for key in ["kmer_size", "read_length", "hash_size"] if key not in raw_params]
+    missing = [key for key in ["kmer_size", "hash_size"] if key not in raw_params]
     if missing:
         return {}, "genome_survey local execution requires explicit survey_parameters." + missing[0]
+    read_length_raw = raw_params.get("read_length")
+    if read_length_raw is None:
+        read_length_raw = _read_length_from_read_qc(state)
+    if read_length_raw is None:
+        return {}, (
+            "genome_survey local execution requires read_length from "
+            "read_qc.summary.avg_len or explicit survey_parameters.read_length"
+        )
     try:
         kmer_size = int(raw_params["kmer_size"])
-        read_length = int(raw_params["read_length"])
+        read_length = int(read_length_raw)
         threads = int(raw_params.get("threads", 1))
     except (TypeError, ValueError):
         return {}, "genome_survey local execution requires integer kmer_size, read_length, and threads"
@@ -736,6 +744,37 @@ def _survey_parameters(survey_out: dict[str, Any]) -> tuple[dict[str, Any], str 
         "threads": threads,
         "hash_size": str(raw_params["hash_size"]),
     }, None
+
+
+def _read_length_from_read_qc(state: TopLevelState) -> int | None:
+    summary = _read_qc_summary(state)
+    for key in ("avg_len", "n50", "max_len"):
+        value = summary.get(key)
+        if value is None:
+            continue
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _read_qc_summary(state: TopLevelState) -> dict[str, Any]:
+    read_qc = ((state.get("stage_outputs") or {}).get("read_qc") or {})
+    summary = read_qc.get("summary")
+    if isinstance(summary, dict):
+        return summary
+    summary_ref = read_qc.get("summary_artifact_ref")
+    if not summary_ref:
+        return {}
+    try:
+        payload = json.loads(Path(summary_ref).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    loaded = payload.get("summary") if isinstance(payload, dict) else None
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:

@@ -179,12 +179,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             fake_bin = self._fake_survey_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
+                "read_qc": {
+                    "summary": {
+                        "avg_len": 150.2,
+                    },
+                },
                 "genome_survey": {
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "survey_parameters": {
                         "kmer_size": 21,
-                        "read_length": 150,
                         "hash_size": "10M",
                         "threads": 1,
                     },

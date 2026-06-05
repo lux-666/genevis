@@ -341,6 +341,10 @@ def _run_session(args: argparse.Namespace) -> int:
         read_qc_out = dict(stage_outputs.get("read_qc") or {})
         read_qc_out["length_filter_request"] = run_config.read_qc.length_filter.model_dump(mode="json")
         stage_outputs["read_qc"] = read_qc_out
+    if run_config and run_config.genome_survey and run_config.genome_survey.survey_parameters:
+        survey_out = dict(stage_outputs.get("genome_survey") or {})
+        survey_out["survey_parameters"] = run_config.genome_survey.survey_parameters.model_dump(exclude_none=True)
+        stage_outputs["genome_survey"] = survey_out
     if "repeat_annotation" in local_stages:
         repeat_out = dict(stage_outputs.get("repeat_annotation") or {})
         repeat_out.setdefault(

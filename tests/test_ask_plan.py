@@ -282,6 +282,27 @@ class AskPlannerParameterTests(unittest.TestCase):
             self.assertIn("shared_parameters.platform", result.required_fields)
             self.assertEqual(result.choices["shared_defaults"]["platform"], "unknown")
 
+    def test_genome_survey_jellyfish_does_not_request_read_length(self):
+        plan = _base_plan(
+            selected_stages=["read_qc", "genome_survey"],
+            resolved_execution_order=["read_qc", "genome_survey"],
+            selected_methods={
+                "read_qc": _read_qc_default_methods(),
+                "genome_survey": [
+                    "genome_survey.kmer_count.jellyfish",
+                    "genome_survey.model.genomescope2",
+                ],
+            },
+        )
+
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertEqual(result.kind, "parameter_values")
+        self.assertIn("genome_survey.kmer_count.jellyfish.kmer_size", result.required_fields)
+        self.assertIn("genome_survey.kmer_count.jellyfish.hash_size", result.required_fields)
+        self.assertIn("genome_survey.kmer_count.jellyfish.threads", result.required_fields)
+        self.assertFalse(any(field.endswith(".read_length") for field in result.required_fields))
+
     def test_genome_size_conflict_surfaces_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -434,6 +455,34 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(
             payload["read_qc"]["length_filter"],
             {"method": READ_QC_FILTER_SEQKIT, "approved": True, "thresholds": {"min_len": 1000}},
+        )
+
+    def test_build_run_config_includes_genome_survey_parameters_without_read_length(self):
+        plan = _base_plan(
+            selected_stages=["read_qc", "genome_survey"],
+            resolved_execution_order=["read_qc", "genome_survey"],
+            selected_methods={
+                "read_qc": _read_qc_default_methods(),
+                "genome_survey": [
+                    "genome_survey.kmer_count.jellyfish",
+                    "genome_survey.model.genomescope2",
+                ],
+            },
+            method_parameters={
+                "genome_survey.kmer_count.jellyfish": {
+                    "kmer_size": 31,
+                    "hash_size": "2G",
+                    "threads": 8,
+                }
+            },
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(
+            payload["genome_survey"]["survey_parameters"],
+            {"kmer_size": 31, "hash_size": "2G", "threads": 8},
         )
 
     def test_build_run_config_rejects_seqkit_filter_without_threshold(self):

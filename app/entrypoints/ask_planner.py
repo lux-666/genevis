@@ -118,7 +118,7 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         {
             "method_name": "genome_survey.kmer_count.jellyfish",
             "execution_support": "executable",
-            "required_parameters": ["kmer_size", "hash_size", "read_length", "threads"],
+            "required_parameters": ["kmer_size", "hash_size", "threads"],
             "parameter_defaults": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
         },
         {
@@ -512,6 +512,10 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         payload["assembly"] = {"flye_parameters": flye_params}
     if "read_qc" in local_stages:
         payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
+    if "genome_survey" in local_stages:
+        survey_config = _build_genome_survey_config(plan)
+        if survey_config:
+            payload["genome_survey"] = survey_config
     if "assembly_review" in local_stages:
         ar_config = _build_assembly_review_config(plan)
         if ar_config:
@@ -839,6 +843,18 @@ def _read_qc_length_filter_config(plan: AskPlanState) -> dict[str, Any]:
             raise ValueError("read_qc.length_filter.seqkit_seq.min_len must be a positive integer")
         return {"method": filter_method, "approved": True, "thresholds": {"min_len": min_len}}
     return {"method": filter_method, "approved": False, "thresholds": {}}
+
+
+def _build_genome_survey_config(plan: AskPlanState) -> dict[str, Any] | None:
+    params = dict((plan.method_parameters or {}).get("genome_survey.kmer_count.jellyfish") or {})
+    if not params:
+        cap = _get_method_descriptor("genome_survey.kmer_count.jellyfish") or {}
+        params = dict(cap.get("parameter_defaults") or {})
+    survey_params: dict[str, Any] = {}
+    for key in ("kmer_size", "hash_size", "threads"):
+        if key in params:
+            survey_params[key] = params[key]
+    return {"survey_parameters": survey_params} if survey_params else None
 
 
 def _coerce_positive_int(value: Any) -> int | None:

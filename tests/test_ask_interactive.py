@@ -228,6 +228,26 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "ont")
 
+    def test_parameter_prompt_accepts_platform_number(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"shared_defaults": {"platform": "unknown"}},
+            required_fields=["shared_parameters.platform"],
+            response_schema={},
+            next_action={},
+        )
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", return_value="2"):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.shared_parameters)
+        self.assertEqual(response.shared_parameters.platform, "ont")
+
     def test_apply_set_params_accepts_platform_alias(self):
         plan = _base_plan()
 
