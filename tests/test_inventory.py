@@ -8,7 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.review.base import ResumeReviewRequest
 from app.stages.inventory.builder import build_stage
+from app.stages.inventory.nodes import apply_inventory_resume_decision
 from app.schemas.state import initial_state
 import yaml
 
@@ -99,6 +101,57 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(asset["provenance"]["declared_path"], str(fq))
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
+    def test_inventory_does_not_block_for_unknown_long_read_platform(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "_250F701999011_barcode10_01.fastq.gz"
+            fq.write_bytes(gzip.compress(b"@r1\nACGT\n+\n!!!!\n"))
+            manifest = {
+                "session_id": "unknown-platform",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(fq)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="unknown-platform",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "read_qc")
+            self.assertEqual(result["supervision_state"], "running_stage")
+            self.assertIsNone(result.get("active_interrupt"))
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            self.assertEqual(registry["assets"][0]["platform"], "unknown")
+            warnings = result["stage_outputs"]["inventory"]["warnings"]
+            self.assertTrue(any("platform unknown" in warning for warning in warnings))
+
+    def test_inventory_shared_platform_overrides_registered_raw_long_read_platform(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fq = Path(tmpdir) / "_250F701999011_barcode10_01.fastq.gz"
+            fq.write_bytes(gzip.compress(b"@r1\nACGT\n+\n!!!!\n"))
+            manifest = {
+                "session_id": "override-platform",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(fq)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="override-platform",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            state["shared_parameters"] = {"platform": "ont"}
+
+            result = build_stage().invoke(state)
+
+            registry = json.loads(Path(result["asset_registry_ref"]).read_text())
+            self.assertEqual(registry["assets"][0]["platform"], "ont")
+            self.assertFalse(any("platform unknown" in warning for warning in result["stage_outputs"]["inventory"]["warnings"]))
+
     def test_inventory_registers_cycloneseq_fastq_as_raw_long_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "BGI_CycloneSEQ_sample.fastq.gz"
@@ -182,9 +235,46 @@ class InventoryStageTests(unittest.TestCase):
             result = graph.invoke(state)
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "inventory")
+            self.assertEqual(result["active_interrupt"]["gate_id"], "inventory_review")
+            self.assertIn("continue", result["active_interrupt"]["decisions_allowed"])
             self.assertEqual(result["current_stage"], "inventory")
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNone(result.get("asset_registry_ref"))
+
+    def test_inventory_review_continue_registers_assets_and_advances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            genomic = Path(tmpdir) / "a.fq"
+            transcript = Path(tmpdir) / "b.fq"
+            genomic.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            transcript.write_text("@r2\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = {
+                "session_id": "s3-continue",
+                "assets": [
+                    {"asset_type": "raw_long_reads", "paths": [str(genomic)]},
+                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": [str(transcript)]},
+                ],
+            }
+            path = self._build_manifest_file(tmpdir, manifest)
+            state = initial_state(
+                session_id="s3-continue",
+                input_manifest_ref=str(path),
+                data_dir=tmpdir,
+            )
+            blocked = build_stage().invoke(state)
+            decision = ResumeReviewRequest(
+                session_id="s3-continue",
+                stage="inventory",
+                gate_id="inventory_review",
+                decision="continue",
+                notes=["confirmed inputs"],
+            )
+
+            update = apply_inventory_resume_decision(blocked, decision)
+
+            self.assertIsNone(update["active_interrupt"])
+            self.assertEqual(update["current_stage"], "read_qc")
+            self.assertEqual(update["supervision_state"], "running_stage")
+            self.assertTrue(Path(update["asset_registry_ref"]).exists())
 
     def test_inventory_with_existing_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:

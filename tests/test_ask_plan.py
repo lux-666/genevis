@@ -254,9 +254,33 @@ class AskPlannerParameterTests(unittest.TestCase):
             defaults = result.choices.get("defaults", {})
             shared_defaults = result.choices.get("shared_defaults", {})
             flye_defaults = defaults.get("assembly.candidate.flye", {})
+            self.assertIn("shared_parameters.platform", result.required_fields)
+            self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
             self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
             self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
             self.assertEqual(flye_defaults.get("threads"), 4)
+
+    def test_unknown_manifest_platform_is_exposed_as_optional_shared_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 2000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: unknown\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["read_qc", "assembly"],
+                resolved_execution_order=["read_qc", "assembly"],
+                selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+            self.assertEqual(result.kind, "parameter_values")
+            self.assertIn("shared_parameters.platform", result.required_fields)
+            self.assertEqual(result.choices["shared_defaults"]["platform"], "unknown")
 
     def test_genome_size_conflict_surfaces_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -366,11 +390,12 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             selected_stages=["read_qc", "assembly"],
             resolved_execution_order=["read_qc", "assembly"],
             selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
-            shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 2000000},
+            shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
             method_parameters={"assembly.candidate.flye": {"threads": 8}},
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
+        self.assertEqual(payload["shared_parameters"]["platform"], "ont")
         self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
         self.assertEqual(payload["shared_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"], {"threads": 8, "read_type": "nano-raw", "estimated_genome_size": 2000000})

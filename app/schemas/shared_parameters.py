@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.manifest import Platform
+
 NormalizedReadType = Literal["ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
 
 PLATFORM_TO_SHARED_READ_TYPE = {
@@ -55,5 +57,6 @@ class SharedParameters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    platform: Platform | None = None
     read_type: NormalizedReadType | None = None
     estimated_genome_size: int | None = Field(default=None, gt=0)

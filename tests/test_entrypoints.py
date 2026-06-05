@@ -274,6 +274,22 @@ class EntrypointTests(unittest.TestCase):
         self.assertTrue(args.json)
         self.assertEqual(args.write_decision_template, "decision.json")
 
+    def test_review_args_accept_checkpointer_flag(self):
+        args = _parse_args([
+            "review",
+            "--session-id",
+            "s1",
+            "--data-dir",
+            "out",
+            "--checkpointer",
+            "sqlite",
+        ])
+
+        self.assertEqual(args.command, "review")
+        self.assertEqual(args.session_id, "s1")
+        self.assertEqual(args.data_dir, "out")
+        self.assertEqual(args.checkpointer, "sqlite")
+
     def test_run_args_can_omit_session_id(self):
         args = _parse_args(["run", "--manifest", "manifest.yaml"])
 

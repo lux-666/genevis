@@ -45,6 +45,7 @@ class RunConfigSchemaTests(unittest.TestCase):
             {
                 "local_exec": ["assembly"],
                 "shared_parameters": {
+                    "platform": "ont",
                     "read_type": "ont_raw",
                     "estimated_genome_size": 2_000_000,
                 },
@@ -59,6 +60,7 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.shared_parameters is not None
         assert config.assembly is not None
         assert config.assembly.flye_parameters is not None
+        self.assertEqual(config.shared_parameters.platform, "ont")
         self.assertEqual(config.shared_parameters.read_type, "ont_raw")
         self.assertIsNone(config.assembly.flye_parameters.read_type)
         self.assertIsNone(config.assembly.flye_parameters.estimated_genome_size)

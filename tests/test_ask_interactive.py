@@ -150,8 +150,8 @@ class InteractiveLoopTests(unittest.TestCase):
             )
             args = _ask_ns()
             # "y" auto-resolve, "" read_qc filter, "" assembly method,
-            # "" x3 for params (accept defaults), "y" confirm
-            inputs = iter(["y", "", "", "", "", "", "y"])
+            # "" x4 for params (accept defaults), "y" confirm
+            inputs = iter(["y", "", "", "", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -208,6 +208,34 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
+    def test_parameter_prompt_accepts_platform_default(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"shared_defaults": {"platform": "unknown"}},
+            required_fields=["shared_parameters.platform"],
+            response_schema={},
+            next_action={},
+        )
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", return_value="ont"):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.shared_parameters)
+        self.assertEqual(response.shared_parameters.platform, "ont")
+
+    def test_apply_set_params_accepts_platform_alias(self):
+        plan = _base_plan()
+
+        updated = _apply_set_params(plan, ["platform=nanopore"])
+
+        self.assertIsNotNone(updated.shared_parameters)
+        self.assertEqual(updated.shared_parameters.platform, "ont")
+
     def test_parameter_prompt_retries_invalid_shared_read_type(self):
         req = AskClarificationRequest(
             status="clarification_required",
@@ -247,14 +275,14 @@ class InteractiveLoopTests(unittest.TestCase):
             # "n" reject auto-resolve immediately,
             # "assembly" stage select (just assembly, avoids assembly_review),
             # "" read_qc filter, "" assembly method,
-            # "" "" "" shared/flye params, "n" reject confirm,
+            # "" x4 shared/flye params, "n" reject confirm,
             # "assembly" stage select again,
             # "" read_qc filter, "" assembly method,
-            # "" "" "" shared/flye params, "y" confirm
+            # "" x4 shared/flye params, "y" confirm
             inputs = iter([
                 "n",
-                "assembly", "", "", "", "", "", "n",
-                "assembly", "", "", "", "", "", "y",
+                "assembly", "", "", "", "", "", "", "n",
+                "assembly", "", "", "", "", "", "", "y",
             ])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
@@ -302,8 +330,9 @@ class InteractiveLoopTests(unittest.TestCase):
                              entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
             args = _ask_ns()
             # "y" auto-resolve, "" read_qc filter, "" assembly method,
-            # "" read_type [ont_raw], "500m" genome_size, "" threads [4], "y" confirm
-            inputs = iter(["y", "", "", "", "500m", "", "y"])
+            # "" platform [ont], "" read_type [ont_raw], "500m" genome_size,
+            # "" threads [4], "y" confirm
+            inputs = iter(["y", "", "", "", "", "500m", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:

@@ -25,8 +25,10 @@ def _review_gate(state: TopLevelState) -> dict:
     return {
         "active_interrupt": {
             "stage": "inventory",
+            "gate_id": "inventory_review",
             "reason": "review_required",
             "messages": warnings,
+            "decisions_allowed": ["continue", "stop_human_review"],
         },
         "supervision_state": "blocked_human",
     }

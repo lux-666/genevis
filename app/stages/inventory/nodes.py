@@ -158,6 +158,7 @@ def validate_inputs(state: TopLevelState) -> dict:
             },
         }
 
+    _apply_shared_platform_override(manifest, state)
     report = validate_manifest(manifest)
     return {
         "stage_outputs": {
@@ -183,6 +184,7 @@ def register_assets(state: TopLevelState) -> dict:
 
     manifest_ref = state["input_manifest_ref"]
     manifest = _load_manifest(manifest_ref)
+    _apply_shared_platform_override(manifest, state)
     report = validate_manifest(manifest)
     inferred = report["inferred"]
 
@@ -212,6 +214,21 @@ def register_assets(state: TopLevelState) -> dict:
     }
 
 
+def _apply_shared_platform_override(manifest: InputManifest, state: TopLevelState) -> None:
+    """Apply an operator-selected platform to raw long-read assets."""
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(exclude_none=True)
+    if not isinstance(shared, dict):
+        return
+    platform = shared.get("platform")
+    if not platform or platform == "unknown":
+        return
+    for asset in manifest.assets:
+        if asset.asset_type == "raw_long_reads":
+            asset.platform = platform
+
+
 def commit_inventory(state: TopLevelState) -> dict:
     """Advance to the next stage based on routing decision."""
     from app.graph.routing import next_stage_name
@@ -235,3 +252,25 @@ def commit_inventory(state: TopLevelState) -> dict:
             "assembly": "existing_assembly_input",
         }
     return update
+
+
+def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
+    """Apply a human inventory review decision."""
+    if request.decision in {"stop_human_review", "stop"}:
+        return {
+            "current_stage": "inventory",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            "last_error": "inventory review stopped by human decision",
+        }
+    if request.decision not in {"continue", "accept"}:
+        raise ValueError(f"unsupported inventory decision: {request.decision}")
+
+    register_update = register_assets(state)
+    registered_state = {**state, **register_update}
+    commit_update = commit_inventory(registered_state)
+    return {
+        **register_update,
+        **commit_update,
+        "active_interrupt": None,
+    }

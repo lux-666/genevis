@@ -102,6 +102,16 @@ def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, 
 
 register_review_gate(
     ReviewGateDeclaration(
+        stage="inventory",
+        gate_id="inventory_review",
+        decisions_allowed=("continue", "stop_human_review"),
+        decision_applier="app.stages.inventory.nodes:apply_inventory_resume_decision",
+        template_preferred_decision="continue",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
         stage="assembly_review",
         gate_id="assembly_review",
         decisions_allowed=(

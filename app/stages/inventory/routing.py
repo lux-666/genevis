@@ -26,8 +26,19 @@ def route_from_inventory(state: TopLevelState) -> str:
         if not inventory_out.get("valid"):
             return "fail"
         warnings = inventory_out.get("warnings", [])
-        if warnings:
+        if _warnings_require_human_review(warnings):
             return "review"
         return "register"
 
     return "fail"
+
+
+def _warnings_require_human_review(warnings: list[str]) -> bool:
+    """Return whether inventory warnings need an explicit human decision."""
+    for warning in warnings:
+        normalized = str(warning).lower()
+        if "human review required" in normalized:
+            return True
+        if "ambiguous classification" in normalized:
+            return True
+    return False

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from app.control.ledger import Ledger
 from app.entrypoints.review_interactive import (
     build_decision_brief,
+    collect_gate_decision,
     prompt_assembly_review_decision,
     prompt_hic_scaffolding_decision,
     render_blocked_summary,
@@ -401,6 +402,53 @@ class RunInteractiveReviewTests(unittest.TestCase):
             decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "skip")
             self.assertEqual(decision["stage"], "hic_scaffolding")
+
+    def test_collect_gate_decision_uses_checkpoint_blocked_state_before_ledger_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "inventory-blocked"
+            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "inventory",
+                "active_interrupt": {
+                    "stage": "inventory",
+                    "gate_id": "inventory_review",
+                    "reason": "review_required",
+                    "messages": ["raw_long_reads: platform unknown"],
+                    "decisions_allowed": ["continue", "stop_human_review"],
+                },
+                "stage_outputs": {
+                    "inventory": {
+                        "status": "validated",
+                        "valid": True,
+                        "warnings": ["raw_long_reads: platform unknown"],
+                    }
+                },
+                "route_trace": [],
+            }
+            graph = type(
+                "FakeGraph",
+                (),
+                {"get_state": lambda self, config: type("Snapshot", (), {"values": state})()},
+            )()
+            inputs = iter(["1", "continue inventory"])
+
+            with patch("app.graph.builder.build_graph", return_value=graph), \
+                    patch("builtins.input", side_effect=lambda _: next(inputs)):
+                result = collect_gate_decision(session_id, str(data_dir))
+
+            self.assertIsNotNone(result)
+            request, raw = result
+            self.assertEqual(request.stage, "inventory")
+            self.assertEqual(request.gate_id, "inventory_review")
+            self.assertEqual(request.decision, "continue")
+            self.assertEqual(raw["notes"], ["continue inventory"])
 
 
 class RenderBlockedSummaryTests(unittest.TestCase):

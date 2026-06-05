@@ -175,6 +175,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Validate and write decision artifact without resuming",
     )
+    review_parser.add_argument(
+        "--checkpointer",
+        choices=["sqlite", "memory"],
+        default="sqlite",
+        help="Checkpoint backend for interactive review; review requires sqlite.",
+    )
 
     tui_parser = subparsers.add_parser(
         "tui",
@@ -990,6 +996,13 @@ def _run_resume(args: argparse.Namespace) -> int:
 def _run_review(args: argparse.Namespace) -> int:
     from app.entrypoints.review_interactive import run_interactive_review
 
+    if getattr(args, "checkpointer", "sqlite") != "sqlite":
+        print(
+            "error: interactive review requires --checkpointer sqlite; "
+            "memory checkpoints do not survive between processes",
+            file=sys.stderr,
+        )
+        return 1
     data_dir = _resolve_data_dir(args.data_dir)
     return run_interactive_review(
         args.session_id,

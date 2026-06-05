@@ -146,6 +146,7 @@ _PARAM_HINTS: dict[str, str] = {
     "assembly_review.eval.quast.threads": "CPU threads for QUAST",
     "assembly.candidate.flye.threads": "CPU threads for Flye assembler",
     "estimated_genome_size": "e.g. 500m, 2.5g",
+    "platform": "sequencing platform for raw long-read registration",
     "read_type": "sequencing platform read type",
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
@@ -158,6 +159,7 @@ _PARAM_HINTS: dict[str, str] = {
 
 _GENOME_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmg]?)$", re.IGNORECASE)
 _GENOME_SIZE_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+_SHARED_PLATFORM_VALUES = ("cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown")
 _SHARED_READ_TYPE_VALUES = tuple(SHARED_TO_METHOD_READ_TYPE.keys())
 
 _STAGE_DESCRIPTIONS: dict[str, str] = {
@@ -476,6 +478,8 @@ def _prompt_text_value(label: str, default: Any) -> Any:
 
 
 def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
+    if param_name == "platform":
+        return _prompt_shared_platform(label, default)
     if param_name == "read_type":
         return _prompt_shared_read_type(label, default)
 
@@ -485,6 +489,24 @@ def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
             value = _parse_genome_size(value)
         if _shared_parameter_value_is_valid(param_name, value):
             return value
+
+
+def _prompt_shared_platform(label: str, default: Any) -> Any:
+    default_value = _normalize_shared_platform(default)
+    if _HAS_QUESTIONARY:
+        return _safe_ask(questionary.select(
+            f"{label}:",
+            choices=list(_SHARED_PLATFORM_VALUES),
+            default=default_value if default_value in _SHARED_PLATFORM_VALUES else "unknown",
+            instruction="(used for asset registry platform)",
+        ))
+
+    print(f"    accepted: {', '.join(_SHARED_PLATFORM_VALUES)}")
+    while True:
+        value = _prompt_text_value(label, default_value)
+        normalized = _normalize_shared_platform(value)
+        if _shared_parameter_value_is_valid("platform", normalized):
+            return normalized
 
 
 def _prompt_shared_read_type(label: str, default: Any) -> Any:
@@ -521,6 +543,21 @@ def _normalize_shared_read_type(value: Any) -> Any:
         return None
     raw = str(value).strip()
     return FLYE_TO_SHARED_READ_TYPE.get(raw, raw)
+
+
+def _normalize_shared_platform(value: Any) -> Any:
+    if value is None:
+        return None
+    raw = str(value).strip().lower().replace("-", "_")
+    if raw in {"nanopore", "nano", "ont_raw", "ont_hq"}:
+        return "ont"
+    if raw in {"pacbio_hifi", "pacbio_hifi_reads", "hifi", "ccs"}:
+        return "pacbio_hifi"
+    if raw in {"pacbio_clr", "pacbio_raw", "pacbio", "sequel"}:
+        return "clr"
+    if raw in {"cyclone_seq", "cyclone", "bgi_cycloneseq"}:
+        return "cycloneseq"
+    return raw
 
 
 def _shared_parameter_value_is_valid(param_name: str, value: Any) -> bool:
@@ -597,6 +634,7 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
     _PARAM_ALIASES = {
         "genome_size": ("shared_parameters", "estimated_genome_size"),
         "estimated_genome_size": ("shared_parameters", "estimated_genome_size"),
+        "platform": ("shared_parameters", "platform"),
         "read_type": ("shared_parameters", "read_type"),
         "threads": ("assembly.candidate.flye", "threads"),
     }
@@ -611,6 +649,8 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
                     value = _parse_genome_size(value)
                 if param == "read_type":
                     value = FLYE_TO_SHARED_READ_TYPE.get(str(value), value)
+                if param == "platform":
+                    value = _normalize_shared_platform(value)
                 shared[param] = value
                 continue
             bucket = dict(existing.get(method, {}))

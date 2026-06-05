@@ -607,6 +607,8 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
     missing_fields, defaults, shared_defaults, warnings = _missing_parameters_and_defaults(plan)
     all_fields: list[str] = []
+    if _has_raw_long_reads(plan):
+        all_fields.append("shared_parameters.platform")
     if _assembly_needs_shared_read_type(plan):
         all_fields.append("shared_parameters.read_type")
     if _assembly_needs_shared_genome_size(plan):
@@ -856,6 +858,8 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
     method_overrides = _method_specific_shared_overrides(plan)
     merged_shared = {**shared_defaults, **shared, **method_overrides}
+    if _has_raw_long_reads(plan) and "platform" not in merged_shared:
+        return True
     if _assembly_needs_shared_read_type(plan) and "read_type" not in merged_shared:
         return True
     if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in merged_shared:
@@ -960,10 +964,12 @@ def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any]
     warnings: list[str] = []
     manifest = _load_manifest(plan.manifest_ref)
     if manifest:
-        platforms = {
-            asset.platform for asset in manifest.assets
-            if asset.asset_type == "raw_long_reads" and asset.platform != "unknown"
-        }
+        platforms = _raw_long_read_platforms(manifest, include_unknown=False)
+        all_platforms = _raw_long_read_platforms(manifest, include_unknown=True)
+        if len(all_platforms) == 1:
+            inferred.setdefault("platform", next(iter(all_platforms)))
+        elif len(platforms) == 1:
+            inferred.setdefault("platform", next(iter(platforms)))
         for platform, read_type in PLATFORM_TO_SHARED_READ_TYPE.items():
             if platform in platforms:
                 inferred.setdefault("read_type", read_type)
@@ -982,6 +988,19 @@ def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any]
         else:
             inferred.setdefault("estimated_genome_size", request_size)
     return inferred, warnings
+
+
+def _has_raw_long_reads(plan: AskPlanState) -> bool:
+    manifest = _load_manifest(plan.manifest_ref)
+    return bool(manifest and any(asset.asset_type == "raw_long_reads" for asset in manifest.assets))
+
+
+def _raw_long_read_platforms(manifest: Any, *, include_unknown: bool) -> set[str]:
+    return {
+        str(asset.platform)
+        for asset in manifest.assets
+        if asset.asset_type == "raw_long_reads" and (include_unknown or asset.platform != "unknown")
+    }
 
 
 def _assembly_needs_shared_read_type(plan: AskPlanState) -> bool:

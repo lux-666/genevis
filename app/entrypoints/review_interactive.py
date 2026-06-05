@@ -631,7 +631,7 @@ def collect_gate_decision(
     from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
 
-    summary = inspect_session(session_id, data_dir)
+    summary = _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(session_id, data_dir)
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return None
@@ -678,6 +678,43 @@ def collect_gate_decision(
         return None
 
     return request, raw_decision
+
+
+def _checkpoint_blocked_summary(session_id: str, data_dir: str) -> dict[str, Any] | None:
+    """Return a blocked-state summary from sqlite checkpoint state, if present."""
+    try:
+        from app.control.lifecycle import build_result_next_action, inspect_state
+        from app.graph.builder import build_graph
+        from app.graph.checkpointer import checkpoint_db_path
+
+        if not checkpoint_db_path(data_dir).exists():
+            return None
+        graph = build_graph(backend="sqlite", data_dir=data_dir)
+        snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
+    except Exception:
+        return None
+    if (
+        snapshot is None
+        or not snapshot.values
+        or snapshot.values.get("session_id") != session_id
+        or snapshot.values.get("supervision_state") != "blocked_human"
+    ):
+        return None
+
+    state = snapshot.values
+    summary = inspect_state(state)
+    summary["checkpoint_persistence"] = "sqlite"
+    summary["durable_resume_available"] = True
+    summary["latest_review_request_artifact"] = None
+    active_interrupt = state.get("active_interrupt") or {}
+    request_ref = active_interrupt.get("review_request_artifact_ref")
+    if request_ref:
+        summary["latest_review_request_artifact"] = {"file_path": request_ref}
+    summary["latest_review_request"] = {"payload": active_interrupt}
+    summary["next_action"] = build_result_next_action(
+        {**state, "session_id": session_id, "data_dir": data_dir, "checkpoint_persistence": "sqlite"}
+    )
+    return summary
 
 
 def persist_decision_artifact(
