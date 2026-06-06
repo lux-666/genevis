@@ -381,7 +381,19 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
 
             filter_script = Path(tmpdir) / "work" / "read_qc" / "s1" / "length_filter" / "run_length_filter.sh"
-            self.assertIn("seqkit seq -m 1000", filter_script.read_text(encoding="utf-8"))
+            filter_script_text = filter_script.read_text(encoding="utf-8")
+            self.assertIn("seqkit seq -m 1000", filter_script_text)
+            self.assertIn("seqkit stats -a -T", filter_script_text)
+            post_filter_summary_ref = Path(read_qc["post_filter_summary_artifact_ref"])
+            self.assertTrue(post_filter_summary_ref.exists())
+            post_filter_summary = json.loads(post_filter_summary_ref.read_text(encoding="utf-8"))
+            self.assertEqual(post_filter_summary["read_set"], "post_filter")
+            self.assertEqual(post_filter_summary["thresholds"], {"min_len": 1000})
+            self.assertEqual(post_filter_summary["summary"], read_qc["summary"])
+            self.assertEqual(read_qc["post_filter_summary"], read_qc["summary"])
+            self.assertEqual(read_qc["summary_artifact_ref"], str(post_filter_summary_ref))
+            self.assertEqual(read_qc["final_read_set"], "post_filter")
+            self.assertIn("raw_summary_artifact_ref", read_qc)
             artifact_events = [
                 json.loads(line)
                 for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()

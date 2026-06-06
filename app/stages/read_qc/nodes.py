@@ -384,8 +384,12 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
             "status": "completed",
             "stats_artifact_ref": str(stats_path),
             "summary_artifact_ref": str(summary_path),
+            "raw_stats_artifact_ref": str(stats_path),
+            "raw_summary_artifact_ref": str(summary_path),
+            "final_read_set": "raw",
             "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
             "summary": summary,
+            "raw_summary": summary,
             "substeps": {
                 **dict(read_qc_out.get("substeps") or {}),
                 "long_read_stats": {
@@ -505,13 +509,18 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         _filtered_long_reads_path(artifact_dir, input_path, index=index, total=len(input_paths), fmt=read_qc_out.get("format"))
         for index, input_path in enumerate(input_paths, start=1)
     ]
+    post_filter_stats_path = artifact_dir / "post_filter_seqkit_stats.tsv"
     script_path = working_dir / "run_length_filter.sh"
     filter_commands = [
         f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} > {shlex.quote(str(filtered_path))}"
         for input_path, filtered_path in zip(input_paths, filtered_paths)
     ]
+    filtered_reads_arg = " ".join(shlex.quote(str(path)) for path in filtered_paths)
     script_path.write_text(
-        "set -e\n" + "\n".join(filter_commands) + "\n",
+        "set -e\n"
+        + "\n".join(filter_commands)
+        + "\n"
+        + f"seqkit stats -a -T {filtered_reads_arg} > {shlex.quote(str(post_filter_stats_path))}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -523,7 +532,7 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         method_name=LENGTH_FILTER_METHOD_NAME,
         script_path=script_path,
         working_dir=working_dir,
-        expected_outputs=filtered_paths,
+        expected_outputs=[*filtered_paths, post_filter_stats_path],
         env=read_qc_out.get("env"),
         env_spec=env_spec,
         metadata={
@@ -533,6 +542,7 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
             "raw_long_reads_paths": [str(path) for path in input_paths],
             "filtered_long_reads_path": str(filtered_paths[0]),
             "filtered_long_reads_paths": [str(path) for path in filtered_paths],
+            "post_filter_stats_path": str(post_filter_stats_path),
             "thresholds": {"min_len": min_len},
         },
     )
@@ -572,6 +582,56 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         )
         for filtered_path in filtered_paths
     ]
+    artifacts.append(
+        ArtifactMeta.from_file(
+            post_filter_stats_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_STATS,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
+                "read_set": "post_filter",
+                "format": "tsv",
+                "thresholds": {"min_len": min_len},
+                "tool": "seqkit",
+            },
+        )
+    )
+    post_filter_summary = _parse_seqkit_summary(post_filter_stats_path)
+    post_filter_summary_path = artifact_dir / "post_filter_read_qc_summary.json"
+    post_filter_summary_payload = {
+        "session_id": attempt.session_id,
+        "method_name": METHOD_NAME,
+        "input_asset_ref": read_qc_out.get("input_asset_ref"),
+        "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
+        "raw_long_reads_path": read_qc_out.get("raw_long_reads_path"),
+        "raw_long_reads_paths": read_qc_out.get("raw_long_reads_paths") or [],
+        "filtered_long_reads_path": str(filtered_paths[0]),
+        "filtered_long_reads_paths": [str(path) for path in filtered_paths],
+        "thresholds": {"min_len": min_len},
+        "read_set": "post_filter",
+        "summary": post_filter_summary,
+    }
+    post_filter_summary_path.write_text(json.dumps(post_filter_summary_payload, indent=2), encoding="utf-8")
+    artifacts.append(
+        ArtifactMeta.from_file(
+            post_filter_summary_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_SUMMARY,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "input_asset_ref": read_qc_out.get("input_asset_ref"),
+                "input_asset_refs": read_qc_out.get("input_asset_refs") or [],
+                "read_set": "post_filter",
+                "format": "json",
+                "thresholds": {"min_len": min_len},
+                "tool": "seqkit",
+            },
+        )
+    )
     for path, artifact_type in [
         (result.stdout_path, "command.stdout"),
         (result.stderr_path, "command.stderr"),
@@ -602,6 +662,8 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
         "thresholds": {"min_len": min_len},
         "artifact_ref": str(filtered_paths[0]),
         "artifact_refs": [str(path) for path in filtered_paths],
+        "post_filter_stats_ref": str(post_filter_stats_path),
+        "post_filter_summary_ref": str(post_filter_summary_path),
     }
     return _update_read_qc_output(
         state,
@@ -609,6 +671,16 @@ def maybe_run_length_filter(state: TopLevelState) -> dict:
             "status": "length_filter_executed",
             "filtered_long_reads_ref": str(filtered_paths[0]),
             "filtered_long_reads_refs": [str(path) for path in filtered_paths],
+            "post_filter_stats_artifact_ref": str(post_filter_stats_path),
+            "post_filter_summary_artifact_ref": str(post_filter_summary_path),
+            "post_filter_summary": post_filter_summary,
+            "summary": post_filter_summary,
+            "summary_artifact_ref": str(post_filter_summary_path),
+            "final_read_set": "post_filter",
+            "artifact_refs": [
+                *list(read_qc_out.get("artifact_refs") or []),
+                *[str(artifact.file_path) for artifact in artifacts],
+            ],
             "length_filter_method": LENGTH_FILTER_METHOD_NAME,
             "length_filter_decision": LENGTH_FILTER_DECISIONS[LENGTH_FILTER_METHOD_NAME],
             "substeps": substeps,
@@ -687,6 +759,7 @@ def commit_read_qc(state: TopLevelState) -> dict:
         "assembly_input_ref",
         "blocked_input_ref",
         "env_target",
+        "final_read_set",
         "filtered_long_reads_fofn_ref",
         "filtered_long_reads_ref",
         "filtered_long_reads_refs",
@@ -700,7 +773,13 @@ def commit_read_qc(state: TopLevelState) -> dict:
         "missing_tools",
         "package_name",
         "platform",
+        "post_filter_stats_artifact_ref",
+        "post_filter_summary",
+        "post_filter_summary_artifact_ref",
         "raw_long_reads_paths",
+        "raw_stats_artifact_ref",
+        "raw_summary",
+        "raw_summary_artifact_ref",
         "reason",
         "skip_reason",
         "stats_artifact_ref",
