@@ -53,6 +53,20 @@ def _ask_ns(**overrides):
     return argparse.Namespace(**base)
 
 
+def _diamond_provenance_json(proteins_ref: str = "/data/proteins.fa") -> str:
+    return json.dumps([
+        {
+            "method_name": "function_annotation.candidate.diamond",
+            "database_name": "UniProt",
+            "database_version": "2026_02",
+            "snapshot_date": "2026-05-16",
+            "database_source_ref": "/db/uniprot/2026_02.dmnd",
+            "descriptor_version": "diamond.yaml",
+            "input_proteins_ref": proteins_ref,
+        }
+    ])
+
+
 class IsInteractiveTests(unittest.TestCase):
     def test_true_when_tty(self):
         with patch("sys.stdin") as mock_stdin:
@@ -244,6 +258,27 @@ class InteractiveLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
+
+    def test_parameter_prompt_accepts_function_database_provenance_json(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"stage_defaults": {}},
+            required_fields=["function_annotation.database_provenance"],
+            response_schema={},
+            next_action={},
+        )
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", return_value=_diamond_provenance_json()):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.stage_parameters)
+        provenance = response.stage_parameters["function_annotation"]["database_provenance"]
+        self.assertEqual(provenance[0]["method_name"], "function_annotation.candidate.diamond")
 
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(
@@ -655,7 +690,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("[      dep] read_qc", rendered)
             self.assertIn("[      dep] repeat_annotation", rendered)
             self.assertIn("[      run] assembly", rendered)
-            self.assertIn("[plan-only] gene_annotation", rendered)
+            self.assertIn("[      run] gene_annotation", rendered)
             self.assertIn("assembly_review: pending", rendered)
             self.assertIn("Advisory preview.", rendered)
 

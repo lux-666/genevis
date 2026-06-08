@@ -49,6 +49,20 @@ def _read_qc_default_methods() -> list[str]:
     return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
 
 
+def _diamond_provenance(proteins_ref: str = "/data/proteins.fa") -> list[dict[str, str]]:
+    return [
+        {
+            "method_name": "function_annotation.candidate.diamond",
+            "database_name": "UniProt",
+            "database_version": "2026_02",
+            "snapshot_date": "2026-05-16",
+            "database_source_ref": "/db/uniprot/2026_02.dmnd",
+            "descriptor_version": "diamond.yaml",
+            "input_proteins_ref": proteins_ref,
+        }
+    ]
+
+
 class AskPlanSchemaTests(unittest.TestCase):
     def test_stage_selection_requires_selected_stages(self):
         with self.assertRaisesRegex(ValueError, "selected_stages"):
@@ -59,7 +73,7 @@ class AskPlanSchemaTests(unittest.TestCase):
             AskClarificationResponse(kind="method_selection")
 
     def test_parameter_values_requires_parameter_payload(self):
-        with self.assertRaisesRegex(ValueError, "method_parameters or shared_parameters"):
+        with self.assertRaisesRegex(ValueError, "method_parameters, shared_parameters, or stage_parameters"):
             AskClarificationResponse(kind="parameter_values")
 
     def test_parameter_values_accepts_shared_parameters_only(self):
@@ -68,6 +82,16 @@ class AskPlanSchemaTests(unittest.TestCase):
             shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 2_000_000},
         )
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
+
+    def test_parameter_values_accepts_stage_parameters_only(self):
+        response = AskClarificationResponse(
+            kind="parameter_values",
+            stage_parameters={"function_annotation": {"database_provenance": _diamond_provenance()}},
+        )
+        self.assertEqual(
+            response.stage_parameters["function_annotation"]["database_provenance"][0]["database_name"],
+            "UniProt",
+        )
 
     def test_confirm_requires_confirmed(self):
         with self.assertRaisesRegex(ValueError, "confirmed"):
@@ -899,6 +923,9 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
                 self.assertEqual(m["execution_support"], "executable")
             else:
                 self.assertEqual(m["execution_support"], "planned_only")
+        defaults = result.choices["defaults"]["gene_annotation"]
+        self.assertIn("gene_annotation.candidate.miniprot", defaults)
+        self.assertIn("gene_annotation.candidate.augustus", defaults)
 
     def test_function_annotation_method_selection(self):
         plan = _base_plan(
@@ -909,8 +936,41 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertEqual(result.kind, "method_selection")
         self.assertIn("function_annotation", result.choices["methods_by_stage"])
         defaults = result.choices["defaults"]["function_annotation"]
-        self.assertIn("function_annotation.candidate.interproscan", defaults)
-        self.assertIn("function_annotation.candidate.eggnog_mapper", defaults)
+        self.assertIn("function_annotation.candidate.diamond", defaults)
+
+    def test_function_annotation_diamond_default_requires_database_provenance(self):
+        plan = _base_plan(
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={
+                "function_annotation": ["function_annotation.candidate.diamond"],
+            },
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "parameter_values")
+        self.assertIn("function_annotation.database_provenance", result.required_fields)
+        self.assertIn("stage_parameters", result.response_schema)
+
+    def test_function_annotation_diamond_provenance_written_to_run_config(self):
+        provenance = _diamond_provenance()
+        plan = _base_plan(
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={
+                "function_annotation": ["function_annotation.candidate.diamond"],
+            },
+        )
+        updated = merge_clarification_response(
+            plan,
+            AskClarificationResponse(
+                kind="parameter_values",
+                stage_parameters={"function_annotation": {"database_provenance": provenance}},
+            ),
+        )
+        self.assertIsNone(next_clarification(updated.model_copy(update={"confirmed": True}), ask_plan_ref="/tmp/plan.json"))
+        payload = build_run_config_payload(updated)
+        self.assertIn("function_annotation", payload.get("local_exec", []))
+        self.assertEqual(payload["function_annotation"]["database_provenance"], provenance)
 
     def test_hic_scaffolding_method_selection(self):
         plan = _base_plan(

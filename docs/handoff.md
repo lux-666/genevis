@@ -28,7 +28,10 @@ execution is opt-in per stage and is currently wired for: `read_qc`
 (SeqKit), `genome_survey` (Jellyfish + GenomeScope2), `assembly` (Flye),
 `assembly_review` (QUAST + BUSCO when offline lineage provenance is supplied),
 `hic_scaffolding` (YaHS), `repeat_annotation` (RepeatMasker for provided
-libraries). All other methods are planning-only contracts.
+libraries), `gene_annotation` (Miniprot + AUGUSTUS runners, EVM merge,
+BUSCO), `function_annotation` (DIAMOND blastp). Real-data smoke validation
+for the annotation runners is pending (Phase 7 task 08). All remaining
+methods are planning-only contracts.
 
 Phase 6 task 04 (session observability and run trace) is code-complete and
 locally validated: `gene-agent inspect --trace` reconstructs a stage-by-stage

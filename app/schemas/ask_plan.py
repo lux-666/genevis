@@ -34,6 +34,7 @@ class AskPlanState(BaseModel):
     selected_methods: dict[str, str | list[str]] | None = None
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
+    stage_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool = False
 
 
@@ -65,6 +66,7 @@ class AskClarificationResponse(BaseModel):
     selected_methods: dict[str, str | list[str]] | None = None
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
+    stage_parameters: dict[str, dict[str, Any]] | None = None
     confirmed: bool | None = None
 
     @model_validator(mode="after")
@@ -73,8 +75,10 @@ class AskClarificationResponse(BaseModel):
             raise ValueError("stage_selection response requires selected_stages")
         if self.kind == "method_selection" and not self.selected_methods:
             raise ValueError("method_selection response requires selected_methods")
-        if self.kind == "parameter_values" and not (self.method_parameters or self.shared_parameters):
-            raise ValueError("parameter_values response requires method_parameters or shared_parameters")
+        if self.kind == "parameter_values" and not (
+            self.method_parameters or self.shared_parameters or self.stage_parameters
+        ):
+            raise ValueError("parameter_values response requires method_parameters, shared_parameters, or stage_parameters")
         if self.kind == "confirm" and self.confirmed is None:
             raise ValueError("confirm response requires confirmed field")
         return self

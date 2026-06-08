@@ -21,6 +21,9 @@ from app.schemas.run_config import RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.stages import STAGE_ORDER
 
+FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
+FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
+
 _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
     "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
@@ -397,9 +400,9 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
     if stage == "repeat_annotation":
         return ["repeat_annotation.masking.repeatmasker"]
     if stage == "gene_annotation":
-        return ["gene_annotation.candidate.braker3"]
+        return ["gene_annotation.candidate.miniprot", "gene_annotation.candidate.augustus"]
     if stage == "function_annotation":
-        return ["function_annotation.candidate.interproscan", "function_annotation.candidate.eggnog_mapper"]
+        return ["function_annotation.candidate.diamond"]
     if _STAGE_SELECTION_MODE.get(stage) == "pipeline":
         methods = [m["method_name"] for m in _executable_methods_for_stage(stage)]
         return methods or None
@@ -485,6 +488,7 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
             "resolved_execution_order": order,
             "selected_methods": pipeline_methods or None,
             "method_parameters": None,
+            "stage_parameters": None,
             "confirmed": False,
         })
     if response.kind == "method_selection":
@@ -496,12 +500,20 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
         return plan.model_copy(update={
             "selected_methods": existing,
             "method_parameters": None,
+            "stage_parameters": None,
             "confirmed": False,
         })
     if response.kind == "parameter_values":
         existing = dict(plan.method_parameters or {})
         existing.update(response.method_parameters or {})
         update: dict[str, Any] = {"method_parameters": existing or None, "confirmed": False}
+        stage_existing = dict(plan.stage_parameters or {})
+        for stage, values in (response.stage_parameters or {}).items():
+            merged = dict(stage_existing.get(stage) or {})
+            merged.update(values)
+            stage_existing[stage] = merged
+        if stage_existing:
+            update["stage_parameters"] = stage_existing
         if response.shared_parameters:
             current_shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
             current_shared.update(response.shared_parameters.model_dump(exclude_none=True))
@@ -546,6 +558,10 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         ar_config = _build_assembly_review_config(plan)
         if ar_config:
             payload["assembly_review"] = ar_config
+    if "function_annotation" in local_stages:
+        fn_config = _build_function_annotation_config(plan)
+        if fn_config:
+            payload["function_annotation"] = fn_config
     RunConfig.model_validate(payload)
     return payload
 
@@ -579,6 +595,7 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
             "kind": "parameter_values",
             "shared_parameters": dict(request.choices.get("shared_defaults", {})),
             "method_parameters": defaults,
+            "stage_parameters": dict(request.choices.get("stage_defaults", {})),
         }
     return {"kind": "confirm", "confirmed": True}
 
@@ -635,7 +652,7 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 
 
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
-    missing_fields, defaults, shared_defaults, warnings = _missing_parameters_and_defaults(plan)
+    missing_fields, defaults, shared_defaults, stage_defaults, warnings = _missing_parameters_and_defaults(plan)
     all_fields: list[str] = []
     has_raw_long_reads = _has_raw_long_reads(plan)
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
@@ -655,8 +672,10 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
             continue
         for param in cap["required_parameters"]:
             all_fields.append(f"{method}.{param}")
+    if _function_annotation_needs_database_provenance(plan):
+        all_fields.append(FUNCTION_DATABASE_PROVENANCE_FIELD)
     display_fields = all_fields if all_fields else missing_fields
-    choices: dict[str, Any] = {"defaults": defaults, "shared_defaults": shared_defaults}
+    choices: dict[str, Any] = {"defaults": defaults, "shared_defaults": shared_defaults, "stage_defaults": stage_defaults}
     if warnings:
         choices["warnings"] = warnings
     return AskClarificationRequest(
@@ -672,6 +691,7 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
             "kind": "parameter_values",
             "shared_parameters": shared_defaults,
             "method_parameters": defaults,
+            "stage_parameters": stage_defaults,
         },
         next_action=_next_action(ask_plan_ref),
     )
@@ -714,13 +734,15 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
     if plan.method_parameters:
         summary["method_parameters"] = plan.method_parameters
+    if plan.stage_parameters:
+        summary["stage_parameters"] = plan.stage_parameters
     method_status: dict[str, str] = {}
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
         method_status[method] = cap["execution_support"] if cap else "unknown"
     if method_status:
         summary["method_execution_status"] = method_status
-    _, _, _, param_warnings = _missing_parameters_and_defaults(plan)
+    _, _, _, _, param_warnings = _missing_parameters_and_defaults(plan)
     warnings = [*param_warnings, *_plan_validation_warnings(plan)]
     if warnings:
         summary["warnings"] = warnings
@@ -919,6 +941,14 @@ def _build_genome_survey_config(plan: AskPlanState) -> dict[str, Any] | None:
     return {"survey_parameters": survey_params} if survey_params else None
 
 
+def _build_function_annotation_config(plan: AskPlanState) -> dict[str, Any] | None:
+    params = (plan.stage_parameters or {}).get("function_annotation") or {}
+    provenance = params.get("database_provenance")
+    if not provenance:
+        return None
+    return {"database_provenance": provenance}
+
+
 def _coerce_positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -960,12 +990,14 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
                     return True
             if not provided:
                 return True
+    if _function_annotation_needs_database_provenance(plan):
+        return True
     return False
 
 
 def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
     """Merge inferred defaults into method_parameters for any missing keys."""
-    _, defaults, shared_defaults, _ = _missing_parameters_and_defaults(plan)
+    _, defaults, shared_defaults, _, _ = _missing_parameters_and_defaults(plan)
     update: dict[str, Any] = {}
     if defaults:
         update["method_parameters"] = defaults
@@ -980,9 +1012,10 @@ def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
 
 def _missing_parameters_and_defaults(
     plan: AskPlanState,
-) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any], list[str]]:
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any], dict[str, dict[str, Any]], list[str]]:
     missing_fields: list[str] = []
     defaults: dict[str, dict[str, Any]] = {}
+    stage_defaults: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     shared_defaults, shared_warnings = _infer_shared_parameter_defaults(plan)
     warnings.extend(shared_warnings)
@@ -1006,7 +1039,21 @@ def _missing_parameters_and_defaults(
         for param in cap["required_parameters"]:
             if param not in merged:
                 missing_fields.append(f"{method}.{param}")
-    return missing_fields, defaults, shared_defaults, warnings
+    function_params = dict((plan.stage_parameters or {}).get("function_annotation") or {})
+    if function_params:
+        stage_defaults["function_annotation"] = function_params
+    if _function_annotation_needs_database_provenance(plan):
+        missing_fields.append(FUNCTION_DATABASE_PROVENANCE_FIELD)
+    return missing_fields, defaults, shared_defaults, stage_defaults, warnings
+
+
+def _function_annotation_needs_database_provenance(plan: AskPlanState) -> bool:
+    methods = (plan.selected_methods or {}).get("function_annotation")
+    method_list = methods if isinstance(methods, list) else [methods] if methods else []
+    if FUNCTION_ANNOTATION_DIAMOND_METHOD not in method_list:
+        return False
+    provenance = ((plan.stage_parameters or {}).get("function_annotation") or {}).get("database_provenance")
+    return not provenance
 
 
 def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

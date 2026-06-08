@@ -77,6 +77,20 @@ def _request(session_id: str, decision: str = "accept") -> ResumeReviewRequest:
     )
 
 
+def _diamond_provenance() -> list[dict[str, str]]:
+    return [
+        {
+            "method_name": "function_annotation.candidate.diamond",
+            "database_name": "UniProt",
+            "database_version": "2026_02",
+            "snapshot_date": "2026-05-16",
+            "database_source_ref": "/db/uniprot/2026_02.dmnd",
+            "descriptor_version": "diamond.yaml",
+            "input_proteins_ref": "/data/proteins.fa",
+        }
+    ]
+
+
 class AnnotationIntakeTests(unittest.TestCase):
     def test_decision_classifier_only_continue_downstream_triggers_intake(self):
         self.assertEqual(classify_assembly_review_decision("accept"), "continue_downstream")
@@ -197,6 +211,36 @@ class AnnotationIntakeTests(unittest.TestCase):
                 result.update["stage_outputs"]["repeat_annotation"]["primary_method"],
                 "repeat_annotation.masking.repeatmasker",
             )
+
+    def test_override_persists_function_database_provenance_to_checkpoint_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            session_id = "s6"
+            Ledger(data_dir).create_session(session_id, "manifest.json")
+            state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
+            provenance = _diamond_provenance()
+            recommended = build_recommended_annotation_plan(state)
+            final = recommended.model_copy(
+                update={
+                    "selected_stages": ["function_annotation"],
+                    "resolved_execution_order": ["function_annotation"],
+                    "selected_methods": {"function_annotation": ["function_annotation.candidate.diamond"]},
+                    "stage_parameters": {"function_annotation": {"database_provenance": provenance}},
+                    "confirmed": True,
+                }
+            )
+
+            result = persist_annotation_intake_plan(
+                state=state,
+                recommended_plan=recommended,
+                final_plan=final,
+                request=_request(session_id),
+                source="test",
+            )
+
+            function_out = result.update["stage_outputs"]["function_annotation"]
+            self.assertEqual(function_out["database_provenance"], provenance)
+            self.assertEqual(function_out["execution_mode"], "local")
 
     def test_override_clears_omitted_downstream_suffix_state(self):
         with tempfile.TemporaryDirectory() as tmp:

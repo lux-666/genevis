@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from typing import Any
@@ -21,6 +22,7 @@ from app.entrypoints.ask_planner import (
     save_plan_to_default_path,
 )
 from app.schemas.ask_plan import AskClarificationRequest, AskClarificationResponse, AskPlanState
+from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.shared_parameters import (
     FLYE_TO_SHARED_READ_TYPE,
     PLATFORM_TO_SHARED_READ_TYPE,
@@ -95,6 +97,7 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                     "selected_methods": None,
                     "shared_parameters": None,
                     "method_parameters": None,
+                    "stage_parameters": None,
                     "confirmed": False,
                 })
                 plan_ref = save_plan_to_default_path(plan)
@@ -261,6 +264,16 @@ def _render_plan_summary(
                 print(f"  [{short}] {k}: {v}")
     elif preview:
         print("\nParameters: pending")
+
+    stage_params = summary.get("stage_parameters", {})
+    if stage_params:
+        print("\nStage parameters:")
+        for stage, pdict in stage_params.items():
+            for k, v in pdict.items():
+                if isinstance(v, list):
+                    print(f"  [{stage}] {k}: {len(v)} record(s)")
+                else:
+                    print(f"  [{stage}] {k}: {v}")
 
     warnings = summary.get("warnings", [])
     for w in warnings:
@@ -460,7 +473,9 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
 def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
     shared_defaults = dict(req.choices.get("shared_defaults", {}))
+    stage_defaults = dict(req.choices.get("stage_defaults", {}))
     params: dict[str, dict[str, Any]] = {}
+    stage_params: dict[str, dict[str, Any]] = {}
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
     print("  Press Enter to accept [default], or type a new value.\n")
@@ -489,6 +504,11 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
             value = _prompt_shared_parameter(label, param_name, default)
             shared_params[param_name] = value
             shared_params = _derive_shared_parameter_defaults(shared_params)
+        elif field == "function_annotation.database_provenance":
+            value = _prompt_function_database_provenance(
+                stage_defaults.get("function_annotation", {}).get("database_provenance")
+            )
+            stage_params.setdefault("function_annotation", {})["database_provenance"] = value
         else:
             value = _prompt_text_value(label, default)
             if param_name == "estimated_genome_size" and isinstance(value, str):
@@ -499,7 +519,33 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
         kind="parameter_values",
         shared_parameters=_derive_shared_parameter_defaults(shared_params) or None,
         method_parameters=params or None,
+        stage_parameters=stage_params or None,
     )
+
+
+def _prompt_function_database_provenance(default: Any) -> list[dict[str, Any]]:
+    print("  function_annotation.database_provenance expects a JSON list of provenance records.")
+    print("  Required keys: method_name, database_name, database_version, snapshot_date, database_source_ref, input_proteins_ref.")
+    print("  Each record also needs command or descriptor_version.")
+    default_text = json.dumps(default, ensure_ascii=False) if default is not None else None
+    while True:
+        raw = _prompt_text_value("[function_annotation] database_provenance JSON", default_text)
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError as exc:
+            print(f"  Invalid JSON: {exc}")
+            continue
+        if not isinstance(parsed, list):
+            print("  database_provenance must be a JSON list.")
+            continue
+        try:
+            records = [FunctionDatabaseProvenance.model_validate(item).model_dump(mode="json") for item in parsed]
+        except ValidationError as exc:
+            print(f"  Invalid database_provenance: {exc.errors()[0]['msg']}")
+            continue
+        if records:
+            return records
+        print("  database_provenance must contain at least one record.")
 
 
 def _prompt_text_value(label: str, default: Any) -> Any:

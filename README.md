@@ -67,8 +67,13 @@ Implemented:
   pre-Hi-C assembly preservation, and contact-map human review block
 - real `repeat_annotation` stage with opt-in local RepeatMasker for provided
   libraries and softmasked genome handoff
-- `gene_annotation` and `function_annotation` planning-only contracts with
-  evidence profile routing and database-provenance requirements
+- `gene_annotation` with executable Miniprot + AUGUSTUS runners, EVM merge,
+  BUSCO completeness signal, and review chain gates (method planning,
+  candidate evidence, merge, final gene set); BRAKER3, MAKER, GeMoMa, and
+  RNA-seq helpers remain planning-only
+- `function_annotation` with executable DIAMOND blastp runner and
+  database-provenance gating; InterProScan, eggNOG-mapper, KofamScan
+  remain planning-only
 - shared `EnvResolver` + `env_dispatch`: method/stage/default precedence,
   `conda run` dispatch, and preflight that emits `blocked_env` / `missing_tool`
   before any biological command runs; wired into `read_qc`, `assembly`,
@@ -94,11 +99,11 @@ Not implemented:
 
 - in-agent remote execution (intentionally unsupported; see
   [`docs/deployment/mac_dev_server_pull.md`](docs/deployment/mac_dev_server_pull.md))
-- executable bioinformatics methods beyond the slices above (BUSCO, Merqury,
+- executable bioinformatics methods beyond the slices above (Merqury,
   minimap2 coverage, purge_dups, contamination check; NextDenovo, Canu,
   hifiasm; Juicer/3D-DNA/Juicebox and raw Hi-C alignment; EDTA, RepeatModeler,
-  TRF, de novo repeat library; BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2,
-  StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, DIAMOND, KofamScan)
+  TRF, de novo repeat library; BRAKER3, MAKER, HISAT2,
+  StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, KofamScan)
 - requested-stage routing (the `--stages` flag is intentionally not exposed)
 - lifecycle operations beyond structured review resume, such as retry, abort,
   rebuild, or requested-stage reruns

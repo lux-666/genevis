@@ -373,6 +373,7 @@ def _checkpoint_update_from_plan(
     }
     local_exec = set(run_config_preview.get("local_exec") or [])
     selected_methods = dict(plan.selected_methods or {})
+    stage_parameters = dict(plan.stage_parameters or {})
 
     existing_downstream = state.get("stage_outputs") or {}
     for stage in DOWNSTREAM_STAGES:
@@ -389,6 +390,8 @@ def _checkpoint_update_from_plan(
             stage_out["selected_methods"] = method_list
             if len(method_list) == 1:
                 stage_out["primary_method"] = method_list[0]
+        if stage in stage_parameters:
+            stage_out.update(stage_parameters[stage])
         if stage in local_exec:
             stage_out["execution_mode"] = "local"
         stage_outputs[stage] = stage_out

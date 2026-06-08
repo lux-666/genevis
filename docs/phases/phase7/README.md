@@ -11,10 +11,13 @@ durable resume, assembly_review gate). The annotation half does not:
 - `repeat_annotation` executes only RepeatMasker, and only against a
   **provided** library (`strategy == "provided"`); de novo library build
   (EDTA / RepeatModeler) and TRF are planning-only.
-- `gene_annotation` is entirely planning + adoption of user-provided models; no
-  predictor (BRAKER3 / MAKER / AUGUSTUS / Miniprot / GeMoMa / …) actually runs.
-- `function_annotation` is entirely planning + database-provenance gating; no
-  annotation tool (InterProScan / DIAMOND / eggNOG-mapper / KofamScan) runs.
+- `gene_annotation` has executable runners for Miniprot and AUGUSTUS (task 04
+  Slice 1 + task 09 boilerplate consolidation), plus EVM merge and BUSCO
+  (task 05). BRAKER3, MAKER, GeMoMa, and RNA-seq helpers remain planning-only.
+  Real-data smoke validation is pending (task 08).
+- `function_annotation` has an executable DIAMOND runner (task 06 Slice 1).
+  InterProScan, eggNOG-mapper, and KofamScan remain planning-only. Real-data
+  smoke validation and remaining method slices are pending (task 08).
 - `assembly_review` has the full review-policy path, and `hic_scaffolding`
   already has a partial gate/resume path. The remaining downstream review points
   the workflow conceptually needs do not exist yet, and the existing gates still
@@ -81,6 +84,9 @@ See the numbered task docs in this folder:
   method by method.
 - `07_interpretation_agent.md` — direction note for agent 3 (out of scope until
   the annotation agent lands).
+- `08_hpc_integration_smoke_tests.md` — HPC end-to-end smoke covering the full
+  annotation chain (gene_annotation + function_annotation) with real Actinopterygii
+  data, DIAMOND provenance, BUSCO lineage, and durable resume.
 - `09_stage_method_boilerplate_consolidation.md` — behavior-preserving refactor:
   collapse per-method freeze/run/collect node + thin-router boilerplate into the
   shared `gene_annotation` helper + `{suffix: cfg}` table pattern.
