@@ -18,6 +18,8 @@ from app.entrypoints.ask_planner import (
     _infer_parameter_defaults,
     _plan_validation_warnings,
     _recommended_stages_from_manifest,
+    build_initial_plan_draft,
+    build_run_plan_summary,
     build_run_config_payload,
     merge_clarification_response,
     next_clarification,
@@ -111,6 +113,15 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
         self.assertEqual(result.kind, "stage_selection")
         self.assertEqual(result.status, "clarification_required")
 
+    def test_intent_requested_stages_drive_stage_selection_default(self):
+        plan = _base_plan(entry_request={"requested_stages": ["assembly"]})
+
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertEqual(result.kind, "stage_selection")
+        self.assertEqual(result.choices["suggested_stages"], ["assembly"])
+        self.assertEqual(result.response_schema["selected_stages"], ["assembly"])
+
     def test_assembly_without_read_qc_adds_read_qc_dependency(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -127,6 +138,63 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             self.assertIn("assembly", updated.resolved_execution_order)
             order = updated.resolved_execution_order
             self.assertLess(order.index("read_qc"), order.index("assembly"))
+
+    def test_plan_summary_includes_input_assets_from_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={"command": "run", "manifest": str(manifest)})
+
+            summary = build_run_plan_summary(plan)
+
+            self.assertEqual(summary["input_assets"][0]["asset_type"], "raw_long_reads")
+            self.assertEqual(summary["input_assets"][0]["platform"], "ont")
+            self.assertEqual(summary["input_assets"][0]["format"], "fastq")
+            self.assertEqual(summary["input_assets"][0]["paths"], [str(reads)])
+
+
+class BuildInitialPlanDraftTests(unittest.TestCase):
+    def test_no_requested_stages_returns_none(self):
+        plan = _base_plan()
+        self.assertIsNone(build_initial_plan_draft(plan))
+
+    def test_assembly_goal_expands_read_qc_dependency_and_keeps_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={"requested_stages": ["assembly"]})
+            draft = build_initial_plan_draft(plan)
+            self.assertEqual(draft.selected_stages, ["assembly"])
+            self.assertEqual(draft.resolved_execution_order, ["read_qc", "assembly"])
+            self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
+
+    def test_multi_stage_goal_expands_dependencies_but_target_stays_user_goal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                entry_request={"requested_stages": ["assembly", "gene_annotation"]},
+            )
+            draft = build_initial_plan_draft(plan)
+            self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
+            self.assertIn("repeat_annotation", draft.resolved_execution_order)
+            self.assertIn("assembly_review", draft.resolved_execution_order)
 
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
@@ -250,15 +318,16 @@ class AskPlannerParameterTests(unittest.TestCase):
                 selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
             )
             result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-            self.assertEqual(result.kind, "parameter_values")
-            defaults = result.choices.get("defaults", {})
-            shared_defaults = result.choices.get("shared_defaults", {})
-            flye_defaults = defaults.get("assembly.candidate.flye", {})
-            self.assertIn("shared_parameters.platform", result.required_fields)
-            self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
-            self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
-            self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
-            self.assertEqual(flye_defaults.get("threads"), 4)
+        self.assertEqual(result.kind, "parameter_values")
+        defaults = result.choices.get("defaults", {})
+        shared_defaults = result.choices.get("shared_defaults", {})
+        flye_defaults = defaults.get("assembly.candidate.flye", {})
+        self.assertIn("shared_parameters.platform", result.required_fields)
+        self.assertNotIn("shared_parameters.read_type", result.required_fields)
+        self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
+        self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
+        self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
+        self.assertEqual(flye_defaults.get("threads"), 4)
 
     def test_unknown_manifest_platform_is_exposed_as_optional_shared_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,7 +349,48 @@ class AskPlannerParameterTests(unittest.TestCase):
 
             self.assertEqual(result.kind, "parameter_values")
             self.assertIn("shared_parameters.platform", result.required_fields)
+            self.assertNotIn("shared_parameters.read_type", result.required_fields)
             self.assertEqual(result.choices["shared_defaults"]["platform"], "unknown")
+
+    def test_confirmed_unknown_platform_falls_back_to_read_type_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 2000000\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: unknown\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["read_qc", "assembly"],
+                resolved_execution_order=["read_qc", "assembly"],
+                selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+                shared_parameters={"platform": "unknown", "estimated_genome_size": 2_000_000},
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+            self.assertEqual(result.kind, "parameter_values")
+            self.assertIn("shared_parameters.read_type", result.required_fields)
+
+    def test_parameter_response_derives_read_type_from_platform(self):
+        plan = _base_plan(
+            selected_stages=["read_qc", "assembly"],
+            resolved_execution_order=["read_qc", "assembly"],
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+        )
+        response = AskClarificationResponse(
+            kind="parameter_values",
+            shared_parameters={"platform": "cycloneseq", "estimated_genome_size": 2_000_000},
+            method_parameters={"assembly.candidate.flye": {"threads": 4}},
+        )
+
+        updated = merge_clarification_response(plan, response)
+
+        self.assertIsNotNone(updated.shared_parameters)
+        self.assertEqual(updated.shared_parameters.platform, "cycloneseq")
+        self.assertEqual(updated.shared_parameters.read_type, "ont_raw")
 
     def test_genome_survey_jellyfish_does_not_request_read_length(self):
         plan = _base_plan(
@@ -420,6 +530,23 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(payload["shared_parameters"]["read_type"], "ont_raw")
         self.assertEqual(payload["shared_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"], {"threads": 8, "read_type": "nano-raw", "estimated_genome_size": 2000000})
+
+    def test_build_run_config_for_assembly_goal_stops_at_dependency_expanded_target(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["read_qc", "assembly"],
+            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+            shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
+            method_parameters={"assembly.candidate.flye": {"threads": 8}},
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["requested_stages"], ["read_qc", "assembly"])
+        self.assertEqual(sorted(payload["local_exec"]), ["assembly", "read_qc"])
+        self.assertNotIn("assembly_review", payload["requested_stages"])
+        self.assertNotIn("repeat_annotation", payload["requested_stages"])
 
     def test_build_run_config_uses_selected_read_qc_filter(self):
         plan = _base_plan(

@@ -26,7 +26,7 @@ class AskPlanState(BaseModel):
     version: Literal[1] = 1
     session_id: str
     data_dir: str
-    request_text: str | None = None
+    request_text: str | None = None  # original NL request, serialized for audit; not read back by code
     entry_request: dict[str, Any]
     manifest_ref: str
     selected_stages: list[str] | None = None

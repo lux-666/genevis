@@ -15,7 +15,6 @@ from app.entrypoints.ask_interactive import (
     parse_set_params,
     run_interactive_loop,
     _apply_set_params,
-    _confirm_auto_resolve,
     _parse_genome_size,
     _prompt_parameter_values,
     _render_confirm,
@@ -23,7 +22,8 @@ from app.entrypoints.ask_interactive import (
     _update_derived_defaults,
 )
 from app.entrypoints.ask_planner import (
-    auto_resolve_plan,
+    build_initial_plan_draft,
+    build_run_plan_summary,
     next_clarification,
     save_plan_to_default_path,
 )
@@ -75,8 +75,8 @@ class IsInteractiveTests(unittest.TestCase):
             self.assertFalse(is_interactive(_ask_ns()))
 
 
-class AutoResolvePlanTests(unittest.TestCase):
-    def test_raw_long_reads_only_auto_selects_assembly_flye(self):
+class BuildInitialPlanDraftTests(unittest.TestCase):
+    def test_no_workflow_goal_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -86,13 +86,27 @@ class AutoResolvePlanTests(unittest.TestCase):
                 encoding="utf-8",
             )
             plan = _base_plan(manifest_ref=str(manifest))
-            resolved = auto_resolve_plan(plan)
-            self.assertEqual(resolved.selected_stages, ["assembly"])
-            self.assertIn("read_qc", resolved.resolved_execution_order)
-            self.assertIn("assembly", resolved.resolved_execution_order)
-            self.assertEqual(resolved.selected_methods, {"assembly": "assembly.candidate.flye"})
+            self.assertIsNone(build_initial_plan_draft(plan))
 
-    def test_mixed_asset_types_does_not_auto_resolve(self):
+    def test_assembly_goal_raw_long_reads_prefills_flye_and_read_qc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={"requested_stages": ["assembly"]})
+            draft = build_initial_plan_draft(plan)
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft.selected_stages, ["assembly"])
+            self.assertIn("read_qc", draft.resolved_execution_order)
+            self.assertIn("assembly", draft.resolved_execution_order)
+            self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
+            self.assertIn("read_qc", draft.selected_methods)
+
+    def test_assembly_goal_mixed_assets_leaves_assembly_method_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -105,16 +119,30 @@ class AutoResolvePlanTests(unittest.TestCase):
                 f"  - asset_type: assembly_fasta_registered\n    paths:\n      - {asm}\n    format: fasta\n    platform: unknown\n",
                 encoding="utf-8",
             )
-            plan = _base_plan(manifest_ref=str(manifest))
-            resolved = auto_resolve_plan(plan)
-            self.assertIsNone(resolved.selected_stages)
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={"requested_stages": ["assembly"]})
+            draft = build_initial_plan_draft(plan)
+            self.assertEqual(draft.selected_stages, ["assembly"])
+            self.assertNotIn("assembly", draft.selected_methods or {})
 
-    def test_already_resolved_plan_not_changed(self):
-        plan = _base_plan(selected_stages=["read_qc"])
-        resolved = auto_resolve_plan(plan)
-        self.assertEqual(resolved.selected_stages, ["read_qc"])
+    def test_multi_stage_goal_keeps_target_and_expands_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                entry_request={"requested_stages": ["assembly", "gene_annotation"]},
+            )
+            draft = build_initial_plan_draft(plan)
+            self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
+            self.assertIn("repeat_annotation", draft.resolved_execution_order)
+            self.assertIn("assembly_review", draft.resolved_execution_order)
 
-    def test_nanopore_fasta_asks_for_read_qc_filter_choice(self):
+    def test_assembly_goal_draft_accepted_asks_only_for_missing_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "bht.Nanopore.pass.first500.fa"
             reads.write_text(">r1\nACGT\n", encoding="utf-8")
@@ -123,12 +151,16 @@ class AutoResolvePlanTests(unittest.TestCase):
                 f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fasta\n    platform: ont\n",
                 encoding="utf-8",
             )
-            plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp)
-            resolved = auto_resolve_plan(plan)
-            plan_ref = save_plan_to_default_path(resolved)
-            clarification = next_clarification(resolved, ask_plan_ref=plan_ref)
-            self.assertEqual(clarification.kind, "method_selection")
-            self.assertIn("read_qc", clarification.choices["methods_by_stage"])
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                entry_request={"requested_stages": ["assembly"]},
+            )
+            draft = build_initial_plan_draft(plan)
+            plan_ref = save_plan_to_default_path(draft)
+            clarification = next_clarification(draft, ask_plan_ref=plan_ref)
+            self.assertEqual(clarification.kind, "parameter_values")
+            self.assertIn("shared_parameters.estimated_genome_size", clarification.required_fields)
 
 
 class InteractiveLoopTests(unittest.TestCase):
@@ -146,12 +178,17 @@ class InteractiveLoopTests(unittest.TestCase):
             plan = _base_plan(
                 manifest_ref=str(manifest),
                 data_dir=tmp,
-                entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
+                entry_request={
+                    "command": "run",
+                    "manifest": str(manifest),
+                    "data_dir": tmp,
+                    "requested_stages": ["assembly"],
+                },
             )
             args = _ask_ns()
-            # "y" auto-resolve, "" read_qc filter, "" assembly method,
-            # "" x4 for params (accept defaults), "y" confirm
-            inputs = iter(["y", "", "", "", "", "", "", "y"])
+            # Draft prefills flye + read_qc + genome size (from manifest) + platform.
+            # "y" accept draft (nothing left to clarify), "y" confirm.
+            inputs = iter(["y", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -248,6 +285,28 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "ont")
 
+    def test_parameter_prompt_derives_read_type_from_platform(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"shared_defaults": {"platform": "unknown"}},
+            required_fields=["shared_parameters.platform", "shared_parameters.read_type"],
+            response_schema={},
+            next_action={},
+        )
+        inputs = iter(["1"])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            response = _prompt_parameter_values(req)
+
+        self.assertIsNotNone(response.shared_parameters)
+        self.assertEqual(response.shared_parameters.platform, "cycloneseq")
+        self.assertEqual(response.shared_parameters.read_type, "ont_raw")
+
     def test_apply_set_params_accepts_platform_alias(self):
         plan = _base_plan()
 
@@ -255,6 +314,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(updated.shared_parameters)
         self.assertEqual(updated.shared_parameters.platform, "ont")
+        self.assertEqual(updated.shared_parameters.read_type, "ont_raw")
 
     def test_parameter_prompt_retries_invalid_shared_read_type(self):
         req = AskClarificationRequest(
@@ -289,20 +349,23 @@ class InteractiveLoopTests(unittest.TestCase):
             plan = _base_plan(
                 manifest_ref=str(manifest),
                 data_dir=tmp,
-                entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp},
+                entry_request={
+                    "command": "run",
+                    "manifest": str(manifest),
+                    "data_dir": tmp,
+                    "requested_stages": ["assembly"],
+                },
             )
             args = _ask_ns()
-            # "n" reject auto-resolve immediately,
-            # "assembly" stage select (just assembly, avoids assembly_review),
-            # "" read_qc filter, "" assembly method,
-            # "" x4 shared/flye params, "n" reject confirm,
-            # "assembly" stage select again,
-            # "" read_qc filter, "" assembly method,
-            # "" x4 shared/flye params, "y" confirm
+            # "n" reject draft -> manual editing.
+            # "" stage selection (intent default = assembly),
+            # "" read_qc filter, "" assembly method (params satisfied from manifest),
+            # "n" reject confirm -> restart from stage selection,
+            # "" stage selection, "" read_qc filter, "" assembly method, "y" confirm
             inputs = iter([
                 "n",
-                "assembly", "", "", "", "", "", "", "n",
-                "assembly", "", "", "", "", "", "", "y",
+                "", "", "", "n",
+                "", "", "", "y",
             ])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
@@ -347,12 +410,16 @@ class InteractiveLoopTests(unittest.TestCase):
                 encoding="utf-8",
             )
             plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp,
-                             entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
+                             entry_request={
+                                 "command": "run",
+                                 "manifest": str(manifest),
+                                 "data_dir": tmp,
+                                 "requested_stages": ["assembly"],
+                             })
             args = _ask_ns()
-            # "y" auto-resolve, "" read_qc filter, "" assembly method,
-            # "" platform [ont], "" read_type [ont_raw], "500m" genome_size,
-            # "" threads [4], "y" confirm
-            inputs = iter(["y", "", "", "", "", "500m", "", "y"])
+            # "y" accept draft; manifest has no genome size so params are asked:
+            # "" platform [ont], "500m" genome_size, "" threads [4], "y" confirm
+            inputs = iter(["y", "", "500m", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -462,6 +529,26 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Parameters: pending", rendered)
         self.assertIn("Advisory preview.", rendered)
 
+    def test_preview_renders_input_assets(self):
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "input_assets": [
+                {
+                    "asset_type": "raw_long_reads",
+                    "platform": "ont",
+                    "format": "fastq",
+                    "paths": ["/in/reads.fastq.gz"],
+                }
+            ],
+        }
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Plan Preview", preview=True)
+        rendered = stdout.getvalue()
+        self.assertIn("Inputs:", rendered)
+        self.assertIn("raw_long_reads [ont/fastq]: /in/reads.fastq.gz", rendered)
+
     def test_preview_shows_deferred_warnings_and_preview_error(self):
         summary = {
             "session_id": "s1",
@@ -510,7 +597,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertNotIn("pending", rendered)
         self.assertNotIn("Advisory preview.", rendered)
 
-    def test_auto_resolve_preview_appears_and_does_not_execute(self):
+    def test_plan_draft_renders_recommended_methods_and_input_assets(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -520,19 +607,61 @@ class PlanPreviewRenderTests(unittest.TestCase):
                 encoding="utf-8",
             )
             plan = _base_plan(manifest_ref=str(manifest), data_dir=tmp,
-                             entry_request={"command": "run", "manifest": str(manifest), "data_dir": tmp})
-            resolved = auto_resolve_plan(plan)
-            with patch("sys.stdout", new_callable=io.StringIO) as stdout, \
-                 patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-                 patch("builtins.input", return_value="n"), \
-                 patch("app.entrypoints.ask_interactive._execute_confirmed_plan") as mock_exec:
-                accepted = _confirm_auto_resolve(resolved)
+                             entry_request={
+                                 "command": "run",
+                                 "manifest": str(manifest),
+                                 "data_dir": tmp,
+                                 "requested_stages": ["assembly"],
+                             })
+            draft = build_initial_plan_draft(plan)
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                _render_plan_summary(
+                    build_run_plan_summary(draft), title="Plan Draft", preview=True, draft=draft
+                )
             rendered = stdout.getvalue()
-            self.assertFalse(accepted)
-            mock_exec.assert_not_called()
-            self.assertIn("Plan Preview", rendered)
-            self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
-            self.assertIn("read_qc: pending", rendered)
+            self.assertIn("Plan Draft", rendered)
+            self.assertIn(f"raw_long_reads [ont/fastq]: {reads}", rendered)
+            self.assertIn("assembly: assembly.candidate.flye [local]  (recommended)", rendered)
+            self.assertIn("Advisory preview.", rendered)
+
+    def test_plan_draft_multi_stage_goal_marks_targets_deps_and_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fa"
+            reads.write_text(">r1\nACGT\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n"
+                f"  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fasta\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                entry_request={
+                    "command": "run",
+                    "manifest": str(manifest),
+                    "data_dir": tmp,
+                    "requested_stages": ["assembly", "gene_annotation"],
+                },
+            )
+            draft = build_initial_plan_draft(plan)
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                _render_plan_summary(
+                    build_run_plan_summary(draft), title="Plan Draft", preview=True, draft=draft
+                )
+            rendered = stdout.getvalue()
+            self.assertIn("Plan Draft", rendered)
+            self.assertIn(f"raw_long_reads [ont/fasta]: {reads}", rendered)
+            self.assertIn("[      dep] read_qc", rendered)
+            self.assertIn("[      dep] repeat_annotation", rendered)
+            self.assertIn("[      run] assembly", rendered)
+            self.assertIn("[plan-only] gene_annotation", rendered)
+            self.assertIn("assembly_review: pending", rendered)
+            self.assertIn("Advisory preview.", rendered)
+
+    def test_build_initial_plan_draft_skips_when_no_goal_was_parsed(self):
+        plan = _base_plan(entry_request={"command": "run", "manifest": "test.yaml", "data_dir": "data"})
+        self.assertIsNone(build_initial_plan_draft(plan))
 
 
 if __name__ == "__main__":

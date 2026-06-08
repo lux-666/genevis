@@ -84,6 +84,9 @@ See the numbered task docs in this folder:
 - `09_stage_method_boilerplate_consolidation.md` — behavior-preserving refactor:
   collapse per-method freeze/run/collect node + thin-router boilerplate into the
   shared `gene_annotation` helper + `{suffix: cfg}` table pattern.
+- `10_natural_language_draft_plan_approval.md` — refactor ask/TUI entry into a
+  real natural-language -> draft plan -> accept/reject -> manual-correction
+  flow.
 
 ## Annotation review chain (target shape)
 

@@ -494,6 +494,15 @@ run-config preview error) before the accept prompt, marking not-yet-selected
 values as `pending`. It is advisory and read-only; the final `Run Plan`
 confirmation before execution is unchanged.
 
+Superseded by Phase 7 task 10: the two divergent first-screen paths
+(`auto_resolve_plan`/`Plan Preview` for assembly-only vs. advisory-only intent
+preview for multi-stage goals) are replaced by one unified `Plan Draft` →
+`Accept this plan?` flow for every parsed workflow goal. The draft is
+evidence-prefilled; accepting it skips stage selection and prompts only for
+missing/ambiguous values. Reject enters manual stage selection (defaults =
+parsed target stages); no parsed goal goes straight to stage selection. The
+final `Run Plan` confirmation is still always shown before execution.
+
 ## Phase 6 Run Trace Example Record
 
 Local Mac-dev example of `gene-agent inspect --trace` regenerated from durable

@@ -15,6 +15,7 @@ from app.entrypoints.intent import (
 from app.llm.config import load_llm_profile
 from app.llm.prompts import load_prompt_bundle
 from app.schemas.entry import EntryAssetTypeHint, EntryRequest
+from app.schemas.run_config import RequestableStage
 
 
 class _FakeResponse:
@@ -126,6 +127,17 @@ class IntentParsingTests(unittest.TestCase):
             with self.subTest(asset_type_hint=asset_type_hint):
                 self.assertIn(asset_type_hint, system_prompt)
 
+    def test_intent_prompt_lists_requestable_stages(self):
+        system_prompt = load_prompt_bundle("intent.parse").system
+
+        self.assertIn("requested_stages", system_prompt)
+        for stage in get_args(RequestableStage):
+            with self.subTest(stage=stage):
+                self.assertIn(stage, system_prompt)
+        for phrase in ("组装/assemble", "质控/read QC", "功能注释/functional annotation", "全流程"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, system_prompt)
+
     def test_intent_prompt_describes_cyclone_fasta_raw_read_rules(self):
         system_prompt = load_prompt_bundle("intent.parse").system
 
@@ -142,6 +154,7 @@ class IntentParsingTests(unittest.TestCase):
                     "source_paths": ["/data/work/genevis/data/bht.Nanopore.pass.fa"],
                     "platform": "cycloneseq",
                     "asset_type_hint": "raw_long_reads",
+                    "requested_stages": ["assembly"],
                 }
             )
         )
@@ -149,6 +162,7 @@ class IntentParsingTests(unittest.TestCase):
         self.assertEqual(request.source_paths, ["/data/work/genevis/data/bht.Nanopore.pass.fa"])
         self.assertEqual(request.platform, "cycloneseq")
         self.assertEqual(request.asset_type_hint, "raw_long_reads")
+        self.assertEqual(request.requested_stages, ["assembly"])
 
     def test_blank_session_id_is_rejected_when_explicit(self):
         with self.assertRaisesRegex(ValueError, "session_id"):
@@ -202,6 +216,38 @@ class IntentParsingTests(unittest.TestCase):
         self.assertTrue(model.bound_formats)
         self.assertEqual(model.messages[0]["role"], "system")
         self.assertEqual(model.messages[1]["role"], "user")
+
+    def test_parse_request_does_not_infer_stage_goal_when_model_omits_it(self):
+        model = _FakeModel(
+            json.dumps(
+                {
+                    "command": "run",
+                    "source_paths": ["/data/input/reads.fastq.gz"],
+                    "platform": "cycloneseq",
+                    "asset_type_hint": "raw_long_reads",
+                }
+            )
+        )
+
+        request = parse_request_with_llm("/data/input/reads.fastq.gz 做一下组装", model=model)
+
+        self.assertIsNone(request.requested_stages)
+
+    def test_parse_request_does_not_treat_method_name_as_stage_goal(self):
+        model = _FakeModel(
+            json.dumps(
+                {
+                    "command": "run",
+                    "source_paths": ["/data/input/reads.fastq.gz"],
+                    "platform": "cycloneseq",
+                    "asset_type_hint": "raw_long_reads",
+                }
+            )
+        )
+
+        request = parse_request_with_llm("/data/input/reads.fastq.gz 用 Flye", model=model)
+
+        self.assertIsNone(request.requested_stages)
 
     def test_strict_response_schema_recursively_forbids_extra_properties(self):
         schema = _make_schema_strict(

@@ -14,14 +14,19 @@ from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
-    auto_resolve_plan,
+    build_initial_plan_draft,
     build_run_plan_summary,
     merge_clarification_response,
     next_clarification,
     save_plan_to_default_path,
 )
 from app.schemas.ask_plan import AskClarificationRequest, AskClarificationResponse, AskPlanState
-from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE, SharedParameters
+from app.schemas.shared_parameters import (
+    FLYE_TO_SHARED_READ_TYPE,
+    PLATFORM_TO_SHARED_READ_TYPE,
+    SHARED_TO_METHOD_READ_TYPE,
+    SharedParameters,
+)
 
 try:
     import questionary
@@ -51,18 +56,27 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
 
 
 def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int:
-    original_plan = plan
-    auto_resolved = auto_resolve_plan(plan)
-    plan = _apply_set_params(auto_resolved, getattr(args, "set_params", None) or [])
+    set_params = getattr(args, "set_params", None) or []
 
-    _auto_hint: AskPlanState | None = None
-
-    if plan.selected_stages is not None and original_plan.selected_stages is None:
-        if _confirm_auto_resolve(plan):
-            _auto_hint = plan
+    if plan.selected_stages is None:
+        draft = build_initial_plan_draft(plan)
+        if draft is not None:
+            draft = _apply_set_params(draft, set_params)
+            _render_plan_summary(
+                build_run_plan_summary(draft),
+                title="Plan Draft",
+                preview=True,
+                draft=draft,
+            )
+            if _prompt_confirm("Accept this plan?"):
+                plan = draft
+            else:
+                print("\n--- Editing plan manually ---\n")
+                plan = _apply_set_params(plan, set_params)
         else:
-            plan = original_plan
-            plan = _apply_set_params(plan, getattr(args, "set_params", None) or [])
+            plan = _apply_set_params(plan, set_params)
+    else:
+        plan = _apply_set_params(plan, set_params)
 
     plan_ref = save_plan_to_default_path(plan)
 
@@ -90,26 +104,9 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
             response = _prompt_for_answer(clarification)
 
         plan = merge_clarification_response(plan, response)
-
-        if response.kind == "stage_selection" and _auto_hint is not None:
-            plan = _try_auto_fill_methods(plan, _auto_hint)
-
         plan_ref = save_plan_to_default_path(plan)
 
     return _execute_confirmed_plan(plan, args)
-
-
-def _try_auto_fill_methods(plan: AskPlanState, hint: AskPlanState) -> AskPlanState:
-    """If user-selected stages match the auto-resolved hint, carry over methods."""
-    if not hint.selected_methods:
-        return plan
-    existing = dict(plan.selected_methods or {})
-    for stage, method in hint.selected_methods.items():
-        if stage not in existing and stage in (plan.resolved_execution_order or []):
-            existing[stage] = method
-    if existing != (plan.selected_methods or {}):
-        return plan.model_copy(update={"selected_methods": existing})
-    return plan
 
 
 def apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
@@ -177,7 +174,14 @@ def _render_confirm(req: AskClarificationRequest) -> None:
     _render_plan_summary(req.summary or {}, title="Run Plan")
 
 
-def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool = False) -> None:
+def _render_plan_summary(
+    summary: dict[str, Any],
+    *,
+    title: str,
+    preview: bool = False,
+    draft: AskPlanState | None = None,
+) -> None:
+    explicit_shared = _explicit_shared_params(draft) if draft is not None else set()
     print()
     print("=" * 50)
     print(title)
@@ -186,8 +190,26 @@ def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool =
     print(f"\nSession:  {summary.get('session_id', '?')}")
     print(f"Data dir: {summary.get('data_dir', '?')}")
     print(f"Manifest: {summary.get('manifest_ref', '?')}")
+    input_assets = summary.get("input_assets") or []
     source_paths = summary.get("source_paths")
-    if source_paths:
+    if input_assets:
+        print("\nInputs:")
+        for asset in input_assets:
+            paths = list(asset.get("paths") or [])
+            label_parts = [str(asset.get("asset_type") or "input")]
+            platform = asset.get("platform")
+            fmt = asset.get("format")
+            details = [str(value) for value in (platform, fmt) if value and value != "unknown"]
+            if details:
+                label_parts.append(f"[{'/'.join(details)}]")
+            label = " ".join(label_parts)
+            if len(paths) == 1:
+                print(f"  {label}: {paths[0]}")
+            else:
+                print(f"  {label}:")
+                for path in paths:
+                    print(f"    - {path}")
+    elif source_paths:
         print(f"Input:    {', '.join(source_paths)}")
 
     roles = summary.get("stage_roles", {})
@@ -201,6 +223,7 @@ def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool =
 
     methods = summary.get("selected_methods", {})
     exec_status = summary.get("method_execution_status", {})
+    method_note = "  (recommended)" if draft is not None else ""
     if preview and order:
         print("\nMethods:")
         for stage in order:
@@ -210,7 +233,7 @@ def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool =
                 continue
             method_list = value if isinstance(value, list) else [value]
             for m in method_list:
-                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}")
+                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}{method_note}")
     elif methods:
         print("\nMethods:")
         for stage, value in methods.items():
@@ -222,7 +245,10 @@ def _render_plan_summary(summary: dict[str, Any], *, title: str, preview: bool =
     if shared:
         print("\nShared parameters:")
         for k, v in shared.items():
-            print(f"  {k}: {v}")
+            note = ""
+            if draft is not None:
+                note = "  (from request)" if k in explicit_shared else "  (recommended)"
+            print(f"  {k}: {v}{note}")
     elif preview:
         print("\nShared parameters: pending")
 
@@ -289,9 +315,15 @@ def _prompt_confirm(message: str) -> bool:
     return raw in ("y", "yes")
 
 
-def _confirm_auto_resolve(plan: AskPlanState) -> bool:
-    _render_plan_summary(build_run_plan_summary(plan), title="Plan Preview", preview=True)
-    return _prompt_confirm("Accept this auto-detected plan?")
+def _explicit_shared_params(draft: AskPlanState) -> set[str]:
+    """Shared-parameter keys that were parsed from the user request, not inferred."""
+    entry = draft.entry_request or {}
+    explicit: set[str] = set()
+    if entry.get("platform") and entry["platform"] != "unknown":
+        explicit.add("platform")
+    if entry.get("genome_size_estimate"):
+        explicit.add("estimated_genome_size")
+    return explicit
 
 
 def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationResponse:
@@ -300,7 +332,7 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
 
     if _HAS_QUESTIONARY:
         print("\n--- Step 1: Stage Selection ---")
-        print("  Recommended stages are pre-checked based on your input data.\n")
+        print("  Recommended stages are pre-checked based on your request/input data.\n")
         choices = [
             questionary.Choice(
                 f"{stage} — {_STAGE_DESCRIPTIONS.get(stage, '')}",
@@ -320,7 +352,7 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
 
     # Plain-text fallback
     print("\n--- Step 1: Stage Selection ---")
-    print("  * = recommended based on your input data\n")
+    print("  * = recommended based on your request/input data\n")
     print("Available stages:")
     for i, stage in enumerate(available, 1):
         marker = "*" if stage in suggested else " "
@@ -427,7 +459,7 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
 
 def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
-    shared_defaults = req.choices.get("shared_defaults", {})
+    shared_defaults = dict(req.choices.get("shared_defaults", {}))
     params: dict[str, dict[str, Any]] = {}
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
@@ -444,11 +476,19 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
         if hint:
             label = f"{label}  ({hint})"
 
-        default = shared_defaults.get(param_name) if method_key == "shared_parameters" else _find_default(field, defaults)
+        if method_key == "shared_parameters":
+            current_shared_defaults = _derive_shared_parameter_defaults({**shared_defaults, **shared_params})
+            default = current_shared_defaults.get(param_name)
+            if param_name == "read_type" and default and current_shared_defaults.get("platform"):
+                shared_params[param_name] = default
+                continue
+        else:
+            default = _find_default(field, defaults)
 
         if method_key == "shared_parameters":
             value = _prompt_shared_parameter(label, param_name, default)
             shared_params[param_name] = value
+            shared_params = _derive_shared_parameter_defaults(shared_params)
         else:
             value = _prompt_text_value(label, default)
             if param_name == "estimated_genome_size" and isinstance(value, str):
@@ -457,7 +497,7 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
             _update_derived_defaults(method_key, param_name, value, defaults)
     return AskClarificationResponse(
         kind="parameter_values",
-        shared_parameters=shared_params or None,
+        shared_parameters=_derive_shared_parameter_defaults(shared_params) or None,
         method_parameters=params or None,
     )
 
@@ -621,6 +661,15 @@ def _update_derived_defaults(method_key: str, param_name: str, value: Any, defau
         bucket.setdefault("lineage_source", "local")
 
 
+def _derive_shared_parameter_defaults(shared: dict[str, Any]) -> dict[str, Any]:
+    if "read_type" in shared:
+        return shared
+    read_type = PLATFORM_TO_SHARED_READ_TYPE.get(str(shared.get("platform") or ""))
+    if not read_type:
+        return shared
+    return {**shared, "read_type": read_type}
+
+
 def _parse_genome_size(raw: str) -> int | str:
     m = _GENOME_SIZE_RE.match(raw.strip())
     if not m:
@@ -666,6 +715,7 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
     if existing:
         update["method_parameters"] = existing
     if shared:
+        shared = _derive_shared_parameter_defaults(shared)
         update["shared_parameters"] = SharedParameters.model_validate(shared)
     if update:
         return plan.model_copy(update=update)

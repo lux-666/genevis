@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.manifest import Platform
+from app.schemas.run_config import RequestableStage
 
 EntryAssetTypeHint = Literal[
     "raw_long_reads",
@@ -34,6 +35,7 @@ class EntryRequest(BaseModel):
     asset_type_hint: EntryAssetTypeHint | None = None
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
     genome_size_estimate: int | None = Field(default=None, gt=0)
+    requested_stages: list[RequestableStage] | None = None
 
     @model_validator(mode="after")
     def _validate_entry_source(self):

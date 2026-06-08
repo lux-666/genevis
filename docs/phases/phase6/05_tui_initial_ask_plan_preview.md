@@ -1,6 +1,11 @@
 # 05 TUI Initial Ask Plan Preview
 
-Task status: done.
+Task status: done. Superseded by Phase 7 task 10: the `auto_resolve_plan` /
+`_confirm_auto_resolve` "Plan Preview" accept path described below was replaced
+by the unified `Plan Draft` → `Accept this plan?` flow in
+`docs/phases/phase7/10_natural_language_draft_plan_approval.md`. The
+`_render_plan_summary` preview renderer documented here is retained and reused.
+
 
 ## Goal
 

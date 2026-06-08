@@ -414,24 +414,49 @@ def save_plan_to_default_path(plan: AskPlanState) -> Path:
     return save_ask_plan(plan, ask_plan_path(plan.data_dir, plan.session_id))
 
 
-def auto_resolve_plan(plan: AskPlanState) -> AskPlanState:
-    """Auto-select assembly/flye when the manifest contains only raw long reads."""
-    if plan.selected_stages is not None:
+def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
+    """Build an evidence-prefilled draft plan from the parsed workflow goal.
+
+    Returns an unconfirmed candidate AskPlanState with target stages,
+    dependency-expanded order, safe default methods, and inferred parameters
+    prefilled. Returns None when no workflow goal was parsed, so the caller
+    falls back to manual stage selection.
+
+    Contract: the result is a *candidate*, not committed state. The fields it
+    reuses (selected_stages/selected_methods/...) carry recommended values, not
+    operator-confirmed ones. The caller must show it for approval and only treat
+    it as the live plan (persist it / feed it to next_clarification) once the
+    operator accepts; on reject it must be discarded, never saved. A dedicated
+    AskPlanDraft model was deliberately not introduced — see the data-boundary
+    note in docs/phases/phase7/10_natural_language_draft_plan_approval.md.
+    """
+    target = _intent_requested_stages(plan)
+    if not target:
+        return None
+    draft = merge_clarification_response(
+        plan,
+        AskClarificationResponse(kind="stage_selection", selected_stages=target),
+    )
+    draft = _fill_draft_default_methods(draft)
+    draft = _auto_fill_inferred_defaults(draft)
+    return draft
+
+
+def _fill_draft_default_methods(plan: AskPlanState) -> AskPlanState:
+    """Prefill conventional default methods for the draft preview.
+
+    Stages with a clear default are filled; genuinely multi-candidate stages
+    (e.g. genome_survey, assembly_review) are left for method selection.
+    """
+    filled = _fill_missing_method_defaults(plan, dict(plan.selected_methods or {}))
+    if "assembly" in (plan.resolved_execution_order or []) and "assembly" not in filled:
+        manifest = _load_manifest(plan.manifest_ref)
+        asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
+        if asset_types == {"raw_long_reads"}:
+            filled["assembly"] = "assembly.candidate.flye"
+    if filled == (plan.selected_methods or {}):
         return plan
-    manifest = _load_manifest(plan.manifest_ref)
-    if manifest is None:
-        return plan
-    asset_types = {asset.asset_type for asset in manifest.assets}
-    if asset_types != {"raw_long_reads"}:
-        return plan
-    stages = ["assembly"]
-    order = _resolve_execution_order(stages, plan)
-    plan = plan.model_copy(update={
-        "selected_stages": stages,
-        "resolved_execution_order": order,
-        "selected_methods": {"assembly": "assembly.candidate.flye"},
-    })
-    return plan
+    return plan.model_copy(update={"selected_methods": filled or None})
 
 
 def next_clarification(plan: AskPlanState, *, ask_plan_ref: str | Path) -> AskClarificationRequest | None:
@@ -480,6 +505,7 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
         if response.shared_parameters:
             current_shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
             current_shared.update(response.shared_parameters.model_dump(exclude_none=True))
+            current_shared = _derive_shared_read_type_from_platform(current_shared)
             update["shared_parameters"] = SharedParameters.model_validate(current_shared)
         return plan.model_copy(update=update)
     if response.kind == "confirm":
@@ -611,9 +637,15 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
 def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClarificationRequest:
     missing_fields, defaults, shared_defaults, warnings = _missing_parameters_and_defaults(plan)
     all_fields: list[str] = []
-    if _has_raw_long_reads(plan):
+    has_raw_long_reads = _has_raw_long_reads(plan)
+    shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+    if has_raw_long_reads:
         all_fields.append("shared_parameters.platform")
-    if _assembly_needs_shared_read_type(plan):
+    if (
+        _assembly_needs_shared_read_type(plan)
+        and "read_type" not in shared_defaults
+        and (not has_raw_long_reads or "platform" in shared)
+    ):
         all_fields.append("shared_parameters.read_type")
     if _assembly_needs_shared_genome_size(plan):
         all_fields.append("shared_parameters.estimated_genome_size")
@@ -673,6 +705,9 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     entry = plan.entry_request or {}
     if entry.get("source_paths"):
         summary["source_paths"] = entry["source_paths"]
+    input_assets = _input_assets_from_manifest(plan.manifest_ref)
+    if input_assets:
+        summary["input_assets"] = input_assets
     if plan.selected_methods:
         summary["selected_methods"] = plan.selected_methods
     if plan.shared_parameters:
@@ -733,10 +768,37 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
 
 
 def _suggested_stages(plan: AskPlanState, available: list[str]) -> list[str]:
+    requested = [stage for stage in _intent_requested_stages(plan) if stage in available]
+    if requested:
+        return requested
     recommended = _recommended_stages_from_manifest(plan.manifest_ref)
     if recommended:
         return [s for s in recommended if s in available]
     return available[:2] if available else []
+
+
+def _intent_requested_stages(plan: AskPlanState) -> list[str]:
+    entry = plan.entry_request or {}
+    requested = entry.get("requested_stages")
+    if not isinstance(requested, list):
+        return []
+    available = set(_all_selectable_stages())
+    return [str(stage) for stage in requested if str(stage) in available]
+
+
+def _input_assets_from_manifest(manifest_ref: str) -> list[dict[str, Any]]:
+    manifest = _load_manifest(manifest_ref)
+    if manifest is None:
+        return []
+    return [
+        {
+            "asset_type": str(asset.asset_type),
+            "platform": str(asset.platform),
+            "format": str(asset.format),
+            "paths": list(asset.paths),
+        }
+        for asset in manifest.assets
+    ]
 
 
 def _resolve_execution_order(selected: list[str], plan: AskPlanState) -> list[str]:
@@ -873,7 +935,7 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
     shared_defaults, _ = _infer_shared_parameter_defaults(plan)
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
     method_overrides = _method_specific_shared_overrides(plan)
-    merged_shared = {**shared_defaults, **shared, **method_overrides}
+    merged_shared = _derive_shared_read_type_from_platform({**shared_defaults, **shared, **method_overrides})
     if _has_raw_long_reads(plan) and "platform" not in merged_shared:
         return True
     if _assembly_needs_shared_read_type(plan) and "read_type" not in merged_shared:
@@ -909,7 +971,7 @@ def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
         update["method_parameters"] = defaults
     if shared_defaults:
         current_shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
-        current_shared = {**shared_defaults, **current_shared}
+        current_shared = _derive_shared_read_type_from_platform({**shared_defaults, **current_shared})
         update["shared_parameters"] = SharedParameters.model_validate(current_shared)
     if not update:
         return plan
@@ -925,7 +987,9 @@ def _missing_parameters_and_defaults(
     shared_defaults, shared_warnings = _infer_shared_parameter_defaults(plan)
     warnings.extend(shared_warnings)
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
-    shared_defaults = {**shared_defaults, **shared, **_method_specific_shared_overrides(plan)}
+    shared_defaults = _derive_shared_read_type_from_platform(
+        {**shared_defaults, **shared, **_method_specific_shared_overrides(plan)}
+    )
     if _assembly_needs_shared_read_type(plan) and "read_type" not in shared_defaults:
         missing_fields.append("shared_parameters.read_type")
     if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in shared_defaults:
@@ -1003,7 +1067,16 @@ def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any]
             )
         else:
             inferred.setdefault("estimated_genome_size", request_size)
-    return inferred, warnings
+    return _derive_shared_read_type_from_platform(inferred), warnings
+
+
+def _derive_shared_read_type_from_platform(shared: dict[str, Any]) -> dict[str, Any]:
+    if "read_type" in shared:
+        return shared
+    read_type = PLATFORM_TO_SHARED_READ_TYPE.get(str(shared.get("platform") or ""))
+    if not read_type:
+        return shared
+    return {**shared, "read_type": read_type}
 
 
 def _has_raw_long_reads(plan: AskPlanState) -> bool:
