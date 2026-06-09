@@ -1071,6 +1071,37 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
         warnings = _plan_validation_warnings(plan)
         self.assertTrue(any("hic_scaffolding" in w and "Hi-C reads" in w for w in warnings))
 
+    def test_assembly_review_without_assembly_warns(self):
+        plan = _base_plan(
+            selected_stages=["assembly_review"],
+            resolved_execution_order=["assembly_review"],
+            selected_methods={"assembly_review": ["assembly_review.eval.quast"]},
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertTrue(any("assembly_review" in w and "without an assembly" in w for w in warnings))
+
+    def test_gene_annotation_without_assembly_warns(self):
+        plan = _base_plan(
+            selected_stages=["gene_annotation"],
+            resolved_execution_order=["gene_annotation"],
+            selected_methods={"gene_annotation": ["gene_annotation.candidate.braker3"]},
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertTrue(any("gene_annotation" in w and "without a genome" in w for w in warnings))
+
+    def test_gene_annotation_with_assembly_no_genome_warning(self):
+        plan = _base_plan(
+            selected_stages=["assembly", "gene_annotation"],
+            resolved_execution_order=["assembly", "gene_annotation"],
+            selected_methods={
+                "assembly": "assembly.candidate.flye",
+                "gene_annotation": ["gene_annotation.candidate.braker3"],
+            },
+        )
+        warnings = _plan_validation_warnings(plan)
+        self.assertFalse(any("without a genome" in w for w in warnings))
+
+
     def test_method_execution_status_in_summary(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding", "gene_annotation"],

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,20 +50,6 @@ def _ask_ns(**overrides):
     )
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-def _diamond_provenance_json(proteins_ref: str = "/data/proteins.fa") -> str:
-    return json.dumps([
-        {
-            "method_name": "function_annotation.candidate.diamond",
-            "database_name": "UniProt",
-            "database_version": "2026_02",
-            "snapshot_date": "2026-05-16",
-            "database_source_ref": "/db/uniprot/2026_02.dmnd",
-            "descriptor_version": "diamond.yaml",
-            "input_proteins_ref": proteins_ref,
-        }
-    ])
 
 
 class IsInteractiveTests(unittest.TestCase):
@@ -285,6 +270,7 @@ class InteractiveLoopTests(unittest.TestCase):
         provenance = response.stage_parameters["function_annotation"]["database_provenance"]
         self.assertEqual(provenance[0]["method_name"], "function_annotation.candidate.diamond")
         self.assertEqual(provenance[0]["database_name"], "UniProt")
+        self.assertIsNone(provenance[0]["input_proteins_ref"])
 
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(

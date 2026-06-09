@@ -170,7 +170,29 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("input_proteins_ref", result["last_error"])
 
-    def test_valid_provenance_requires_materialized_protein_artifact(self):
+    def test_provenance_omitted_input_proteins_ref_adopts_resolved_proteins(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proteins_ref = str(Path(tmpdir) / "proteins.fa")
+            state = self._protein_state(
+                tmpdir,
+                provenance=[
+                    {
+                        "method_name": "function_annotation.candidate.interproscan",
+                        "database_name": "InterPro",
+                        "database_version": "99.0",
+                        "snapshot_date": "2026-05-05",
+                        "database_source_ref": "/db/interpro/99.0",
+                        "descriptor_version": "interproscan.yaml",
+                    }
+                ],
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "completed")
+            function = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(function["database_provenance"][0]["input_proteins_ref"], proteins_ref)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins_ref = str(Path(tmpdir) / "proteins.fa")
             state = self._protein_state(

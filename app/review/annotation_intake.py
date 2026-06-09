@@ -320,7 +320,7 @@ def _collect_downstream_stage_selection(plan: AskPlanState) -> AskPlanState:
         response_schema={"kind": "stage_selection", "selected_stages": plan.selected_stages or []},
         next_action={"kind": "interactive_annotation_intake"},
     )
-    response = _prompt_for_answer(req)
+    response = _prompt_for_answer(req, plan)
     selected = _ordered_downstream(response.selected_stages or [])
     return plan.model_copy(
         update={
@@ -338,7 +338,7 @@ def _collect_downstream_method_selection(plan: AskPlanState) -> AskPlanState:
     if not plan.resolved_execution_order:
         return plan.model_copy(update={"selected_methods": None, "method_parameters": None})
     req = _method_selection_request(plan, "annotation_intake")
-    response = _prompt_for_answer(req)
+    response = _prompt_for_answer(req, plan)
     plan = merge_clarification_response(plan, response)
     selected = dict(plan.selected_methods or {})
     selected = {stage: methods for stage, methods in selected.items() if stage in DOWNSTREAM_STAGES}
@@ -350,7 +350,7 @@ def _collect_downstream_parameters(plan: AskPlanState) -> AskPlanState:
     if not _needs_parameter_values(plan):
         return plan
     req = _parameter_values_request(plan, "annotation_intake")
-    response = _prompt_for_answer(req)
+    response = _prompt_for_answer(req, plan)
     return merge_clarification_response(plan, response)
 
 

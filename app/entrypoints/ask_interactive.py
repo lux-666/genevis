@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from typing import Any
@@ -525,14 +524,13 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
     """Prompt for function annotation database provenance interactively.
 
     Asks simple per-method questions (database path, name, version) and
-    auto-fills the rest (method_name, snapshot_date, input_proteins_ref,
-    descriptor_version).  Users never see or construct JSON.
+    auto-fills the rest (method_name, snapshot_date, descriptor_version).
+    input_proteins_ref is left unset: function_annotation adopts the resolved
+    proteins_fasta_ref at runtime, which the ask layer cannot know for
+    manifest-provided proteins.  Users never see or construct JSON.
     """
     from datetime import date
-    from pathlib import Path
 
-    data_dir = plan.data_dir
-    session_id = plan.session_id
     methods = (plan.selected_methods or {}).get("function_annotation")
     method_list = methods if isinstance(methods, list) else [methods] if methods else []
 
@@ -567,27 +565,15 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
         if db_version is None:
             db_version = "current"
 
-        # Auto-derive input_proteins_ref from the gene_annotation work dir
-        gene_work = str(Path(data_dir) / "work" / "gene_annotation" / session_id / "proteins.fa")
-
         record = {
             "method_name": method,
             "database_name": str(db_name),
             "database_version": str(db_version),
             "snapshot_date": date.today().isoformat(),
             "database_source_ref": db_path,
-            "input_proteins_ref": gene_work,
             "descriptor_version": f"{method.rsplit('.', 1)[-1]}.yaml",
         }
-
-        # Validate via the schema
-        try:
-            validated = FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json")
-            records.append(validated)
-        except ValidationError as exc:
-            print(f"    Validation error: {exc.errors()[0]['msg']}")
-            print(f"    Re-entering {label} provenance.\n")
-            continue
+        records.append(FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json"))
 
     if not records:
         return records
@@ -748,7 +734,6 @@ def _update_derived_defaults(method_key: str, param_name: str, value: Any, defau
         name = _Path(str(value)).name
         bucket = defaults.setdefault(method_key, {})
         bucket.setdefault("lineage_name", name)
-        import re
         m = re.search(r"(odb\d+)", name)
         if m:
             bucket.setdefault("lineage_version", m.group(1))

@@ -471,7 +471,7 @@ def next_clarification(plan: AskPlanState, *, ask_plan_ref: str | Path) -> AskCl
 def merge_clarification_response(plan: AskPlanState, response: AskClarificationResponse) -> AskPlanState:
     if response.kind == "stage_selection":
         stages = list(response.selected_stages or [])
-        order = _resolve_execution_order(stages, plan)
+        order = _resolve_execution_order(stages)
         pipeline_methods = _auto_fill_pipeline_methods(order)
         return plan.model_copy(update={
             "selected_stages": stages,
@@ -813,7 +813,7 @@ def _input_assets_from_manifest(manifest_ref: str) -> list[dict[str, Any]]:
     ]
 
 
-def _resolve_execution_order(selected: list[str], _plan: AskPlanState) -> list[str]:
+def _resolve_execution_order(selected: list[str]) -> list[str]:
     selected_set = set(selected)
     return [stage for stage in STAGE_ORDER if stage in selected_set]
 
@@ -1174,6 +1174,19 @@ def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
     if "hic_scaffolding" in order:
         if "hic_reads_registered" not in asset_types and "hic_alignment_bam" not in asset_types:
             warnings.append("hic_scaffolding: no Hi-C reads in manifest; stage will skip at runtime")
+    assembly_available = "assembly" in order or "assembly_fasta_registered" in asset_types
+    if "assembly_review" in order and not assembly_available:
+        warnings.append(
+            "assembly_review: no assembly stage upstream and no "
+            "assembly_fasta_registered in manifest; stage will fail without an assembly"
+        )
+    if "gene_annotation" in order and not assembly_available:
+        has_provided = "gene_models" in asset_types and "predicted_proteins" in asset_types
+        if not has_provided:
+            warnings.append(
+                "gene_annotation: no assembly upstream and no provided "
+                "gene_models/predicted_proteins in manifest; stage will fail without a genome"
+            )
     if "function_annotation" in order and "gene_annotation" not in order:
         if "predicted_proteins" not in asset_types and "gene_models" not in asset_types:
             warnings.append(

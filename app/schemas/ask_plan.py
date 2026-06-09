@@ -32,6 +32,11 @@ class AskPlanState(BaseModel):
     selected_stages: list[str] | None = None
     resolved_execution_order: list[str] | None = None
     selected_methods: dict[str, str | list[str]] | None = None
+    # Three parameter scopes, threaded consistently through response -> merge ->
+    # request -> run_config -> checkpoint: shared_parameters are pipeline-wide
+    # (platform, genome size); method_parameters key off a method id (e.g. Flye
+    # threads); stage_parameters are stage-scoped and not owned by one method
+    # (e.g. function_annotation.database_provenance).
     shared_parameters: SharedParameters | None = None
     method_parameters: dict[str, dict[str, Any]] | None = None
     stage_parameters: dict[str, dict[str, Any]] | None = None

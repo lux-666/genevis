@@ -498,7 +498,9 @@ def _validate_provenance_records(
             field = ".".join(str(part) for part in error.get("loc", []))
             message = f"{field}: {error['msg']}" if field else error["msg"]
             return [], f"invalid database_provenance[{index}]: {message}"
-        if record.input_proteins_ref != proteins_ref:
+        if record.input_proteins_ref is None:
+            record = record.model_copy(update={"input_proteins_ref": proteins_ref})
+        elif record.input_proteins_ref != proteins_ref:
             return [], f"database_provenance[{index}].input_proteins_ref does not match proteins_fasta_ref"
         records.append(record)
     if not records:

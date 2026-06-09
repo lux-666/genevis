@@ -329,7 +329,10 @@ class FunctionDatabaseProvenance(BaseModel):
     database_version: str
     snapshot_date: str
     database_source_ref: str
-    input_proteins_ref: str
+    # Optional: when omitted, function_annotation adopts the resolved
+    # proteins_fasta_ref at runtime. The ask layer cannot know the runtime
+    # path for manifest-provided proteins, so it leaves this unset.
+    input_proteins_ref: str | None = None
     command: str | None = None
     descriptor_version: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -340,7 +343,6 @@ class FunctionDatabaseProvenance(BaseModel):
         "database_version",
         "snapshot_date",
         "database_source_ref",
-        "input_proteins_ref",
     )
     @classmethod
     def _required_text_must_not_be_empty(cls, value: str) -> str:
