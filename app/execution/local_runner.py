@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 
 from app.execution.results import CollectResult, ExecutionResult
@@ -44,7 +45,11 @@ class LocalRunner:
             ]
             shell = False
         else:
-            command = f"{spec.env_setup + ' && ' if spec.env_setup else ''}{spec.interpreter} {script_name}"
+            parts: list[str] = []
+            if spec.env_setup:
+                parts.append(spec.env_setup)
+            parts.append(f"{shlex.quote(spec.interpreter)} {shlex.quote(script_name)}")
+            command = " && ".join(parts)
             shell = True
 
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1010,7 +1011,7 @@ GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 
 CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
 AUGUSTUS_METHOD = "gene_annotation.candidate.augustus"
-AUGUSTUS_DEFAULT_SPECIES = "fly"
+AUGUSTUS_DEFAULT_SPECIES = "generic"
 
 
 def _freeze_gene_method_attempt(
@@ -1311,9 +1312,8 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     weights_path = working_dir / "weights.txt"
     weight_lines = []
     for method_ref in sorted(candidate_refs.values()):
-        # Map evidence class from method type; default ab_initio weight 1.
-        weight_lines.append(f"ABINITIO_PREDICTION\t{method_ref}\t1")
-    weight_lines.append(f"PROTEIN_PREDICTION\t{str(Path(genome_ref))}\t{merge_weights.get('protein', 5)}")
+        # EVM weights format: EVIDENCE_TYPE<TAB>WEIGHT<TAB>FILE_PATH
+        weight_lines.append(f"ABINITIO_PREDICTION\t1\t{method_ref}")
     weights_path.write_text("\n".join(weight_lines) + "\n", encoding="utf-8")
 
     output_gff3 = artifact_dir / "evm_merged.gff3"
@@ -1491,6 +1491,8 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     out_name = "busco_gene"
+    lineage_name = Path(busco_lineage).name
+    short_summary = artifact_dir / out_name / f"short_summary.specific.{lineage_name}.{out_name}.txt"
     script_path = working_dir / "run_busco.sh"
     script_path.write_text(
         "set -e\n"
@@ -1499,7 +1501,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
         f" -m {shlex.quote(busco_mode)}"
         f" -l {shlex.quote(str(busco_lineage))}"
         f" --offline --cpu 4\n"
-        f"test -f {shlex.quote(str(artifact_dir / out_name / 'short_summary.txt'))}\n",
+        f"test -f {shlex.quote(str(short_summary))}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -1511,7 +1513,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
         method_name=GENE_BUSCO_METHOD,
         script_path=script_path,
         working_dir=working_dir,
-        expected_outputs=[artifact_dir / out_name / "short_summary.txt"],
+        expected_outputs=[short_summary],
         env=gene_out.get("env"),
         env_spec=env_spec,
         metadata={
@@ -1519,7 +1521,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
             "busco_mode": busco_mode,
             "busco_lineage": str(busco_lineage),
             "busco_output_dir": str(artifact_dir / out_name),
-            "short_summary_ref": str(artifact_dir / out_name / "short_summary.txt"),
+            "short_summary_ref": str(short_summary),
         },
     )
 
@@ -1608,9 +1610,6 @@ def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
             "busco_metrics": metrics,
         },
     )
-
-
-import re  # noqa: E402 — needed by _parse_busco_short_summary below
 
 
 def _parse_busco_short_summary(path: Path) -> dict[str, Any]:

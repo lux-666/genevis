@@ -341,11 +341,17 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     artifact_dir = data_dir / "artifacts" / "function_annotation" / session_id / cfg["suffix"]
     output_tsv = artifact_dir / f"{cfg['suffix']}_hits.tsv"
 
+    threads = function_out.get("diamond_parameters", {}).get("threads", 4)
+    try:
+        threads = int(threads)
+    except (TypeError, ValueError):
+        threads = 4
+
     script = (
         "set -e\n"
         f"diamond makedb --in {shlex.quote(str(db_path))} -d {shlex.quote(str(dmnd_index))}\n"
         f"diamond blastp --db {shlex.quote(str(dmnd_index))} --query {shlex.quote(str(proteins_ref))}"
-        f" --outfmt 6 --out {shlex.quote(str(output_tsv))}\n"
+        f" --outfmt 6 --threads {threads} --out {shlex.quote(str(output_tsv))}\n"
         f"test -f {shlex.quote(str(output_tsv))}\n"
     )
 
@@ -354,7 +360,7 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
         method_name=DIAMOND_METHOD,
         cfg=cfg,
         script_body=script,
-        extra_metadata={"database_source_ref": db_path, "dmnd_index": str(dmnd_index)},
+        extra_metadata={"database_source_ref": db_path, "dmnd_index": str(dmnd_index), "threads": threads},
     )
 
 
