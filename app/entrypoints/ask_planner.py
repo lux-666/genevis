@@ -355,16 +355,6 @@ _STAGES_NEEDING_METHOD_SELECTION = {
     stage for stage, mode in _STAGE_SELECTION_MODE.items() if mode != "pipeline"
 }
 
-_ASSEMBLY_UPSTREAM_DEPS = {
-    "assembly": ["read_qc"],
-    "assembly_review": ["read_qc", "assembly"],
-    "hic_scaffolding": ["read_qc", "assembly", "assembly_review"],
-    "repeat_annotation": ["read_qc", "assembly", "assembly_review"],
-    "gene_annotation": ["read_qc", "assembly", "assembly_review", "repeat_annotation"],
-    "function_annotation": ["read_qc", "assembly", "assembly_review", "repeat_annotation", "gene_annotation"],
-}
-
-
 def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
     for methods in _STAGE_METHODS.values():
         for m in methods:
@@ -421,7 +411,7 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
     """Build an evidence-prefilled draft plan from the parsed workflow goal.
 
     Returns an unconfirmed candidate AskPlanState with target stages,
-    dependency-expanded order, safe default methods, and inferred parameters
+    execution order, safe default methods, and inferred parameters
     prefilled. Returns None when no workflow goal was parsed, so the caller
     falls back to manual stage selection.
 
@@ -823,31 +813,9 @@ def _input_assets_from_manifest(manifest_ref: str) -> list[dict[str, Any]]:
     ]
 
 
-def _resolve_execution_order(selected: list[str], plan: AskPlanState) -> list[str]:
-    manifest = _load_manifest(plan.manifest_ref)
-    manifest_asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
-    required = set(selected)
-    for stage in selected:
-        deps = _ASSEMBLY_UPSTREAM_DEPS.get(stage, [])
-        for dep in deps:
-            if dep in required:
-                continue
-            if _can_skip_dependency(dep, manifest_asset_types):
-                continue
-            required.add(dep)
-    return [stage for stage in STAGE_ORDER if stage in required]
-
-
-def _can_skip_dependency(dep_stage: str, manifest_asset_types: set[str]) -> bool:
-    if dep_stage == "read_qc" and "clean_long_reads" in manifest_asset_types:
-        return True
-    if dep_stage in ("assembly", "assembly_review") and "assembly_fasta_registered" in manifest_asset_types:
-        return True
-    if dep_stage == "repeat_annotation" and "repeat_library" in manifest_asset_types:
-        return True
-    if dep_stage == "gene_annotation" and "gene_models" in manifest_asset_types and "predicted_proteins" in manifest_asset_types:
-        return True
-    return False
+def _resolve_execution_order(selected: list[str], _plan: AskPlanState) -> list[str]:
+    selected_set = set(selected)
+    return [stage for stage in STAGE_ORDER if stage in selected_set]
 
 
 def _needs_method_selection(plan: AskPlanState) -> bool:

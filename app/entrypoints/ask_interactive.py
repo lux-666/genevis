@@ -104,7 +104,7 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                 continue
             response = AskClarificationResponse(kind="confirm", confirmed=True)
         else:
-            response = _prompt_for_answer(clarification)
+            response = _prompt_for_answer(clarification, plan)
 
         plan = merge_clarification_response(plan, response)
         plan_ref = save_plan_to_default_path(plan)
@@ -311,13 +311,13 @@ def _safe_ask(question: Any) -> Any:
     return result
 
 
-def _prompt_for_answer(req: AskClarificationRequest) -> AskClarificationResponse:
+def _prompt_for_answer(req: AskClarificationRequest, plan: AskPlanState) -> AskClarificationResponse:
     if req.kind == "stage_selection":
         return _prompt_stage_selection(req)
     if req.kind == "method_selection":
         return _prompt_method_selection(req)
     if req.kind == "parameter_values":
-        return _prompt_parameter_values(req)
+        return _prompt_parameter_values(req, plan)
     raise ValueError(f"unexpected clarification kind: {req.kind}")
 
 
@@ -470,7 +470,7 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
     return [READ_QC_STATS_METHOD, filter_method, READ_QC_HANDOFF_METHOD]
 
 
-def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationResponse:
+def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
     shared_defaults = dict(req.choices.get("shared_defaults", {}))
     stage_defaults = dict(req.choices.get("stage_defaults", {}))
@@ -505,9 +505,7 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
             shared_params[param_name] = value
             shared_params = _derive_shared_parameter_defaults(shared_params)
         elif field == "function_annotation.database_provenance":
-            value = _prompt_function_database_provenance(
-                stage_defaults.get("function_annotation", {}).get("database_provenance")
-            )
+            value = _prompt_function_database_provenance(plan)
             stage_params.setdefault("function_annotation", {})["database_provenance"] = value
         else:
             value = _prompt_text_value(label, default)
@@ -523,29 +521,79 @@ def _prompt_parameter_values(req: AskClarificationRequest) -> AskClarificationRe
     )
 
 
-def _prompt_function_database_provenance(default: Any) -> list[dict[str, Any]]:
-    print("  function_annotation.database_provenance expects a JSON list of provenance records.")
-    print("  Required keys: method_name, database_name, database_version, snapshot_date, database_source_ref, input_proteins_ref.")
-    print("  Each record also needs command or descriptor_version.")
-    default_text = json.dumps(default, ensure_ascii=False) if default is not None else None
-    while True:
-        raw = _prompt_text_value("[function_annotation] database_provenance JSON", default_text)
+def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, Any]]:
+    """Prompt for function annotation database provenance interactively.
+
+    Asks simple per-method questions (database path, name, version) and
+    auto-fills the rest (method_name, snapshot_date, input_proteins_ref,
+    descriptor_version).  Users never see or construct JSON.
+    """
+    from datetime import date
+    from pathlib import Path
+
+    data_dir = plan.data_dir
+    session_id = plan.session_id
+    methods = (plan.selected_methods or {}).get("function_annotation")
+    method_list = methods if isinstance(methods, list) else [methods] if methods else []
+
+    _METHOD_LABELS = {
+        "function_annotation.candidate.diamond": "DIAMOND",
+        "function_annotation.candidate.interproscan": "InterProScan",
+        "function_annotation.candidate.eggnog_mapper": "eggNOG-mapper",
+        "function_annotation.candidate.kofamscan": "KOfamScan",
+    }
+
+    records: list[dict[str, Any]] = []
+    for method in method_list:
+        label = _METHOD_LABELS.get(method, method.rsplit(".", 1)[-1])
+        print(f"\n  -- {label} database provenance --")
+
+        # Database source path (the only thing the user must provide)
+        db_path = None
+        while not db_path:
+            raw = _prompt_text_value(f"{label} database path", None)
+            if raw and str(raw).strip():
+                db_path = str(raw).strip()
+            else:
+                print(f"    Database path is required for {label}.")
+
+        # Database name (optional, defaults to label)
+        db_name = _prompt_text_value(f"{label} database name", label)
+        if db_name is None:
+            db_name = label
+
+        # Database version (optional, defaults to "current")
+        db_version = _prompt_text_value(f"{label} database version", "current")
+        if db_version is None:
+            db_version = "current"
+
+        # Auto-derive input_proteins_ref from the gene_annotation work dir
+        gene_work = str(Path(data_dir) / "work" / "gene_annotation" / session_id / "proteins.fa")
+
+        record = {
+            "method_name": method,
+            "database_name": str(db_name),
+            "database_version": str(db_version),
+            "snapshot_date": date.today().isoformat(),
+            "database_source_ref": db_path,
+            "input_proteins_ref": gene_work,
+            "descriptor_version": f"{method.rsplit('.', 1)[-1]}.yaml",
+        }
+
+        # Validate via the schema
         try:
-            parsed = json.loads(raw) if isinstance(raw, str) else raw
-        except json.JSONDecodeError as exc:
-            print(f"  Invalid JSON: {exc}")
-            continue
-        if not isinstance(parsed, list):
-            print("  database_provenance must be a JSON list.")
-            continue
-        try:
-            records = [FunctionDatabaseProvenance.model_validate(item).model_dump(mode="json") for item in parsed]
+            validated = FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json")
+            records.append(validated)
         except ValidationError as exc:
-            print(f"  Invalid database_provenance: {exc.errors()[0]['msg']}")
+            print(f"    Validation error: {exc.errors()[0]['msg']}")
+            print(f"    Re-entering {label} provenance.\n")
             continue
-        if records:
-            return records
-        print("  database_provenance must contain at least one record.")
+
+    if not records:
+        return records
+
+    print(f"\n  database_provenance: {len(records)} record(s) configured.")
+    return records
 
 
 def _prompt_text_value(label: str, default: Any) -> Any:

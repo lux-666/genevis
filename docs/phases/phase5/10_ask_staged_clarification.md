@@ -58,10 +58,10 @@ clarification steps, then confirm the execution plan before starting.
   plan is confirmed. `merge_clarification_response()` applies operator
   answers. `build_run_config_payload()` generates a `RunConfig`-valid dict
   from the confirmed plan.
-- Dependency resolution (`_resolve_execution_order`): adds upstream stages
-  from `_ASSEMBLY_UPSTREAM_DEPS` unless `_can_skip_dependency` determines
-  the manifest already provides the required output (e.g. clean_long_reads
-  skips read_qc).
+- Historical note: this phase originally added upstream stages inside
+  `_resolve_execution_order`; Phase 7 superseded that behavior. Current ask
+  planning treats the operator-selected stages as the execution boundary and
+  only orders those stages by `STAGE_ORDER`.
 - Parameter inference (`_infer_parameter_defaults`): reads manifest
   raw_long_reads platform for Flye read_type, manifest genome_size_estimate,
   and entry_request genome_size_estimate. Conflicts surface as warnings

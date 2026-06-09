@@ -102,7 +102,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             plan = _base_plan(manifest_ref=str(manifest))
             self.assertIsNone(build_initial_plan_draft(plan))
 
-    def test_assembly_goal_raw_long_reads_prefills_flye_and_read_qc(self):
+    def test_assembly_goal_raw_long_reads_prefills_flye_without_read_qc(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -115,10 +115,9 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             draft = build_initial_plan_draft(plan)
             self.assertIsNotNone(draft)
             self.assertEqual(draft.selected_stages, ["assembly"])
-            self.assertIn("read_qc", draft.resolved_execution_order)
-            self.assertIn("assembly", draft.resolved_execution_order)
+            self.assertEqual(draft.resolved_execution_order, ["assembly"])
             self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
-            self.assertIn("read_qc", draft.selected_methods)
+            self.assertNotIn("read_qc", draft.selected_methods)
 
     def test_assembly_goal_mixed_assets_leaves_assembly_method_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,7 +137,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             self.assertEqual(draft.selected_stages, ["assembly"])
             self.assertNotIn("assembly", draft.selected_methods or {})
 
-    def test_multi_stage_goal_keeps_target_and_expands_dependencies(self):
+    def test_multi_stage_goal_keeps_requested_execution_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -153,8 +152,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
-            self.assertIn("repeat_annotation", draft.resolved_execution_order)
-            self.assertIn("assembly_review", draft.resolved_execution_order)
+            self.assertEqual(draft.resolved_execution_order, ["assembly", "gene_annotation"])
 
     def test_assembly_goal_draft_accepted_asks_only_for_missing_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,7 +198,7 @@ class InteractiveLoopTests(unittest.TestCase):
                 },
             )
             args = _ask_ns()
-            # Draft prefills flye + read_qc + genome size (from manifest) + platform.
+            # Draft prefills flye + genome size (from manifest) + platform.
             # "y" accept draft (nothing left to clarify), "y" confirm.
             inputs = iter(["y", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
@@ -254,12 +252,12 @@ class InteractiveLoopTests(unittest.TestCase):
         )
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", return_value="nano-raw"):
-            response = _prompt_parameter_values(req)
+            response = _prompt_parameter_values(req, _base_plan())
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
-    def test_parameter_prompt_accepts_function_database_provenance_json(self):
+    def test_parameter_prompt_accepts_function_database_provenance_fields(self):
         req = AskClarificationRequest(
             status="clarification_required",
             kind="parameter_values",
@@ -272,13 +270,21 @@ class InteractiveLoopTests(unittest.TestCase):
             response_schema={},
             next_action={},
         )
+        plan = _base_plan(
+            data_dir="/data",
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={"function_annotation": ["function_annotation.candidate.diamond"]},
+        )
+        inputs = iter(["/db/uniprot/2026_02.dmnd", "UniProt", "2026_02"])
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-             patch("builtins.input", return_value=_diamond_provenance_json()):
-            response = _prompt_parameter_values(req)
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            response = _prompt_parameter_values(req, plan)
 
         self.assertIsNotNone(response.stage_parameters)
         provenance = response.stage_parameters["function_annotation"]["database_provenance"]
         self.assertEqual(provenance[0]["method_name"], "function_annotation.candidate.diamond")
+        self.assertEqual(provenance[0]["database_name"], "UniProt")
 
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(
@@ -295,7 +301,7 @@ class InteractiveLoopTests(unittest.TestCase):
         )
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", return_value="ont"):
-            response = _prompt_parameter_values(req)
+            response = _prompt_parameter_values(req, _base_plan())
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "ont")
@@ -315,7 +321,7 @@ class InteractiveLoopTests(unittest.TestCase):
         )
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", return_value="2"):
-            response = _prompt_parameter_values(req)
+            response = _prompt_parameter_values(req, _base_plan())
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "ont")
@@ -336,7 +342,7 @@ class InteractiveLoopTests(unittest.TestCase):
         inputs = iter(["1"])
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", side_effect=lambda _: next(inputs)):
-            response = _prompt_parameter_values(req)
+            response = _prompt_parameter_values(req, _base_plan())
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "cycloneseq")
@@ -367,7 +373,7 @@ class InteractiveLoopTests(unittest.TestCase):
         inputs = iter(["nano-old", "pacbio-hifi"])
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", side_effect=lambda _: next(inputs)):
-            response = _prompt_parameter_values(req)
+            response = _prompt_parameter_values(req, _base_plan())
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "pacbio_hifi")
@@ -394,13 +400,14 @@ class InteractiveLoopTests(unittest.TestCase):
             args = _ask_ns()
             # "n" reject draft -> manual editing.
             # "" stage selection (intent default = assembly),
-            # "" read_qc filter, "" assembly method (params satisfied from manifest),
+            # "" assembly method, "" platform, "" genome size, "" threads,
             # "n" reject confirm -> restart from stage selection,
-            # "" stage selection, "" read_qc filter, "" assembly method, "y" confirm
+            # "" stage selection, "" assembly method, "" platform, "" genome size,
+            # "" threads, "y" confirm
             inputs = iter([
                 "n",
-                "", "", "", "n",
-                "", "", "", "y",
+                "", "", "", "", "", "n",
+                "", "", "", "", "", "y",
             ])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
@@ -412,13 +419,8 @@ class InteractiveLoopTests(unittest.TestCase):
     def test_confirm_n_restart_clears_shared_parameters(self):
         plan = _base_plan(
             selected_stages=["assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
+            resolved_execution_order=["assembly"],
             selected_methods={
-                "read_qc": [
-                    "read_qc.long_read_stats.seqkit_stats",
-                    "read_qc.length_filter.skip",
-                    "read_qc.make_fofn.local",
-                ],
                 "assembly": "assembly.candidate.flye",
             },
             shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 500_000_000},
@@ -659,7 +661,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("assembly: assembly.candidate.flye [local]  (recommended)", rendered)
             self.assertIn("Advisory preview.", rendered)
 
-    def test_plan_draft_multi_stage_goal_marks_targets_deps_and_pending(self):
+    def test_plan_draft_multi_stage_goal_marks_requested_targets_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fa"
             reads.write_text(">r1\nACGT\n", encoding="utf-8")
@@ -687,11 +689,11 @@ class PlanPreviewRenderTests(unittest.TestCase):
             rendered = stdout.getvalue()
             self.assertIn("Plan Draft", rendered)
             self.assertIn(f"raw_long_reads [ont/fasta]: {reads}", rendered)
-            self.assertIn("[      dep] read_qc", rendered)
-            self.assertIn("[      dep] repeat_annotation", rendered)
             self.assertIn("[      run] assembly", rendered)
             self.assertIn("[      run] gene_annotation", rendered)
-            self.assertIn("assembly_review: pending", rendered)
+            self.assertNotIn("[      dep] read_qc", rendered)
+            self.assertNotIn("[      dep] repeat_annotation", rendered)
+            self.assertNotIn("assembly_review: pending", rendered)
             self.assertIn("Advisory preview.", rendered)
 
     def test_build_initial_plan_draft_skips_when_no_goal_was_parsed(self):

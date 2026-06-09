@@ -146,7 +146,7 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
         self.assertEqual(result.choices["suggested_stages"], ["assembly"])
         self.assertEqual(result.response_schema["selected_stages"], ["assembly"])
 
-    def test_assembly_without_read_qc_adds_read_qc_dependency(self):
+    def test_stage_selection_keeps_requested_execution_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -158,10 +158,26 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             plan = _base_plan(manifest_ref=str(manifest))
             response = AskClarificationResponse(kind="stage_selection", selected_stages=["assembly"])
             updated = merge_clarification_response(plan, response)
-            self.assertIn("read_qc", updated.resolved_execution_order)
-            self.assertIn("assembly", updated.resolved_execution_order)
-            order = updated.resolved_execution_order
-            self.assertLess(order.index("read_qc"), order.index("assembly"))
+            self.assertEqual(updated.selected_stages, ["assembly"])
+            self.assertEqual(updated.resolved_execution_order, ["assembly"])
+
+    def test_annotation_only_with_raw_reads_does_not_auto_add_assembly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest))
+            response = AskClarificationResponse(kind="stage_selection", selected_stages=["gene_annotation"])
+            updated = merge_clarification_response(plan, response)
+
+            self.assertEqual(updated.resolved_execution_order, ["gene_annotation"])
+            self.assertNotIn("assembly", updated.resolved_execution_order)
+            self.assertNotIn("assembly_review", updated.resolved_execution_order)
+            self.assertNotIn("repeat_annotation", updated.resolved_execution_order)
 
     def test_plan_summary_includes_input_assets_from_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +203,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
         plan = _base_plan()
         self.assertIsNone(build_initial_plan_draft(plan))
 
-    def test_assembly_goal_expands_read_qc_dependency_and_keeps_target(self):
+    def test_assembly_goal_keeps_requested_stage_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -199,10 +215,10 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             plan = _base_plan(manifest_ref=str(manifest), entry_request={"requested_stages": ["assembly"]})
             draft = build_initial_plan_draft(plan)
             self.assertEqual(draft.selected_stages, ["assembly"])
-            self.assertEqual(draft.resolved_execution_order, ["read_qc", "assembly"])
+            self.assertEqual(draft.resolved_execution_order, ["assembly"])
             self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
 
-    def test_multi_stage_goal_expands_dependencies_but_target_stays_user_goal(self):
+    def test_multi_stage_goal_keeps_requested_stages_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -217,8 +233,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
-            self.assertIn("repeat_annotation", draft.resolved_execution_order)
-            self.assertIn("assembly_review", draft.resolved_execution_order)
+            self.assertEqual(draft.resolved_execution_order, ["assembly", "gene_annotation"])
 
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
@@ -555,11 +570,11 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(payload["shared_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"], {"threads": 8, "read_type": "nano-raw", "estimated_genome_size": 2000000})
 
-    def test_build_run_config_for_assembly_goal_stops_at_dependency_expanded_target(self):
+    def test_build_run_config_for_assembly_goal_uses_requested_boundary(self):
         plan = _base_plan(
             selected_stages=["assembly"],
-            resolved_execution_order=["read_qc", "assembly"],
-            selected_methods={"read_qc": _read_qc_default_methods(), "assembly": "assembly.candidate.flye"},
+            resolved_execution_order=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.flye"},
             shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
             method_parameters={"assembly.candidate.flye": {"threads": 8}},
             confirmed=True,
@@ -567,8 +582,9 @@ class AskPlannerRunConfigTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
 
-        self.assertEqual(payload["requested_stages"], ["read_qc", "assembly"])
-        self.assertEqual(sorted(payload["local_exec"]), ["assembly", "read_qc"])
+        self.assertEqual(payload["requested_stages"], ["assembly"])
+        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertNotIn("read_qc", payload["requested_stages"])
         self.assertNotIn("assembly_review", payload["requested_stages"])
         self.assertNotIn("repeat_annotation", payload["requested_stages"])
 

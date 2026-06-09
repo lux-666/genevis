@@ -26,10 +26,10 @@
 - **LLM 负责理解用户目标，planner 负责把目标变成可执行草案。**
 - **草案不是最终事实。** 草案必须能被接受、拒绝、编辑；最终执行仍以确认后的
   ask plan / run config 为准。
-- **用户目标边界和执行依赖必须分开。**
-  - 用户目标：operator 想做到哪里，例如 `["assembly", "gene_annotation"]`。
-  - 执行顺序：为了达到目标需要跑的上游依赖，例如
-    `read_qc -> assembly -> assembly_review -> repeat_annotation -> gene_annotation`。
+- **用户目标边界就是 ask 计划的执行边界。**
+  - 用户目标：operator 想做哪些 stage，例如 `["assembly", "gene_annotation"]`。
+  - 执行顺序：这些被选择 stage 在 `STAGE_ORDER` 中的稳定顺序；planner 不再
+    默默补齐未选择的上游 stage。
 - **输入文件必须是一等信息。** plan 草案和最终确认都必须展示即将处理的 manifest
   assets / paths。
 - **没有明确目标时不要假装有 plan。** 如果 LLM 没解析出 workflow goal，应进入
@@ -41,7 +41,7 @@
 
 - `EntryRequest.requested_stages`：LLM 解析出的用户目标。
 - `AskPlanState.selected_stages`：有时表示用户已确认的目标，有时又被当成自动草案。
-- `resolved_execution_order`：依赖展开后的实际执行顺序。
+- `resolved_execution_order`：用户选择 stage 的稳定执行顺序。
 - `auto_resolve_plan()`：既承担默认方法选择，又间接决定是否出现 plan preview。
 
 这种结构导致 UI 行为不稳定：
@@ -87,8 +87,9 @@ build_initial_plan_draft(ask_plan: AskPlanState) -> AskPlanDraft | None
 Draft plan 至少包含：
 
 - `target_stages`：来自 `EntryRequest.requested_stages` 的用户目标边界。
-- `resolved_execution_order`：目标 + 必要上游依赖。
-- `stage_roles`：target / dependency / planned-only / local-executable 等展示角色。
+- `resolved_execution_order`：按 `STAGE_ORDER` 排序后的目标 stage。
+- `stage_roles`：local-executable / planned-only 等展示角色；`dependency` 仅用于
+  兼容旧 plan 或外部手工构造的 plan。
 - `default_methods`：planner 可以安全建议的方法。
 - `pending_method_choices`：仍需 operator 选择的方法。
 - `pending_parameters`：仍需确认或填写的参数。
@@ -159,7 +160,7 @@ class AskPlanDraft(BaseModel):
 - 保留 LLM-first intent parse；不要在 Python 里做自然语言关键词兜底。
 - 保留手改能力；reject 后进入现有 stage/method/parameter clarification。
 - 统一 preview 与最终 Run Plan 的输入文件展示。
-- 明确 selected target stages 与 dependency-expanded execution order 的区别。
+- 明确 selected target stages 与 ordered execution boundary 的区别。
 
 ## Non-goals
 
@@ -175,7 +176,7 @@ class AskPlanDraft(BaseModel):
 - [x] 定义 `AskPlanDraft` 或等价内部结构，并写清楚它与 `AskPlanState` 的边界。
 - [x] 实现 `build_initial_plan_draft()`：
   - [x] 从 `entry_request.requested_stages` 读取目标。
-  - [x] 展开必要上游依赖。
+  - [x] 按 `STAGE_ORDER` 排序用户选择的 stage，不自动扩展上游依赖。
   - [x] 回读 manifest assets 作为 `input_assets`。
   - [x] 填入安全默认方法或标记 pending。
   - [x] 生成 warnings / pending fields。
@@ -202,16 +203,16 @@ class AskPlanDraft(BaseModel):
 - 该 draft plan 至少展示：
   - 输入 FASTA 路径。
   - target stages：`assembly`, `gene_annotation`。
-  - dependency-expanded order：包含必要的 `read_qc`, `assembly_review`,
-    `repeat_annotation`，但明确它们是依赖。
+  - execution order：只包含用户目标 `assembly`, `gene_annotation`，按
+    `STAGE_ORDER` 展示。
   - method/default/pending 状态。
   - 待确认参数。
 - operator 选择 `yes` 后进入后续 clarification，不重新询问 stage selection。
 - operator 选择 `no` 后进入 stage selection，默认勾选仍是 LLM 解析出的用户目标
   stages，而不是 manifest 推荐全链路。
 - raw long reads + 无明确目标时，不展示假 plan，不默认 assembly，直接手选。
-- `requested_stages=["assembly"]` 最终执行只到 `read_qc -> assembly`，不会继续
-  `assembly_review/repeat/gene/function`。
+- `requested_stages=["assembly"]` 最终执行只包含 `assembly`，不会自动补
+  `read_qc/assembly_review/repeat/gene/function`。
 - plan preview 和最终 Run Plan 都能展示 manifest 中的实际 input assets。
 - 测试覆盖 questionary 与 plain-text fallback 的关键路径。
 
@@ -244,8 +245,8 @@ class AskPlanDraft(BaseModel):
 - **draft 不引入新模型。** `build_initial_plan_draft()`（`app/entrypoints/ask_planner.py`）
   返回一个未持久化的候选 `AskPlanState`；"草案 vs 状态" 的边界就是"接受前不落盘"。
   渲染复用既有的 `build_run_plan_summary()`。
-- **evidence-prefilled。** draft 预填能从证据推导的一切：target stages、依赖展开、
-  manifest 推断的 shared params、安全默认方法（含 raw-long-reads-only 时 assembly→flye）、
+- **evidence-prefilled。** draft 预填能从证据推导的一切：target stages、排序后的
+  execution boundary、manifest 推断的 shared params、安全默认方法（含 raw-long-reads-only 时 assembly→flye）、
   推断的方法参数。accept 直接采用整个 draft；随后复用既有 `next_clarification()` 循环，
   **只**对仍缺失/有歧义的项发问（如缺 genome size、多候选且无默认的 `assembly_review`）。
 - **统一入口。** 删除了 `auto_resolve_plan` / `_confirm_auto_resolve` /
