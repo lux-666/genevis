@@ -16,10 +16,11 @@ durable resume, assembly_review gate). The annotation half does not:
   bundles, EVM/single-candidate merge, gffread materialization, BUSCO, and final
   gene set review. BRAKER3, MAKER, GeMoMa, and RNA-seq helpers remain
   planning-only. Real-data smoke validation is pending in task 08.
-- `function_annotation` has an executable DIAMOND runner, but still needs a
-  result-bundle refactor so only materialized outputs are published.
-  InterProScan, eggNOG-mapper, and KofamScan remain planning-only. Real-data
-  smoke validation is pending in task 08.
+- `function_annotation` has an executable DIAMOND runner and no longer
+  publishes GO/KEGG/Pfam placeholder refs as if they were materialized outputs.
+  It still needs a richer FunctionMethodResult structure before additional
+  methods land. InterProScan, eggNOG-mapper, and KofamScan remain planning-only.
+  Real-data smoke validation is pending in task 08.
 - `assembly_review` has the full review-policy path, and `hic_scaffolding`
   already has a partial gate/resume path. The remaining downstream review points
   the workflow conceptually needs do not exist yet, and the existing gates still
@@ -82,8 +83,8 @@ See the numbered task docs in this folder:
   CandidateBundle boundary.
 - `05_gene_merge_final_set.md` — candidate merge, final gene set materialization,
   BUSCO, and function handoff contract.
-- `06_function_annotation_execution.md` — DIAMOND execution contract and the
-  pending FunctionMethodResult / bundle refactor.
+- `06_function_annotation_execution.md` — DIAMOND execution contract, materialized
+  function bundle refs, and the pending FunctionMethodResult refactor.
 - `07_interpretation_agent.md` — direction note for agent 3 (out of scope until
   the annotation agent lands).
 - `08_hpc_integration_smoke_tests.md` — local E2E + HPC end-to-end validation

@@ -403,10 +403,11 @@ class FunctionAnnotationBundle(BaseModel):
     proteins_fasta_ref: str
     genes_gff3_ref: str | None = None
     transcripts_fasta_ref: str | None = None
-    gene_function_tsv_ref: str
-    go_annotation_table_ref: str
-    kegg_annotation_table_ref: str
-    pfam_interpro_table_ref: str
+    diamond_hits_ref: str | None = None
+    gene_function_tsv_ref: str | None = None
+    go_annotation_table_ref: str | None = None
+    kegg_annotation_table_ref: str | None = None
+    pfam_interpro_table_ref: str | None = None
     annotated_gene_models_gff3_ref: str | None = None
     candidate_methods: list[str] = Field(default_factory=list)
     database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)

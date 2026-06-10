@@ -390,8 +390,13 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     session_id = state["session_id"]
     out_dir = data_dir / "artifacts" / "function_annotation" / session_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    expected_outputs = function_out["expected_outputs"]
+    expected_outputs = function_out.get("expected_outputs", {})
     diamond_hits_ref = function_out.get("diamond_hits_ref")
+    materialized_gene_function = _existing_file_ref(expected_outputs.get("gene_function_tsv"))
+    materialized_go = _existing_file_ref(expected_outputs.get("go_annotation_table"))
+    materialized_kegg = _existing_file_ref(expected_outputs.get("kegg_annotation_table"))
+    materialized_pfam = _existing_file_ref(expected_outputs.get("pfam_interpro_table"))
+    materialized_annotated_gff = _existing_file_ref(expected_outputs.get("annotated_gene_models_gff3"))
     provenance = [FunctionDatabaseProvenance.model_validate(record) for record in function_out.get("database_provenance", [])]
     bundle = FunctionAnnotationBundle(
         session_id=session_id,
@@ -399,19 +404,28 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         proteins_fasta_ref=function_out["proteins_fasta_ref"],
         genes_gff3_ref=function_out.get("genes_gff3_ref"),
         transcripts_fasta_ref=function_out.get("transcripts_fasta_ref"),
-        gene_function_tsv_ref=diamond_hits_ref or expected_outputs["gene_function_tsv"],
-        go_annotation_table_ref=expected_outputs["go_annotation_table"],
-        kegg_annotation_table_ref=expected_outputs["kegg_annotation_table"],
-        pfam_interpro_table_ref=expected_outputs["pfam_interpro_table"],
-        annotated_gene_models_gff3_ref=expected_outputs.get("annotated_gene_models_gff3"),
+        diamond_hits_ref=diamond_hits_ref,
+        gene_function_tsv_ref=materialized_gene_function,
+        go_annotation_table_ref=materialized_go,
+        kegg_annotation_table_ref=materialized_kegg,
+        pfam_interpro_table_ref=materialized_pfam,
+        annotated_gene_models_gff3_ref=materialized_annotated_gff,
         candidate_methods=function_out.get("candidate_methods", []),
         database_provenance=provenance,
         plan_artifact_ref=function_out.get("plan_artifact_ref"),
         notes=function_out.get("notes", []),
         metadata={
-            "execution_enabled": False,
+            "execution_enabled": bool(diamond_hits_ref),
             "database_download_enabled": False,
             "provenance_required": True,
+            "materialized_outputs": {
+                "diamond_hits": bool(diamond_hits_ref),
+                "gene_function_tsv": bool(materialized_gene_function),
+                "go_annotation_table": bool(materialized_go),
+                "kegg_annotation_table": bool(materialized_kegg),
+                "pfam_interpro_table": bool(materialized_pfam),
+                "annotated_gene_models_gff3": bool(materialized_annotated_gff),
+            },
         },
     )
     bundle_ref = out_dir / "function_annotation_bundle.json"
@@ -425,7 +439,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         method_name=FUNCTION_CONTRACT_METHOD,
         artifact_type="function_annotation.bundle",
         metadata={
-            "execution_enabled": False,
+            "execution_enabled": bool(diamond_hits_ref),
             "database_download_enabled": False,
             "provenance_required": True,
         },
@@ -438,11 +452,12 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     outputs["function_annotation"] = {
         **function_out,
         "status": "completed",
-        "gene_function_tsv_ref": diamond_hits_ref or expected_outputs["gene_function_tsv"],
-        "go_annotation_table_ref": expected_outputs["go_annotation_table"],
-        "kegg_annotation_table_ref": expected_outputs["kegg_annotation_table"],
-        "pfam_interpro_table_ref": expected_outputs["pfam_interpro_table"],
-        "annotated_gene_models_gff3_ref": expected_outputs.get("annotated_gene_models_gff3"),
+        "diamond_hits_ref": diamond_hits_ref,
+        "gene_function_tsv_ref": materialized_gene_function,
+        "go_annotation_table_ref": materialized_go,
+        "kegg_annotation_table_ref": materialized_kegg,
+        "pfam_interpro_table_ref": materialized_pfam,
+        "annotated_gene_models_gff3_ref": materialized_annotated_gff,
         "bundle_artifact_ref": str(bundle_ref),
         "final_review_report_artifact_ref": final_report_ref,
         "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path), final_report_ref],
@@ -453,6 +468,13 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         "supervision_state": "completed",
         "route_trace": [*state.get("route_trace", []), "function_annotation_stage"],
     }
+
+
+def _existing_file_ref(ref: Any) -> str | None:
+    if not ref:
+        return None
+    path = Path(str(ref))
+    return str(path) if path.is_file() else None
 
 
 def fail_function_annotation(state: TopLevelState) -> dict:

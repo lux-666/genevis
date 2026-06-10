@@ -10,6 +10,7 @@ from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state
 from app.stages.function_annotation.nodes import (
     collect_diamond_artifacts,
+    commit_function_annotation,
     freeze_diamond_attempt,
     run_diamond_attempt,
 )
@@ -249,6 +250,21 @@ class DiamondFullPathTests(unittest.TestCase):
             self.assertEqual(func_out["status"], "diamond_completed")
             self.assertTrue(Path(func_out["diamond_hits_ref"]).exists())
             self.assertIn("diamond_hits_ref", func_out)
+
+            state["stage_outputs"] = result["stage_outputs"]
+            committed = commit_function_annotation(state)
+            committed_out = committed["stage_outputs"]["function_annotation"]
+            self.assertEqual(committed_out["diamond_hits_ref"], func_out["diamond_hits_ref"])
+            self.assertIsNone(committed_out["gene_function_tsv_ref"])
+            self.assertIsNone(committed_out["go_annotation_table_ref"])
+            self.assertIsNone(committed_out["kegg_annotation_table_ref"])
+            self.assertIsNone(committed_out["pfam_interpro_table_ref"])
+            bundle = json.loads(Path(committed_out["bundle_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(bundle["diamond_hits_ref"], func_out["diamond_hits_ref"])
+            self.assertIsNone(bundle["gene_function_tsv_ref"])
+            self.assertIsNone(bundle["go_annotation_table_ref"])
+            self.assertIsNone(bundle["kegg_annotation_table_ref"])
+            self.assertIsNone(bundle["pfam_interpro_table_ref"])
 
 
 if __name__ == "__main__":

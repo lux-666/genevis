@@ -1,6 +1,6 @@
 # 07-06 功能注释执行契约
 
-任务状态：DIAMOND Slice 1 本地实现已落地；契约仍需重构，真实 HPC smoke 待 task 08 执行。
+任务状态：DIAMOND Slice 1 本地实现已落地；bundle 已停止发布未物化的 GO/KEGG/Pfam 占位 refs；FunctionMethodResult 结构化仍待后续切片补齐；真实 HPC smoke 待 task 08 执行。
 
 ## 目标
 
@@ -42,13 +42,17 @@ collect 阶段注册：
 - `function_annotation.diamond_hits`
 - `diamond_hits_ref`
 
-## 需要重构的契约问题
+## 已修正的 bundle 契约问题
 
-function annotation 现在还保留了 planning-era 的占位发布模式。`commit_function_annotation` 在 DIAMOND 已执行时会优先使用 `diamond_hits_ref`，但 GO/KEGG/Pfam/annotated GFF 等字段仍可能来自 expected output 占位路径。
+function annotation 曾保留 planning-era 的占位发布模式：`commit_function_annotation` 在 DIAMOND 已执行时会优先使用 `diamond_hits_ref`，但 GO/KEGG/Pfam/annotated GFF 等字段仍可能来自 expected output 占位路径。
 
-这与 gene annotation 之前的问题同型：真实产物和规划占位没有彻底分离。
+这与 gene annotation 之前的问题同型：真实产物和规划占位没有彻底分离。当前实现已经把 bundle 字段改为只发布真实存在的 materialized refs：
 
-下一步应引入方法级 result bundle，而不是继续让 stage output 混合 planned outputs 与 materialized outputs。
+- `diamond_hits_ref` 用于 DIAMOND raw outfmt 6 hits。
+- `gene_function_tsv_ref` / `go_annotation_table_ref` / `kegg_annotation_table_ref` / `pfam_interpro_table_ref` / `annotated_gene_models_gff3_ref` 只有在对应文件真实存在时才发布。
+- 未执行或未产出的结果在 bundle 和 stage output 中为 `null`，而不是 expected output 占位路径。
+
+下一步应引入方法级 result bundle，而不是继续把所有方法结果压平到 stage output。
 
 ## FunctionMethodResult 契约
 
@@ -80,6 +84,7 @@ InterProScan / eggNOG / KOfamScan 后续切片各自扩展 result refs，但都�
 必须包含：
 
 - `proteins_fasta_ref`
+- `diamond_hits_ref` when DIAMOND executed
 - `method_results`
 - `database_provenance`
 - `execution_mode`
@@ -139,10 +144,10 @@ gene_annotation_bundle.proteins_fasta_ref
 
 - `test_function_annotation_provenance.py`: provenance schema、自动回填 proteins ref、显式不匹配失败。
 - `test_function_annotation_diamond.py`: DIAMOND freeze-run-collect、失败清理、artifact 注册。
-- `test_function_annotation_bundle.py`: 只发布真实 materialized refs，禁止 expected output 占位。
+- `test_function_annotation_bundle.py`: 只发布真实 materialized refs，禁止 expected output 占位；DIAMOND hits 不冒充 GO/KEGG/Pfam。
 - `test_function_annotation_e2e.py`: fake DIAMOND + gene proteins handoff + final report。
 
-当前 `tests/test_function_annotation.py` 中断言 expected output 后缀的测试应改写为 bundle contract 测试。
+当前 `tests/test_function_annotation.py` 和 `tests/test_function_annotation_diamond.py` 已覆盖 bundle 不发布未物化 refs 的基础行为；后续可按上面的分层继续拆分。
 
 ## 验收
 
@@ -150,6 +155,7 @@ gene_annotation_bundle.proteins_fasta_ref
 
 - DIAMOND 能以真实 proteins FASTA 和真实 database FASTA 产出 `diamond_hits.tsv`。
 - `function_annotation_bundle.json` 只发布真实存在的 result refs。
+- DIAMOND hits 写入 `diamond_hits_ref`，不写入 `gene_function_tsv_ref`。
 - provenance 中省略 `input_proteins_ref` 时能回填 gene stage resolved proteins ref。
 - provenance 显式路径不匹配时 terminal fail。
 - DIAMOND hits 不被误标为 GO/KEGG/Pfam/InterPro 输出。
