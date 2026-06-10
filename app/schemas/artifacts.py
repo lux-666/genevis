@@ -379,6 +379,18 @@ class FunctionDatabaseProvenance(BaseModel):
         return self
 
 
+class FunctionMethodResult(BaseModel):
+    """Materialized result from one function annotation method."""
+
+    method_name: str
+    status: Literal["materialized", "skipped", "failed"] = "materialized"
+    result_refs: dict[str, str] = Field(default_factory=dict)
+    database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
+    execution_result_ref: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class FunctionAnnotationPlan(BaseModel):
     """Planned function annotation contract without running tools."""
 
@@ -409,6 +421,7 @@ class FunctionAnnotationBundle(BaseModel):
     kegg_annotation_table_ref: str | None = None
     pfam_interpro_table_ref: str | None = None
     annotated_gene_models_gff3_ref: str | None = None
+    method_results: list[FunctionMethodResult] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)
     database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
     plan_artifact_ref: str | None = None

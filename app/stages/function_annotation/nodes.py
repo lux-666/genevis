@@ -20,6 +20,7 @@ from app.schemas.artifacts import (
     FunctionAnnotationBundle,
     FunctionAnnotationPlan,
     FunctionDatabaseProvenance,
+    FunctionMethodResult,
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
@@ -398,6 +399,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     materialized_pfam = _existing_file_ref(expected_outputs.get("pfam_interpro_table"))
     materialized_annotated_gff = _existing_file_ref(expected_outputs.get("annotated_gene_models_gff3"))
     provenance = [FunctionDatabaseProvenance.model_validate(record) for record in function_out.get("database_provenance", [])]
+    method_results = _function_method_results(function_out, provenance)
     bundle = FunctionAnnotationBundle(
         session_id=session_id,
         status="planned",
@@ -410,6 +412,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         kegg_annotation_table_ref=materialized_kegg,
         pfam_interpro_table_ref=materialized_pfam,
         annotated_gene_models_gff3_ref=materialized_annotated_gff,
+        method_results=method_results,
         candidate_methods=function_out.get("candidate_methods", []),
         database_provenance=provenance,
         plan_artifact_ref=function_out.get("plan_artifact_ref"),
@@ -458,6 +461,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         "kegg_annotation_table_ref": materialized_kegg,
         "pfam_interpro_table_ref": materialized_pfam,
         "annotated_gene_models_gff3_ref": materialized_annotated_gff,
+        "method_results": [result.model_dump(mode="json") for result in method_results],
         "bundle_artifact_ref": str(bundle_ref),
         "final_review_report_artifact_ref": final_report_ref,
         "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path), final_report_ref],
@@ -475,6 +479,34 @@ def _existing_file_ref(ref: Any) -> str | None:
         return None
     path = Path(str(ref))
     return str(path) if path.is_file() else None
+
+
+def _function_method_results(
+    function_out: dict[str, Any],
+    provenance: list[FunctionDatabaseProvenance],
+) -> list[FunctionMethodResult]:
+    results: list[FunctionMethodResult] = []
+    diamond_hits_ref = function_out.get("diamond_hits_ref")
+    if diamond_hits_ref and Path(str(diamond_hits_ref)).is_file():
+        diamond_provenance = [record for record in provenance if record.method_name == DIAMOND_METHOD]
+        metadata: dict[str, Any] = {"outfmt": "6"}
+        frozen = function_out.get("diamond_frozen_attempt") or {}
+        frozen_metadata = frozen.get("metadata") if isinstance(frozen, dict) else None
+        if isinstance(frozen_metadata, dict):
+            if frozen_metadata.get("dmnd_index"):
+                metadata["database_index_ref"] = frozen_metadata["dmnd_index"]
+            if frozen_metadata.get("database_source_ref"):
+                metadata["database_source_ref"] = frozen_metadata["database_source_ref"]
+        results.append(
+            FunctionMethodResult(
+                method_name=DIAMOND_METHOD,
+                status="materialized",
+                result_refs={"diamond_hits": str(diamond_hits_ref)},
+                database_provenance=diamond_provenance,
+                metadata=metadata,
+            )
+        )
+    return results
 
 
 def fail_function_annotation(state: TopLevelState) -> dict:

@@ -1,6 +1,6 @@
 # 07-06 功能注释执行契约
 
-任务状态：DIAMOND Slice 1 本地实现已落地；bundle 已停止发布未物化的 GO/KEGG/Pfam 占位 refs；FunctionMethodResult 结构化仍待后续切片补齐；真实 HPC smoke 待 task 08 执行。
+任务状态：DIAMOND Slice 1 本地实现已落地；bundle 已停止发布未物化的 GO/KEGG/Pfam 占位 refs；DIAMOND 已写入 `FunctionMethodResult`；真实 HPC smoke 待 task 08 执行。
 
 ## 目标
 
@@ -52,11 +52,11 @@ function annotation 曾保留 planning-era 的占位发布模式：`commit_funct
 - `gene_function_tsv_ref` / `go_annotation_table_ref` / `kegg_annotation_table_ref` / `pfam_interpro_table_ref` / `annotated_gene_models_gff3_ref` 只有在对应文件真实存在时才发布。
 - 未执行或未产出的结果在 bundle 和 stage output 中为 `null`，而不是 expected output 占位路径。
 
-下一步应引入方法级 result bundle，而不是继续把所有方法结果压平到 stage output。
+当前已引入方法级 result bundle，DIAMOND 会写入一个 `FunctionMethodResult`。后续方法切片应复用同一结构，而不是继续把所有方法结果压平到 stage output。
 
 ## FunctionMethodResult 契约
 
-建议新增方法级结果结构：
+方法级结果结构：
 
 ```text
 FunctionMethodResult
@@ -68,12 +68,10 @@ FunctionMethodResult
   warnings
 ```
 
-DIAMOND result refs 至少包含：
+DIAMOND method result 当前包含：
 
-- `diamond_hits_ref`
-- `outfmt`
-- `database_index_ref`
-- `query_proteins_ref`
+- `result_refs.diamond_hits`
+- `metadata.outfmt`
 
 InterProScan / eggNOG / KOfamScan 后续切片各自扩展 result refs，但都通过同一结构进入最终 bundle。
 
@@ -147,7 +145,7 @@ gene_annotation_bundle.proteins_fasta_ref
 - `test_function_annotation_bundle.py`: 只发布真实 materialized refs，禁止 expected output 占位；DIAMOND hits 不冒充 GO/KEGG/Pfam。
 - `test_function_annotation_e2e.py`: fake DIAMOND + gene proteins handoff + final report。
 
-当前 `tests/test_function_annotation.py` 和 `tests/test_function_annotation_diamond.py` 已覆盖 bundle 不发布未物化 refs 的基础行为；后续可按上面的分层继续拆分。
+当前 `tests/test_function_annotation.py` 和 `tests/test_function_annotation_diamond.py` 已覆盖 bundle 不发布未物化 refs、DIAMOND hits 写入 `FunctionMethodResult` 的基础行为；后续可按上面的分层继续拆分。
 
 ## 验收
 
@@ -156,6 +154,7 @@ gene_annotation_bundle.proteins_fasta_ref
 - DIAMOND 能以真实 proteins FASTA 和真实 database FASTA 产出 `diamond_hits.tsv`。
 - `function_annotation_bundle.json` 只发布真实存在的 result refs。
 - DIAMOND hits 写入 `diamond_hits_ref`，不写入 `gene_function_tsv_ref`。
+- DIAMOND result 写入 `method_results[]`，并携带 database provenance。
 - provenance 中省略 `input_proteins_ref` 时能回填 gene stage resolved proteins ref。
 - provenance 显式路径不匹配时 terminal fail。
 - DIAMOND hits 不被误标为 GO/KEGG/Pfam/InterPro 输出。

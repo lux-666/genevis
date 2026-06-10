@@ -265,6 +265,11 @@ class DiamondFullPathTests(unittest.TestCase):
             self.assertIsNone(bundle["go_annotation_table_ref"])
             self.assertIsNone(bundle["kegg_annotation_table_ref"])
             self.assertIsNone(bundle["pfam_interpro_table_ref"])
+            self.assertEqual(len(bundle["method_results"]), 1)
+            method_result = bundle["method_results"][0]
+            self.assertEqual(method_result["method_name"], "function_annotation.candidate.diamond")
+            self.assertEqual(method_result["result_refs"]["diamond_hits"], func_out["diamond_hits_ref"])
+            self.assertEqual(method_result["database_provenance"][0]["method_name"], "function_annotation.candidate.diamond")
 
 
 if __name__ == "__main__":
