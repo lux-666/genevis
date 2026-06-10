@@ -1,23 +1,25 @@
 # Phase 7: Annotation Execution And The Review-Driven Annotation Agent
 
-Status: planning. Subjects captured; specifics intentionally loose. These tasks
-are the main objective for a sustained period, not a sprint.
+Status: implementation in progress. The repeat/gene/function execution slices
+are now partially real, and task 08 is the end-to-end validation layer that
+keeps those contracts honest.
 
 ## Why this phase
 
 The assembly half of the workflow executes for real (Flye + QUAST mainline,
 durable resume, assembly_review gate). The annotation half does not:
 
-- `repeat_annotation` executes only RepeatMasker, and only against a
-  **provided** library (`strategy == "provided"`); de novo library build
-  (EDTA / RepeatModeler) and TRF are planning-only.
-- `gene_annotation` has executable runners for Miniprot and AUGUSTUS (task 04
-  Slice 1 + task 09 boilerplate consolidation), plus EVM merge and BUSCO
-  (task 05). BRAKER3, MAKER, GeMoMa, and RNA-seq helpers remain planning-only.
-  Real-data smoke validation is pending (task 08).
-- `function_annotation` has an executable DIAMOND runner (task 06 Slice 1).
+- `repeat_annotation` executes RepeatMasker against a **provided** repeat
+  library and publishes a mask-reviewable softmasked genome bundle. De novo
+  library build (EDTA / RepeatModeler) and TRF remain planning-only.
+- `gene_annotation` has executable runners for Miniprot and AUGUSTUS, candidate
+  bundles, EVM/single-candidate merge, gffread materialization, BUSCO, and final
+  gene set review. BRAKER3, MAKER, GeMoMa, and RNA-seq helpers remain
+  planning-only. Real-data smoke validation is pending in task 08.
+- `function_annotation` has an executable DIAMOND runner, but still needs a
+  result-bundle refactor so only materialized outputs are published.
   InterProScan, eggNOG-mapper, and KofamScan remain planning-only. Real-data
-  smoke validation and remaining method slices are pending (task 08).
+  smoke validation is pending in task 08.
 - `assembly_review` has the full review-policy path, and `hic_scaffolding`
   already has a partial gate/resume path. The remaining downstream review points
   the workflow conceptually needs do not exist yet, and the existing gates still
@@ -76,17 +78,17 @@ See the numbered task docs in this folder:
   + mask-completion review.
 - `03_annotation_review_chain.md` — the full gate skeleton for the annotation
   path, consuming Phase 6 task 06's `annotation.intake_plan`.
-- `04_gene_annotation_execution.md` — real gene-predictor runners, method by
-  method.
-- `05_gene_merge_final_set.md` — candidate merge (EVM/MAKER) + final gene set +
-  BUSCO.
-- `06_function_annotation_execution.md` — real function-annotation runners,
-  method by method.
+- `04_gene_annotation_execution.md` — executable gene-predictor contract and
+  CandidateBundle boundary.
+- `05_gene_merge_final_set.md` — candidate merge, final gene set materialization,
+  BUSCO, and function handoff contract.
+- `06_function_annotation_execution.md` — DIAMOND execution contract and the
+  pending FunctionMethodResult / bundle refactor.
 - `07_interpretation_agent.md` — direction note for agent 3 (out of scope until
   the annotation agent lands).
-- `08_hpc_integration_smoke_tests.md` — HPC end-to-end smoke covering the full
-  annotation chain (gene_annotation + function_annotation) with real Actinopterygii
-  data, DIAMOND provenance, BUSCO lineage, and durable resume.
+- `08_hpc_integration_smoke_tests.md` — local E2E + HPC end-to-end validation
+  for the full annotation chain with real Actinopterygii data, DIAMOND
+  provenance, BUSCO lineage, and durable resume.
 - `09_stage_method_boilerplate_consolidation.md` — behavior-preserving refactor:
   collapse per-method freeze/run/collect node + thin-router boilerplate into the
   shared `gene_annotation` helper + `{suffix: cfg}` table pattern.

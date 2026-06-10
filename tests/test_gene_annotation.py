@@ -101,6 +101,13 @@ class GeneAnnotationDescriptorTests(unittest.TestCase):
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["gene_annotation"])
 
+    def test_miniprot_native_gff_is_evm_other_prediction_not_protein_alignment(self):
+        registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+
+        miniprot = registry.methods["gene_annotation.candidate.miniprot"]
+        self.assertEqual(miniprot.evm["evidence_class"], "OTHER_PREDICTION")
+        self.assertEqual(miniprot.evm["source_type"], "miniprot")
+
 
 class GeneAnnotationStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:

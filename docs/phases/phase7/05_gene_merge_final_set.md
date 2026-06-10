@@ -1,87 +1,155 @@
-# 07-05 候选基因模型合并与最终基因集
+# 07-05 候选合并、最终基因集与 BUSCO
 
-任务状态：本地实现完成（未提交）；依赖 task 04（候选基因模型执行切片）和 task 03（merge review gate）。
-
-## 实现要点（本地）
-
-- EVM+BUSCO 六个节点（freeze→run→collect × 2）插入在 gate3（merge_review）之后、gate4（final_gene_set_review）之前。`route_after_merge_gate` 改为返回 `evm_freeze`，BUSCO collect 之后返回 `block_final`。
-- 单候选直通：`freeze_evm_attempt` 检测 `candidate_refs` 数量 ≤ 1 时直接设置 `evm_collected` + `merge_method: single_candidate_passthrough`，跳过脚本生成和 run/collect。
-- 多候选：生成 EVM weights 文件和 `evidence_modeler.pl` 命令脚本，走完整 freeze→run→collect 路径。
-- `freeze_gene_busco_attempt`：优先 proteins 模式（从 `expected_outputs.predicted_proteins`），fallback transcriptome 模式；无 lineage 或序列途径时降级为 `busco_completeness_status: missing`。
-- BUSCO 失败不中止：run 失败时降级为 missing 信号并继续到 gate4。
-- `collect_gene_busco_artifacts` 解析 BUSCO short summary（复用 assembly_review 的 `_parse_busco_short_summary` 模式），写入 `busco_completeness` 和 `busco_metrics`，gate4 的 `build_final_gene_set_review_payload` 读取这些字段。
-- `route_after_method_plan` 新增 `evm_frozen/ran/collected` 和 `busco_frozen/ran` 的 crash-recovery 路由。
-- `config/envs.yaml` 新增 `gene_annotation.evm` 和 `gene_annotation.busco` 条目。
+任务状态：本地实现已提交（commit `fcf48ec`）；真实 HPC smoke 待 task 08 执行。
 
 ## 目标
 
-将一个或多个候选基因注释方法产出的 GFF3 文件通过 EVM 合并为最终基因集，经 BUSCO 完整性验证后送入最终基因集 review gate。EVM 权重在合并阶段决定，候选-证据 review（task 03）确认候选值得合并，合并步骤完成整合，最终基因集 review 以 BUSCO 为信号接受或拒绝。
+本任务负责把 task 04 产出的候选基因模型提升为最终 gene set，并给最终 gene set 生成 BUSCO 质量信号。它是 `gene_annotation` stage 内部的后半段，不另立 stage。
 
-## 当前状态（已验证）
+链路位置：
 
-- `gene_annotation` stage 无任何 EVM/MAKER 集成；`commit_gene_annotation` 目前直接把规划阶段的期望输出路径写入 bundle，不执行合并。
-- `GeneAnnotationBundle`（`app/schemas/artifacts.py`）已有 `genes_gff3_ref` / `predicted_proteins_ref` 字段，可直接承载最终基因集路径。
-- BUSCO 在 `assembly_review` 已有完整模式：`freeze_busco_attempts` → `run_busco_attempts` → `collect_busco_artifacts`，以及 `assembly_review.eval.busco` 在 `config/envs.yaml` 的 conda env 条目；复用该集成模式，不另立新机制。
-- `ArtifactMeta.from_file(...)` 是注册制品的统一入口，模式已稳定。
-- `lineage_or_species_hints` 已由 `resolve_gene_annotation_inputs` 从 inventory 中读取 `busco_lineage`，可直接复用。
-
-## 位置（chain position）
-
-```
-task 04：运行基因注释方法
-    ↓ candidate_gff_refs（来自 merge review gate 决策）
-task 05：EVM 合并（本任务） → 运行 BUSCO（proteins/transcriptome 模式）
-    ↓ final_gff_ref + BUSCO 完整性信号
-    → final_gene_set_review gate（ReviewPayload）
-task 06：功能注释
+```text
+candidate_evidence_review
+  -> EVM 或 single-candidate passthrough
+  -> materialize final proteins/transcripts
+  -> BUSCO on final materialized sequences
+  -> final_gene_set_review
+  -> commit_gene_annotation
 ```
 
-## 范围
+核心原则：最终发布和 BUSCO 都必须读取同一套 final gene set resolver，不能让 planning 占位路径进入最终 bundle。
 
-- 在 `gene_annotation` commit 路径中增加合并执行节点（不另立 stage）。
-- EVM 合并执行器：接收候选 GFF3 列表 + 权重表（来自 merge review gate），产出合并后的最终基因集 GFF3 作为持久制品。
-- 单候选直通：若仅有一个 `candidate_gff_ref`，跳过 EVM，将其直接提升为最终基因集，记录 `merge_method: single_candidate_passthrough`。
-- BUSCO 执行器：以 `--mode proteins` 或 `--mode transcriptome` 在最终基因集上运行 BUSCO，将完整性分数作为信号写入 `final_gene_set_review` ReviewPayload。
-- 将合并与 BUSCO 节点接入 `gene_annotation` 的 node graph，位置在候选-证据 review gate 之后。
-- 在 `config/envs.yaml` 中补充 `gene_annotation.evm` 和 `gene_annotation.busco` 方法条目。
+## 合并契约
 
-## 非目标
+输入来自 `candidate_evidence_review` 接受的 CandidateBundle。
 
-- 产出候选基因模型（task 04）。
-- 功能注释（task 06）。
-- EVM 权重的人工审核界面（属于 task 03 的 merge review gate）。
-- 在本任务中实现 MAKER 合并路径（EVM 为主，MAKER 不在本任务范围）。
+### 单候选直通
 
-## 已决事项
+当 accepted candidate 数量为 1 时，不运行 EVM：
 
-- **合并主干**：EVM 为主。考虑到 EVM 维护风险，设有单候选直通兜底：若只有一个候选 GFF3，跳过 EVM，直接将其作为最终基因集，记录 `merge_method: single_candidate_passthrough`。
-- **合并位置**：在 `gene_annotation` commit 路径中实现（不另立 stage），与 task 03 决策一致。
-- **BUSCO lineage**：从 `lineage_or_species_hints["busco_lineage"]` 读取（`resolve_gene_annotation_inputs` 已从 inventory 填充此字段）；若不存在则沿用 `assembly_review` BUSCO 使用的相同 lineage（通过 shared_parameters 约定）；两者均不存在时记录缺失信号、不中止流程。
-- **BUSCO 模式**：优先 `--mode proteins`；若无蛋白序列则退回 `--mode transcriptome`；两者均不可用时记录为缺失信号。
-- **制品键名**：`stage_output["final_gff_ref"]`，artifact_type 为 `gene_annotation.final_gff`。
+- `merge_method = "single_candidate_passthrough"`
+- `final_gff_ref` 指向该候选 GFF3
+- 如果候选已有 proteins/transcripts，优先沿用并注册为 final refs
+- 如果候选只有 GFF3，尝试用 gffread 物化 proteins/transcripts
 
-## 任务
+### 多候选 EVM
 
-- [x] 在 `gene_annotation/nodes.py` 中添加 `freeze_evm_attempt` 节点：输入为 merge review gate 决策中的 `candidate_gff_refs` 列表和权重表，生成 EVM pipeline 命令脚本，写入工作目录，冻结为 attempt payload（模式与 `freeze_busco_attempts` 保持一致）。
-- [x] 实现单候选直通逻辑：`freeze_evm_attempt` 中检测 `candidate_gff_refs` 数量；若为 1，跳过脚本生成，在 attempt payload 中设 `merge_method: single_candidate_passthrough`，直接记录源路径。
-- [x] 添加 `run_evm_attempt` 节点：使用 `LocalRunner` 执行冻结的 EVM 脚本，捕获 stdout/stderr，错误时在 stage_output 中记录失败原因（不抛异常）。
-- [x] 添加 `collect_evm_artifacts` 节点：将合并后的 GFF3 注册为 `ArtifactMeta`（artifact_type `gene_annotation.final_gff`），将路径写入 `stage_output["final_gff_ref"]`，记录 `merge_method`（`evm` 或 `single_candidate_passthrough`）。
-- [x] 添加 `freeze_gene_busco_attempt` 节点：从 `stage_output["final_gff_ref"]` 推断蛋白/转录本序列路径，按已决事项的模式选择策略，生成 BUSCO 命令脚本，冻结为 attempt payload；lineage 来自 `lineage_or_species_hints["busco_lineage"]`。
-- [x] 添加 `run_gene_busco_attempt` 节点：使用 `LocalRunner` 执行冻结的 BUSCO 脚本，捕获结果；错误时降级为缺失信号，不中止。
-- [x] 添加 `collect_gene_busco_artifacts` 节点：解析 BUSCO short summary，提取完整性分数（Complete/Single/Duplicated/Fragmented/Missing 百分比），注册为 `ArtifactMeta`（artifact_type `gene_annotation.busco_summary`），将指标写入 `stage_output["busco_completeness"]`。
-- [x] 构建 `final_gene_set_review` ReviewPayload：将 `busco_completeness` 作为信号字段写入（gate4 已由 task 03 实现，本任务填充 busco 信号数据）。
-- [x] 将上述节点接入 `gene_annotation` node graph：在 merge_review gate 之后，依次连接 `freeze_evm_attempt` → `run_evm_attempt` → `collect_evm_artifacts` → `freeze_gene_busco_attempt` → `run_gene_busco_attempt` → `collect_gene_busco_artifacts` → `final_gene_set_review` gate。
-- [x] 在 `config/envs.yaml` 中添加 `gene_annotation.evm` 和 `gene_annotation.busco` 方法条目，`required_tools` 分别指定 `EVidenceModeler` 和 `busco`，conda_env 均指向 `env_geno_exec`。
-- [x] 添加单元测试：`freeze_evm_attempt` 生成正确的权重表命令；单候选直通时不生成 EVM 脚本；`busco_completeness` 信号出现在 `final_gene_set_review` ReviewPayload 中；`final_gff_ref` 在合并成功后出现在 `stage_output` 中。
-- [ ] task 04 首个执行切片落地后，以真实候选文件执行本地冒烟验证（smoke test），确认 EVM 命令可运行并产出 GFF3。
+当 accepted candidate 数量大于 1 时运行 EVM：
+
+- gene prediction evidence 写入 `--gene_predictions`
+- protein alignment evidence 写入 `--protein_alignments`
+- transcript alignment evidence 写入 `--transcript_alignments`
+
+EVM weights 文件必须使用真实 EVM 语义：
+
+```text
+EVIDENCE_CLASS<TAB>SOURCE_OR_TYPE<TAB>WEIGHT
+```
+
+禁止把文件路径写入 weights 文件。文件路径只属于 EVM 命令参数。
+
+Miniprot 需要按输出格式区分：
+
+- Miniprot native `--gff` 输出：`OTHER_PREDICTION` / `--gene_predictions`。
+- Miniprot converted alignment GFF3：只有在实现并验证 `miniprot_GFF_2_EVM_alignment_GFF3` 后，才允许 `PROTEIN` / `--protein_alignments`。
+
+AUGUSTUS 归为 `ABINITIO_PREDICTION` / `--gene_predictions`。GeneWise 等真正的 protein alignment GFF3 才能进入 `PROTEIN` / `--protein_alignments`。
+
+## Final Gene Set Resolver
+
+最终基因集由一个统一 resolver 发布，优先级如下：
+
+1. `final_gff_ref`
+2. `final_proteins_ref`
+3. `final_transcripts_ref`
+4. provided annotation refs
+
+`commit_gene_annotation`、`freeze_gene_busco_attempt` 和 function annotation handoff 必须使用同一套最终 refs。
+
+禁止行为：
+
+- 从 `expected_outputs.predicted_proteins` 推断最终蛋白。
+- 在文件不存在时仍把路径传给 BUSCO 或 function annotation。
+- 在 bundle 中发布未物化的 `work/.../proteins.fa` 占位路径。
+
+## gffread 物化契约
+
+当最终 GFF3 可用而 proteins/transcripts 不可用时，使用 gffread 物化序列：
+
+```bash
+gffread <final.gff3> -g <genome.fa> -y <proteins.fa> -x <transcripts.fa>
+```
+
+物化产物必须满足：
+
+- 文件真实存在且非空。
+- 注册为 gene annotation artifact。
+- 写入 `final_proteins_ref` / `final_transcripts_ref`。
+- 被 `commit_gene_annotation` 发布为 `proteins_fasta_ref` / `transcripts_fasta_ref`。
+
+若 gffread 缺失或失败，错误应落在 gene annotation 的执行/收集路径中；不能用旧 expected output 占位继续向下游冒充成功。
+
+CandidateBundle 可以没有 `proteins_fasta_ref`；Final gene set 不可以在进入 function annotation 前缺少真实存在且非空的 `proteins_fasta_ref`。若 `requested_stages` 包含 `function_annotation`，`commit_gene_annotation` 必须发布真实 proteins FASTA，否则应 terminal fail 或停在 review/修复路径。
+
+## BUSCO 契约
+
+BUSCO 使用最终物化序列，而不是 planning expected outputs。
+
+选择顺序：
+
+1. 若 `final_proteins_ref` 存在，使用 `--mode proteins`。
+2. 否则若 `final_transcripts_ref` 存在，使用 `--mode transcriptome`。
+3. 两者都不存在时，记录 `busco_completeness_status = "missing"`，不冻结 BUSCO attempt。
+
+BUSCO 失败不中止流程，但必须降级为明确的 missing/failed signal，并进入 `final_gene_set_review`。这保证 review 能看到“没有可靠 BUSCO”的事实，而不是流程假装完整。
+
+BUSCO lineage 来自 lineage/species hints 或 run-config 中的显式 lineage。缺 lineage 时同样记录缺失信号，不运行 BUSCO。
+
+## Final Gene Set Review
+
+`final_gene_set_review` payload 必须包含：
+
+- `final_gff_ref`
+- `final_proteins_ref`
+- `final_transcripts_ref`
+- `merge_method`
+- accepted candidate summary
+- BUSCO completeness or missing reason
+- warnings
+
+review 决策接受后，`commit_gene_annotation` 发布最终 gene annotation bundle。
+
+## Function Annotation Handoff
+
+function annotation 的蛋白输入必须来自 gene annotation 最终 bundle：
+
+- 首选 `proteins_fasta_ref`
+- 兼容 `predicted_proteins_ref`
+- 兼容旧 alias `predicted_proteins`
+
+task 08 的 run-config 不应预猜 gene stage 的工作目录路径。推荐在 database provenance 中省略 `input_proteins_ref`，由 function annotation 在 provenance validation 时采用实际 resolved proteins ref，并在 bundle 中回填。
+
+## 测试重构设计
+
+本任务的测试应集中覆盖最终契约：
+
+- `test_gene_annotation_merge.py`: EVM weights 三列格式、evidence class 路由、单候选 passthrough。
+- `test_gene_annotation_materialization.py`: gffread 物化 proteins/transcripts、空文件失败、artifact 注册。
+- `test_gene_annotation_busco.py`: BUSCO 使用 `final_proteins_ref`、transcript fallback、缺文件不运行 BUSCO、run failure 降级。
+- `test_gene_annotation_final_bundle.py`: commit 只发布真实 final refs，禁止 expected output 占位。
+
+历史测试可以继续存在，但断言应从“脚本包含某个字符串”升级为“生成的命令和文件符合生信语义”。
 
 ## 验收
 
-本任务完成时：
+本任务完成时必须满足：
 
-- 若有多个候选 GFF3，`stage_output["merge_method"]` 为 `evm`，`final_gff_ref` 指向 EVM 产出的合并 GFF3；
-- 若只有一个候选 GFF3，`stage_output["merge_method"]` 为 `single_candidate_passthrough`，EVM 脚本未被生成或执行；
-- BUSCO 完整性分数（Complete/Single/Duplicated/Fragmented/Missing）出现在 `final_gene_set_review` 的 `ReviewPayload.signals` 中；
-- `final_gff_ref` 和 `busco_completeness` 均出现在 `gene_annotation` stage_output 中，且已通过 `ArtifactMeta.from_file` 注册到制品账本；
-- `config/envs.yaml` 中存在 `gene_annotation.evm` 和 `gene_annotation.busco` 方法条目；
-- 新增单元测试全部通过，现有 `gene_annotation` 测试无退化。
+- 单候选和多候选路径都能产出 `final_gff_ref`。
+- 多候选 EVM weights 为 `EVIDENCE_CLASS<TAB>SOURCE_OR_TYPE<TAB>WEIGHT`。
+- Miniprot native GFF 进入 `OTHER_PREDICTION` / `--gene_predictions`；只有 converter 产出的 Miniprot alignment GFF 才能进入 `PROTEIN` / `--protein_alignments`。
+- AUGUSTUS 等 prediction evidence 进入 `--gene_predictions`；GeneWise 等真正 protein alignment evidence 进入 `--protein_alignments`。
+- `final_proteins_ref` / `final_transcripts_ref` 来自真实物化文件。
+- 若 `requested_stages` 包含 `function_annotation`，final bundle 必须发布真实存在且非空的 `proteins_fasta_ref`。
+- BUSCO 使用 final refs，缺 final sequence 时干净降级为 missing。
+- `gene_annotation_bundle.json` 不包含不存在的 expected output 占位路径。
+- function annotation handoff 能解析到真实 proteins fasta。

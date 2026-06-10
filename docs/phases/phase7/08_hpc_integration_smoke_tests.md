@@ -1,36 +1,128 @@
-# 08 HPC 集成冒烟测试
+# 08 Phase 7 端到端验收与 HPC 冒烟测试
 
-任务状态：待执行（需要 HPC、真实 FASTQ、真实数据库路径）
+任务状态：待执行。文档已重构为验收契约；需要 HPC、真实 FASTQ、真实数据库路径。
 
 ## 目标
 
-这个 task 用真实 HPC 数据验证 Phase 7 注释执行链路是否已经接入当前主流程。测试不再使用旧的 `--stage repeat_annotation/gene_annotation/function_annotation` 单阶段入口；当前真实运行链路是：
+本任务不是单个功能切片，而是 Phase 7 的验收层。它验证 repeat、gene、function 三段 annotation chain 是否能在主流程中真实运行，并通过 durable checkpoint + review/resume 到达最终 `done/completed`。
+
+主链入口固定为：
 
 ```bash
-gene-agent run -> blocked_human -> gene-agent inspect/review -> gene-agent resume -> done
+gene-agent run
+  -> blocked_human
+  -> gene-agent inspect/review
+  -> gene-agent resume
+  -> done
 ```
 
-本轮 smoke 必须覆盖：
+不再使用旧的 `--stage repeat_annotation/gene_annotation/function_annotation` 单阶段入口。
 
-- 两个 Actinopterygii 物种。
-- 每个物种各两个 raw long-read FASTQ 文件。
-- `assembly_review` BUSCO 使用 `actinopterygii_odb10`。
-- `gene_annotation` 和 `function_annotation` 都通过 run-config 纳入同一条 raw FASTQ 主链。
-- `function_annotation` 使用 DIAMOND，并由 run-config 提供 database provenance。
+## 验收分层
 
-通过标准是两个物种都跑到 `done/completed`，并且两个物种的 `route_trace` 都包含完整链路：
+### 08A: 本地缩小版 E2E
+
+本地 E2E 使用 fake tools 和小输入，目标是快速防止路由、checkpoint、review 和 artifact contract 退化。
+
+必须覆盖：
+
+- durable sqlite checkpointer
+- assembly review accept
+- repeat_annotation -> mask_review
+- gene_annotation candidate execution
+- final gene set review
+- function_annotation DIAMOND handoff
+- final report
+- route trace 完整
+- resume 后不重复执行同一 method attempt
+
+本地 E2E 不要求真实生物结果，但必须验证所有 bundle 中的路径都是真实存在的文件，不能是 planning expected output 占位。
+
+### 08B: HPC 真数据 smoke
+
+HPC smoke 使用两个 Actinopterygii 物种、真实 raw long-read FASTQ、真实 BUSCO lineage、真实 repeat library、真实 reference proteins 和真实 DIAMOND database。
+
+它验证工具环境、数据库 provenance、生物输入规模和长流程稳定性。
+
+## 通过标准
+
+两个物种都必须达到：
+
+- `current_stage == "done"`
+- `supervision_state == "completed"`
+- `route_trace` 包含完整链路：
 
 ```text
-inventory_stage -> read_qc_stage -> genome_survey_stage -> assembly_stage
--> assembly_review_stage -> hic_scaffolding_stage -> repeat_annotation_stage
--> gene_annotation_stage -> function_annotation_stage
+inventory_stage
+read_qc_stage
+genome_survey_stage
+assembly_stage
+assembly_review_stage
+hic_scaffolding_stage
+repeat_annotation_stage
+gene_annotation_stage
+function_annotation_stage
 ```
 
----
+并且以下 artifact 均存在：
+
+- durable sqlite checkpoint
+- ledger events
+- repeat annotation bundle
+- gene annotation bundle
+- function annotation bundle
+- final report
+
+## Phase 7 当前契约基线
+
+08 必须验证以下契约，而不是复制旧任务里的路径假设。
+
+### Repeat Annotation
+
+当前真实执行边界：
+
+- RepeatMasker
+- provided repeat library
+- softmasked genome
+- repeat GFF3
+- mask_review accept/skip
+
+当前不强制：
+
+- EDTA
+- RepeatModeler
+- TRF
+- RepeatMasker 内置 `-species` Dfam 路径
+
+### Gene Annotation
+
+当前真实执行边界：
+
+- Miniprot candidate execution
+- AUGUSTUS candidate execution when `augustus_species_model` is available
+- CandidateBundle
+- EVM merge or single-candidate passthrough
+- gffread final proteins/transcripts materialization
+- BUSCO on final materialized proteins/transcripts
+- final gene set review
+
+08 不允许 gene bundle 或 BUSCO 使用不存在的 planning expected output 路径。
+
+Miniprot native `--gff` 必须作为 `OTHER_PREDICTION` / `--gene_predictions` 进入 EVM。它不能直接作为 `PROTEIN` / `--protein_alignments`，除非本轮 smoke 使用的是已验证转换器产出的 Miniprot alignment GFF3。
+
+### Function Annotation
+
+当前真实执行边界：
+
+- DIAMOND makedb + blastp
+- database provenance validation
+- function annotation bundle
+
+08 应优先在 provenance 中省略 `input_proteins_ref`，让 function annotation 使用 gene bundle 中实际发布的 `proteins_fasta_ref` 并回填 provenance。只有在专门测试路径匹配时，才显式写 `input_proteins_ref`。
 
 ## 1. HPC 数据布局
 
-建议单独建目录，避免复用旧 smoke 输出：
+建议单独建目录：
 
 ```bash
 export PHASE7_ROOT=/data/work/genevis/data/phase7_08_actino_smoke
@@ -78,10 +170,8 @@ ${PHASE7_ROOT}/
 - [ ] 两个物种的 `genome_size_estimate` 已确认，单位为 bp。
 - [ ] `actinopterygii_odb10` BUSCO lineage 目录已落盘。
 - [ ] RepeatMasker 可用的 Actinopterygii repeat library 已落盘。
-- [ ] miniprot 可用的 Actinopterygii 参考蛋白 FASTA 已落盘。
-- [ ] DIAMOND 可用的功能注释 FASTA 已落盘。
-
----
+- [ ] Miniprot 可用的 Actinopterygii reference proteins FASTA 已落盘。
+- [ ] DIAMOND 可用的 function protein database FASTA 已落盘。
 
 ## 2. 环境预检
 
@@ -94,6 +184,7 @@ conda run -n env_geno_exec busco --version
 conda run -n env_geno_exec RepeatMasker -version
 conda run -n env_geno_exec miniprot --version
 conda run -n env_geno_exec augustus --version
+conda run -n env_geno_exec gffread --version
 conda run -n env_geno_exec diamond version
 ```
 
@@ -114,13 +205,11 @@ conda run -n env_geno_exec seqkit stats \
   "${PHASE7_ROOT}/inputs/species_b/species_b.reads.2.fastq.gz"
 ```
 
----
-
 ## 3. Manifest 模板
 
-每个物种一个 manifest。两个 FASTQ 文件放在同一个 `raw_long_reads` asset 下，表示同一物种同一测序来源的多个输入文件。
+每个物种一个 manifest。两个 FASTQ 文件放在同一个 `raw_long_reads` asset 下。
 
-`species_a.manifest.yaml`：
+`species_a.manifest.yaml`:
 
 ```yaml
 session_id: phase7-08-species-a-YYYYMMDD-a
@@ -166,23 +255,11 @@ assets:
 - `genome_size_estimate`
 - 两个 FASTQ 路径
 
-当前 manifest schema 已接受 `reference_proteins`，不需要再做旧文档中的 schema 修复。
-
----
-
 ## 4. Run Config 模板
 
-现在 `local_exec` 可以包含 `gene_annotation` 和 `function_annotation`，所以两个物种的 smoke 都应把最后两个 stage 纳入同一份 run-config。
+重点：不要预填 gene stage 将来生成的 proteins 路径。`function_annotation.database_provenance[*].input_proteins_ref` 可以省略，validation 会采用 gene annotation 实际发布的 proteins ref 并回填。
 
-`function_annotation.database_provenance[*].input_proteins_ref` 必须精确等于 gene stage 传给 function stage 的 `proteins_fasta_ref`。当前 gene planning 的预测蛋白路径是可预测的：
-
-```text
-${DATA_DIR}/work/gene_annotation/${SESSION_ID}/proteins.fa
-```
-
-因此每个物种的 run-config 需要按自己的 `data-dir` 和 `session-id` 填入该绝对路径。如果流程最后失败为 `protein artifact not found for function_annotation`，说明最后两 stage 已经被 config 纳入并路由到了 function execution，但 gene stage 没有物化 `proteins.fa`；这应作为 smoke 暴露的实现问题处理。
-
-`species_a.run_config.json`：
+`species_a.run_config.json`:
 
 ```json
 {
@@ -246,11 +323,10 @@ ${DATA_DIR}/work/gene_annotation/${SESSION_ID}/proteins.fa
         "method_name": "function_annotation.candidate.diamond",
         "database_name": "Actinopterygii functional protein database",
         "database_version": "operator_supplied",
-        "snapshot_date": "2026-06-04",
+        "snapshot_date": "2026-06-10",
         "database_source_ref": "/data/work/genevis/data/phase7_08_actino_smoke/db/function/actinopterygii_function_db.faa",
         "descriptor_version": "diamond.yaml",
-        "input_proteins_ref": "/data/work/genevis/data/phase7_08_actino_smoke/out/species_a/work/gene_annotation/phase7-08-species-a-YYYYMMDD-a/proteins.fa",
-        "command": "gene-agent function_annotation DIAMOND smoke"
+        "command": "diamond makedb + diamond blastp smoke"
       }
     ]
   }
@@ -261,17 +337,16 @@ ${DATA_DIR}/work/gene_annotation/${SESSION_ID}/proteins.fa
 
 - `shared_parameters.estimated_genome_size`
 - `assembly.flye_parameters.estimated_genome_size`
-- `function_annotation.database_provenance[0].input_proteins_ref`
-- 必要时替换 `assembly.flye_parameters.read_type`
+- session-specific command notes if desired
 - 线程数按队列资源调整
 
----
+若要同时覆盖 AUGUSTUS，必须确保 inventory/hints 能解析出可用的 `augustus_species_model`。否则在 method review 中不要选择 AUGUSTUS，让 Miniprot 单候选 passthrough 路径成为本轮 smoke 的主路径。
 
-## 5. 当前真实运行链路
+注意：当前 run-config schema 不接受顶层 `gene_annotation` 配置块。gene BUSCO 使用的是 `lineage_or_species_hints["busco_lineage"]`，必须由当前实现支持的 inventory/hints 通道写入。若 HPC smoke 中 final gene BUSCO 因 `no busco_lineage in lineage_or_species_hints` 降级为 missing，应作为实现缺口记录，而不是在 run-config 里添加未支持字段绕过。
+
+## 5. 运行流程
 
 ### 5.1 初始 run
-
-两个物种分别跑，session ID 必须和 manifest 中一致：
 
 ```bash
 conda run -n gene_agent gene-agent run \
@@ -291,7 +366,7 @@ conda run -n gene_agent gene-agent run \
   --checkpointer sqlite
 ```
 
-预期：初始 run 在 strict review policy 下停在 `assembly_review`，`supervision_state` 为 `blocked_human`，而不是报错。
+预期：strict review policy 下停在 `assembly_review`，`supervision_state` 为 `blocked_human`。
 
 ### 5.2 Inspect
 
@@ -313,7 +388,7 @@ conda run -n gene_agent gene-agent inspect \
 
 ### 5.3 Review + resume
 
-TTY 场景优先使用：
+TTY 场景：
 
 ```bash
 conda run -n gene_agent gene-agent review \
@@ -321,14 +396,17 @@ conda run -n gene_agent gene-agent review \
   --data-dir "${PHASE7_ROOT}/out/species_a"
 ```
 
-review 时选择：
+review 选择建议：
 
-- assembly review：`accept` 已执行的 assembly candidate。
-- annotation intake：保留 `repeat_annotation -> gene_annotation -> function_annotation`。
-- gene methods：至少选择 `gene_annotation.candidate.miniprot`。如要同时覆盖 Augustus/EVM，选择 `miniprot + augustus`，并确认 Augustus species model 在执行环境可用。
-- function methods：保留 DIAMOND provenance；DIAMOND 是否实际执行由 `function_annotation.database_provenance` 中的 `function_annotation.candidate.diamond` 记录决定。
+- assembly review: accept 已执行的 assembly candidate。
+- annotation intake: 保留 `repeat_annotation -> gene_annotation -> function_annotation`。
+- mask review: accept softmasked genome，除非 RepeatMasker 明显异常。
+- gene methods: 至少选择 `gene_annotation.candidate.miniprot`。
+- AUGUSTUS: 只有在 `augustus_species_model` 可用时选择。
+- final gene set review: 若 BUSCO 缺失或较低，记录原因后人工决定是否继续。
+- function methods: 保留 DIAMOND provenance。
 
-自动化场景使用模板文件：
+自动化场景可用 decision template：
 
 ```bash
 conda run -n gene_agent gene-agent inspect \
@@ -337,20 +415,7 @@ conda run -n gene_agent gene-agent inspect \
   --write-decision-template "${PHASE7_ROOT}/out/species_a/decision_assembly_review.json"
 ```
 
-编辑 decision 文件，至少保留：
-
-```json
-{
-  "stage": "assembly_review",
-  "decision": "accept",
-  "candidate_id": "<candidate id from inspect>",
-  "final_assembly_ref": "<existing final_assembly_ref from inspect>",
-  "decided_by": "human",
-  "notes": ["phase7 08 actinopterygii smoke approved"]
-}
-```
-
-然后 resume：
+然后：
 
 ```bash
 conda run -n gene_agent gene-agent resume \
@@ -360,13 +425,11 @@ conda run -n gene_agent gene-agent resume \
   --checkpointer sqlite
 ```
 
-`species_b` 同理。后续如果再次进入 gene annotation 或其他 review gate，用同一套 `inspect -> review` 或 `inspect -> decision file -> resume` 链路继续，不要改回 `--stage` 命令。
-
----
+后续 review gate 均使用同一套 `inspect -> review` 或 `inspect -> decision file -> resume` 链路。
 
 ## 6. 强制验收点
 
-每个物种都必须满足以下检查。
+以下检查每个物种都要执行。
 
 ### 6.1 终态
 
@@ -381,16 +444,7 @@ conda run -n gene_agent gene-agent inspect \
 
 - [ ] `supervision_state` 为 `completed`。
 - [ ] `current_stage` 为 `done`。
-- [ ] `route_trace` 包含：
-  - `inventory_stage`
-  - `read_qc_stage`
-  - `genome_survey_stage`
-  - `assembly_stage`
-  - `assembly_review_stage`
-  - `hic_scaffolding_stage`
-  - `repeat_annotation_stage`
-  - `gene_annotation_stage`
-  - `function_annotation_stage`
+- [ ] `route_trace` 包含完整 stage 链路。
 - [ ] `out/checkpoints/checkpoints.sqlite` 存在。
 - [ ] `out/ledger/<SESSION>/events.jsonl` 存在。
 - [ ] `out/artifacts/final_report/<SESSION>/review_decision_report.json` 存在。
@@ -406,7 +460,7 @@ grep -n "read_qc" "${PHASE7_ROOT}/out/species_a/ledger/phase7-08-species-a-YYYYM
 
 - [ ] `read_qc_summary.json` 存在。
 - [ ] summary 能追溯到两个 FASTQ 输入。
-- [ ] ledger 中 `read_qc` 有 `method_attempt_started` 和成功记录。
+- [ ] ledger 中 `read_qc` 有真实 attempt 记录。
 
 ### 6.3 Assembly Review + BUSCO
 
@@ -422,9 +476,9 @@ find "${PHASE7_ROOT}/out/species_a/artifacts/assembly_review/phase7-08-species-a
 
 - [ ] Flye draft assembly FASTA 存在且非空。
 - [ ] QUAST summary 存在。
-- [ ] BUSCO 输出存在。
-- [ ] BUSCO lineage/provenance 指向 `actinopterygii_odb10`。
-- [ ] BUSCO 没有因为缺 lineage、缺 tool、缺 dataset 被跳过。
+- [ ] assembly-review BUSCO 输出存在。
+- [ ] assembly-review BUSCO lineage/provenance 指向 `actinopterygii_odb10`。
+- [ ] assembly-review BUSCO 没有因为缺 lineage、缺 tool、缺 dataset 被跳过。
 
 ### 6.4 Repeat Annotation
 
@@ -435,9 +489,11 @@ find "${PHASE7_ROOT}/out/species_a/artifacts/repeat_annotation/phase7-08-species
 
 通过标准：
 
-- [ ] RepeatMasker 或当前选择的 repeat 方法有真实 attempt 记录。
-- [ ] softmasked genome 产物存在。
+- [ ] RepeatMasker 有真实 attempt 记录。
+- [ ] `softmasked_genome_ref` 文件存在且非空。
+- [ ] repeat annotation GFF3 存在。
 - [ ] repeat annotation bundle 存在。
+- [ ] mask review decision 记录在 ledger 和 artifact 中。
 
 ### 6.5 Gene Annotation
 
@@ -448,12 +504,14 @@ find "${PHASE7_ROOT}/out/species_a/artifacts/gene_annotation/phase7-08-species-a
 
 通过标准：
 
-- [ ] `gene_annotation` 的 stage output 中 `execution_mode` 为 `local`。
-- [ ] `miniprot` 有真实 attempt 记录，或 review/plan 中明确记录未选择原因。
-- [ ] 若选择 Augustus/EVM，相关 GFF3 和 merge 产物存在。
+- [ ] 至少一个 candidate method 有真实 attempt 记录，默认 Miniprot。
+- [ ] CandidateBundle 引用的 GFF3 文件存在。
+- [ ] Miniprot native GFF 未进入 EVM `--protein_alignments`。
+- [ ] final GFF3 存在。
+- [ ] final proteins FASTA 存在且非空。
+- [ ] BUSCO 使用 final proteins 或 final transcripts。
 - [ ] `gene_annotation_bundle.json` 存在。
-- [ ] `proteins_fasta_ref` 指向 `run_config.function_annotation.database_provenance[0].input_proteins_ref`。
-- [ ] `proteins_fasta_ref` 对应文件真实存在；否则 DIAMOND 无法通过。
+- [ ] bundle 中不存在未落盘的 expected output 占位路径。
 
 ### 6.6 Function Annotation + DIAMOND
 
@@ -464,32 +522,17 @@ find "${PHASE7_ROOT}/out/species_a/artifacts/function_annotation/phase7-08-speci
 
 通过标准：
 
-- [ ] `function_annotation` 的 stage output 中 `execution_mode` 为 `local`。
-- [ ] `function_annotation_plan.json` 存在。
-- [ ] database provenance 通过校验，没有 `missing database_provenance`。
+- [ ] function annotation resolved proteins ref 等于 gene bundle 的 `proteins_fasta_ref`。
+- [ ] database provenance 通过校验。
+- [ ] provenance 中省略 `input_proteins_ref` 时已回填 resolved proteins ref。
 - [ ] `diamond makedb` 和 `diamond blastp` 有 attempt 记录。
-- [ ] `diamond_hits.tsv` 存在。
-- [ ] `function_annotation_bundle.json` 存在，并记录 DIAMOND database provenance。
-- [ ] final report 存在。
+- [ ] `diamond_hits.tsv` 存在且非空。
+- [ ] `function_annotation_bundle.json` 存在。
+- [ ] bundle 不把 DIAMOND hits 冒充 GO/KEGG/Pfam/InterPro 输出。
 
----
+### 6.7 Resume 幂等性
 
-## 7. 双物种通过标准
-
-整轮 task 只有在两个物种都满足以下条件时才算通过：
-
-- [ ] `species_a` 从两个 FASTQ 跑到 `done/completed`。
-- [ ] `species_b` 从两个 FASTQ 跑到 `done/completed`。
-- [ ] 两个物种的 `local_exec` 都包含 `gene_annotation` 和 `function_annotation`。
-- [ ] 两个物种的 assembly-review BUSCO 都使用 `actinopterygii_odb10`。
-- [ ] 两个物种都有 durable sqlite checkpoint，并且 resume 后没有重复执行同一 method attempt。
-- [ ] 两个物种都有 repeat annotation bundle。
-- [ ] 两个物种都有 gene annotation bundle。
-- [ ] 两个物种都有 function annotation bundle。
-- [ ] 两个物种都有 final report。
-- [ ] 两个物种的 ledger 中 human review decision 至少包含 assembly review 的 `accept`。
-
-重复 attempt 检查可用以下 Python 片段分别对两个物种运行：
+分别对两个物种运行：
 
 ```bash
 conda run -n gene_agent python - <<'PY'
@@ -511,23 +554,21 @@ print("PASS: no duplicate method attempts")
 PY
 ```
 
----
+## 7. 失败解释
 
-## 8. 失败解释
+以下失败都应记录为待修问题，不能从 smoke 中排除：
 
-这轮 smoke 把最后两个 stage 纳入强制验收，因此以下失败都应记录为待修问题，而不是从 smoke 中排除：
+- `protein artifact not found for function_annotation`: gene stage 没有物化 final proteins。
+- `database_provenance[*].input_proteins_ref does not match proteins_fasta_ref`: run-config 写了旧路径或错误路径。
+- `missing database_provenance for function_annotation`: run-config 未提供 DIAMOND provenance。
+- `diamond` attempt failed: DIAMOND database、环境或输入 proteins 有问题。
+- `busco_lineage_not_supplied` 或 `busco_lineage_path_missing`: BUSCO lineage 配置错误。
+- `augustus_species_model` missing: 选择了 AUGUSTUS 但没有 readiness 所需 hints。
+- bundle 包含不存在路径: materialization/commit 契约回退到了 planning 占位。
 
-- `missing database_provenance for function_annotation`：run-config 没有正确传入 `function_annotation.database_provenance`。
-- `database_provenance[*].input_proteins_ref does not match proteins_fasta_ref`：run-config 中预测蛋白路径填错。
-- `protein artifact not found for function_annotation`：gene stage 没有物化 `proteins.fa`，导致 DIAMOND 无法运行。
-- `diamond` attempt failed：DIAMOND database、执行环境或输入蛋白 FASTA 有问题。
-- `busco_lineage_not_supplied` 或 `busco_lineage_path_missing`：assembly-review BUSCO 配置没有正确指向 `actinopterygii_odb10`。
+## 8. 记录到 handoff
 
----
-
-## 9. 记录到 handoff
-
-执行完成后，在 `docs/handoff.md` 追加一段 Phase 7 task 08 run record，至少包含：
+执行完成后，在 `docs/handoff.md` 追加 Phase 7 task 08 run record，至少包含：
 
 - HPC host / working directory。
 - git commit。
@@ -541,3 +582,4 @@ PY
 - 每个物种的 repeat/gene/function annotation bundle refs。
 - 每个物种的 DIAMOND hits ref。
 - 每个物种的 final report ref。
+- 是否发现重复 method attempts。

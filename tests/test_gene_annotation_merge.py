@@ -135,10 +135,11 @@ class EVMFreezeTests(unittest.TestCase):
             weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
             self.assertIn("--weights", script)
-            # braker3 + miniprot both emit gene models → --gene_predictions.
+            # braker3 + native miniprot GFF both emit gene-model-like records → --gene_predictions.
             self.assertIn(f"--gene_predictions {gff1},{gff2}", script)
             # genewise is a true protein alignment → --protein_alignments.
             self.assertIn(f"--protein_alignments {gff3}", script)
+            self.assertNotIn(f"--protein_alignments {gff2}", script)
             self.assertIn("OTHER_PREDICTION\tbraker3\t1", weights)
             self.assertIn("OTHER_PREDICTION\tminiprot\t1", weights)
             self.assertIn("PROTEIN\tgenewise\t5", weights)

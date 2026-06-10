@@ -1,6 +1,6 @@
 # 07-02 重复序列/掩蔽执行端到端
 
-任务状态：本地实现完成（commit f5fafa4）。
+任务状态：本地实现完成（commit f5fafa4）；真实 HPC smoke 由 task 08 验收。
 
 ## 目标
 
@@ -58,6 +58,20 @@
   - `skip` resume 后回退为原始 ref，notes 含 `"mask_review_skipped"`。✓
   - `route_trace` 含 `"mask_review"` 节点，且在 `"repeat_annotation_stage"` 之前。✓
 - [ ] **本地烟雾测试（海豚组装）：** 以实际 Dfam FASTA 库和海豚组装为输入，端到端运行 `repeat_annotation` 阶段，确认 `softmasked_genome.fasta` 生成、`repeat_percentage` 非空、`mask_review` gate 自动通过，bundle artifact 写出。
+
+## 与后续重构的关系
+
+当前 repeat/mask 侧不需要 gene annotation 级别的大重构。它的执行契约已经足够窄：
+
+```text
+assembly + provided repeat library
+  -> RepeatMasker
+  -> softmasked genome + repeat GFF3
+  -> mask_review
+  -> repeat annotation bundle
+```
+
+后续只有在 EDTA / RepeatModeler / TRF 变成真实执行路径时，才需要引入类似 `RepeatLibraryBundle` 的新结构来区分 de novo library build、known library masking 和 tandem repeat evidence。task 08 当前只要求 provided-library RepeatMasker 路径真实可跑。
 
 ## 验收
 

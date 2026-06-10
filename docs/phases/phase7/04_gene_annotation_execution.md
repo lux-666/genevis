@@ -1,82 +1,159 @@
-# 07-04 基因注释执行切片
+# 07-04 基因注释执行契约
 
-任务状态：Slice 1（Miniprot）本地实现完成（未提交）；依赖 task 03 的注释 review chain。
-
-## 实现要点（本地）
-
-- `freeze_miniprot_attempt` / `run_miniprot_attempt` / `collect_miniprot_artifacts` 三个节点遵循 flye/yahs 的 freeze→run→collect 模式，通过 PATH override 绕过 conda preflight 以支持 fake-binary 测试。
-- 三个节点插入在 `run_gene_methods_planning_only` 之后：当 miniprot 在 `confirmed_methods` 中时，`route_after_run_methods` 路由至 `freeze_miniprot_attempt` → `run_miniprot_attempt` → `collect_miniprot_artifacts` → `block_candidate_evidence_review`。
-- `route_after_method_plan` 新增 `miniprot_frozen`/`miniprot_ran` 和 `candidates_ready + miniprot confirmed` 的 crash-recovery 路由，确保重入时正确回到 miniprot 执行路径。
-- `collect_miniprot_artifacts` 将产出 GFF3 注册为 `gene_annotation.candidate_gff` artifact，更新 `candidate_refs` 和 `candidate_gene_counts`，最终状态 `candidates_ready` 汇入 candidate_evidence_review gate。
-- `config/envs.yaml` 新增 `gene_annotation.candidate.miniprot` 条目（`conda_env: env_geno_exec`，`required_tools: [miniprot]`）。
-- `ask_planner.py` 中 miniprot 的 `execution_support` 翻转为 `executable`。
+任务状态：本地实现已提交（commit `fcf48ec`）；真实 HPC smoke 待 task 08 执行。
 
 ## 目标
 
-为基因注释预测器逐方法添加真实执行能力，每次一个切片，复用装配主线已验证的 runner 模式。每个切片将一个当前 `planned_only` 的方法推进到真正可执行状态。
+`gene_annotation` 不再只是规划阶段。当前任务的目标是把可执行的基因预测方法接入 annotation agent 主链，并形成稳定的候选基因模型契约，供 candidate review、EVM merge、BUSCO 和 function annotation 消费。
 
-## 当前状态（已验证）
+本任务关注“候选产生”：
 
-- `gene_annotation` 阶段目前全部为规划 + 采用模式：无 `run_*_attempt`、无 `LocalRunner`、无子进程调用。所有提交路径均设置 `execution_enabled: False`，备注 `execution_deferred_to_method_specific_task`（`app/stages/gene_annotation/nodes.py`）。
-- 注册表中所有方法均为 `planned_only`（`app/entrypoints/ask_planner.py:247-296`）：`braker3`、`maker`、`augustus`、`miniprot`、`hisat2`、`stringtie`、`isoquant`、`gemoma`。
-- 待复制的 runner 模式：`run_flye_attempt`（`app/stages/assembly/nodes.py:381`）与 `run_yahs_attempt`（`app/stages/hic_scaffolding/nodes.py:251`）——冻结 `FrozenAttemptSpec` → `LocalRunner().run(...)` → 收集 artifacts → 注册 → ledger 事件 → 通过 `resolve_method_env` / `attach_conda_fields` 挂载 conda 环境。
+```text
+repeat_annotation / mask_review
+  -> gene method planning review
+  -> executable gene methods
+  -> CandidateBundle
+  -> candidate_evidence_review
+```
 
-## 范围
+最终基因集合并、BUSCO 和最终发布属于 task 05。
 
-- 每个切片实现一个基因注释方法的真实本地执行，产出持久化候选基因模型 artifact。
-- 向 task 03（候选证据 review chain）提供真实候选结果。
+## 当前可执行边界
 
-## 非目标
+已落地的可执行方法：
 
-- 候选合并 / 最终基因集生成（task 05）。
-- 一次性实现所有方法；切片相互独立、可单独验收。
+- `gene_annotation.candidate.miniprot`
+- `gene_annotation.candidate.augustus`
 
-## 设计方向
+仍为 planning-only 的方法：
 
-**切片顺序**：
+- `braker3`
+- `maker`
+- `gemoma`
+- RNA-seq helper methods such as `hisat2`, `stringtie`, `isoquant`
 
-- **Slice 1：Miniprot**——蛋白同源注释，输入面最简（一个蛋白 FASTA + 一个基因组 FASTA），直接输出 GFF3，无需物种训练，比 BRAKER3 轻量。
-- **Slice 2**：AUGUSTUS 或 BRAKER3（ab initio 或带证据训练路径）。
+执行模式统一为：
 
-**候选基因模型表示**：在 `gene_annotation` 的 `stage_output` 中新增 `candidate_gff_ref` 字段，同时注册持久化 artifact `gene_annotation.candidate_gff`。
+```text
+freeze_<method>_attempt
+  -> run_<method>_attempt
+  -> collect_<method>_artifacts
+```
 
-**Conda 环境**：在 `config/envs.yaml` 的 `methods` 节下新增 `gene_annotation.candidate.miniprot` 条目，指向包含 miniprot 的 conda 环境（初始复用 `env_geno_exec`，如需独立环境可切换为 `conda_prefix`）。
+freeze 节点生成 `FrozenAttemptSpec` 和 shell script，run 节点调用 `LocalRunner`，collect 节点只接受真实落盘的输出文件并注册 artifact。
 
-## 任务
+## CandidateBundle 契约
 
-### Slice 1：Miniprot
+每个成功执行的候选方法必须物化为一个候选 bundle。bundle 的职责是把“方法运行结果”与“后续合并所需的证据类型”分开。
 
-- [x] **添加 `freeze_miniprot_attempt` 节点**：从 `stage_outputs.gene_annotation` 读取 `genome_input_ref`（mask_review 产出的软屏蔽基因组）与 manifest asset `protein_db` 路径；构造命令 `miniprot --gff <genome> <proteins>`；写入 shell 脚本；调用 `resolve_method_env` / `attach_conda_fields`；生成 `FrozenAttemptSpec`，状态置为 `miniprot_frozen`。
-- [x] **添加 `run_miniprot_attempt` 节点**：校验状态 `miniprot_frozen`；调用 `LocalRunner().run(attempt)`；失败时清理预期输出文件、调用 `ledger.record_attempt_failed`、返回 `status: failed`；成功时状态置为 `miniprot_ran`。
-- [x] **添加 `collect_miniprot_artifacts` 节点**：校验状态 `miniprot_ran`；将产出 GFF3 文件以 artifact 类型 `gene_annotation.candidate_gff` 注册到 artifact 账本；在 `stage_output` 中写入 `candidate_gff_ref`；状态置为 `candidates_ready`。
-- [x] **将三个节点连入 `gene_annotation` 图**：在 `run_gene_methods_planning_only` 之后按顺序连接 `freeze_miniprot_attempt` → `run_miniprot_attempt` → `collect_miniprot_artifacts`；仅当 `confirmed_methods` 包含 miniprot 时路由进入此分支。
-- [x] **将 `miniprot` 注册表条目 `execution_support` 翻转为 `executable`**：修改 `app/entrypoints/ask_planner.py` 中 `gene_annotation.candidate.miniprot` 对应条目。
-- [x] **在 `config/envs.yaml` 中添加 `gene_annotation.candidate.miniprot` conda 环境条目**：在 `methods` 节新增条目，`conda_env: env_geno_exec`，`required_tools: [miniprot]`。
-- [x] **连接 `resolve_method_env` / `attach_conda_fields`**：在 `freeze_miniprot_attempt` 中调用方式与 `freeze_flye_attempt` 一致，确保 conda 环境字段正确注入 `FrozenAttemptSpec`。
-- [x] **添加单元测试**（`tests/test_gene_annotation_miniprot.py`）：
-  - `freeze_miniprot_attempt` 产出的 `FrozenAttemptSpec` 命令行包含正确的 `--gff <genome> <proteins>` 参数；
-  - `run_miniprot_attempt` 在 runner 返回失败时记录 `attempt_failed` ledger 事件、`stage_output.status` 为 `failed`；
-  - `collect_miniprot_artifacts` 正确注册 `gene_annotation.candidate_gff` artifact；
-  - 执行完整 Slice 1 路径后 `stage_output` 含 `candidate_gff_ref`。
-- [ ] **本地冒烟验证**：在真实海豚软屏蔽基因组 + 真实蛋白数据库上执行完整 Slice 1 路径，确认 GFF3 产出并正确注册。
-- [x] **记录后续切片入口**（见下方 ## 后续切片）。
+必须包含：
 
-## 后续切片
+- `method_name`: 完整方法名，例如 `gene_annotation.candidate.miniprot`
+- `annotation_gff_ref`: 真实存在的候选 GFF3
+- `gene_count`: 从 GFF3 解析出的 gene 数量
+- `evidence_class`: EVM 使用的 evidence class，例如 `OTHER_PREDICTION`、`ABINITIO_PREDICTION` 或 `PROTEIN`
+- `evm_source_type`: EVM weights 中的 source/type，例如 `augustus` 或 `miniprot`
+- `evm_route`: EVM 命令参数路由，例如 `gene_predictions`、`protein_alignments` 或 `transcript_alignments`
+- `proteins_fasta_ref`: 可选，若该候选已经物化蛋白序列
+- `transcripts_fasta_ref`: 可选，若该候选已经物化转录本序列
 
-**Slice 2：AUGUSTUS 或 BRAKER3**
+禁止把 planning 阶段的 expected output 占位路径当作候选结果发布。collect 阶段必须以本地文件存在为准。
 
-- 若无外部证据（`evidence_profile: no_evidence`），以 AUGUSTUS 作为 ab initio 切片；若有 RNA-seq / 蛋白证据，优先 BRAKER3。
-- 输入面：屏蔽基因组 + 物种/谱系参数（AUGUSTUS）或 + RNA-seq BAM / 蛋白 FASTA（BRAKER3）。
-- 实现模式与 Slice 1 相同：freeze → run → collect，conda 环境独立条目，`execution_support` 翻转，新增测试。
-- 设计细节在 Slice 1 完成后具体化。
+## 输入契约
+
+`gene_annotation` 的基因组输入来自上游 annotation chain：
+
+- 优先使用 `repeat_annotation.softmasked_genome_ref`
+- 若 `mask_review` 选择 `skip`，回退为 assembly final ref
+- 若 manifest 直接提供既有 annotation，走 provided annotation 路径
+
+蛋白同源证据输入来自 manifest 中的 reference protein asset，供 Miniprot 使用。
+
+AUGUSTUS 需要 `augustus_species_model`。该值属于 inventory/hints 通道，不属于普通 method parameter。若 method review 选择了 AUGUSTUS 但 hints 中没有 species model，review/readiness 必须阻断或要求操作者改选方法，不能让运行期才失败。
+
+## Miniprot 契约
+
+Miniprot 使用参考蛋白对屏蔽基因组进行同源注释。
+
+命令形态：
+
+```bash
+miniprot --gff <genome.fa> <reference_proteins.fa> > <candidate.gff3>
+```
+
+collect 阶段必须：
+
+- 注册 `gene_annotation.candidate_gff`
+- 写入 `candidate_refs[method_name]`
+- 写入 `candidate_gene_counts[method_name]`
+- 生成 CandidateBundle
+- 标记该 method 已执行
+
+Miniprot 是 protein-homology-derived candidate，但 `miniprot --gff` 原生输出是 mRNA/CDS 风格的 gene-model-like GFF3，不是 EVM `--protein_alignments` 所需的 protein alignment feature 格式。
+
+当前执行契约：
+
+- `native_gff_route = gene_predictions`
+- `evidence_class = OTHER_PREDICTION`
+- `evm_source_type = miniprot`
+- `protein_alignment_route.enabled = false`
+- `protein_alignment_route.requires_converter = miniprot_GFF_2_EVM_alignment_GFF3`
+
+只有在实现并验证 Miniprot GFF 到 EVM protein alignment GFF3 的转换器后，Miniprot 才能作为 `PROTEIN` / `--protein_alignments` 输入 EVM。
+
+## AUGUSTUS 契约
+
+AUGUSTUS 使用显式 species model 在屏蔽基因组上执行 ab initio prediction。
+
+命令形态：
+
+```bash
+augustus --species=<augustus_species_model> --gff3=on <genome.fa> > <candidate.gff3>
+```
+
+readiness 规则：
+
+- 缺 `augustus_species_model` 时，在 method planning/review 阶段阻断。
+- species model 来自 inventory/hints，不能只通过 planner required parameters 填入。
+- 若操作者确认使用 distant model，应在 warnings 中记录风险。
+
+AUGUSTUS 输出按 EVM 语义归为 gene prediction evidence。
+
+## 候选 Review 契约
+
+`candidate_evidence_review` 消费 CandidateBundle 列表，而不是裸 GFF 路径。
+
+review payload 应展示：
+
+- 每个候选的方法名
+- gene count
+- evidence class/source
+- artifact path
+- warnings
+- 未执行或被剔除方法的原因
+
+review 决策写入 accepted candidate 集合，供 task 05 的 merge 阶段使用。
+
+## 测试重构设计
+
+gene annotation 测试应从“任务切片文件”重排为契约分层：
+
+- `test_gene_annotation_methods.py`: Miniprot/AUGUSTUS freeze-run-collect、失败清理、artifact 注册。
+- `test_gene_annotation_candidates.py`: CandidateBundle schema、gene count、evidence class/source/route、禁止占位路径泄漏。
+- `test_gene_annotation_reviews.py`: method readiness、candidate review accept/reject、route trace。
+- `test_gene_annotation_e2e.py`: fake tools 下 repeat -> gene candidate -> review 的最小闭环。
+
+现有 `tests/test_gene_annotation_miniprot.py`、`tests/test_gene_annotation.py` 中的历史 slice 测试可逐步迁移到上述分层；迁移时保留行为覆盖，不保留旧任务命名。
 
 ## 验收
 
-- `gene_annotation.candidate.miniprot` 在注册表中 `execution_support` 为 `executable`。
-- `config/envs.yaml` 中存在 `gene_annotation.candidate.miniprot` 条目，`required_tools` 包含 `miniprot`。
-- 以真实海豚屏蔽基因组 + 蛋白数据库触发 Slice 1 路径，可产出可读取的 GFF3 文件。
-- artifact 账本中出现类型为 `gene_annotation.candidate_gff` 的记录，路径指向上述 GFF3。
-- `stage_outputs.gene_annotation` 中 `candidate_gff_ref` 字段非空，指向同一 GFF3。
-- runner 失败场景（模拟 miniprot 非零返回码）：ledger 中出现 `attempt_failed` 事件，`stage_output.status` 为 `failed`，预期输出文件已清理。
-- 所有新增单元测试通过（`pytest tests/test_gene_annotation_miniprot.py` 或对应文件）。
-- 现有测试套件无回归（`pytest tests/`）。
+本任务完成时必须满足：
+
+- Miniprot 和 AUGUSTUS 均可通过 freeze-run-collect 真实产出候选 GFF3。
+- AUGUSTUS 缺 species model 时在 readiness/review 阶段阻断。
+- 每个成功候选都有 CandidateBundle，且 bundle 引用的文件真实存在。
+- Miniprot native GFF 的 EVM contract 是 `OTHER_PREDICTION` / `gene_predictions`，不得进入 `PROTEIN` / `protein_alignments`。
+- `candidate_evidence_review` 只消费真实候选结果。
+- 没有 planning expected output 占位路径进入 candidate bundle 或后续 merge 输入。
+- 新增和迁移后的单元测试通过。
+- task 08 能用 fake/local smoke 和 HPC smoke 验证该契约。
