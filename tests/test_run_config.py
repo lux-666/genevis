@@ -424,6 +424,31 @@ class RunConfigSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate({"function_annotation": {"unknown_field": "x"}})
 
+    def test_gene_annotation_lineage_or_species_hints_accepted(self):
+        cfg = RunConfig.model_validate(
+            {
+                "gene_annotation": {
+                    "lineage_or_species_hints": {
+                        "busco_lineage": "/db/busco/actinopterygii_odb10",
+                        "augustus_species_model": "zebrafish",
+                    }
+                }
+            }
+        )
+
+        assert cfg.gene_annotation is not None
+        self.assertEqual(
+            cfg.gene_annotation.lineage_or_species_hints,
+            {
+                "busco_lineage": "/db/busco/actinopterygii_odb10",
+                "augustus_species_model": "zebrafish",
+            },
+        )
+
+    def test_gene_annotation_unknown_field_rejected(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({"gene_annotation": {"unknown_field": "x"}})
+
     def test_function_annotation_empty_database_source_ref_rejected(self):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate(

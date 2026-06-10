@@ -210,6 +210,14 @@ class FunctionAnnotationRunConfig(BaseModel):
     database_provenance: list[FunctionDatabaseProvenance] | None = Field(default=None, min_length=1)
 
 
+class GeneAnnotationRunConfig(BaseModel):
+    """Run-config block for gene-annotation lineage/species hints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lineage_or_species_hints: dict[str, Any] = Field(default_factory=dict)
+
+
 class RunConfig(BaseModel):
     """Phase 4 run-config consumed by `gene-agent run --run-config`."""
 
@@ -222,6 +230,7 @@ class RunConfig(BaseModel):
     genome_survey: GenomeSurveyRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
+    gene_annotation: GeneAnnotationRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig | None = None
 

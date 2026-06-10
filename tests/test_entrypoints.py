@@ -1221,6 +1221,53 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(repeat["execution_mode"], "local")
             self.assertEqual(repeat["primary_method"], "repeat_annotation.masking.repeatmasker")
 
+    def test_run_config_gene_annotation_seeds_lineage_or_species_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "gene_annotation": {
+                            "lineage_or_species_hints": {
+                                "busco_lineage": "/db/busco/actinopterygii_odb10",
+                                "augustus_species_model": "zebrafish",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            gene = graph.invocations[0][0]["stage_outputs"]["gene_annotation"]
+            self.assertEqual(
+                gene["lineage_or_species_hints"],
+                {
+                    "busco_lineage": "/db/busco/actinopterygii_odb10",
+                    "augustus_species_model": "zebrafish",
+                },
+            )
+
     def test_missing_run_config_file_fails_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -53,7 +53,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Path to a JSON run-config file that seeds approved stage_outputs "
             "fields (local_exec stages, assembly.flye_parameters, and "
-            "function_annotation.database_provenance)."
+            "gene/function annotation execution hints)."
         ),
     )
     run_parser.add_argument(
@@ -368,6 +368,10 @@ def _run_session(args: argparse.Namespace) -> int:
             stage_out = dict(stage_outputs.get(review_stage) or {})
             stage_out["review_policy"] = run_config.review_policy.effective_for_stage(review_stage)
             stage_outputs[review_stage] = stage_out
+    if run_config and run_config.gene_annotation and run_config.gene_annotation.lineage_or_species_hints:
+        gene_out = dict(stage_outputs.get("gene_annotation") or {})
+        gene_out["lineage_or_species_hints"] = dict(run_config.gene_annotation.lineage_or_species_hints)
+        stage_outputs["gene_annotation"] = gene_out
     if run_config and run_config.function_annotation and run_config.function_annotation.database_provenance:
         fn_out = dict(stage_outputs.get("function_annotation") or {})
         fn_out["database_provenance"] = [

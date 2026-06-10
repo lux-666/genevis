@@ -314,6 +314,11 @@ assets:
     },
     "max_reruns": 3
   },
+  "gene_annotation": {
+    "lineage_or_species_hints": {
+      "busco_lineage": "/data/work/genevis/db/busco/actinopterygii_odb10"
+    }
+  },
   "review_policy": {
     "mode": "strict"
   },
@@ -342,7 +347,7 @@ assets:
 
 若要同时覆盖 AUGUSTUS，必须确保 inventory/hints 能解析出可用的 `augustus_species_model`。否则在 method review 中不要选择 AUGUSTUS，让 Miniprot 单候选 passthrough 路径成为本轮 smoke 的主路径。
 
-注意：当前 run-config schema 不接受顶层 `gene_annotation` 配置块。gene BUSCO 使用的是 `lineage_or_species_hints["busco_lineage"]`，必须由当前实现支持的 inventory/hints 通道写入。若 HPC smoke 中 final gene BUSCO 因 `no busco_lineage in lineage_or_species_hints` 降级为 missing，应作为实现缺口记录，而不是在 run-config 里添加未支持字段绕过。
+`gene_annotation.lineage_or_species_hints` 会被入口写入 `stage_outputs.gene_annotation`，供 gene BUSCO 和 AUGUSTUS readiness 读取。若要覆盖 AUGUSTUS，可在同一对象中加入 `"augustus_species_model": "<installed_augustus_species>"`；不要把它写入 method parameters，因为 runtime 不从该通道读取。
 
 ## 5. 运行流程
 
