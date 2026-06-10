@@ -351,10 +351,16 @@ def _run_session(args: argparse.Namespace) -> int:
             "primary_method", "repeat_annotation.masking.repeatmasker"
         )
         stage_outputs["repeat_annotation"] = repeat_out
-    if run_config and run_config.assembly and run_config.assembly.flye_parameters:
+    if run_config and run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
-        assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
-        stage_outputs["assembly"] = assembly_out
+        if run_config.assembly.flye_parameters:
+            assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
+        for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
+            value = getattr(run_config.assembly, key)
+            if value is not None:
+                assembly_out[key] = value
+        if assembly_out:
+            stage_outputs["assembly"] = assembly_out
     if run_config and run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})
         if run_config.assembly_review.quast:
@@ -364,7 +370,7 @@ def _run_session(args: argparse.Namespace) -> int:
         review_out["max_reruns"] = run_config.assembly_review.max_reruns
         stage_outputs["assembly_review"] = review_out
     if run_config and run_config.review_policy:
-        for review_stage in ["assembly_review", "hic_scaffolding"]:
+        for review_stage in ["assembly", "assembly_review", "hic_scaffolding"]:
             stage_out = dict(stage_outputs.get(review_stage) or {})
             stage_out["review_policy"] = run_config.review_policy.effective_for_stage(review_stage)
             stage_outputs[review_stage] = stage_out

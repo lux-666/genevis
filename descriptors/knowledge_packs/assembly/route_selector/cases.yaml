@@ -1,0 +1,14 @@
+- case_id: hifi_priority
+  context:
+    has_hifi: true
+    has_ont: true
+    target_level: draft
+  recommended_route: hifi
+  reasoning: "HiFi reads are present and provide the highest-accuracy route."
+
+- case_id: cyclone_only
+  context:
+    platform: cycloneseq
+    has_hifi: false
+  recommended_route: cyclone
+  reasoning: "CycloneSeq is treated as ONT R9-like for the first route pack."

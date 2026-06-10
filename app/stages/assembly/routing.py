@@ -14,7 +14,25 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving assembly inputs."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "build"
+    return "fail" if _output(state).get("status") in FAIL_STATUSES else "infer_profile"
+
+
+def route_after_infer_profile(state: TopLevelState) -> str:
+    """Route after writing the input profile."""
+    status = _output(state).get("status")
+    if status in FAIL_STATUSES:
+        return "fail"
+    return "select_route"
+
+
+def route_after_select_route(state: TopLevelState) -> str:
+    """Route after confirming or blocking on route selection."""
+    status = _output(state).get("status")
+    if status == "blocked_human":
+        return "block"
+    if status in FAIL_STATUSES:
+        return "fail"
+    return "build"
 
 
 def route_after_candidate_set(state: TopLevelState) -> str:

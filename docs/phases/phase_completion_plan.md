@@ -151,3 +151,23 @@ Exit criteria:
 - Every newly executed method runs through the same runner/freeze/collect pattern
   and durable resume as the assembly mainline.
 - The annotation review gates reuse one shared mechanism, not per-stage forks.
+
+## Phase 8: Assembly Agent And Data-Type-Driven T2T Routing
+
+Goal: turn the assembly stage from a Flye-first candidate path into a
+data-type-driven assembly agent that profiles Cyclone/ONT/HiFi/Hi-C inputs,
+selects an assembly route through skill-like knowledge packs, evaluates
+candidate QC, and gates T2T readiness with explicit human review when evidence
+is weak.
+
+Current status: Slice 1 is implemented. `docs/phases/phase8/01_*.md` and
+`02_*.md` are landed in code: new assembly artifact schemas, run-config fields,
+knowledge pack loader/files, extended input profiling, route recommendation,
+strict-by-default route selection, and the `assembly/route_selection` review
+gate. The assembly graph now runs route selection before the existing Flye
+candidate planning path.
+
+Remaining Phase 8 work lives in `docs/phases/phase8/03_*.md` through
+`06_*.md`: multi-route long-read candidate execution/QC, Hi-C evidence,
+T2T finishing/review tasks, and final subgraph cleanup that replaces the old
+candidate path completely.

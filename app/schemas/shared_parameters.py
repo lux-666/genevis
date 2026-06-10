@@ -11,6 +11,7 @@ from app.schemas.manifest import Platform
 NormalizedReadType = Literal["ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
 
 PLATFORM_TO_SHARED_READ_TYPE = {
+    "cyclone": "ont_raw",
     "cycloneseq": "ont_raw",
     "ont": "ont_raw",
     "clr": "pacbio_clr",
@@ -29,13 +30,13 @@ SHARED_TO_METHOD_READ_TYPE = {
         "flye": "nano-raw",
         "nextdenovo": "ont",
         "canu": "nanopore",
-        "hifiasm": "not_preferred",
+        "hifiasm": "ont",
     },
     "ont_hq": {
         "flye": "nano-hq",
         "nextdenovo": "ont",
         "canu": "nanopore",
-        "hifiasm": "not_preferred",
+        "hifiasm": "ont",
     },
     "pacbio_clr": {
         "flye": "pacbio-raw",

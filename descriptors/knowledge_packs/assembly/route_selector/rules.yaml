@@ -1,0 +1,27 @@
+pack_id: assembly.route_selector
+version: "1.0"
+
+allowed_actions:
+  - cyclone
+  - ont
+  - hifi
+  - insufficient_data
+
+routes:
+  cyclone:
+    primary_tool: flye
+    primary_tool_flag: nano-raw
+    description: "CycloneSeq or ONT R9-like long reads."
+  ont:
+    primary_tool: hifiasm_ont
+    baseline_tool: flye
+    description: "ONT R10/high-quality nanopore reads."
+  hifi:
+    primary_tool: hifiasm_hifi
+    description: "PacBio HiFi reads."
+
+selection_priority_notes:
+  - "HiFi reads with adequate coverage usually select hifi."
+  - "ONT R10/high-quality ONT reads usually select ont."
+  - "CycloneSeq or ONT R9-like reads usually select cyclone."
+  - "Missing platform/read refs or very low coverage selects insufficient_data."

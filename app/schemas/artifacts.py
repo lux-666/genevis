@@ -427,3 +427,101 @@ class FunctionAnnotationBundle(BaseModel):
     plan_artifact_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+ASSEMBLY_INPUT_PROFILE = "assembly.input_profile"
+ASSEMBLY_ROUTE_DECISION = "assembly.route_decision"
+ASSEMBLY_QC_SUMMARY = "assembly.qc_summary"
+ASSEMBLY_T2T_READINESS = "assembly.t2t_readiness"
+ASSEMBLY_REVIEW_TASKS = "assembly.review_tasks"
+
+
+class AssemblyInputProfile(BaseModel):
+    """InputProfiler output: data profile plus route recommendation."""
+
+    session_id: str
+    primary_long_reads_ref: str | None = None
+    primary_long_read_platform: str | None = None
+    ont_reads_ref: str | None = None
+    hifi_reads_ref: str | None = None
+    hic_reads_ref: str | None = None
+    estimated_coverage: float | None = None
+    estimated_genome_size: int | None = None
+    target_level: Literal["draft", "near_t2t", "strict_t2t"]
+    has_hifi: bool = False
+    has_hic: bool = False
+    recommended_route: Literal["cyclone", "ont", "hifi", "insufficient_data"]
+    recommendation_confidence: float
+    recommendation_reasoning: str
+    uncertainty_notes: list[str] = Field(default_factory=list)
+    profile_source: Literal["manifest", "run_config", "run_config_explicit", "llm_inferred"]
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyRouteDecision(BaseModel):
+    """Final route decision confirmed by run config, policy, or human review."""
+
+    session_id: str
+    selected_route: Literal["cyclone", "ont", "hifi"]
+    decided_by: Literal["llm_auto", "human_override", "run_config_explicit"]
+    rationale: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyQCSummary(BaseModel):
+    """QC summary for one assembly candidate."""
+
+    session_id: str
+    candidate_id: str
+    method_name: str
+    n50_mb: float | None = None
+    contig_count: int | None = None
+    total_length_mb: float | None = None
+    busco_completeness: float | None = None
+    busco_lineage: str | None = None
+    qv_score: float | None = None
+    gap_count: int | None = None
+    telomere_detected: bool | None = None
+    qc_passed: bool
+    qc_notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyT2TReadiness(BaseModel):
+    """T2TFinishingAgent readiness assessment."""
+
+    session_id: str
+    candidate_id: str
+    t2t_verdict: Literal["adopt_draft", "near_t2t", "strict_t2t_candidate", "insufficient", "request_data"]
+    llm_confidence: float
+    llm_reasoning: str
+    uncertainty_notes: list[str] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    telomere_coverage_pct: float | None = None
+    gap_count: int | None = None
+    total_gap_bases: int | None = None
+    hic_misassembly_count: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssemblyReviewTaskItem(BaseModel):
+    """One human-review task generated during T2T readiness assessment."""
+
+    priority: Literal["high", "medium", "low"]
+    category: str
+    finding: str
+    action: str
+    can_auto_resolve: bool = False
+
+
+class AssemblyReviewTasks(BaseModel):
+    """T2TFinishingAgent human-review task list."""
+
+    session_id: str
+    candidate_id: str
+    t2t_status_estimate: Literal["near_t2t", "strict_t2t_candidate", "insufficient"]
+    confidence: float
+    tasks: list[AssemblyReviewTaskItem] = Field(default_factory=list)
+    blocking_for_strict_t2t: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)

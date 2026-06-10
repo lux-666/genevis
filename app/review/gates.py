@@ -133,6 +133,18 @@ register_review_gate(
 
 register_review_gate(
     ReviewGateDeclaration(
+        stage="assembly",
+        gate_id="route_selection",
+        decisions_allowed=("select_cyclone", "select_ont", "select_hifi", "stop_human_review"),
+        decision_applier="app.stages.assembly.nodes:apply_route_decision",
+        prompt_bundle="assembly.route_selector",
+        prompt_adapter="generic",
+        template_preferred_decision="select_ont",
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
         decisions_allowed=("select_method", "skip", "stop_human_review"),

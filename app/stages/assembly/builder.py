@@ -13,19 +13,23 @@ from app.stages.assembly.nodes import (
     enter_assembly,
     fail_assembly,
     freeze_flye_attempt,
+    infer_input_profile,
     plan_candidate_attempts,
-    resolve_assembly_inputs,
+    resolve_extended_inputs,
     run_flye_attempt,
     select_primary_and_fallback,
+    select_route,
 )
 from app.stages.assembly.routing import (
     route_after_candidate_set,
     route_after_flye_collect,
     route_after_flye_freeze,
     route_after_flye_run,
+    route_after_infer_profile,
     route_after_plan,
     route_after_resolve,
     route_after_select,
+    route_after_select_route,
 )
 
 
@@ -34,7 +38,9 @@ def build_stage():
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_assembly)
-    graph.add_node("resolve_assembly_inputs", resolve_assembly_inputs)
+    graph.add_node("resolve_extended_inputs", resolve_extended_inputs)
+    graph.add_node("infer_input_profile", infer_input_profile)
+    graph.add_node("select_route", select_route)
     graph.add_node("build_assembly_candidate_set", build_assembly_candidate_set)
     graph.add_node("select_primary_and_fallback", select_primary_and_fallback)
     graph.add_node("plan_candidate_attempts", plan_candidate_attempts)
@@ -46,11 +52,21 @@ def build_stage():
     graph.add_node("block", block_assembly_for_human)
 
     graph.add_edge(START, "enter")
-    graph.add_edge("enter", "resolve_assembly_inputs")
+    graph.add_edge("enter", "resolve_extended_inputs")
     graph.add_conditional_edges(
-        "resolve_assembly_inputs",
+        "resolve_extended_inputs",
         route_after_resolve,
-        {"build": "build_assembly_candidate_set", "fail": "fail"},
+        {"infer_profile": "infer_input_profile", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "infer_input_profile",
+        route_after_infer_profile,
+        {"select_route": "select_route", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "select_route",
+        route_after_select_route,
+        {"build": "build_assembly_candidate_set", "block": "block", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "build_assembly_candidate_set",

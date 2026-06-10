@@ -36,7 +36,10 @@ class AssemblyDescriptorTests(unittest.TestCase):
         self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
 
     def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
+        self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "ont_raw")
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["pacbio_hifi"], "pacbio_hifi")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_raw"]["hifiasm"], "ont")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_hq"]["hifiasm"], "ont")
         for shared_read_type in PLATFORM_TO_SHARED_READ_TYPE.values():
             with self.subTest(shared_read_type=shared_read_type):
                 mapping = SHARED_TO_METHOD_READ_TYPE[shared_read_type]
@@ -63,6 +66,7 @@ class AssemblyStageTests(unittest.TestCase):
         )
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = registry_ref
+        state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
         return state
 
     def _fake_flye_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
@@ -137,6 +141,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "result_artifact_ref": str(Path(tmpdir) / "genome_survey_result.json"),
                 },
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "method_decision": {
                         "primary": "assembly.candidate.flye",
                         "fallback": "assembly.candidate.nextdenovo",
@@ -173,6 +178,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_input_ref": str(fofn),
                 },
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "method_decision": {
                         "primary": "assembly.candidate.nextdenovo",
                     }
@@ -206,6 +212,7 @@ class AssemblyStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
+                "assembly": {"assembly_route": "cyclone"},
                 "genome_survey": {
                     "status": "completed",
                     "estimates": {"genome_size_prior": 2_000_000},
@@ -244,6 +251,7 @@ class AssemblyStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "assembly": {
+                    "assembly_route": "hifi",
                     "method_decision": {
                         "primary": "assembly.candidate.hifiasm",
                     }
@@ -309,7 +317,12 @@ class AssemblyStageTests(unittest.TestCase):
                 ],
             )
             state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {"assembly": {"env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}}}
+            state["stage_outputs"] = {
+                "assembly": {
+                    "assembly_route": "cyclone",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                }
+            }
 
             result = build_stage().invoke(state)
 
@@ -343,6 +356,7 @@ class AssemblyStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "flye_parameters": {
@@ -383,6 +397,7 @@ class AssemblyStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "flye_parameters": {
@@ -445,6 +460,7 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "flye_parameters": {
@@ -478,6 +494,7 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "flye_parameters": {
@@ -518,6 +535,7 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {"status": "completed", "estimates": {"genome_size_prior": 2_000_000}},
                 "assembly": {
+                    "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {
@@ -569,6 +587,7 @@ class AssemblyStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "assembly": {
+                    "assembly_route": "hifi",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
@@ -604,6 +623,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         )
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = registry_ref
+        state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
         return state
 
     def _fake_flye_bin(self, tmpdir: str, *, marker: Path | None = None) -> Path:
@@ -647,6 +667,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         )
         state = self._state(tmpdir, str(registry))
         assembly_out: dict = {
+            "assembly_route": "cyclone",
             "execution_mode": "local",
             "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
         }

@@ -1,0 +1,20 @@
+pack_id: assembly.input_profiler
+version: "1.0"
+
+allowed_actions:
+  - profile_inputs
+
+required_refs:
+  - long_reads
+
+platform_aliases:
+  cyclone:
+    - cyclone
+    - cycloneseq
+  ont:
+    - ont
+    - ont_r9
+    - ont_r10
+  hifi:
+    - pacbio_hifi
+    - hifi

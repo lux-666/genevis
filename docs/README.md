@@ -18,7 +18,7 @@ If you are taking over:
 6. `phases/phase_completion_plan.md` — long-range roadmap, with pointers
    into per-phase folders for history.
 7. The phase folder relevant to the current work
-   (`phases/phase1/` … `phases/phase6/`).
+   (`phases/phase1/` … `phases/phase8/`).
 
 If you are setting this project up on a new host, read
 `deployment/migration.md` for the conda env / install checklist.

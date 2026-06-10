@@ -52,7 +52,7 @@ ReadQCLengthFilterMethod = Literal[
     "read_qc.length_filter.fastplong",
 ]
 ReviewPolicyMode = Literal["strict", "auto"]
-ReviewPolicyStage = Literal["assembly_review", "hic_scaffolding"]
+ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
 
 
 class StageReviewPolicyConfig(BaseModel):
@@ -99,6 +99,10 @@ class AssemblyRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     flye_parameters: FlyeRunParameters | None = None
+    hifi_reads_ref: str | None = None
+    hic_reads_ref: str | None = None
+    target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
+    assembly_route: Literal["cyclone", "ont", "hifi", "auto"] = "auto"
 
 
 class ReadQCLengthFilterConfig(BaseModel):

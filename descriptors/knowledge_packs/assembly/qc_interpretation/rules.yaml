@@ -1,0 +1,36 @@
+pack_id: assembly.qc_interpretation
+version: "1.0"
+
+allowed_actions:
+  - adopt_draft
+  - enter_hic
+  - t2t_finishing
+  - block_human
+
+tiers:
+  draft:
+    n50_mb_min: 1
+    contig_count_max: 5000
+    busco_completeness_min: 0.85
+  near_t2t:
+    n50_mb_min: 10
+    contig_count_max: 500
+    busco_completeness_min: 0.92
+  strict_t2t:
+    n50_mb_min: 30
+    contig_count_max: 100
+    busco_completeness_min: 0.98
+    telomere_coverage_pct_min: 0.80
+    gap_count_max: 50
+
+safety_boundaries:
+  always_block_human:
+    - "all_candidates_failed"
+    - "all_candidates_fragmented"
+    - "selected_candidate_abnormally_fragmented"
+  never_auto_adopt_strict_t2t: true
+
+data_sufficiency:
+  min_coverage_for_assembly: 20
+  min_coverage_for_near_t2t: 40
+  min_coverage_for_strict_t2t: 60

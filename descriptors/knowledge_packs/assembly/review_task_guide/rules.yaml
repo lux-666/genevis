@@ -1,0 +1,20 @@
+pack_id: assembly.review_task_guide
+version: "1.0"
+
+task_categories:
+  telomere:
+    strict_t2t_required_coverage: 0.80
+    near_t2t_acceptable_coverage: 0.60
+  gap:
+    near_t2t_max_count: 500
+    strict_t2t_max_count: 50
+  misassembly:
+    near_t2t_max_breakpoints: 20
+    strict_t2t_max_breakpoints: 5
+
+fallback_tasks:
+  - priority: high
+    category: manual_review
+    finding: "Automatic review task generation failed."
+    action: "Inspect telomere_result, gap_result, Hi-C evidence, and QC summaries."
+    can_auto_resolve: false

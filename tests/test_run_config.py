@@ -40,6 +40,24 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.flye_parameters.estimated_genome_size, 2_000_000)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
+    def test_assembly_phase8_fields_are_accepted(self):
+        config = RunConfig.model_validate(
+            {
+                "assembly": {
+                    "hifi_reads_ref": "hifi.fofn",
+                    "hic_reads_ref": "hic.fofn",
+                    "target_level": "near_t2t",
+                    "assembly_route": "hifi",
+                }
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.hifi_reads_ref, "hifi.fofn")
+        self.assertEqual(config.assembly.hic_reads_ref, "hic.fofn")
+        self.assertEqual(config.assembly.target_level, "near_t2t")
+        self.assertEqual(config.assembly.assembly_route, "hifi")
+
     def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
         config = RunConfig.model_validate(
             {
@@ -323,6 +341,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "mode": "auto",
                     "max_blocked_seconds": 0,
                     "stages": {
+                        "assembly": {"mode": "strict"},
                         "hic_scaffolding": {"mode": "strict", "max_blocked_seconds": 3600}
                     },
                 }
@@ -333,6 +352,10 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(
             config.review_policy.effective_for_stage("assembly_review"),
             {"mode": "auto", "max_blocked_seconds": 0},
+        )
+        self.assertEqual(
+            config.review_policy.effective_for_stage("assembly"),
+            {"mode": "strict", "max_blocked_seconds": 0},
         )
         self.assertEqual(
             config.review_policy.effective_for_stage("hic_scaffolding"),
