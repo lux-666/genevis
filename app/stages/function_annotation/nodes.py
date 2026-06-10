@@ -421,14 +421,6 @@ def commit_function_annotation(state: TopLevelState) -> dict:
             "execution_enabled": bool(diamond_hits_ref),
             "database_download_enabled": False,
             "provenance_required": True,
-            "materialized_outputs": {
-                "diamond_hits": bool(diamond_hits_ref),
-                "gene_function_tsv": bool(materialized_gene_function),
-                "go_annotation_table": bool(materialized_go),
-                "kegg_annotation_table": bool(materialized_kegg),
-                "pfam_interpro_table": bool(materialized_pfam),
-                "annotated_gene_models_gff3": bool(materialized_annotated_gff),
-            },
         },
     )
     bundle_ref = out_dir / "function_annotation_bundle.json"

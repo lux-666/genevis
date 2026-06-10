@@ -49,13 +49,14 @@ freeze 节点生成 `FrozenAttemptSpec` 和 shell script，run 节点调用 `Loc
 必须包含：
 
 - `method_name`: 完整方法名，例如 `gene_annotation.candidate.miniprot`
+- `category`: 方法类别，来自描述符
 - `annotation_gff_ref`: 真实存在的候选 GFF3
-- `gene_count`: 从 GFF3 解析出的 gene 数量
-- `evidence_class`: EVM 使用的 evidence class，例如 `OTHER_PREDICTION`、`ABINITIO_PREDICTION` 或 `PROTEIN`
+- `evm_evidence_class`: EVM 使用的 evidence class，例如 `OTHER_PREDICTION`、`ABINITIO_PREDICTION` 或 `PROTEIN`
 - `evm_source_type`: EVM weights 中的 source/type，例如 `augustus` 或 `miniprot`
-- `evm_route`: EVM 命令参数路由，例如 `gene_predictions`、`protein_alignments` 或 `transcript_alignments`
-- `proteins_fasta_ref`: 可选，若该候选已经物化蛋白序列
-- `transcripts_fasta_ref`: 可选，若该候选已经物化转录本序列
+- `proteins_fasta_ref`: 真实物化的候选蛋白序列
+- `cds_fasta_ref`: 可选，若该候选已经物化 CDS 序列
+
+EVM 命令参数路由（`gene_predictions` / `protein_alignments` / `transcript_alignments`）不存储在 bundle 上，而是在 merge 阶段由 `evm_evidence_class` 推导。gene 数量记入 stage output 的 `candidate_gene_counts[method_name]`，不是 bundle 字段。
 
 禁止把 planning 阶段的 expected output 占位路径当作候选结果发布。collect 阶段必须以本地文件存在为准。
 
@@ -94,7 +95,7 @@ Miniprot 是 protein-homology-derived candidate，但 `miniprot --gff` 原生输
 当前执行契约：
 
 - `native_gff_route = gene_predictions`
-- `evidence_class = OTHER_PREDICTION`
+- `evm_evidence_class = OTHER_PREDICTION`
 - `evm_source_type = miniprot`
 - `protein_alignment_route.enabled = false`
 - `protein_alignment_route.requires_converter = miniprot_GFF_2_EVM_alignment_GFF3`

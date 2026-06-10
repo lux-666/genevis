@@ -237,7 +237,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertIsNone(bundle["kegg_annotation_table_ref"])
             self.assertIsNone(bundle["pfam_interpro_table_ref"])
             self.assertEqual(bundle["method_results"], [])
-            self.assertFalse(bundle["metadata"]["materialized_outputs"]["go_annotation_table"])
+            self.assertFalse(bundle["metadata"]["execution_enabled"])
             self.assertTrue(Path(function["final_review_report_artifact_ref"]).exists())
             events = Ledger(tmpdir).read_events("s1")
             registered_types = [

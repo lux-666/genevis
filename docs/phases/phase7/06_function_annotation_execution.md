@@ -85,8 +85,9 @@ InterProScan / eggNOG / KOfamScan 后续切片各自扩展 result refs，但都�
 - `diamond_hits_ref` when DIAMOND executed
 - `method_results`
 - `database_provenance`
-- `execution_mode`
-- `warnings`
+- `metadata.execution_enabled`（执行状态信号，DIAMOND 已产出 hits 时为 `true`）
+
+方法级 warnings 写入 `method_results[].warnings`，bundle 本身没有顶层 `warnings` 字段。
 
 可选包含：
 
