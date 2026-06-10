@@ -1,5 +1,6 @@
 packages:
   augustus: augustus.yaml
+  annevo: annevo.yaml
   braker3: braker3.yaml
   busco: busco.yaml
   canu: canu.yaml
@@ -8,6 +9,8 @@ packages:
   edta: edta.yaml
   eggnog_mapper: eggnog_mapper.yaml
   gemoma: gemoma.yaml
+  genewise: genewise.yaml
+  gffread: gffread.yaml
   3ddna: 3ddna.yaml
   fastplong: fastplong.yaml
   filtlong: filtlong.yaml
@@ -52,10 +55,12 @@ methods:
   genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
   gene_annotation.candidate.augustus: gene_annotation/augustus_candidate.yaml
+  gene_annotation.candidate.annevo: gene_annotation/annevo_candidate.yaml
   gene_annotation.candidate.braker3: gene_annotation/braker3_candidate.yaml
   gene_annotation.candidate.maker: gene_annotation/maker_candidate.yaml
   gene_annotation.candidate.miniprot: gene_annotation/miniprot_candidate.yaml
-  gene_annotation.helper.gemoma: gene_annotation/gemoma_helper.yaml
+  gene_annotation.candidate.genewise: gene_annotation/genewise_candidate.yaml
+  gene_annotation.candidate.gemoma: gene_annotation/gemoma_candidate.yaml
   gene_annotation.helper.hisat2: gene_annotation/hisat2_helper.yaml
   gene_annotation.helper.isoquant: gene_annotation/isoquant_helper.yaml
   gene_annotation.helper.stringtie: gene_annotation/stringtie_helper.yaml
@@ -111,14 +116,16 @@ by_stage:
     - repeat_annotation.masking.repeatmasker
     - repeat_annotation.helper.trf
   gene_annotation:
+    - gene_annotation.candidate.augustus
+    - gene_annotation.candidate.annevo
+    - gene_annotation.candidate.miniprot
+    - gene_annotation.candidate.genewise
+    - gene_annotation.candidate.gemoma
     - gene_annotation.candidate.braker3
     - gene_annotation.candidate.maker
-    - gene_annotation.candidate.augustus
-    - gene_annotation.candidate.miniprot
     - gene_annotation.helper.hisat2
     - gene_annotation.helper.stringtie
     - gene_annotation.helper.isoquant
-    - gene_annotation.helper.gemoma
   function_annotation:
     - function_annotation.candidate.interproscan
     - function_annotation.candidate.eggnog_mapper

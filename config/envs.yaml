@@ -82,11 +82,15 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - augustus
+  gene_annotation.materialize.gffread:
+    conda_env: env_geno_exec
+    required_tools:
+      - gffread
   function_annotation.candidate.diamond:
     conda_env: env_geno_exec
     required_tools:
       - diamond
-  gene_annotation.evm:
+  gene_annotation.merge.evm:
     conda_env: env_geno_exec
     required_tools:
       - EVidenceModeler

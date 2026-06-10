@@ -30,6 +30,30 @@ def _write_intake_plan(tmpdir: str) -> str:
     return str(path)
 
 
+def _fake_gffread_bin(tmpdir: str) -> Path:
+    """Fake gffread that materializes proteins.fa (-y) and cds.fa (-x)."""
+    bin_dir = Path(tmpdir) / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gffread = bin_dir / "gffread"
+    gffread.write_text(
+        "#!/bin/sh\n"
+        "prot=\"\"; cds=\"\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -y) prot=\"$2\"; shift 2;;\n"
+        "    -x) cds=\"$2\"; shift 2;;\n"
+        "    -g) shift 2;;\n"
+        "    *) shift;;\n"
+        "  esac\n"
+        "done\n"
+        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
+        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        encoding="utf-8",
+    )
+    gffread.chmod(0o755)
+    return bin_dir
+
+
 def _merge_accepted_state(tmpdir: str, **gene_updates):
     """State as it stands after gate3 (merge_review) auto-decides."""
     softmasked = Path(tmpdir) / "softmasked.fa"
@@ -86,17 +110,20 @@ class EVMFreezeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             gff1 = Path(tmpdir) / "braker3.gff3"
             gff2 = Path(tmpdir) / "miniprot.gff3"
-            gff1.write_text("##gff-version 3\n", encoding="utf-8")
-            gff2.write_text("##gff-version 3\n", encoding="utf-8")
+            gff3 = Path(tmpdir) / "genewise.gff3"
+            for gff in (gff1, gff2, gff3):
+                gff.write_text("##gff-version 3\n", encoding="utf-8")
             state = _merge_accepted_state(
                 tmpdir,
                 candidate_refs={
                     "gene_annotation.candidate.braker3": str(gff1),
                     "gene_annotation.candidate.miniprot": str(gff2),
+                    "gene_annotation.candidate.genewise": str(gff3),
                 },
                 accepted_candidate_refs={
                     "gene_annotation.candidate.braker3": str(gff1),
                     "gene_annotation.candidate.miniprot": str(gff2),
+                    "gene_annotation.candidate.genewise": str(gff3),
                 },
             )
             result = freeze_evm_attempt(state)
@@ -105,9 +132,19 @@ class EVMFreezeTests(unittest.TestCase):
             self.assertEqual(gene["status"], "evm_frozen")
             attempt = FrozenAttemptSpec.model_validate(gene["evm_frozen_attempt"])
             script = attempt.script_path.read_text(encoding="utf-8")
+            weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
             self.assertIn("--weights", script)
-            self.assertIn("--gene_predictions", script)
+            # braker3 + miniprot both emit gene models → --gene_predictions.
+            self.assertIn(f"--gene_predictions {gff1},{gff2}", script)
+            # genewise is a true protein alignment → --protein_alignments.
+            self.assertIn(f"--protein_alignments {gff3}", script)
+            self.assertIn("OTHER_PREDICTION\tbraker3\t1", weights)
+            self.assertIn("OTHER_PREDICTION\tminiprot\t1", weights)
+            self.assertIn("PROTEIN\tgenewise\t5", weights)
+            self.assertNotIn(str(gff1), weights)
+            self.assertNotIn(str(gff2), weights)
+            self.assertNotIn(str(gff3), weights)
 
     def test_freeze_requires_merge_accepted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -186,9 +223,17 @@ class EVMCollectTests(unittest.TestCase):
         )
         state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
         state["current_stage"] = "gene_annotation"
+        genome = Path(tmpdir) / "genome.fa"
+        genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
-            "gene_annotation": {"status": "evm_ran", "evm_frozen_attempt": attempt.model_dump(mode="json")},
+            "gene_annotation": {
+                "status": "evm_ran",
+                "genome_input_ref": str(genome),
+                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "evm_frozen_attempt": attempt.model_dump(mode="json"),
+            },
         }
         return state
 
@@ -239,14 +284,16 @@ class GeneBUSBOTests(unittest.TestCase):
             self.assertEqual(gene["status"], "merge_accepted")
             self.assertEqual(gene["busco_completeness_status"], "missing")
 
-    def test_freeze_with_lineage_produces_busco_script(self):
+    def test_freeze_with_lineage_uses_materialized_final_proteins(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            proteins, lineage = self._busco_inputs(tmpdir)
+            _, lineage = self._busco_inputs(tmpdir)
+            final_proteins = Path(tmpdir) / "final_proteins.fa"
+            final_proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             state = _merge_accepted_state(
                 tmpdir,
                 status="evm_collected",
                 final_gff_ref=str(Path(tmpdir) / "final.gff3"),
-                expected_outputs={"predicted_proteins": proteins},
+                final_proteins_ref=str(final_proteins),
                 lineage_or_species_hints={"busco_lineage": lineage},
             )
             result = freeze_gene_busco_attempt(state)
@@ -256,6 +303,7 @@ class GeneBUSBOTests(unittest.TestCase):
             attempt = FrozenAttemptSpec.model_validate(gene["busco_frozen_attempt"])
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("busco -i", script)
+            self.assertEqual(attempt.metadata["busco_input"], str(final_proteins))
             self.assertIn("-m proteins", script)
             self.assertIn(f"-l {lineage}", script)
 
@@ -358,7 +406,18 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             # Step 1: EVM freeze (single candidate → passthrough)
             state = _merge_accepted_state(
                 tmpdir,
-                expected_outputs={"predicted_proteins": str(proteins)},
+                candidate_bundles={
+                    "gene_annotation.candidate.augustus": {
+                        "method_name": "gene_annotation.candidate.augustus",
+                        "category": "ab_initio",
+                        "annotation_gff_ref": str(Path(tmpdir) / "augustus.gff3"),
+                        "proteins_fasta_ref": str(proteins),
+                        "cds_fasta_ref": None,
+                        "evm_evidence_class": "ABINITIO_PREDICTION",
+                        "evm_source_type": "augustus",
+                        "status": "materialized",
+                    }
+                },
                 lineage_or_species_hints={"busco_lineage": str(lineage)},
             )
             evm_result = freeze_evm_attempt(state)

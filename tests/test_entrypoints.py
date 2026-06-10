@@ -105,6 +105,35 @@ def _artifact_types(data_dir: Path, session_id: str) -> list[str]:
     ]
 
 
+def _add_gene_method_bins(bin_dir: Path) -> Path:
+    """Add fake augustus + gffread binaries so a gene candidate can materialize."""
+    augustus = bin_dir / "augustus"
+    augustus.write_text(
+        "#!/bin/sh\n"
+        "printf '##gff-version 3\\nctg1\\tAUGUSTUS\\tgene\\t1\\t6\\t.\\t+\\t.\\tID=g1\\n'\n",
+        encoding="utf-8",
+    )
+    augustus.chmod(0o755)
+    gffread = bin_dir / "gffread"
+    gffread.write_text(
+        "#!/bin/sh\n"
+        "prot=\"\"; cds=\"\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -y) prot=\"$2\"; shift 2;;\n"
+        "    -x) cds=\"$2\"; shift 2;;\n"
+        "    -g) shift 2;;\n"
+        "    *) shift;;\n"
+        "  esac\n"
+        "done\n"
+        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
+        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        encoding="utf-8",
+    )
+    gffread.chmod(0o755)
+    return bin_dir
+
+
 def _assert_existing_assembly_blocks_at_review(
     test: unittest.TestCase,
     *,
@@ -1448,6 +1477,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             session_id = "phase5-e2e-resume"
             manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
             bin_dir = self._fake_repeatmasker_bin(root)
+            _add_gene_method_bins(bin_dir)
             args = self._run_args(
                 session_id=session_id,
                 manifest=manifest,
@@ -1459,6 +1489,12 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
                 return_value=(None, None),
+            ), patch(
+                "app.stages.gene_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ), patch(
+                "app.stages.gene_annotation.nodes._lineage_or_species_hints",
+                return_value={"augustus_species_model": "test_species"},
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -1513,6 +1549,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             session_id = "phase6-intake-sqlite-smoke"
             manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
             bin_dir = self._fake_repeatmasker_bin(root)
+            _add_gene_method_bins(bin_dir)
             args = self._run_args(
                 session_id=session_id,
                 manifest=manifest,
@@ -1524,6 +1561,12 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
                 return_value=(None, None),
+            ), patch(
+                "app.stages.gene_annotation.nodes.resolve_method_env",
+                return_value=(None, None),
+            ), patch(
+                "app.stages.gene_annotation.nodes._lineage_or_species_hints",
+                return_value={"augustus_species_model": "test_species"},
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
                 _assert_existing_assembly_blocks_at_review(

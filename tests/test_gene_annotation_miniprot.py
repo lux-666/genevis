@@ -77,7 +77,29 @@ def _fake_augustus_bin(tmpdir: str, *, fail: bool = False) -> Path:
     return bin_dir
 
 
-# --- helpers for pending_execution state ---------------------------------------
+def _fake_gffread_bin(tmpdir: str) -> Path:
+    """Fake gffread that materializes proteins.fa (-y) and cds.fa (-x)."""
+    bin_dir = Path(tmpdir) / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gffread = bin_dir / "gffread"
+    gffread.write_text(
+        "#!/bin/sh\n"
+        "prot=\"\"; cds=\"\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -y) prot=\"$2\"; shift 2;;\n"
+        "    -x) cds=\"$2\"; shift 2;;\n"
+        "    -g) shift 2;;\n"
+        "    *) shift;;\n"
+        "  esac\n"
+        "done\n"
+        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
+        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        encoding="utf-8",
+    )
+    gffread.chmod(0o755)
+    return bin_dir
+
 
 def _pending_execution_state(tmpdir: str, **gene_updates):
     """State as it stands after run_gene_methods_planning_only with executable methods."""
@@ -271,10 +293,15 @@ class MiniprotCollectTests(unittest.TestCase):
             data_dir=tmpdir,
         )
         state["current_stage"] = "gene_annotation"
+        genome = Path(tmpdir) / "genome.fa"
+        genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
             "gene_annotation": {
                 "status": "miniprot_ran",
+                "genome_input_ref": str(genome),
+                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "miniprot_frozen_attempt": attempt.model_dump(mode="json"),
                 "candidate_refs": {"gene_annotation.candidate.miniprot": str(output_gff3)},
                 "candidate_gene_counts": {"gene_annotation.candidate.miniprot": 0},
@@ -316,6 +343,24 @@ class MiniprotCollectTests(unittest.TestCase):
             ]
             self.assertIn("gene_annotation.candidate_gff", artifact_types)
 
+    def test_collect_materialization_failure_sets_materialization_failed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._collect_state(tmpdir)
+            # Point at a gffread that exits non-zero and writes no proteins.
+            fail_bin = Path(tmpdir) / "failbin"
+            fail_bin.mkdir()
+            bad = fail_bin / "gffread"
+            bad.write_text("#!/bin/sh\necho boom >&2\nexit 1\n", encoding="utf-8")
+            bad.chmod(0o755)
+            state["stage_outputs"]["gene_annotation"]["env"] = {
+                "PATH": f"{fail_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            }
+            result = collect_miniprot_artifacts(state)
+
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["status"], "materialization_failed")
+            self.assertNotIn("proteins_fasta_ref", gene)
+
     def test_collect_fails_when_gff3_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir, gff3_exists=False)
@@ -352,6 +397,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
             proteins.write_text(">p1\nMKT\n", encoding="utf-8")
 
             bin_dir = _fake_miniprot_bin(tmpdir)
+            _fake_gffread_bin(tmpdir)
 
             freeze_state = _pending_execution_state(
                 tmpdir,
@@ -400,6 +446,10 @@ def _augustus_pending_state(tmpdir: str, **gene_updates):
         gene["confirmed_methods"] = ["gene_annotation.candidate.augustus"]
     gene.setdefault("candidate_refs", {})["gene_annotation.candidate.augustus"] = str(Path(tmpdir) / "augustus.gff3")
     gene.setdefault("candidate_gene_counts", {})["gene_annotation.candidate.augustus"] = 0
+    # AUGUSTUS now requires an explicit species model; supply one by default
+    # unless the caller passed its own lineage_or_species_hints.
+    if "lineage_or_species_hints" not in gene_updates:
+        gene["lineage_or_species_hints"] = {"augustus_species_model": "test_species"}
     return state
 
 
@@ -444,7 +494,7 @@ class AugustusFreezeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._freeze_state(
                 tmpdir,
-                lineage_or_species_hints={"species": "human"},
+                lineage_or_species_hints={"augustus_species_model": "human"},
             )
             result = freeze_augustus_attempt(state)
 
@@ -452,6 +502,15 @@ class AugustusFreezeTests(unittest.TestCase):
             attempt = FrozenAttemptSpec.model_validate(gene["augustus_frozen_attempt"])
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("--species=human", script)
+
+    def test_freeze_fails_without_species_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._freeze_state(tmpdir, lineage_or_species_hints={})
+            result = freeze_augustus_attempt(state)
+
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["status"], "failed")
+            self.assertIn("augustus_species_model", gene["reason"])
 
 
 class AugustusRunTests(unittest.TestCase):
@@ -524,10 +583,15 @@ class AugustusCollectTests(unittest.TestCase):
         )
         state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
         state["current_stage"] = "gene_annotation"
+        genome = Path(tmpdir) / "genome.fa"
+        genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
             "gene_annotation": {
                 "status": "augustus_ran",
+                "genome_input_ref": str(genome),
+                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 "augustus_frozen_attempt": attempt.model_dump(mode="json"),
                 "candidate_refs": {"gene_annotation.candidate.augustus": str(output_gff3)},
                 "candidate_gene_counts": {"gene_annotation.candidate.augustus": 0},
@@ -562,6 +626,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             mp_bin = _fake_miniprot_bin(tmpdir)
             aug_bin = _fake_augustus_bin(tmpdir)
+            _fake_gffread_bin(tmpdir)
             combined_path = f"{mp_bin}:{aug_bin}:{os.environ.get('PATH', '')}"
 
             # Step 1: freeze miniprot
@@ -570,6 +635,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             state = _pending_execution_state(
                 tmpdir,
                 protein_evidence_refs=[str(proteins)],
+                lineage_or_species_hints={"augustus_species_model": "test_species"},
                 candidate_refs={
                     "gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3"),
                     "gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3"),

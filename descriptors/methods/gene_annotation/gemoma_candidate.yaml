@@ -1,0 +1,49 @@
+method_name: gene_annotation.candidate.gemoma
+stage: gene_annotation
+package_ref: gemoma
+goal: "Homology-based gene model transfer from a reference genome and annotation."
+category: homology_reference_annotation
+execution_status: deferred
+recommended_default: false
+required_inputs:
+  - name: genome_fasta_ref
+    type: softmasked_genome
+    description: "Target genome FASTA."
+  - name: reference_genome_fasta
+    type: reference_genome
+    description: "Reference genome FASTA."
+  - name: reference_annotation_gff
+    type: reference_annotation
+    description: "Reference annotation GFF."
+optional_inputs:
+  - name: reference_proteins_fasta
+    type: reference_proteins
+    description: "Optional reference protein FASTA."
+    required: false
+expected_outputs:
+  - name: homology_gene_models
+    type: gene_models
+    description: "Homology-supported gene models in GFF3."
+materialize_outputs:
+  - annotation.gff3
+  - proteins.fa
+  - cds.fa
+readiness_rules:
+  - require_reference_genome_and_annotation
+  - warn_if_reference_set_missing
+review_notes:
+  - slower_than_miniprot
+  - useful_for_more_distant_references
+  - good_comparison_candidate
+evm:
+  evidence_class: OTHER_PREDICTION
+  source_type: gemoma
+review_rules:
+  - homology_evidence_plan_exists
+human_review_triggers:
+  - homology_reference_policy_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 36.0

@@ -157,7 +157,7 @@ def route_after_run_for(suffix: str):
 def route_after_method_collect(state: TopLevelState) -> str:
     """After any method collect: loop to next pending method or proceed to review."""
     status = _output(state).get("status")
-    if status == "failed":
+    if status in ("failed", "materialization_failed"):
         return "fail"
     if status == "pending_execution":
         return "run_methods"
@@ -180,7 +180,7 @@ def route_after_evm_run(state: TopLevelState) -> str:
 
 
 def route_after_evm_collect(state: TopLevelState) -> str:
-    return "fail" if _output(state).get("status") == "failed" else "busco_freeze"
+    return "fail" if _output(state).get("status") in ("failed", "materialization_failed") else "busco_freeze"
 
 
 def route_after_busco_freeze(state: TopLevelState) -> str:

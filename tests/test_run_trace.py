@@ -220,6 +220,24 @@ class RunTraceAnnotationChainTests(unittest.TestCase):
             aug = bin_dir / "augustus"
             aug.write_text("#!/bin/sh\nprintf '##gff-version 3\\nctg1\\tAUGUSTUS\\tgene\\t1\\t500\\t.\\t+\\t.\\tID=g1\\n'\n", encoding="utf-8")
             aug.chmod(0o755)
+            # gffread materializes proteins.fa/cds.fa from the candidate GFF.
+            gffread = bin_dir / "gffread"
+            gffread.write_text(
+                "#!/bin/sh\n"
+                "prot=\"\"; cds=\"\"\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -y) prot=\"$2\"; shift 2;;\n"
+                "    -x) cds=\"$2\"; shift 2;;\n"
+                "    -g) shift 2;;\n"
+                "    *) shift;;\n"
+                "  esac\n"
+                "done\n"
+                "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
+                "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+                encoding="utf-8",
+            )
+            gffread.chmod(0o755)
             # The annotation intake artifact is recorded at assembly_review.
             _register_artifact(
                 tmp,
@@ -238,6 +256,7 @@ class RunTraceAnnotationChainTests(unittest.TestCase):
                 "repeat_annotation": {"status": "completed", "softmasked_genome_ref": str(softmasked)},
                 "gene_annotation": {
                     "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "lineage_or_species_hints": {"augustus_species_model": "test_species"},
                 },
             }
 

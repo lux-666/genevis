@@ -1,0 +1,49 @@
+method_name: gene_annotation.candidate.annevo
+stage: gene_annotation
+package_ref: annevo
+goal: "Deep-learning de novo gene structure prediction."
+category: ab_initio_deep_learning
+execution_status: deferred_or_local_if_installed
+recommended_default: candidate_if_model_available
+required_inputs:
+  - name: genome_fasta_ref
+    type: softmasked_genome
+    description: "Target genome FASTA."
+  - name: annevo_model_path
+    type: model_path
+    description: "Path to the ANNEVO model."
+  - name: annevo_lineage
+    type: lineage
+    description: "Lineage the model was trained for."
+optional_inputs:
+  - name: repeat_masked_genome_ref
+    type: softmasked_genome
+    description: "Optional repeat-masked genome."
+    required: false
+expected_outputs:
+  - name: genes_gff3
+    type: gene_models
+    description: "Predicted gene models in GFF3."
+materialize_outputs:
+  - annotation.gff3
+  - proteins.fa
+  - cds.fa
+readiness_rules:
+  - require_model_path_exists
+  - require_lineage_supported
+  - for_fish_prefer_lineage_Actinopteri
+review_notes:
+  - experimental_new_method
+  - validate_with_BUSCO_and_gene_stats
+evm:
+  evidence_class: ABINITIO_PREDICTION
+  source_type: annevo
+review_rules:
+  - gene_annotation_plan_exists
+human_review_triggers:
+  - gene_annotation_method_selection_required
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: true
+  walltime_hours: 24.0

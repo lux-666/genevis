@@ -1,0 +1,15 @@
+package_name: annevo
+version_constraint: ">=0.1"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "annevo --genome {genome_fasta} --model {annevo_model_path} --lineage {annevo_lineage}"
+help_summary: "ANNEVO deep-learning de novo gene structure prediction."
+known_pitfalls:
+  - "Experimental; predictions must be validated with BUSCO and gene-structure stats."
+  - "Requires a lineage-matched model; distant lineages degrade accuracy."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: true
+  walltime_hours: 24.0

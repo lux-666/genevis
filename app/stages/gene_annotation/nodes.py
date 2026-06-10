@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,7 +23,7 @@ from app.review.annotation_intake import (
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
-from app.schemas.artifacts import ArtifactMeta, GeneAnnotationBundle, GeneAnnotationPlan
+from app.schemas.artifacts import ArtifactMeta, CandidateBundle, GeneAnnotationBundle, GeneAnnotationPlan
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir
@@ -38,7 +39,7 @@ RNA_HELPER_METHODS = [
     "gene_annotation.helper.stringtie",
 ]
 LONG_RNA_HELPER_METHODS = ["gene_annotation.helper.isoquant"]
-PROTEIN_HELPER_METHODS = ["gene_annotation.helper.gemoma"]
+PROTEIN_HELPER_METHODS: list[str] = []
 GENE_CONTRACT_METHOD = "gene_annotation.contract"
 
 
@@ -285,6 +286,31 @@ def commit_gene_annotation(state: TopLevelState) -> dict:
     return _commit_planned_gene_annotation(state)
 
 
+def _resolve_final_gene_set(gene_out: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+    """Resolve the materialized final gene set: (gff, proteins, cds, error).
+
+    Prefers the merged/passthrough refs set during EVM collect; falls back to a
+    single accepted candidate bundle. proteins.fa must exist on disk.
+    """
+    gff_ref = gene_out.get("final_gff_ref")
+    proteins_ref = gene_out.get("final_proteins_ref")
+    cds_ref = gene_out.get("final_cds_ref")
+    if not proteins_ref:
+        accepted = gene_out.get("accepted_candidate_refs") or {}
+        bundles = gene_out.get("candidate_bundles") or {}
+        method = next(iter(accepted), None)
+        bundle = bundles.get(method) if method else None
+        if bundle:
+            gff_ref = gff_ref or bundle.get("annotation_gff_ref")
+            proteins_ref = bundle.get("proteins_fasta_ref")
+            cds_ref = bundle.get("cds_fasta_ref")
+    if not proteins_ref:
+        return gff_ref, None, None, "no materialized proteins_fasta_ref for final gene set"
+    if not Path(str(proteins_ref)).exists():
+        return gff_ref, None, None, f"final proteins.fa does not exist on disk: {proteins_ref}"
+    return gff_ref, str(proteins_ref), (str(cds_ref) if cds_ref else None), None
+
+
 def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
@@ -292,14 +318,19 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
     out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = gene_out["expected_outputs"]
+    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = _resolve_final_gene_set(gene_out)
+    if final_error:
+        return _fail_update(state, final_error)
+    genes_gff3_ref = final_gff_ref or expected_outputs["genes_gff3"]
+    transcripts_ref = final_cds_ref or gene_out.get("transcripts_fasta_ref") or expected_outputs["transcripts_fasta"]
     bundle = GeneAnnotationBundle(
         session_id=session_id,
         status="planned",
         genome_input_ref=gene_out["genome_input_ref"],
         genome_input_source=gene_out["genome_input_source"],
-        genes_gff3_ref=expected_outputs["genes_gff3"],
-        transcripts_fasta_ref=expected_outputs["transcripts_fasta"],
-        predicted_proteins_ref=expected_outputs["predicted_proteins"],
+        genes_gff3_ref=genes_gff3_ref,
+        transcripts_fasta_ref=transcripts_ref,
+        predicted_proteins_ref=final_proteins_ref,
         evidence_report_ref=expected_outputs["evidence_report"],
         repeat_annotation_ref=gene_out.get("repeat_annotation_ref"),
         evidence_profile=gene_out["evidence_profile"],
@@ -334,13 +365,13 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     outputs["gene_annotation"] = {
         **gene_out,
         "status": "completed",
-        "gene_models_ref": expected_outputs["genes_gff3"],
-        "gene_models": expected_outputs["genes_gff3"],
-        "genes_gff3_ref": expected_outputs["genes_gff3"],
-        "transcripts_fasta_ref": expected_outputs["transcripts_fasta"],
-        "predicted_proteins_ref": expected_outputs["predicted_proteins"],
-        "predicted_proteins": expected_outputs["predicted_proteins"],
-        "proteins_fasta_ref": expected_outputs["predicted_proteins"],
+        "gene_models_ref": genes_gff3_ref,
+        "gene_models": genes_gff3_ref,
+        "genes_gff3_ref": genes_gff3_ref,
+        "transcripts_fasta_ref": transcripts_ref,
+        "predicted_proteins_ref": final_proteins_ref,
+        "predicted_proteins": final_proteins_ref,
+        "proteins_fasta_ref": final_proteins_ref,
         "evidence_report_ref": expected_outputs["evidence_report"],
         "bundle_artifact_ref": str(bundle_ref),
         "artifact_refs": [*gene_out.get("artifact_refs", []), str(artifact.file_path)],
@@ -661,6 +692,13 @@ def _require_gene_stage(request: ResumeReviewRequest, gate_id: str) -> None:
         raise ResumeValidationError(f"{gate_id} resume requires stage gene_annotation")
 
 
+def _gene_method_readiness_issues(state: TopLevelState, methods: list[str]) -> list[str]:
+    issues: list[str] = []
+    if AUGUSTUS_METHOD in methods and not _lineage_or_species_hints(state).get("augustus_species_model"):
+        issues.append("gene_annotation.candidate.augustus requires augustus_species_model before execution")
+    return issues
+
+
 # --- gate 1: gene method planning ----------------------------------------------
 
 def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPayload:
@@ -668,8 +706,13 @@ def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPay
     candidate_methods = list(gene_out.get("candidate_methods") or [])
     triggers = _review_triggers(gene_out)
     conflict = "rna_protein_evidence_conflict_review" in triggers
+    readiness_issues = _gene_method_readiness_issues(state, candidate_methods)
     candidates = [
-        {"method_id": method, "evidence_profile": gene_out.get("evidence_profile")}
+        {
+            "method_id": method,
+            "evidence_profile": gene_out.get("evidence_profile"),
+            "readiness_issues": _gene_method_readiness_issues(state, [method]),
+        }
         for method in candidate_methods
     ]
     signals = [
@@ -680,6 +723,16 @@ def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPay
             metadata={"evidence_profile": gene_out.get("evidence_profile")},
         )
     ]
+    signals.extend(
+        ReviewSignal(
+            signal_name="method_readiness",
+            method_name=method,
+            status="missing",
+            metadata={"issues": _gene_method_readiness_issues(state, [method])},
+        )
+        for method in candidate_methods
+        if _gene_method_readiness_issues(state, [method])
+    )
     return ReviewPayload(
         stage="gene_annotation",
         gate_id="gene_method_planning_review",
@@ -687,8 +740,8 @@ def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPay
         candidates=candidates,
         signals=signals,
         decisions_allowed=["select_methods", "accept", "stop"],
-        auto_decidable=len(candidate_methods) == 1 and not conflict,
-        notes=list(gene_out.get("notes", [])),
+        auto_decidable=len(candidate_methods) == 1 and not conflict and not readiness_issues,
+        notes=[*gene_out.get("notes", []), *readiness_issues],
     )
 
 
@@ -721,6 +774,18 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
     else:
         confirmed = candidate_methods
 
+    # Reject selections that contain only planned_only (not-yet-implemented) methods.
+    executable = [m for m in confirmed if m in GENE_EXECUTABLE_METHODS]
+    if not executable:
+        planned_only = [m for m in confirmed if m not in GENE_EXECUTABLE_METHODS]
+        raise ResumeValidationError(
+            f"no executable gene annotation methods among selected {confirmed}; "
+            f"the following are planned_only placeholders not yet implemented: {planned_only}"
+        )
+    readiness_issues = _gene_method_readiness_issues(state, executable)
+    if readiness_issues:
+        raise ResumeValidationError("; ".join(readiness_issues))
+
     decision_ref = _record_gene_gate_decision(
         state,
         "gene_method_planning_review",
@@ -752,27 +817,28 @@ def run_gene_methods_planning_only(state: TopLevelState) -> dict:
         return {}
     methods = list(gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or [])
     work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
-    candidate_refs = {method: str(work_dir / f"{method.split('.')[-1]}.gff3") for method in methods}
-
+    # Only executable methods become real candidates; deferred (planned_only)
+    # methods produce no files and must not seed candidate_refs (which would
+    # pollute review and EVM with non-existent paths).
     executable = [m for m in methods if m in GENE_EXECUTABLE_METHODS]
     if executable:
+        candidate_refs = {m: str(work_dir / f"{m.split('.')[-1]}.gff3") for m in executable}
         return _update_gene_output(
             state,
             {
                 "status": "pending_execution",
                 "candidate_refs": candidate_refs,
-                "candidate_gene_counts": {method: 0 for method in methods},
+                "candidate_gene_counts": {m: 0 for m in executable},
                 "executed_methods": [],
             },
         )
-    return _update_gene_output(
+    # planned_only methods are placeholders for future implementation;
+    # selecting only non-executable methods is not supported yet.
+    planned_only = [m for m in methods if m not in GENE_EXECUTABLE_METHODS]
+    return _fail_update(
         state,
-        {
-            "status": "candidates_ready",
-            "candidate_refs": candidate_refs,
-            "candidate_gene_counts": {method: 0 for method in methods},
-            "execution_support": "planning_only",
-        },
+        "no executable gene annotation methods selected; "
+        f"planned_only methods are not yet supported: {planned_only}",
     )
 
 
@@ -782,6 +848,7 @@ def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPaylo
     gene_out = _gene_output(state)
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
     gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
+    bundles = dict(gene_out.get("candidate_bundles") or {})
     triggers = _review_triggers(gene_out)
     conflict = "rna_protein_evidence_conflict_review" in triggers
     candidates = [
@@ -789,16 +856,22 @@ def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPaylo
             "method_id": method,
             "candidate_ref": ref,
             "gene_count": gene_counts.get(method, 0),
+            "proteins_fasta_ref": (bundles.get(method) or {}).get("proteins_fasta_ref"),
             "conflict_signals": ["rna_protein_evidence_conflict_review"] if conflict else [],
         }
         for method, ref in candidate_refs.items()
     ]
+    # EVM is offered as a post-review merge action only when multiple candidates
+    # exist; a single accepted candidate skips EVM via passthrough.
+    decisions = ["accept_candidate", "proceed_merge", "request_rerun", "stop"]
+    if len(candidate_refs) >= 2:
+        decisions.insert(1, "merge_with_evm")
     return ReviewPayload(
         stage="gene_annotation",
         gate_id="candidate_evidence_review",
         reason="candidate_evidence_review",
         candidates=candidates,
-        decisions_allowed=["proceed_merge", "request_rerun", "stop"],
+        decisions_allowed=decisions,
         auto_decidable=not conflict,
         notes=["execution_support=planning_only"],
     )
@@ -819,7 +892,7 @@ def block_candidate_evidence_review(state: TopLevelState) -> dict:
 
 def apply_candidate_evidence_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
     _require_gene_stage(request, "candidate_evidence_review")
-    if request.decision not in {"proceed_merge", "request_rerun", "stop"}:
+    if request.decision not in {"accept_candidate", "merge_with_evm", "proceed_merge", "request_rerun", "stop"}:
         raise ResumeValidationError(f"unsupported candidate_evidence_review decision: {request.decision!r}")
     if request.decision == "stop":
         return _gene_gate_stop(state, "candidate_evidence_review", request)
@@ -837,17 +910,29 @@ def apply_candidate_evidence_review_decision(state: TopLevelState, request: Resu
         )
         return own
 
+    # accept_candidate keeps a single operator-chosen candidate (EVM passthrough);
+    # merge_with_evm / proceed_merge keep all candidates for an EVM merge.
+    if request.decision == "accept_candidate":
+        chosen = request.method_name or request.candidate_id
+        if not chosen or chosen not in candidate_refs:
+            raise ResumeValidationError(
+                f"accept_candidate requires method_name of an executed candidate; got {chosen!r}"
+            )
+        accepted = {chosen: candidate_refs[chosen]}
+    else:
+        accepted = candidate_refs
+
     decision_ref = _record_gene_gate_decision(
         state,
         "candidate_evidence_review",
         request,
-        {"accepted_candidate_refs": candidate_refs},
+        {"accepted_candidate_refs": accepted},
     )
     own = _gene_gate_own_update(
         state,
         "candidate_evidence_review",
         request,
-        {"status": "candidates_accepted", "accepted_candidate_refs": candidate_refs},
+        {"status": "candidates_accepted", "accepted_candidate_refs": accepted},
         decision_ref,
     )
     return own
@@ -1011,7 +1096,172 @@ GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 
 CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
 AUGUSTUS_METHOD = "gene_annotation.candidate.augustus"
-AUGUSTUS_DEFAULT_SPECIES = "generic"
+GFFREAD_METHOD = "gene_annotation.materialize.gffread"
+CANDIDATE_PROTEINS_TYPE = "gene_annotation.candidate_proteins"
+
+# Per-candidate EVM evidence class, keyed by method. Used both for EVM weight
+# selection and for the standardized candidate bundle. Methods absent here
+# default to ABINITIO_PREDICTION.
+_REGISTRY_PATH = Path("descriptors/registry.yaml")
+
+
+@lru_cache(maxsize=1)
+def _gene_registry() -> DescriptorRegistry:
+    return DescriptorRegistry.load(_REGISTRY_PATH)
+
+
+def _method_evm_class(method_name: str) -> str:
+    """EVM evidence class for a candidate, sourced from its descriptor's evm block."""
+    method = _gene_registry().methods.get(method_name)
+    evm = method.evm if method else None
+    return (evm or {}).get("evidence_class", "ABINITIO_PREDICTION")
+
+
+# Weight bucket each evidence class draws from in merge_weights.
+_EVM_CLASS_WEIGHT_KEY = {
+    "ABINITIO_PREDICTION": "ab_initio",
+    "PROTEIN": "protein",
+    "TRANSCRIPT": "rnaseq",
+    "OTHER_PREDICTION": "ab_initio",
+}
+
+
+def _materialize_candidate_proteins(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    suffix: str,
+    output_gff3: Path,
+) -> tuple[Path | None, Path | None, str | None]:
+    """Translate proteins.fa + cds.fa from a candidate GFF via gffread.
+
+    Returns ``(proteins_fa, cds_fa, None)`` on success, or ``(None, None, error)``
+    when gffread fails or yields empty output. Methods without native protein
+    output must call this before a candidate bundle is recorded; nothing may
+    publish a proteins path that is not materialized on disk.
+    """
+    gene_out = _gene_output(state)
+    genome_ref = gene_out.get("genome_input_ref")
+    if not genome_ref:
+        return None, None, f"{suffix} materialization requires genome_input_ref"
+
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    working_dir = data_dir / "work" / "gene_annotation" / session_id / suffix
+    working_dir.mkdir(parents=True, exist_ok=True)
+    proteins_fa = working_dir / "proteins.fa"
+    cds_fa = working_dir / "cds.fa"
+
+    env_spec, blocked = resolve_method_env(
+        gene_out,
+        stage="gene_annotation",
+        method_name=GFFREAD_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return None, None, str(blocked.get("reason") or "gffread env preflight blocked")
+
+    script = (
+        "set -e\n"
+        f"gffread {shlex.quote(str(output_gff3))} -g {shlex.quote(str(genome_ref))}"
+        f" -x {shlex.quote(str(cds_fa))} -y {shlex.quote(str(proteins_fa))}\n"
+        f"test -s {shlex.quote(str(proteins_fa))}\n"
+    )
+    script_path = working_dir / f"materialize_{suffix}.sh"
+    script_path.write_text(script, encoding="utf-8")
+    script_path.chmod(0o755)
+
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:gene_annotation:{suffix}:materialize",
+        session_id=session_id,
+        stage="gene_annotation",
+        method_name=GFFREAD_METHOD,
+        script_path=script_path,
+        working_dir=working_dir,
+        expected_outputs=[proteins_fa],
+        env=gene_out.get("env"),
+        env_spec=env_spec,
+        metadata={"source_gff3": str(output_gff3), "candidate_method": method_name},
+    )
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label=f"{suffix} materialization",
+    )
+    if not outcome.success:
+        return None, None, outcome.error or f"{suffix} protein materialization failed"
+    cds_ref = cds_fa if cds_fa.exists() else None
+    return proteins_fa, cds_ref, None
+
+
+def _write_candidate_bundle(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    suffix: str,
+    output_gff3: Path,
+    proteins_fa: Path,
+    cds_fa: Path | None,
+    gene_count: int,
+) -> dict[str, Any]:
+    """Write minimal metrics/provenance and return a CandidateBundle dict."""
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    work_dir = data_dir / "work" / "gene_annotation" / session_id / suffix
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_path = work_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps({"method_name": method_name, "gene_count": gene_count}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    provenance_path = work_dir / "provenance.json"
+    provenance_path.write_text(
+        json.dumps(
+            {"method_name": method_name, "annotation_gff_ref": str(output_gff3), "materialized_with": "gffread"},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    evm_class = _method_evm_class(method_name)
+    bundle = CandidateBundle(
+        method_name=method_name,
+        category=_method_category(method_name),
+        annotation_gff_ref=str(output_gff3),
+        proteins_fasta_ref=str(proteins_fa),
+        cds_fasta_ref=str(cds_fa) if cds_fa else None,
+        metrics_ref=str(metrics_path),
+        provenance_ref=str(provenance_path),
+        evm_evidence_class=evm_class,
+        evm_source_type=suffix,
+    )
+    return bundle.model_dump(mode="json")
+
+
+def _method_category(method_name: str) -> str:
+    method = _gene_registry().methods.get(method_name)
+    return (method.category if method else None) or "candidate"
+
+
+def _evm_source_type(gene_out: dict[str, Any], method_name: str) -> str:
+    bundles = gene_out.get("candidate_bundles") or {}
+    bundle = bundles.get(method_name) or {}
+    source_type = bundle.get("evm_source_type")
+    if source_type:
+        return str(source_type)
+    return method_name.split(".")[-1]
+
+
+def _evm_argument_bucket(evm_class: str) -> str:
+    if evm_class == "PROTEIN":
+        return "protein_alignments"
+    if evm_class == "TRANSCRIPT":
+        return "transcript_alignments"
+    return "gene_predictions"
 
 
 def _freeze_gene_method_attempt(
@@ -1154,6 +1404,30 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
     candidate_gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
     candidate_gene_counts[method_name] = gene_count
 
+    # Materialize a real proteins.fa (+ cds.fa) from the candidate GFF. A
+    # candidate is only valid with a structural GFF AND an on-disk proteins
+    # FASTA; nothing may publish a fabricated protein path downstream.
+    proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
+        state, method_name=method_name, suffix=cfg["suffix"], output_gff3=output_gff3,
+    )
+    if mat_error:
+        Ledger(data_dir).record_attempt_failed(
+            attempt.session_id, attempt, return_code=0, error=mat_error,
+        )
+        return _update_gene_output(state, {"status": "materialization_failed", "reason": mat_error})
+
+    bundle = _write_candidate_bundle(
+        state,
+        method_name=method_name,
+        suffix=cfg["suffix"],
+        output_gff3=output_gff3,
+        proteins_fa=proteins_fa,
+        cds_fa=cds_fa,
+        gene_count=gene_count,
+    )
+    candidate_bundles = dict(gene_out.get("candidate_bundles") or {})
+    candidate_bundles[method_name] = bundle
+
     executed = list(gene_out.get("executed_methods") or [])
     executed.append(method_name)
     confirmed = list(gene_out.get("confirmed_methods") or [])
@@ -1165,6 +1439,7 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
         {
             "status": "pending_execution" if pending else "candidates_ready",
             "candidate_refs": candidate_refs,
+            "candidate_bundles": candidate_bundles,
             "candidate_gene_counts": candidate_gene_counts,
             "candidate_gff_ref": str(output_gff3),
             f"{cfg['suffix']}_gene_count": gene_count,
@@ -1224,6 +1499,14 @@ def collect_miniprot_artifacts(state: TopLevelState) -> dict:
 
 # --- augustus freeze / run / collect ------------------------------------------
 
+_AUGUSTUS_NO_MODEL_MESSAGE = (
+    "augustus requires an explicit augustus_species_model; --species is a trained "
+    "species model, not a generic label. Options: "
+    "(1) train a model with BUSCO --long (future prepare action), "
+    "(2) use a nearby installed species model, or (3) skip augustus."
+)
+
+
 def freeze_augustus_attempt(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "pending_execution":
@@ -1233,13 +1516,20 @@ def freeze_augustus_attempt(state: TopLevelState) -> dict:
     if AUGUSTUS_METHOD in (gene_out.get("executed_methods") or []):
         return {}
     hints = gene_out.get("lineage_or_species_hints") or {}
-    species = hints.get("species", AUGUSTUS_DEFAULT_SPECIES)
+    species = hints.get("augustus_species_model")
+    if not species:
+        return _fail_update(state, _AUGUSTUS_NO_MODEL_MESSAGE)
+    warnings: list[str] = []
+    if hints.get("species_model_is_distant"):
+        warnings.append("augustus_species_model_is_distant")
+    if not gene_out.get("repeat_annotation_ref"):
+        warnings.append("augustus_repeat_masking_missing")
     genome_arg = shlex.quote(str(gene_out["genome_input_ref"]))
     species_arg = shlex.quote(str(species))
     output_arg = shlex.quote(str(Path(gene_out.get("candidate_refs", {}).get(AUGUSTUS_METHOD, "")) or "augustus.gff3"))
     script = (
         "set -e\n"
-        f"augustus --species={species_arg} {genome_arg} > {output_arg}\n"
+        f"augustus --species={species_arg} --gff3=on {genome_arg} > {output_arg}\n"
         f"test -f {output_arg}\n"
     )
     return _freeze_gene_method_attempt(
@@ -1247,7 +1537,7 @@ def freeze_augustus_attempt(state: TopLevelState) -> dict:
         method_name=AUGUSTUS_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
         script_body=script,
-        extra_metadata={"species": str(species)},
+        extra_metadata={"species": str(species), "readiness_warnings": warnings},
     )
 
 
@@ -1269,7 +1559,7 @@ def collect_augustus_artifacts(state: TopLevelState) -> dict:
 
 # --- EVM merge + BUSCO execution (Phase 7 task 05) ----------------------------
 
-EVM_METHOD = "gene_annotation.evm"
+EVM_METHOD = "gene_annotation.merge.evm"
 GENE_BUSCO_METHOD = "gene_annotation.busco"
 FINAL_GFF_TYPE = "gene_annotation.final_gff"
 BUSCO_SUMMARY_TYPE = "gene_annotation.busco_summary"
@@ -1286,18 +1576,23 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
 
-    # Single-candidate passthrough: no EVM script needed.
+    # Single-candidate passthrough: no EVM script needed. Reuse the candidate's
+    # already-materialized proteins so the final gene set has a real proteins.fa.
     if len(candidate_refs) <= 1:
         final_ref = list(candidate_refs.values())[0] if candidate_refs else None
-        return _update_gene_output(
-            state,
-            {
-                "status": "evm_collected",
-                "merge_method": "single_candidate_passthrough",
-                "final_gff_ref": final_ref,
-                "merge_weights": merge_weights,
-            },
-        )
+        bundles = gene_out.get("candidate_bundles") or {}
+        final_method = next(iter(candidate_refs), None) if candidate_refs else None
+        bundle = bundles.get(final_method) if final_method else None
+        update = {
+            "status": "evm_collected",
+            "merge_method": "single_candidate_passthrough",
+            "final_gff_ref": final_ref,
+            "merge_weights": merge_weights,
+        }
+        if bundle:
+            update["final_proteins_ref"] = bundle.get("proteins_fasta_ref")
+            update["final_cds_ref"] = bundle.get("cds_fasta_ref")
+        return _update_gene_output(state, update)
 
     # Multi-candidate: write EVM weights file and script.
     genome_ref = gene_out.get("genome_input_ref")
@@ -1311,19 +1606,35 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
 
     weights_path = working_dir / "weights.txt"
     weight_lines = []
-    for method_ref in sorted(candidate_refs.values()):
-        # EVM weights format: EVIDENCE_TYPE<TAB>WEIGHT<TAB>FILE_PATH
-        weight_lines.append(f"ABINITIO_PREDICTION\t1\t{method_ref}")
+    evm_inputs: dict[str, list[str]] = {
+        "gene_predictions": [],
+        "protein_alignments": [],
+        "transcript_alignments": [],
+    }
+    # EVM weights format: EVIDENCE_CLASS<TAB>SOURCE<TAB>WEIGHT. Candidate files
+    # are supplied through the evidence-class-specific command arguments below.
+    for method_name, method_ref in sorted(candidate_refs.items()):
+        evm_class = _method_evm_class(method_name)
+        weight_key = _EVM_CLASS_WEIGHT_KEY.get(evm_class, "ab_initio")
+        weight = merge_weights.get(weight_key, _DEFAULT_MERGE_WEIGHTS.get(weight_key, 1))
+        source_type = _evm_source_type(gene_out, method_name)
+        weight_lines.append(f"{evm_class}\t{source_type}\t{weight}")
+        evm_inputs[_evm_argument_bucket(evm_class)].append(method_ref)
     weights_path.write_text("\n".join(weight_lines) + "\n", encoding="utf-8")
 
     output_gff3 = artifact_dir / "evm_merged.gff3"
     script_path = working_dir / "run_evm.sh"
+    evm_args = [
+        f"--genome {shlex.quote(str(genome_ref))}",
+        f"--weights {shlex.quote(str(weights_path))}",
+    ]
+    for arg_name in ("gene_predictions", "protein_alignments", "transcript_alignments"):
+        refs = evm_inputs[arg_name]
+        if refs:
+            evm_args.append(f"--{arg_name} {shlex.quote(','.join(refs))}")
     script_path.write_text(
         "set -e\n"
-        f"evidence_modeler.pl --genome {shlex.quote(str(genome_ref))}"
-        f" --weights {shlex.quote(str(weights_path))}"
-        f" --gene_predictions {shlex.quote(','.join(candidate_refs.values()))}"
-        f" > {shlex.quote(str(output_gff3))}\n"
+        f"evidence_modeler.pl {' '.join(evm_args)} > {shlex.quote(str(output_gff3))}\n"
         f"test -f {shlex.quote(str(output_gff3))}\n",
         encoding="utf-8",
     )
@@ -1350,6 +1661,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
         metadata={
             "genome_input_ref": str(genome_ref),
             "candidate_refs": candidate_refs,
+            "evm_inputs": evm_inputs,
             "merge_weights": merge_weights,
             "output_gff3": str(output_gff3),
         },
@@ -1409,12 +1721,23 @@ def collect_evm_artifacts(state: TopLevelState) -> dict:
         artifacts=[{"path": str(output_gff3), "artifact_type": FINAL_GFF_TYPE}],
     )
 
+    # Materialize proteins from the merged GFF so the final gene set carries a
+    # real proteins.fa before BUSCO and commit.
+    proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
+        state, method_name=EVM_METHOD, suffix="evm", output_gff3=output_gff3,
+    )
+    if mat_error:
+        Ledger(data_dir).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=mat_error)
+        return _update_gene_output(state, {"status": "materialization_failed", "reason": mat_error})
+
     return _update_gene_output(
         state,
         {
             "status": "evm_collected",
             "merge_method": "evm",
             "final_gff_ref": str(output_gff3),
+            "final_proteins_ref": str(proteins_fa),
+            "final_cds_ref": str(cds_fa) if cds_fa else None,
         },
     )
 
@@ -1425,7 +1748,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evm_collected":
         return {}
 
-    final_gff_ref = gene_out.get("final_gff_ref")
+    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = _resolve_final_gene_set(gene_out)
     if not final_gff_ref:
         return _update_gene_output(
             state,
@@ -1435,21 +1758,22 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
                 "busco_note": "no final_gff_ref for BUSCO",
             },
         )
+    if final_error:
+        return _update_gene_output(
+            state,
+            {
+                "status": "merge_accepted",
+                "busco_completeness_status": "missing",
+                "busco_note": final_error,
+            },
+        )
 
-    expected = gene_out.get("expected_outputs") or {}
-    protein_ref = expected.get("predicted_proteins") or gene_out.get("predicted_proteins_ref")
-    transcript_ref = expected.get("transcripts_fasta") or gene_out.get("transcripts_fasta_ref")
+    transcript_ref = final_cds_ref or gene_out.get("transcripts_fasta_ref")
 
-    if protein_ref and Path(str(protein_ref)).exists():
-        busco_input = str(protein_ref)
+    if final_proteins_ref and Path(str(final_proteins_ref)).exists():
+        busco_input = str(final_proteins_ref)
         busco_mode = "proteins"
     elif transcript_ref and Path(str(transcript_ref)).exists():
-        busco_input = str(transcript_ref)
-        busco_mode = "transcriptome"
-    elif protein_ref:
-        busco_input = str(protein_ref)
-        busco_mode = "proteins"
-    elif transcript_ref:
         busco_input = str(transcript_ref)
         busco_mode = "transcriptome"
     else:
@@ -1735,7 +2059,7 @@ def _lineage_or_species_hints(state: TopLevelState) -> dict[str, Any]:
     gene_out = _gene_output(state)
     hints = dict(gene_out.get("lineage_or_species_hints") or {})
     inventory_out = (state.get("stage_outputs") or {}).get("inventory") or {}
-    for key in ["species", "lineage", "busco_lineage"]:
+    for key in ["species", "lineage", "busco_lineage", "augustus_species_model"]:
         if inventory_out.get(key) and key not in hints:
             hints[key] = inventory_out[key]
     return hints

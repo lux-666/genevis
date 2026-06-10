@@ -321,6 +321,26 @@ class GeneAnnotationBundle(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CandidateBundle(BaseModel):
+    """Standardized gene-annotation candidate: a structural GFF plus a real,
+    on-disk proteins FASTA. A candidate is valid only when annotation_gff_ref
+    and proteins_fasta_ref point at files that actually exist; methods without
+    native protein output materialize proteins.fa from the GFF + genome before
+    the bundle is recorded.
+    """
+
+    method_name: str
+    category: str
+    annotation_gff_ref: str
+    proteins_fasta_ref: str
+    cds_fasta_ref: str | None = None
+    metrics_ref: str | None = None
+    provenance_ref: str | None = None
+    evm_evidence_class: str = "ABINITIO_PREDICTION"
+    evm_source_type: str = ""
+    status: Literal["materialized", "materialization_failed"] = "materialized"
+
+
 class FunctionDatabaseProvenance(BaseModel):
     """Database provenance required for planned function annotation."""
 

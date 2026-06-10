@@ -194,11 +194,13 @@ class DurableResumeTests(unittest.TestCase):
                 advanced_past_assembly_review,
                 f"expected current_stage past assembly_review, got {snap.values['current_stage']!r}",
             )
-            self.assertNotEqual(
-                snap.values["supervision_state"],
-                "blocked_human",
-                "the assembly_review block should be cleared",
-            )
+            if snap.values["supervision_state"] == "blocked_human":
+                active = snap.values.get("active_interrupt") or {}
+                self.assertNotEqual(
+                    active.get("stage"),
+                    "assembly_review",
+                    "the assembly_review block should be cleared",
+                )
             if hasattr(graph.checkpointer, "conn"):
                 graph.checkpointer.conn.close()
 

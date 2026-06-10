@@ -2,10 +2,32 @@ method_name: gene_annotation.candidate.maker
 stage: gene_annotation
 package_ref: maker
 goal: "Plan MAKER as an integrative gene annotation candidate without execution."
+category: integration_pipeline
+execution_status: deferred
+recommended_default: false
 required_inputs:
-  - name: softmasked_genome
+  - name: genome_fasta_ref
     type: softmasked_genome
     description: "Softmasked genome FASTA from repeat annotation."
+  - name: repeat_masked_genome_ref
+    type: softmasked_genome
+    description: "Repeat-masked genome FASTA."
+  - name: protein_evidence_ref
+    type: reference_proteins
+    description: "Protein evidence FASTA."
+optional_inputs:
+  - name: transcript_evidence_ref
+    type: transcript_evidence
+    description: "Optional transcript evidence."
+    required: false
+  - name: augustus_species_model
+    type: species_model
+    description: "Optional AUGUSTUS species model."
+    required: false
+  - name: snap_model
+    type: model_path
+    description: "Optional SNAP model."
+    required: false
 expected_outputs:
   - name: genes_gff3
     type: gene_models
@@ -16,6 +38,19 @@ expected_outputs:
   - name: predicted_proteins
     type: predicted_proteins
     description: "Planned protein FASTA for function annotation."
+materialize_outputs:
+  - annotation.gff3
+  - proteins.fa
+  - transcripts.fa
+readiness_rules:
+  - require_repeat_masking
+  - require_evidence_sources
+review_notes:
+  - heavy_pipeline
+  - useful_when_full_annotation_inputs_are_ready
+evm:
+  evidence_class: OTHER_PREDICTION
+  source_type: maker
 review_rules:
   - gene_annotation_plan_exists
 human_review_triggers:

@@ -2,10 +2,21 @@ method_name: gene_annotation.candidate.augustus
 stage: gene_annotation
 package_ref: augustus
 goal: "Plan AUGUSTUS ab initio gene prediction without execution."
+category: ab_initio
+execution_status: local
+recommended_default: false
 required_inputs:
-  - name: softmasked_genome
+  - name: genome_fasta_ref
     type: softmasked_genome
     description: "Softmasked genome FASTA from repeat annotation."
+  - name: augustus_species_model
+    type: species_model
+    description: "Trained AUGUSTUS species model (not a generic label)."
+optional_inputs:
+  - name: augustus_hints_ref
+    type: hints
+    description: "Optional AUGUSTUS hints file."
+    required: false
 expected_outputs:
   - name: genes_gff3
     type: gene_models
@@ -13,6 +24,21 @@ expected_outputs:
   - name: predicted_proteins
     type: predicted_proteins
     description: "Planned protein FASTA for function annotation."
+materialize_outputs:
+  - annotation.gff3
+  - proteins.fa
+  - cds.fa
+readiness_rules:
+  - reject_if_species_model_missing
+  - warn_if_species_model_is_distant
+  - require_or_strongly_warn_repeat_masking_missing
+review_notes:
+  - high_false_positive_risk
+  - may_overpredict_in_repeats
+  - low_confidence_if_using_nearby_species_model
+evm:
+  evidence_class: ABINITIO_PREDICTION
+  source_type: augustus
 review_rules:
   - ab_initio_plan_exists
 human_review_triggers:

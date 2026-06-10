@@ -2,6 +2,9 @@ method_name: gene_annotation.candidate.braker3
 stage: gene_annotation
 package_ref: braker3
 goal: "Plan BRAKER3 as a structural gene annotation candidate without execution."
+category: evidence_guided_ab_initio
+execution_status: deferred
+recommended_default: true_if_rnaseq_or_protein_evidence_available
 required_inputs:
   - name: softmasked_genome
     type: softmasked_genome
@@ -13,6 +16,19 @@ expected_outputs:
   - name: predicted_proteins
     type: predicted_proteins
     description: "Planned protein FASTA for function annotation."
+materialize_outputs:
+  - annotation.gff3
+  - proteins.fa
+  - cds.fa
+readiness_rules:
+  - require_rnaseq_or_protein_evidence
+  - do_not_run_as_empty_default
+review_notes:
+  - better_than_bare_augustus_when_evidence_available
+  - environment_complex
+evm:
+  evidence_class: OTHER_PREDICTION
+  source_type: braker3
 review_rules:
   - gene_annotation_plan_exists
 human_review_triggers:

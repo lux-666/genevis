@@ -51,9 +51,22 @@ class MethodDescriptor(BaseModel):
     goal: str
     required_inputs: list[IOSpec]
     expected_outputs: list[IOSpec]
+    optional_inputs: list[IOSpec] = Field(default_factory=list)
     review_rules: list[str] = Field(default_factory=list)
     human_review_triggers: list[str] = Field(default_factory=list)
     resource_hints: ResourceHints = Field(default_factory=ResourceHints)
+    # Gene-annotation taxonomy / candidate-bundle contract (all optional so
+    # existing descriptors stay valid). category groups methods (ab_initio,
+    # homology, integration, merge); execution_status records whether a method
+    # runs locally today or is a deferred placeholder; materialize_outputs lists
+    # the standardized candidate files the method must produce on disk.
+    category: str | None = None
+    execution_status: str | None = None
+    recommended_default: str | bool | None = None
+    materialize_outputs: list[str] = Field(default_factory=list)
+    readiness_rules: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
+    evm: dict[str, str] | None = None
 
 
 class FrozenAttemptSpec(BaseModel):

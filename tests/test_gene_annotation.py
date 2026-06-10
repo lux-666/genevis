@@ -26,7 +26,7 @@ from app.stages.gene_annotation.nodes import (
 
 
 def _fake_gene_method_bins(tmpdir: str) -> Path:
-    """Create fake miniprot and augustus binaries for testing the execution path."""
+    """Create fake miniprot, augustus, and gffread binaries for the execution path."""
     bin_dir = Path(tmpdir) / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, gff_line in [
@@ -41,6 +41,25 @@ def _fake_gene_method_bins(tmpdir: str) -> Path:
                 encoding="utf-8",
             )
             bin_path.chmod(0o755)
+    # Fake gffread: materialize proteins.fa (-y) and cds.fa (-x) from the GFF.
+    gffread = bin_dir / "gffread"
+    if not gffread.exists():
+        gffread.write_text(
+            "#!/bin/sh\n"
+            "prot=\"\"; cds=\"\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  case \"$1\" in\n"
+            "    -y) prot=\"$2\"; shift 2;;\n"
+            "    -x) cds=\"$2\"; shift 2;;\n"
+            "    -g) shift 2;;\n"
+            "    *) shift;;\n"
+            "  esac\n"
+            "done\n"
+            "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
+            "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+            encoding="utf-8",
+        )
+        gffread.chmod(0o755)
     return bin_dir
 
 
@@ -70,10 +89,10 @@ class GeneAnnotationDescriptorTests(unittest.TestCase):
             "gene_annotation.candidate.maker": "maker",
             "gene_annotation.candidate.augustus": "augustus",
             "gene_annotation.candidate.miniprot": "miniprot",
+            "gene_annotation.candidate.gemoma": "gemoma",
             "gene_annotation.helper.hisat2": "hisat2",
             "gene_annotation.helper.stringtie": "stringtie",
             "gene_annotation.helper.isoquant": "isoquant",
-            "gene_annotation.helper.gemoma": "gemoma",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -120,6 +139,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
         bin_dir = _fake_gene_method_bins(tmpdir)
         state["stage_outputs"]["gene_annotation"] = {
             "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            "lineage_or_species_hints": {"augustus_species_model": "test_species"},
         }
         return state
 
@@ -306,7 +326,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertEqual(gene["evidence_profile"], "no_evidence")
             self.assertNotIn("gene_annotation.helper.isoquant", gene["helper_methods"])
 
-    def test_protein_evidence_adds_miniprot_and_gemoma(self):
+    def test_protein_evidence_adds_miniprot_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins = Path(tmpdir) / "ref_proteins.fa"
             proteins.write_text(">p1\nMKK\n", encoding="utf-8")
@@ -320,7 +340,8 @@ class GeneAnnotationStageTests(unittest.TestCase):
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "protein")
             self.assertIn("gene_annotation.candidate.miniprot", gene["candidate_methods"])
-            self.assertIn("gene_annotation.helper.gemoma", gene["helper_methods"])
+            # gemoma is now a deferred candidate, not an auto-added helper.
+            self.assertNotIn("gene_annotation.helper.gemoma", gene.get("helper_methods", []))
 
     def test_mixed_evidence_records_review_triggers_without_inventing_merge_policy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -362,6 +383,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
             bin_dir = _fake_gene_method_bins(tmpdir)
             state["stage_outputs"]["gene_annotation"] = {
                 "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+                "lineage_or_species_hints": {"augustus_species_model": "test_species"},
             }
 
             result = build_stage().invoke(state)
@@ -420,6 +442,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         bin_dir = _fake_gene_method_bins(tmpdir)
         state["stage_outputs"]["gene_annotation"] = {
             "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            "lineage_or_species_hints": {"augustus_species_model": "test_species"},
         }
         return state
 
@@ -477,7 +500,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"] = {"review_policy": {"mode": "strict"}}
+            state["stage_outputs"]["gene_annotation"]["review_policy"] = {"mode": "strict"}
 
             blocked = build_stage().invoke(state)
 
@@ -533,6 +556,63 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             gene = update["stage_outputs"]["gene_annotation"]
             self.assertTrue(gene["accepted_candidate_refs"])
 
+    def test_candidate_review_offers_merge_only_with_multiple_candidates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._softmasked_state(tmpdir, None)
+            base = {
+                "evidence_profile": "protein",
+                "available_evidence": ["protein"],
+                "genome_input_ref": str(Path(tmpdir) / "softmasked.fa"),
+                "genome_input_source": "softmasked_genome",
+            }
+            # Single candidate: no merge action.
+            state["stage_outputs"]["gene_annotation"] = {
+                **base,
+                "candidate_refs": {"gene_annotation.candidate.miniprot": "/tmp/m.gff3"},
+            }
+            single = build_candidate_evidence_review_payload(state)
+            self.assertNotIn("merge_with_evm", single.decisions_allowed)
+            self.assertIn("accept_candidate", single.decisions_allowed)
+
+            # Two candidates: merge offered.
+            state["stage_outputs"]["gene_annotation"] = {
+                **base,
+                "candidate_refs": {
+                    "gene_annotation.candidate.miniprot": "/tmp/m.gff3",
+                    "gene_annotation.candidate.augustus": "/tmp/a.gff3",
+                },
+            }
+            multi = build_candidate_evidence_review_payload(state)
+            self.assertIn("merge_with_evm", multi.decisions_allowed)
+
+    def test_accept_candidate_keeps_single_chosen_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._softmasked_state(tmpdir, None)
+            state["stage_outputs"]["gene_annotation"] = {
+                "evidence_profile": "protein",
+                "available_evidence": ["protein"],
+                "status": "candidates_ready",
+                "genome_input_ref": str(Path(tmpdir) / "softmasked.fa"),
+                "genome_input_source": "softmasked_genome",
+                "candidate_refs": {
+                    "gene_annotation.candidate.miniprot": "/tmp/m.gff3",
+                    "gene_annotation.candidate.augustus": "/tmp/a.gff3",
+                },
+            }
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="gene_annotation",
+                gate_id="candidate_evidence_review",
+                decision="accept_candidate",
+                method_name="gene_annotation.candidate.miniprot",
+            )
+            update = apply_candidate_evidence_review_decision(state, request)
+            gene = update["stage_outputs"]["gene_annotation"]
+            self.assertEqual(
+                list(gene["accepted_candidate_refs"].keys()),
+                ["gene_annotation.candidate.miniprot"],
+            )
+
     def test_merge_review_blocks_on_merge_policy_and_adjusts_weights(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._softmasked_state(tmpdir, None)
@@ -569,6 +649,8 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
+            final_proteins = Path(tmpdir) / "final_proteins.fa"
+            final_proteins.write_text(">g1\nMKT\n", encoding="utf-8")
             state["stage_outputs"]["gene_annotation"] = {
                 "status": "merge_accepted",
                 "evidence_profile": "no_evidence",
@@ -576,6 +658,8 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 "available_evidence": [],
                 "genome_input_ref": str(Path(tmpdir) / "softmasked.fa"),
                 "genome_input_source": "softmasked_genome",
+                "final_gff_ref": str(Path(tmpdir) / "genes.gff3"),
+                "final_proteins_ref": str(final_proteins),
                 "expected_outputs": {
                     "genes_gff3": str(Path(tmpdir) / "genes.gff3"),
                     "transcripts_fasta": str(Path(tmpdir) / "transcripts.fa"),
@@ -609,7 +693,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"] = {"review_policy": {"mode": "strict"}}
+            state["stage_outputs"]["gene_annotation"]["review_policy"] = {"mode": "strict"}
             repeat_before = dict(state["stage_outputs"]["repeat_annotation"])
             hic_before = dict(state["stage_outputs"]["hic_scaffolding"])
 
@@ -625,6 +709,83 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             update = resume_review_state(resume_state, request)
             self.assertEqual(update["stage_outputs"]["repeat_annotation"], repeat_before)
             self.assertEqual(update["stage_outputs"]["hic_scaffolding"], hic_before)
+
+    def test_planned_only_methods_rejected_at_method_review(self):
+        """Selecting only planned_only (non-executable) methods raises a validation error."""
+        from app.control.lifecycle import ResumeValidationError
+        from app.stages.gene_annotation.nodes import apply_gene_method_planning_review_decision
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = self._write_registry(tmpdir, assets=[])
+            state = self._softmasked_state(tmpdir, str(registry))
+            state["stage_outputs"]["gene_annotation"] = {
+                "status": "methods_planned",
+                "candidate_methods": [
+                    "gene_annotation.candidate.braker3",
+                    "gene_annotation.candidate.maker",
+                ],
+                "evidence_profile": "protein",
+            }
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="gene_annotation",
+                gate_id="gene_method_planning_review",
+                decision="accept",
+            )
+            with self.assertRaises(ResumeValidationError) as ctx:
+                apply_gene_method_planning_review_decision(state, request)
+            self.assertIn("planned_only", str(ctx.exception))
+
+    def test_augustus_without_species_model_blocks_method_planning_readiness(self):
+        """AUGUSTUS readiness is checked before execution, not deferred to freeze."""
+        from app.control.lifecycle import ResumeValidationError
+        from app.stages.gene_annotation.nodes import (
+            apply_gene_method_planning_review_decision,
+            build_gene_method_planning_review_payload,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._softmasked_state(tmpdir, None)
+            state["stage_outputs"]["gene_annotation"] = {
+                "status": "methods_planned",
+                "candidate_methods": ["gene_annotation.candidate.augustus"],
+                "evidence_profile": "no_evidence",
+                "lineage_or_species_hints": {},
+            }
+
+            payload = build_gene_method_planning_review_payload(state)
+            self.assertFalse(payload.auto_decidable)
+            self.assertIn("augustus_species_model", payload.notes[-1])
+
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="gene_annotation",
+                gate_id="gene_method_planning_review",
+                decision="accept",
+            )
+            with self.assertRaises(ResumeValidationError) as ctx:
+                apply_gene_method_planning_review_decision(state, request)
+            self.assertIn("augustus_species_model", str(ctx.exception))
+
+    def test_run_gene_methods_planning_only_fails_for_non_executable(self):
+        """run_gene_methods_planning_only returns failed status when no executable methods are confirmed."""
+        from app.stages.gene_annotation.nodes import run_gene_methods_planning_only
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = self._write_registry(tmpdir, assets=[])
+            state = self._softmasked_state(tmpdir, str(registry))
+            state["stage_outputs"]["gene_annotation"] = {
+                "status": "methods_confirmed",
+                "confirmed_methods": [
+                    "gene_annotation.candidate.braker3",
+                    "gene_annotation.candidate.maker",
+                ],
+                "evidence_profile": "protein",
+            }
+            result = run_gene_methods_planning_only(state)
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["status"], "failed")
+            self.assertIn("planned_only", gene["reason"])
 
 
 if __name__ == "__main__":

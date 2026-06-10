@@ -1,0 +1,15 @@
+package_name: genewise
+version_constraint: ">=2.4"
+language: cli
+install_channel: conda
+entry_patterns:
+  - "genewise {protein_reference_fasta} {genome_fasta}"
+help_summary: "GeneWise high-accuracy protein-to-genome alignment for difficult genes."
+known_pitfalls:
+  - "Slow and resource-intensive; best used to rescue difficult genes."
+  - "Requires pre-filtered BLAST/exonerate hits to bound the search."
+resource_defaults:
+  cpu_cores: 16
+  memory_gb: 64.0
+  gpu_required: false
+  walltime_hours: 72.0
