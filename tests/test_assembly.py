@@ -6,12 +6,17 @@ import json
 import os
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
 
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import initial_state
 from app.stages.assembly.builder import build_stage
+from app.stages.assembly.method_application import flye as flye_graph
+from app.stages.assembly.method_application import nextdenovo as nextdenovo_graph
+from app.stages.assembly.method_application.flye import build_flye_graph
+from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 
 
 class AssemblyDescriptorTests(unittest.TestCase):
@@ -50,6 +55,30 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
 
 class AssemblyStageTests(unittest.TestCase):
+    def test_outer_graph_routes_to_method_subgraphs(self):
+        outer_nodes = set(build_stage().get_graph().nodes)
+        flye_nodes = set(build_flye_graph().get_graph().nodes)
+        nextdenovo_nodes = set(build_nextdenovo_graph().get_graph().nodes)
+
+        self.assertIn("flye", outer_nodes)
+        self.assertIn("nextdenovo", outer_nodes)
+        self.assertNotIn("method_application", outer_nodes)
+        self.assertNotIn("freeze_flye_attempt", outer_nodes)
+        self.assertNotIn("run_flye_attempt", outer_nodes)
+        self.assertNotIn("collect_flye_artifacts", outer_nodes)
+        self.assertIn("freeze", flye_nodes)
+        self.assertIn("run", flye_nodes)
+        self.assertIn("collect", flye_nodes)
+        self.assertIn("freeze", nextdenovo_nodes)
+        self.assertIn("run", nextdenovo_nodes)
+        self.assertIn("collect", nextdenovo_nodes)
+
+    def test_method_subgraphs_do_not_import_parent_graph_modules(self):
+        for module in [flye_graph, nextdenovo_graph]:
+            source = inspect.getsource(module)
+            self.assertNotIn("app.stages.assembly.nodes", source)
+            self.assertNotIn("app.stages.assembly.routing", source)
+
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
@@ -100,6 +129,32 @@ class AssemblyStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
         flye.chmod(0o755)
+        return bin_dir
+
+    def _fake_nextdenovo_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        nextdenovo = bin_dir / "nextDenovo"
+        if fail:
+            nextdenovo.write_text(
+                "#!/bin/sh\n"
+                f"{f'echo nextdenovo-called > {marker!s}' if marker else ':'}\n"
+                "echo fake nextDenovo failed >&2\n"
+                "exit 9\n",
+                encoding="utf-8",
+            )
+        else:
+            nextdenovo.write_text(
+                "#!/bin/sh\n"
+                f"{f'echo nextdenovo-called > {marker!s}' if marker else ':'}\n"
+                "cfg=\"$1\"\n"
+                "workdir=$(awk -F= '/^workdir[[:space:]]*=/{gsub(/^[ \\t]+|[ \\t]+$/, \"\", $2); print $2}' \"$cfg\")\n"
+                "mkdir -p \"$workdir/03.ctg_graph\"\n"
+                "printf '>nd_contig1\\nACGTACGT\\n' > \"$workdir/03.ctg_graph/nd.asm.fasta\"\n"
+                "printf 'fake nextDenovo stdout\\n'\n",
+                encoding="utf-8",
+            )
+        nextdenovo.chmod(0o755)
         return bin_dir
 
     def test_missing_assembly_inputs_fails_terminally(self):
@@ -602,6 +657,70 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "planned")
+
+    def test_local_nextdenovo_execution_writes_draft_assembly_and_ledger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            called_marker = Path(tmpdir) / "nextdenovo-called"
+            fake_bin = self._fake_nextdenovo_bin(tmpdir, marker=called_marker)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "cycloneseq",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "genome_survey": {"status": "completed", "estimates": {"genome_size_prior": 2_000_000}},
+                "assembly": {
+                    "assembly_route": "cyclone",
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "method_decision": {"primary": "assembly.candidate.nextdenovo"},
+                    "nextdenovo_parameters": {
+                        "read_type": "ont",
+                        "genome_size": 2_000_000,
+                        "threads": 1,
+                        "read_cutoff": 1000,
+                    },
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertTrue(called_marker.exists())
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "draft_ready")
+            self.assertEqual(assembly["primary_method"], "assembly.candidate.nextdenovo")
+            self.assertEqual(assembly["substeps"]["nextdenovo_assembly"]["status"], "executed")
+            self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
+
+            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(candidate["status"], "executed")
+            self.assertTrue(candidate["metadata"]["execution_enabled"])
+            self.assertTrue(candidate["metadata"]["method_graph_requested"])
+            self.assertEqual(candidate["metadata"]["draft_assembly_ref_status"], "materialized")
+            run_cfg = Path(candidate["logs"]["run_cfg"])
+            self.assertTrue(run_cfg.exists())
+            run_cfg_text = run_cfg.read_text(encoding="utf-8")
+            self.assertIn("read_type = ont", run_cfg_text)
+            self.assertIn("genome_size = 2000000", run_cfg_text)
+            self.assertEqual(candidate["logs"]["run_cfg"], str(run_cfg))
+
+            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            events = [
+                json.loads(line)["event_type"]
+                for line in ledger_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("attempt_started", events)
+            self.assertIn("attempt_succeeded", events)
 
 
 class Phase4FlyeParameterTests(unittest.TestCase):

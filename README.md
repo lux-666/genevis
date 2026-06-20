@@ -58,8 +58,9 @@ Implemented:
 - real `genome_survey` stage with full Jellyfish + GenomeScope2 opt-in
   execution, CycloneSEQ-only low-confidence fallback, and explicit skip record
 - real `assembly` stage with deterministic candidate planning, opt-in local
-  Flye execution (strict `flye_parameters` validation → `blocked_param`), and
-  materialized `draft_assembly.fasta`
+  Flye and NextDenovo execution (method-specific parameter validation →
+  `blocked_param`), and materialized `draft_assembly.fasta`; Canu and hifiasm
+  remain planning-only candidates
 - real `assembly_review` stage with opt-in local QUAST, `quast_summary.json`,
   action-provenance artifacts for pass/purge/polish, and a human gate that
   does not invent thresholds
@@ -100,7 +101,7 @@ Not implemented:
 - in-agent remote execution (intentionally unsupported; see
   [`docs/deployment/mac_dev_server_pull.md`](docs/deployment/mac_dev_server_pull.md))
 - executable bioinformatics methods beyond the slices above (Merqury,
-  minimap2 coverage, purge_dups, contamination check; NextDenovo, Canu,
+  minimap2 coverage, purge_dups, contamination check; Canu,
   hifiasm; Juicer/3D-DNA/Juicebox and raw Hi-C alignment; EDTA, RepeatModeler,
   TRF, de novo repeat library; BRAKER3, MAKER, HISAT2,
   StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, KofamScan)

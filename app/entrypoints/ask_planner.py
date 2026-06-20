@@ -152,9 +152,9 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": "assembly.candidate.nextdenovo",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
+            "execution_support": "executable",
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 4},
         },
         {
             "method_name": "assembly.candidate.canu",
@@ -545,18 +545,9 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         payload["requested_stages"] = plan.resolved_execution_order
     if plan.shared_parameters:
         payload["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
-    flye_params = dict((plan.method_parameters or {}).get("assembly.candidate.flye") or {})
-    if flye_params and "assembly" in local_stages:
-        if plan.shared_parameters:
-            shared = plan.shared_parameters
-            if "read_type" not in flye_params and shared.read_type:
-                from app.schemas.shared_parameters import SHARED_TO_METHOD_READ_TYPE
-                flye_rt = SHARED_TO_METHOD_READ_TYPE.get(shared.read_type, {}).get("flye")
-                if flye_rt:
-                    flye_params["read_type"] = flye_rt
-            if "estimated_genome_size" not in flye_params and shared.estimated_genome_size:
-                flye_params["estimated_genome_size"] = shared.estimated_genome_size
-        payload["assembly"] = {"flye_parameters": flye_params}
+    assembly_config = _build_assembly_execution_config(plan, local_stages)
+    if assembly_config:
+        payload["assembly"] = assembly_config
     if "read_qc" in local_stages:
         payload["read_qc"] = {"length_filter": _read_qc_length_filter_config(plan)}
     if "genome_survey" in local_stages:
@@ -573,6 +564,44 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             payload["function_annotation"] = fn_config
     RunConfig.model_validate(payload)
     return payload
+
+
+def _build_assembly_execution_config(
+    plan: AskPlanState,
+    local_stages: list[str],
+) -> dict[str, Any] | None:
+    """Translate the one executable assembly selection into the run-config API."""
+    if "assembly" not in local_stages:
+        return None
+
+    selected = (plan.selected_methods or {}).get("assembly")
+    methods = selected if isinstance(selected, list) else [selected] if selected else []
+    executable = [
+        method
+        for method in methods
+        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
+    ]
+    if len(executable) != 1:
+        raise ValueError(
+            "assembly local execution requires exactly one executable method selection"
+        )
+
+    method_name = executable[0]
+    config_method = method_name.rsplit(".", 1)[-1]
+    params = dict((plan.method_parameters or {}).get(method_name) or {})
+    if plan.shared_parameters:
+        from app.schemas.shared_parameters import SHARED_TO_METHOD_READ_TYPE
+
+        shared = plan.shared_parameters
+        method_read_type = SHARED_TO_METHOD_READ_TYPE.get(shared.read_type or "", {}).get(config_method)
+        if method_read_type:
+            params.setdefault("read_type", method_read_type)
+        if shared.estimated_genome_size:
+            genome_key = "estimated_genome_size" if config_method == "flye" else "genome_size"
+            params.setdefault(genome_key, shared.estimated_genome_size)
+
+    parameter_key = f"{config_method}_parameters"
+    return {"assembly_method": config_method, parameter_key: params}
 
 
 def write_ask_run_config(plan: AskPlanState) -> Path:

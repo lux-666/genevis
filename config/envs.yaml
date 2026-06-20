@@ -58,6 +58,10 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - flye
+  assembly.candidate.nextdenovo:
+    conda_env: env_geno_exec
+    required_tools:
+      - nextDenovo
   assembly_review.eval.quast:
     conda_env: env_geno_exec
     required_tools:

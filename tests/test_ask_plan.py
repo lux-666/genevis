@@ -555,6 +555,46 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(payload["assembly"]["flye_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"]["threads"], 8)
 
+    def test_build_run_config_executes_selected_nextdenovo_method(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.nextdenovo"},
+            shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
+            method_parameters={"assembly.candidate.nextdenovo": {"threads": 8}},
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(payload["assembly"], {
+            "assembly_method": "nextdenovo",
+            "nextdenovo_parameters": {
+                "read_type": "ont",
+                "genome_size": 2000000,
+                "threads": 8,
+            },
+        })
+
+    def test_build_run_config_rejects_multiple_executable_assembly_methods(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["assembly"],
+            selected_methods={
+                "assembly": ["assembly.candidate.flye", "assembly.candidate.nextdenovo"],
+            },
+            shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
+            method_parameters={
+                "assembly.candidate.flye": {"threads": 8},
+                "assembly.candidate.nextdenovo": {"threads": 8},
+            },
+            confirmed=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one executable"):
+            build_run_config_payload(plan)
+
     def test_build_run_config_uses_shared_assembly_parameters(self):
         plan = _base_plan(
             selected_stages=["read_qc", "assembly"],

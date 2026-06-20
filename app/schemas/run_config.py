@@ -44,6 +44,8 @@ LocalExecStage = Literal[
 ]
 
 FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
+NextDenovoReadType = Literal["ont", "clr", "hifi"]
+AssemblyMethod = Literal["flye", "nextdenovo", "canu", "hifiasm"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
@@ -93,16 +95,78 @@ class FlyeRunParameters(BaseModel):
     threads: int = Field(gt=0)
 
 
+class NextDenovoRunParameters(BaseModel):
+    """Explicit NextDenovo parameters for local assembly execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read_type: NextDenovoReadType | None = None
+    genome_size: int | None = Field(default=None, gt=0)
+    threads: int = Field(gt=0)
+    read_cutoff: int = Field(default=1000, gt=0)
+
+
 class AssemblyRunConfig(BaseModel):
     """Run-config block for the assembly stage."""
 
     model_config = ConfigDict(extra="forbid")
 
+    assembly_method: AssemblyMethod | None = None
     flye_parameters: FlyeRunParameters | None = None
+    nextdenovo_parameters: NextDenovoRunParameters | None = None
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
     assembly_route: Literal["cyclone", "ont", "hifi", "auto"] = "auto"
+
+
+def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> None:
+    """Validate the method/parameter contract after all local-exec inputs merge.
+
+    Canu and hifiasm remain selectable planning candidates until their method
+    adapters are implemented; they intentionally do not require executable
+    method parameters yet.
+    """
+    if assembly is None:
+        raise ValueError(
+            "run_config: local_exec includes 'assembly' but "
+            "assembly.flye_parameters or assembly.nextdenovo_parameters is missing"
+        )
+
+    method = assembly.assembly_method
+    if method == "flye":
+        if not assembly.flye_parameters:
+            raise ValueError("run_config: local assembly method 'flye' requires assembly.flye_parameters")
+        return
+    if method == "nextdenovo":
+        if not assembly.nextdenovo_parameters:
+            raise ValueError("run_config: local assembly method 'nextdenovo' requires assembly.nextdenovo_parameters")
+        return
+    if method in {"canu", "hifiasm"}:
+        if assembly.flye_parameters or assembly.nextdenovo_parameters:
+            raise ValueError(
+                f"run_config: local assembly method '{method}' is planning-only; "
+                "do not provide Flye or NextDenovo execution parameters"
+            )
+        return
+
+    provided = [
+        name
+        for name, value in [
+            ("flye", assembly.flye_parameters),
+            ("nextdenovo", assembly.nextdenovo_parameters),
+        ]
+        if value is not None
+    ]
+    if not provided:
+        raise ValueError(
+            "run_config: local_exec includes 'assembly' but "
+            "assembly.flye_parameters or assembly.nextdenovo_parameters is missing"
+        )
+    if len(provided) > 1:
+        raise ValueError(
+            "run_config: local assembly has parameters for multiple methods; set assembly.assembly_method"
+        )
 
 
 class ReadQCLengthFilterConfig(BaseModel):
@@ -239,18 +303,9 @@ class RunConfig(BaseModel):
     review_policy: ReviewPolicyConfig | None = None
 
     @model_validator(mode="after")
-    def _require_flye_threads_when_assembly_local(self) -> "RunConfig":
+    def _require_method_parameters_when_assembly_local(self) -> "RunConfig":
         if "assembly" in self.local_exec:
-            if not self.assembly or not self.assembly.flye_parameters:
-                raise ValueError(
-                    "run_config: local_exec includes 'assembly' but "
-                    "assembly.flye_parameters is missing"
-                )
-            if self.assembly.flye_parameters.threads is None:
-                raise ValueError(
-                    "run_config: local_exec includes 'assembly' but "
-                    "assembly.flye_parameters.threads is missing"
-                )
+            validate_local_assembly_execution(self.assembly)
         return self
 
     @model_validator(mode="after")

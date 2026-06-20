@@ -393,7 +393,10 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
             selected[stage] = _prompt_read_qc_filter_choice(methods, req.choices.get("defaults", {}).get(stage))
             continue
         executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
-        default_checked = executable if executable else method_names[:1]
+        # The assembly graph executes one primary candidate at a time. Keep
+        # its interactive choice singular even though other stages may run
+        # several methods in one pass.
+        default_checked = executable[:1] if stage == "assembly" else (executable or method_names[:1])
 
         if _HAS_QUESTIONARY:
             choices = []
@@ -405,14 +408,22 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
                     value=m["method_name"],
                     checked=(m["method_name"] in default_checked),
                 ))
-            answer = _safe_ask(questionary.checkbox(
-                f"Methods for {stage}:",
-                choices=choices,
-                instruction="(Space toggle, Enter confirm)",
-            ))
-            if not answer:
-                answer = default_checked
-            selected[stage] = answer[0] if len(answer) == 1 else answer
+            if stage == "assembly":
+                selected[stage] = _safe_ask(questionary.select(
+                    f"Primary method for {stage}:",
+                    choices=choices,
+                    default=default_checked[0],
+                    instruction="(choose one executable or planning-only primary)",
+                ))
+            else:
+                answer = _safe_ask(questionary.checkbox(
+                    f"Methods for {stage}:",
+                    choices=choices,
+                    instruction="(Space toggle, Enter confirm)",
+                ))
+                if not answer:
+                    answer = default_checked
+                selected[stage] = answer[0] if len(answer) == 1 else answer
         else:
             print(f"  Methods for [{stage}]:")
             for i, m in enumerate(methods, 1):
@@ -420,13 +431,14 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
                 label = " [local]" if support == "executable" else " [deferred]"
                 marker = "*" if m["method_name"] in default_checked else " "
                 print(f"    {marker} {i}. {m['method_name']}{label}")
-            print(f"\n  Enter numbers or names. Enter = {', '.join(default_checked)}:")
+            prompt = "Choose one number or name" if stage == "assembly" else "Enter numbers or names"
+            print(f"\n  {prompt}. Enter = {', '.join(default_checked)}:")
             raw = input(f"  {stage}> ").strip()
             if not raw:
                 picks = default_checked
             else:
                 picks = _parse_selection(raw, method_names)
-            selected[stage] = picks[0] if len(picks) == 1 else picks
+            selected[stage] = picks[0] if stage == "assembly" or len(picks) == 1 else picks
 
     return AskClarificationResponse(kind="method_selection", selected_methods=selected)
 

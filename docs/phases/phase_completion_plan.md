@@ -152,22 +152,47 @@ Exit criteria:
   and durable resume as the assembly mainline.
 - The annotation review gates reuse one shared mechanism, not per-stage forks.
 
-## Phase 8: Assembly Agent And Data-Type-Driven T2T Routing
+## Phase 8: Inventory Alignment, Assembly Methods, And T2T Stage
 
-Goal: turn the assembly stage from a Flye-first candidate path into a
-data-type-driven assembly agent that profiles Cyclone/ONT/HiFi/Hi-C inputs,
-selects an assembly route through skill-like knowledge packs, evaluates
-candidate QC, and gates T2T readiness with explicit human review when evidence
-is weak.
+Goal: correct the stage boundary around assembly-era work. `inventory` remains
+the first stage and owns input profiling. `assembly` remains the long-read
+candidate stage and should evolve from a Flye-first path into a method-dispatch
+stage. `hic_scaffolding` remains the existing chromosome scaffolding stage.
+Phase 8 adds one new top-level stage: `t2t`, placed after `hic_scaffolding` and
+before repeat annotation.
 
-Current status: Slice 1 is implemented. `docs/phases/phase8/01_*.md` and
-`02_*.md` are landed in code: new assembly artifact schemas, run-config fields,
-knowledge pack loader/files, extended input profiling, route recommendation,
-strict-by-default route selection, and the `assembly/route_selection` review
-gate. The assembly graph now runs route selection before the existing Flye
-candidate planning path.
+Current status: an earlier Slice 1 implemented base assembly route-selection
+schema and knowledge-pack loading, but the Phase 8 documents drifted into an
+incorrect design that treated input profiling, Hi-C curation, and T2T finishing
+as assembly-internal agents. The docs are being corrected first so
+implementation follows the real stage model.
 
-Remaining Phase 8 work lives in `docs/phases/phase8/03_*.md` through
-`06_*.md`: multi-route long-read candidate execution/QC, Hi-C evidence,
-T2T finishing/review tasks, and final subgraph cleanup that replaces the old
-candidate path completely.
+Compatibility check: commit `ca685a9` does not conflict with this corrected
+model. Its route-selection slice currently lives inside `assembly` and should be
+kept as a compatibility prelude until `inventory` exposes broader profile hints.
+The next assembly refactor should replace the Flye-specific method path after
+route selection, not revert the route-selection gate. Commit `eb1c838` is
+limited to Phase 7 function-annotation metadata/docs cleanup and does not affect
+Phase 8 stage boundaries.
+
+Phase 8 MVP is intentionally small:
+
+1. Strengthen `inventory` outputs with data availability, target level, and
+   assembly hints.
+2. Refactor `assembly` so method application is not hard-coded to Flye; Flye
+   becomes one method branch, with hifiasm-ONT / hifiasm-HiFi next.
+3. Keep `assembly_review` contracts stable.
+4. Keep Hi-C work under existing `hic_scaffolding`, adding clearer final
+   assembly refs for downstream T2T when needed.
+5. Add the `t2t` stage, including telomere/gap/readiness checks and a final
+   human gate for strict or weak-evidence cases.
+
+Out of scope for Phase 8 unless a later slice explicitly adds consuming nodes:
+renaming `inventory`, creating a parallel Hi-C stage inside assembly, real Verkko
+execution, HERRO correction, Dorado/Medaka polishing, Merqury QV, Teloclip, or
+TeloComp genome modification.
+
+Remaining Phase 8 work lives in `docs/phases/phase8/01_*.md` through
+`06_*.md`: schema/profile deltas, inventory enhancement, assembly method
+dispatch, existing `hic_scaffolding` alignment, new `t2t` stage design, and final
+stage wiring cleanup.

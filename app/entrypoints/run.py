@@ -19,11 +19,22 @@ from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
-from app.schemas.run_config import LocalExecStage, RunConfig, load_run_config
+from app.schemas.run_config import (
+    LocalExecStage,
+    RunConfig,
+    load_run_config,
+    validate_local_assembly_execution,
+)
 from app.schemas.state import initial_state
 
 
 _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
+_ASSEMBLY_METHOD_NAMES = {
+    "flye": "assembly.candidate.flye",
+    "nextdenovo": "assembly.candidate.nextdenovo",
+    "canu": "assembly.candidate.canu",
+    "hifiasm": "assembly.candidate.hifiasm",
+}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,7 +63,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Path to a JSON run-config file that seeds approved stage_outputs "
-            "fields (local_exec stages, assembly.flye_parameters, and "
+            "fields (local_exec stages, assembly method parameters, and "
             "gene/function annotation execution hints)."
         ),
     )
@@ -306,18 +317,12 @@ def _run_session(args: argparse.Namespace) -> int:
     config_local_stages = list(run_config.local_exec) if run_config else []
     local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
 
-    if "assembly" in local_stages and not (
-        run_config
-        and run_config.assembly
-        and run_config.assembly.flye_parameters
-    ):
-        print(
-            "error: local execution of 'assembly' requires "
-            "run_config.assembly.flye_parameters; pass --run-config with "
-            "flye_parameters or remove 'assembly' from --local-exec",
-            file=sys.stderr,
-        )
-        return 1
+    if "assembly" in local_stages:
+        try:
+            validate_local_assembly_execution(run_config.assembly if run_config else None)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
@@ -353,8 +358,21 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
+        if run_config.assembly.assembly_method:
+            assembly_out["method_decision"] = {
+                **dict(assembly_out.get("method_decision") or {}),
+                "primary": _ASSEMBLY_METHOD_NAMES[run_config.assembly.assembly_method],
+            }
+        elif run_config.assembly.nextdenovo_parameters and not run_config.assembly.flye_parameters:
+            assembly_out.setdefault("method_decision", {})
+            assembly_out["method_decision"] = {
+                **dict(assembly_out.get("method_decision") or {}),
+                "primary": _ASSEMBLY_METHOD_NAMES["nextdenovo"],
+            }
         if run_config.assembly.flye_parameters:
             assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
+        if run_config.assembly.nextdenovo_parameters:
+            assembly_out["nextdenovo_parameters"] = run_config.assembly.nextdenovo_parameters.model_dump(exclude_none=True)
         for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
             value = getattr(run_config.assembly, key)
             if value is not None:

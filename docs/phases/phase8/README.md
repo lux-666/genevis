@@ -1,87 +1,104 @@
-# Phase 8：Assembly Agent —— 数据类型驱动的 T2T 组装代理
+# Phase 8: Inventory Alignment, Assembly Methods, And T2T Stage
 
-状态：Slice 1 已实施（task 01-02 落地）；LongReadCandidateAgent / HiCEvidenceAgent / T2TFinishingAgent 仍待后续切片实现。
+状态：重新校正设计中。之前的 Phase 8 文档把输入画像、assembly candidate、Hi-C curation、T2T finishing 都写成了 assembly 内部子代理，这是错误边界。现在统一回到既有 stage 模型：
+
+```text
+inventory
+read_qc
+genome_survey
+assembly
+assembly_review
+hic_scaffolding
+t2t
+repeat_annotation
+gene_annotation
+function_annotation
+```
+
+`inventory` 负责识别输入、登记资产、汇总 run-config / manifest / stage hint，并给后续 stage 提供结构化 profile。不要新增另一个输入画像 stage，也不要把这部分放进 assembly。
+
+`assembly` 根据数据类型和 route 选择 long-read assembly 方法，产出 draft assembly candidate。这里可以在 assembly 内部再拆 method-application subgraph，因为 Flye 只是一个方法，后续还会有 hifiasm、NextDenovo、Canu 或其他数据类型方法；但这个拆分是 assembly stage 的内部实现，不是新的 top-level stage。
+
+`hic_scaffolding` 已经是独立 stage。Phase 8 不再新增 assembly 内部的 Hi-C 主线。需要增强 Hi-C workspace、manual curation、candidate selection 时，应该落在现有 `hic_scaffolding` stage。
+
+`t2t` 是 Phase 8 真正新增的 top-level stage，放在 `hic_scaffolding` 之后、`repeat_annotation` 之前。没有 Hi-C 时，路由可以跳过 `hic_scaffolding` 后进入 `t2t`；有 chromosome 目标时，T2T 消费 Hi-C 后的 final assembly candidate。
 
 ## 当前实现状态
 
-已落地：
+已存在：
 
-- task 01：schema 扩展、assembly skill-like knowledge pack 目录、`load_skill_context`、Cyclone alias、hifiasm ONT shared parameter 映射。
-- task 02：`resolve_extended_inputs`、`infer_input_profile`、`select_route`、`apply_route_decision`、`assembly/route_selection` review gate，以及 assembly 子图中的 route gate 接线。
-- route selection 默认遵守系统 strict policy；只有显式 `review_policy.mode = "auto"` 且推荐置信度满足阈值时才自动采纳。
-- LLM route selector 不可用时返回 `insufficient_data` + `confidence=0.0`，进入人工/补数据 review，不使用启发式自动 fallback。
+- `inventory` stage：manifest / asset registry / existing assembly routing。
+- `assembly` stage：已有 route-selection 相关 Slice 1 代码；方法调用已下沉到 assembly 内部 `method_application/` package。当前包含 Flye 和 NextDenovo execution graph，外层 assembly graph 不再直接挂具体方法的 freeze/run/collect 节点。
+- `assembly_review` stage：评估、人工 gate、rerun/review 逻辑。
+- `hic_scaffolding` stage：已有独立 builder/routing/nodes 和 gate/resume 基础。
 
-仍待实现：
+## 最近提交兼容性检查
 
-- task 03-06 的三路线 candidate runner、QC decision gate、Hi-C evidence、T2T finishing、最终子图清理。
-- 当前子图仍在 route selection 之后回到既有 Flye candidate planning path；Phase 8 的完整多候选/T2T 子图尚未替换旧路径。
+`ca685a9 Implement phase 8 assembly route slice` 和当前校正后的设计不冲突，但有命名和归属上的历史包袱需要显式保留：
 
-## 为什么做这个 phase
+- 已落地的 `resolve_extended_inputs` / `infer_input_profile` / `select_route` 当前位于 `app/stages/assembly/nodes.py`。短期作为 assembly 的 route-selection prelude 保留；长期若需要更完整输入画像，再把职责前移到 `inventory`。
+- 已注册的 `assembly/route_selection` review gate 可以保留。它 gate 的是 assembly 方法路线确认，不是一个独立 input-profile stage。
+- 已新增的 `AssemblyInputProfile`、`AssemblyRouteDecision`、`AssemblyQCSummary`、`AssemblyT2TReadiness`、`AssemblyReviewTasks` 是 Slice 1 schema。后续新增 top-level `t2t` 时，应把 T2T runtime artifacts 迁到 `t2t.*` 命名下，同时保持旧 assembly-scoped schema 在过渡期可读。
+- 已新增的 `descriptors/knowledge_packs/assembly/input_profiler` 是兼容目录名。文档不再把它当作 stage 名；未来可以迁到 `inventory/input_profile` 或作为 assembly route-selection 的 legacy pack alias。
+- `AssemblyRunConfig.target_level` 目前只支持 `draft | near_t2t | strict_t2t`，尚未支持 `chromosome`；这正是 Phase 8 后续 schema delta，而不是冲突。
 
-现有 assembly stage 是一条 Flye-only 的线性流水线，决策靠人。Phase 8 把它重构成一个真正的 Assembly Agent：感知输入数据类型（Cyclone/ONT/HiFi/Hi-C）、通过可插拔知识库推荐路线、调度正确的工具、评估 QC 结果，并把"该怎么办"的专家判断从人身上转移到 LLM + 知识库。
+`eb1c838 Align phase7 annotation docs and drop redundant bundle metadata` 只影响 function annotation bundle metadata 和 Phase 7 文档字段名，不触碰 `inventory` / `assembly` / `hic_scaffolding` / `t2t` 边界；和当前 Phase 8 设计无冲突。
 
-**核心设计原则**
+需要校正：
 
-- **数据驱动，不是工具驱动**：先判断"手上有什么数据"，再决定"用什么工具"。HiFi 是与 Cyclone/ONT 并列的一级路线，不是 ONT 失败后的 fallback。
-- **知识可插拔**：专家经验存在 skill-like knowledge pack 中：`rules.yaml` 提供机器可读 guardrail，`SKILL.md` 提供专家推理流程，`cases.yaml` 提供可选案例样本。节点读包但不硬编码阈值，knowledge pack 可以独立更新，不需要改代码。
-- **LLM 职责明确**：input profiling、route recommendation、gate decision、review task generation。LLM 不直接修改 genome，不做不可逆操作。
-- **节点 API-style**：每个节点是一个可独立调用的能力（profile / select_route / run_candidate / evaluate_qc / decision_gate / generate_review_tasks / apply_human_decision），而不是只能在流水线中存在的步骤。
-- **TUI 协作**：LLM 推荐路线和理由，TUI 暴露给用户，用户可接受或覆盖。
+- 文档全部使用 `inventory`，不再使用其他输入画像 stage 名。
+- `assembly` stage 改写为多方法 long-read candidate stage。
+- Hi-C 相关任务改写为增强既有 `hic_scaffolding` stage，而不是 assembly 内部 agent。
+- 新增 `t2t` stage 的 schema、builder、routing、stage order、review gate 和测试。
 
-## 三层子代理结构
+## Phase 8 MVP
 
-```
-Assembly Agent
-  ├─ InputProfiler         识别数据类型、覆盖度、目标等级，LLM 推荐路线
-  ├─ LongReadCandidateAgent  根据路线运行组装工具，QC，decision gate
-  ├─ HiCEvidenceAgent       Hi-C scaffold 证据、contact map、错连检查（可选）
-  └─ T2TFinishingAgent      端粒/gap/QC 综合，生成 review tasks，final gate
-```
+必须做：
 
-三层子代理都在 assembly stage 内部，对外接口（→ assembly_review）不变。
+1. 修正文档和 stage 边界，所有设计围绕既有 stage 名。
+2. `inventory` 输出更完整的数据 profile：Cyclone/ONT/HiFi/Hi-C、target level、route hints、method hints。
+3. `assembly` 支持多方法 candidate planning/execution，Flye 和 NextDenovo 方法应用已下沉到 method-specific subgraph，后续在同一 package 追加 hifiasm/Canu 等方法。
+4. 保持 `assembly -> assembly_review` 对外 contract 稳定。
+5. 增强现有 `hic_scaffolding` stage 的 chromosome-level candidate/workspace 语义，不新增平行 Hi-C 主线。
+6. 新增 `t2t` stage：telomere/gap/readiness review、review tasks、strict/near T2T final gate。
 
-## 对外接口不变
+暂不做：
 
-`commit_assembly_plan` 写入 `stage_outputs.assembly` 的 committed_keys 结构不变，`assembly_review` stage 不感知此次重构。
+- 重命名 `inventory` 代码。
+- 在 assembly 内部实现独立 Hi-C curation agent。
+- Verkko/HERRO/Dorado/Medaka/Teloclip/TeloComp 的真实执行。
+- 自动修改 genome 以补端粒或 gap。
 
-## Phase 8 任务列表
+## 任务列表
 
-- `[x] 01_schema_and_knowledge_packs.md` — 新 schema + knowledge pack 基础设施
-- `[x] 02_input_profiler.md` — 数据类型识别 + LLM 路线推荐
-- `[ ] 03_long_read_candidate_agent.md` — 三路线候选组装 + QC + decision gate
-- `[ ] 04_hic_evidence_agent.md` — Hi-C scaffold 证据 + 错连检查
-- `[ ] 05_t2t_finishing_agent.md` — T2T readiness + review tasks + final gate
-- `[ ] 06_subgraph_wiring_and_cleanup.md` — 子图连线 + 旧代码清理
+- `[~] 01_schema_and_knowledge_packs.md`：校正 schema/pack 命名，补 inventory profile、assembly method provenance、T2T artifacts。
+- `[ ] 02_inventory.md`：既有 `inventory` stage 的增强。
+- `[~] 03_assembly_stage_methods.md`：`assembly` stage 多方法候选与 method-application package；Flye graph 和 NextDenovo graph 已接入。
+- `[ ] 04_hic_scaffolding_stage.md`：既有 `hic_scaffolding` stage 的增强边界。
+- `[ ] 05_t2t_stage.md`：新增 top-level `t2t` stage。
+- `[ ] 06_subgraph_wiring_and_cleanup.md`：更新 stage order、parent graph wiring、t2t stage 接入、旧 phase8 错误命名清理。
 
-## 与现有 hic_scaffolding stage 的关系
+## 对外接口
 
-Phase 8 的 `HiCEvidenceAgent` 在 assembly stage 内部做证据收集和错连检查，输出供 T2TFinishingAgent 参考。现有独立的 `hic_scaffolding` stage 处理的是染色体级支架化，是下游注释的前置。两者不重叠：
-- Assembly stage HiCEvidenceAgent：验证组装质量、检测错连
-- hic_scaffolding stage：染色体支架化，面向注释输入
+`assembly` 仍然向 `assembly_review` 提供稳定 candidate/draft refs。`hic_scaffolding` 消费 `assembly_review` 的 final assembly ref，并在 chromosome 目标下产出 scaffolded/final assembly。`t2t` 消费 `hic_scaffolding` 或 `assembly_review` 的 final assembly ref，产出 T2T readiness、review tasks 和 final assembly decision。
 
-## 路由总图
+## 路由意图
 
-```
-enter_assembly
-  ↓
-profile                   InputProfiler
-  ↓
-select_route              LLM 推荐 + TUI 暴露
-  ├─ cyclone_route ─┐
-  ├─ ont_route ─────┼→ run_candidate → evaluate_qc → decision_gate
-  └─ hifi_route ────┘
-                         ├─ adopt_draft ──────────────────→ commit
-                         ├─ enter_hic (has_hic) ──────────→ HiCEvidenceAgent
-                         │                                       ↓
-                         │                              hic_decision_gate
-                         │                    ├─ t2t_finishing ──┐
-                         │                    └─ adopt_draft ────→ commit
-                         ├─ t2t_finishing ────────────────→ T2TFinishingAgent
-                         │                                       ↓
-                         │                         generate_review_tasks
-                         │                                       ↓
-                         │                           final_gate (human, strict-T2T)
-                         │                                       ↓
-                         │                                     commit
-                         └─ block_human ──────────────────→ block
+```text
+inventory
+  -> read_qc
+  -> genome_survey
+  -> assembly
+       route/method planning
+       method_application subgraph
+       candidate refs
+  -> assembly_review
+       final_assembly_for_scaffolding_or_annotation
+  -> hic_scaffolding     # optional by target/data
+       final_assembly_for_t2t_or_annotation
+  -> t2t                 # optional by target/policy, new in Phase 8
+       final_assembly_for_annotation
+  -> repeat_annotation
+  -> gene_annotation
+  -> function_annotation
 ```

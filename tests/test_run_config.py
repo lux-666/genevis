@@ -40,6 +40,70 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.flye_parameters.estimated_genome_size, 2_000_000)
         self.assertEqual(config.assembly.flye_parameters.threads, 4)
 
+    def test_valid_config_with_nextdenovo_parameters(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly"],
+                "assembly": {
+                    "assembly_method": "nextdenovo",
+                    "nextdenovo_parameters": {
+                        "read_type": "ont",
+                        "genome_size": 2_000_000,
+                        "threads": 4,
+                        "read_cutoff": 1000,
+                    },
+                },
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.assembly_method, "nextdenovo")
+        assert config.assembly.nextdenovo_parameters is not None
+        self.assertEqual(config.assembly.nextdenovo_parameters.read_type, "ont")
+        self.assertEqual(config.assembly.nextdenovo_parameters.genome_size, 2_000_000)
+        self.assertEqual(config.assembly.nextdenovo_parameters.threads, 4)
+
+    def test_local_planning_only_hifiasm_does_not_require_unrelated_executor_parameters(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly"],
+                "assembly": {"assembly_method": "hifiasm", "assembly_route": "hifi"},
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.assembly_method, "hifiasm")
+        self.assertIsNone(config.assembly.flye_parameters)
+        self.assertIsNone(config.assembly.nextdenovo_parameters)
+
+    def test_local_planning_only_method_rejects_executor_parameters(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "assembly_method": "hifiasm",
+                        "flye_parameters": {"threads": 4},
+                    },
+                }
+            )
+
+        self.assertIn("planning-only", str(ctx.exception))
+
+    def test_local_assembly_with_two_parameter_sets_requires_explicit_method(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "flye_parameters": {"threads": 4},
+                        "nextdenovo_parameters": {"threads": 4},
+                    },
+                }
+            )
+
+        self.assertIn("assembly_method", str(ctx.exception))
+
     def test_assembly_phase8_fields_are_accepted(self):
         config = RunConfig.model_validate(
             {
@@ -248,6 +312,20 @@ class RunConfigSchemaTests(unittest.TestCase):
             )
 
         self.assertIn("flye_parameters", str(ctx.exception))
+
+    def test_local_nextdenovo_method_requires_nextdenovo_parameters(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "assembly_method": "nextdenovo",
+                        "flye_parameters": {"threads": 4},
+                    },
+                }
+            )
+
+        self.assertIn("nextdenovo_parameters", str(ctx.exception))
 
     def test_flye_read_type_and_genome_size_are_optional_when_threads_present(self):
         config = RunConfig.model_validate(

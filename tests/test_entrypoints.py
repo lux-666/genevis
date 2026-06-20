@@ -1108,6 +1108,57 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
 
+    def test_run_config_seeds_nextdenovo_method_and_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "nextdenovo_parameters": {
+                                "read_type": "ont",
+                                "genome_size": 2_000_000,
+                                "threads": 4,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
+            self.assertEqual(assembly_out["execution_mode"], "local")
+            self.assertEqual(
+                assembly_out["method_decision"],
+                {"primary": "assembly.candidate.nextdenovo"},
+            )
+            self.assertEqual(
+                assembly_out["nextdenovo_parameters"],
+                {"read_type": "ont", "genome_size": 2_000_000, "threads": 4, "read_cutoff": 1000},
+            )
+
     def test_run_config_seeds_shared_parameters_and_flye_threads_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1358,6 +1409,43 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(stdout, "")
             self.assertIn("flye_parameters", stderr)
+            build_graph.assert_not_called()
+            initial_state.assert_not_called()
+            self.assertFalse((root / "data" / "ledger").exists())
+
+    def test_cli_local_exec_revalidates_method_parameter_alignment_after_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "assembly": {
+                            "assembly_method": "flye",
+                            "nextdenovo_parameters": {"threads": 4},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
+                "app.entrypoints.run.initial_state"
+            ) as initial_state:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        local_exec=["assembly"],
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("method 'flye' requires assembly.flye_parameters", stderr)
             build_graph.assert_not_called()
             initial_state.assert_not_called()
             self.assertFalse((root / "data" / "ledger").exists())

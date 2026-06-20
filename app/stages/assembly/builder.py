@@ -5,27 +5,23 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
+from app.stages.assembly.method_application import build_flye_graph, build_nextdenovo_graph
 from app.stages.assembly.nodes import (
     block_assembly_for_human,
     build_assembly_candidate_set,
-    collect_flye_artifacts,
     commit_assembly_plan,
     enter_assembly,
     fail_assembly,
-    freeze_flye_attempt,
     infer_input_profile,
     plan_candidate_attempts,
     resolve_extended_inputs,
-    run_flye_attempt,
     select_primary_and_fallback,
     select_route,
 )
 from app.stages.assembly.routing import (
     route_after_candidate_set,
-    route_after_flye_collect,
-    route_after_flye_freeze,
-    route_after_flye_run,
     route_after_infer_profile,
+    route_after_method_subgraph,
     route_after_plan,
     route_after_resolve,
     route_after_select,
@@ -44,9 +40,8 @@ def build_stage():
     graph.add_node("build_assembly_candidate_set", build_assembly_candidate_set)
     graph.add_node("select_primary_and_fallback", select_primary_and_fallback)
     graph.add_node("plan_candidate_attempts", plan_candidate_attempts)
-    graph.add_node("freeze_flye_attempt", freeze_flye_attempt)
-    graph.add_node("run_flye_attempt", run_flye_attempt)
-    graph.add_node("collect_flye_artifacts", collect_flye_artifacts)
+    graph.add_node("flye", build_flye_graph())
+    graph.add_node("nextdenovo", build_nextdenovo_graph())
     graph.add_node("commit", commit_assembly_plan)
     graph.add_node("fail", fail_assembly)
     graph.add_node("block", block_assembly_for_human)
@@ -81,21 +76,16 @@ def build_stage():
     graph.add_conditional_edges(
         "plan_candidate_attempts",
         route_after_plan,
-        {"freeze_flye": "freeze_flye_attempt", "commit": "commit", "fail": "fail"},
+        {"flye": "flye", "nextdenovo": "nextdenovo", "commit": "commit", "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "freeze_flye_attempt",
-        route_after_flye_freeze,
-        {"run_flye": "run_flye_attempt", "fail": "fail"},
+        "flye",
+        route_after_method_subgraph,
+        {"commit": "commit", "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "run_flye_attempt",
-        route_after_flye_run,
-        {"collect_flye": "collect_flye_artifacts", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "collect_flye_artifacts",
-        route_after_flye_collect,
+        "nextdenovo",
+        route_after_method_subgraph,
         {"commit": "commit", "fail": "fail"},
     )
     graph.add_edge("commit", END)

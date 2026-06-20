@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
-
-
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool", "blocked_param"}
+from app.stages.assembly.constants import FAIL_STATUSES
 
 
 def _output(state: TopLevelState) -> dict:
@@ -56,20 +54,15 @@ def route_after_plan(state: TopLevelState) -> str:
     if status in FAIL_STATUSES:
         return "fail"
     if status == "flye_execution_planned":
-        return "freeze_flye"
+        return "flye"
+    if status == "nextdenovo_execution_planned":
+        return "nextdenovo"
     return "commit"
 
 
-def route_after_flye_freeze(state: TopLevelState) -> str:
-    """Route after freezing a local Flye attempt; short-circuit on preflight block."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "run_flye"
-
-
-def route_after_flye_run(state: TopLevelState) -> str:
-    """Route after running local Flye."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect_flye"
-
-
-def route_after_flye_collect(state: TopLevelState) -> str:
-    """Route after collecting Flye artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "commit"
+def route_after_method_subgraph(state: TopLevelState) -> str:
+    """Route after a method-specific assembly subgraph returns."""
+    status = _output(state).get("status")
+    if status in FAIL_STATUSES:
+        return "fail"
+    return "commit"
