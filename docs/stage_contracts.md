@@ -1,8 +1,7 @@
 # Stage Contracts
 
-This document defines the stable biological stage boundaries. The current code
-uses placeholder subgraphs; these contracts define what those subgraphs must
-become as implementation proceeds.
+This document defines the stable biological stage boundaries and the contracts
+used by both executable and planning-only method subgraphs.
 
 ## Shared Stage Shape
 

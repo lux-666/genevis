@@ -242,6 +242,48 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
+    def test_parameter_prompt_collects_dual_hic_candidate_inputs(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"defaults": {"hic_scaffolding.candidate.juicer_3ddna_juicebox": {"input_mode": "merged_nodups"}}},
+            required_fields=[
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.input_mode",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
+                "hic_scaffolding.candidate.yahs.hic_alignment_ref",
+            ],
+            response_schema={},
+            next_action={},
+        )
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={
+                "hic_scaffolding": [
+                    "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "hic_scaffolding.candidate.yahs",
+                ]
+            },
+        )
+        inputs = iter(["merged_nodups", "24", "/data/merged_nodups.txt", "/data/hic.bam"])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            response = _prompt_parameter_values(req, plan)
+
+        assert response.method_parameters is not None
+        self.assertEqual(
+            response.method_parameters["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["merged_nodups_ref"],
+            "/data/merged_nodups.txt",
+        )
+        self.assertEqual(
+            response.method_parameters["hic_scaffolding.candidate.yahs"]["hic_alignment_ref"],
+            "/data/hic.bam",
+        )
+
     def test_parameter_prompt_accepts_function_database_provenance_fields(self):
         req = AskClarificationRequest(
             status="clarification_required",

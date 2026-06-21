@@ -209,7 +209,7 @@ class HiCScaffoldDecisionArtifact(BaseModel):
 
     session_id: str
     stage: Literal["hic_scaffolding"] = "hic_scaffolding"
-    decision: Literal["select_method", "skip", "stop_human_review"]
+    decision: Literal["select_method", "accept_candidate", "skip", "stop_human_review"]
     method_name: str | None = None
     scaffold_plan_ref: str | None = None
     pre_hic_assembly_ref: str

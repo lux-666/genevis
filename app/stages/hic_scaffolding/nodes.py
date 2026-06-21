@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,41 +10,26 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import resolve_method_env
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.policy import evaluate
 from app.schemas.artifacts import (
-    HIC_QC_REPORT,
-    HIC_REVIEW_BUNDLE,
-    HIC_SCAFFOLD_AGP,
     HIC_SCAFFOLD_PLAN,
-    HIC_SCAFFOLDED_ASSEMBLY,
     ArtifactMeta,
     HiCScaffoldDecisionArtifact,
     HiCScaffoldPlan,
     HiCSkipRecord,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.hic_scaffolding.method_application.lifecycle import hic_output as _hic_output
+from app.stages.hic_scaffolding.method_application.lifecycle import update_hic_output as _update_hic_output
 
 HIC_CANDIDATE_METHODS = [
-    "hic_scaffolding.candidate.yahs",
     "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+    "hic_scaffolding.candidate.yahs",
 ]
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
-HIC_YAHS_METHOD = "hic_scaffolding.candidate.yahs"
-
-
-def _hic_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("hic_scaffolding", {}))
-
-
-def _update_hic_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["hic_scaffolding"] = {**_hic_output(state), **payload}
-    return {"stage_outputs": outputs}
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
@@ -78,6 +61,8 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
             "hic_read_paths": [str(asset.get("path")) for asset in hic_assets if asset.get("path")],
             "hic_alignment_refs": [asset.get("asset_id", "") for asset in _hic_alignment_assets(state) if asset.get("asset_id")],
             "hic_alignment_paths": [str(asset.get("path")) for asset in _hic_alignment_assets(state) if asset.get("path")],
+            "hic_merged_nodups_refs": [asset.get("asset_id", "") for asset in _hic_merged_nodups_assets(state) if asset.get("asset_id")],
+            "hic_merged_nodups_paths": [str(asset.get("path")) for asset in _hic_merged_nodups_assets(state) if asset.get("path")],
             "target_assembly_level": target_level,
         },
     )
@@ -88,7 +73,13 @@ def select_hic_mode(state: TopLevelState) -> dict:
     hic_out = _hic_output(state)
     if hic_out.get("status") != "resolved":
         return {}
-    if not hic_out.get("hic_read_refs") and not hic_out.get("hic_alignment_refs"):
+    if not (
+        hic_out.get("hic_read_refs")
+        or hic_out.get("hic_alignment_refs")
+        or hic_out.get("hic_merged_nodups_refs")
+        or hic_out.get("merged_nodups_ref")
+        or hic_out.get("hic_merged_nodups_ref")
+    ):
         mode = "skipped_no_hic"
     elif hic_out.get("target_assembly_level") != "chromosome":
         mode = "skipped_not_chromosome_level"
@@ -139,7 +130,7 @@ def plan_hic_scaffold(state: TopLevelState) -> dict:
         stage="hic_scaffolding",
         method_name=HIC_CONTRACT_METHOD,
         artifact_type=HIC_SCAFFOLD_PLAN,
-        metadata={"mode": "scaffold", "execution_enabled": _local_yahs_enabled(hic_out)},
+        metadata={"mode": "scaffold", "execution_enabled": _local_method_enabled(hic_out)},
     )
     append_artifact_records(data_dir, session_id, [artifact])
     return _update_hic_output(
@@ -151,227 +142,6 @@ def plan_hic_scaffold(state: TopLevelState) -> dict:
             "scaffold_plan_ref": str(scaffold_plan_ref),
             "artifact_refs": [str(artifact.file_path)],
             "notes": plan.notes,
-        },
-    )
-
-
-def freeze_yahs_attempt(state: TopLevelState) -> dict:
-    """Freeze an explicit local YaHS scaffolding attempt."""
-    hic_out = _hic_output(state)
-    if hic_out.get("mode") != "scaffold" or not _local_yahs_enabled(hic_out):
-        return {}
-
-    descriptor_error = _validate_hic_methods([HIC_YAHS_METHOD])
-    if descriptor_error:
-        return _fail_update(state, descriptor_error)
-
-    assembly_ref = Path(str(hic_out.get("pre_hic_assembly_ref", "")))
-    if not assembly_ref.exists():
-        return _update_hic_output(
-            state,
-            {
-                "status": "blocked_human",
-                "notes": _unique_refs([*(hic_out.get("notes") or []), "pre_hic_assembly_not_materialized_for_yahs"]),
-            },
-        )
-    alignment_path, alignment_error = _hic_alignment_path(hic_out)
-    if alignment_error:
-        return _update_hic_output(
-            state,
-            {
-                "status": "blocked_human",
-                "notes": _unique_refs([*(hic_out.get("notes") or []), alignment_error]),
-            },
-        )
-
-    session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
-    env_spec, blocked = resolve_method_env(
-        hic_out,
-        stage="hic_scaffolding",
-        method_name=HIC_YAHS_METHOD,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-    )
-    if blocked is not None:
-        return _update_hic_output(state, blocked)
-
-    safe_id = _safe_path_id(session_id)
-    working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "yahs" / safe_id
-    artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "yahs" / safe_id
-    yahs_out_dir = working_dir / "yahs_out"
-    out_prefix = yahs_out_dir / "yahs"
-    scaffold_fasta = artifact_dir / "chromosome_scaffolded_assembly.fasta"
-    scaffold_agp = artifact_dir / "chromosome_scaffolded_assembly.agp"
-    yahs_fasta = Path(str(out_prefix) + "_scaffolds_final.fa")
-    yahs_agp = Path(str(out_prefix) + "_scaffolds_final.agp")
-    working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    script_path = working_dir / "run_yahs.sh"
-    script_path.write_text(
-        "set -e\n"
-        f"mkdir -p {shlex.quote(str(yahs_out_dir))} {shlex.quote(str(artifact_dir))}\n"
-        f"yahs -o {shlex.quote(str(out_prefix))} {shlex.quote(str(assembly_ref))} {shlex.quote(str(alignment_path))}\n"
-        f"test -f {shlex.quote(str(yahs_fasta))}\n"
-        f"cp {shlex.quote(str(yahs_fasta))} {shlex.quote(str(scaffold_fasta))}\n"
-        f"if test -f {shlex.quote(str(yahs_agp))}; then cp {shlex.quote(str(yahs_agp))} {shlex.quote(str(scaffold_agp))}; fi\n",
-        encoding="utf-8",
-    )
-    script_path.chmod(0o755)
-    attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:hic_scaffolding:yahs",
-        session_id=session_id,
-        stage="hic_scaffolding",
-        method_name=HIC_YAHS_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        expected_outputs=[scaffold_fasta],
-        env=hic_out.get("env"),
-        env_spec=env_spec,
-        metadata={
-            "pre_hic_assembly_ref": str(assembly_ref),
-            "hic_alignment_ref": str(alignment_path),
-            "scaffold_fasta": str(scaffold_fasta),
-            "scaffold_agp": str(scaffold_agp),
-            "out_prefix": str(out_prefix),
-        },
-    )
-    return _update_hic_output(
-        state,
-        {
-            "status": "yahs_frozen",
-            "yahs_frozen_attempt": attempt.model_dump(mode="json"),
-        },
-    )
-
-
-def run_yahs_attempt(state: TopLevelState) -> dict:
-    """Run the frozen YaHS attempt locally."""
-    hic_out = _hic_output(state)
-    if hic_out.get("status") != "yahs_frozen":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(hic_out["yahs_frozen_attempt"])
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="YaHS",
-        cleanup_outputs=False,
-    )
-    result_payload = outcome.result.model_dump(mode="json")
-    if not outcome.success:
-        result_payload["error"] = outcome.error
-    return _update_hic_output(state, {"status": "yahs_ran", "yahs_execution_result": result_payload})
-
-
-def collect_yahs_artifacts(state: TopLevelState) -> dict:
-    """Collect YaHS candidate artifacts while preserving the pre-Hi-C fallback."""
-    hic_out = _hic_output(state)
-    if hic_out.get("status") != "yahs_ran":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(hic_out["yahs_frozen_attempt"])
-    result = dict(hic_out.get("yahs_execution_result") or {})
-    data_dir = Path(state.get("data_dir", "data"))
-    session_id = state["session_id"]
-    artifact_refs = list(hic_out.get("artifact_refs") or [])
-    artifacts: list[ArtifactMeta] = []
-    ledger = Ledger(data_dir)
-    notes = list(hic_out.get("notes") or [])
-
-    if result.get("success"):
-        scaffold_fasta = Path(str(attempt.metadata["scaffold_fasta"]))
-        artifacts.append(
-            ArtifactMeta.from_file(
-                scaffold_fasta,
-                stage="hic_scaffolding",
-                method_name=HIC_YAHS_METHOD,
-                artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
-                metadata={"attempt_id": attempt.attempt_id, "review_required": True},
-            )
-        )
-        scaffold_agp = Path(str(attempt.metadata["scaffold_agp"]))
-        if scaffold_agp.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    scaffold_agp,
-                    stage="hic_scaffolding",
-                    method_name=HIC_YAHS_METHOD,
-                    artifact_type=HIC_SCAFFOLD_AGP,
-                    metadata={"attempt_id": attempt.attempt_id, "review_required": True},
-                )
-            )
-        review_bundle_ref = _write_yahs_review_bundle(state, hic_out, attempt, result)
-        artifacts.append(
-            ArtifactMeta.from_file(
-                Path(review_bundle_ref),
-                stage="hic_scaffolding",
-                method_name=HIC_YAHS_METHOD,
-                artifact_type=HIC_REVIEW_BUNDLE,
-                metadata={"attempt_id": attempt.attempt_id, "review_required": True},
-            )
-        )
-        qc_report_ref = _write_yahs_qc_report(state, hic_out, attempt, result)
-        artifacts.append(
-            ArtifactMeta.from_file(
-                Path(qc_report_ref),
-                stage="hic_scaffolding",
-                method_name=HIC_YAHS_METHOD,
-                artifact_type=HIC_QC_REPORT,
-                metadata={"attempt_id": attempt.attempt_id, "review_required": True},
-            )
-        )
-        notes = _unique_refs([*notes, "yahs_executed", "contact_map_policy_required_before_promotion"])
-        update_payload = {
-            "status": "blocked_human",
-            "chromosome_scaffolded_assembly_candidate_ref": str(scaffold_fasta),
-            "hic_review_bundle_ref": review_bundle_ref,
-            "hic_qc_report_ref": qc_report_ref,
-            "selected_method_name": HIC_YAHS_METHOD,
-            "notes": notes,
-        }
-    else:
-        notes = _unique_refs([*notes, "yahs_execution_failed", "annotation_continues_on_pre_hic_assembly_fallback"])
-        update_payload = {
-            "status": "blocked_human",
-            "selected_method_name": HIC_YAHS_METHOD,
-            "notes": notes,
-            "yahs_error": result.get("error"),
-        }
-
-    for path, artifact_type in [
-        (Path(result["stdout_path"]), "command.stdout"),
-        (Path(result["stderr_path"]), "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="hic_scaffolding",
-                    method_name=HIC_YAHS_METHOD,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
-
-    if artifacts:
-        append_artifact_records(data_dir, session_id, artifacts)
-        artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-        if result.get("success"):
-            ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
-        for artifact in artifact_payloads:
-            ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
-        artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
-
-    return _update_hic_output(
-        state,
-        {
-            **update_payload,
-            "artifact_refs": _unique_refs(artifact_refs),
-            "yahs_frozen_attempt": None,
-            "yahs_execution_result": None,
         },
     )
 
@@ -442,11 +212,14 @@ def commit_hic_scaffolding(state: TopLevelState) -> dict:
 def block_hic_scaffolding(state: TopLevelState) -> dict:
     """Pause for human Hi-C scaffolding method/contact-map decision."""
     hic_out = _hic_output(state)
+    candidates = dict(hic_out.get("method_candidates") or {})
+    successful = [name for name, candidate in candidates.items() if candidate.get("status") == "executed"]
+    decisions = ["accept_candidate", "skip", "stop_human_review"] if successful else ["select_method", "skip", "stop_human_review"]
     payload = ReviewPayload(
         stage="hic_scaffolding",
         reason="hic_scaffolding_human_decision_required",
         candidates=[{"method_name": method} for method in hic_out.get("candidate_methods", [])],
-        decisions_allowed=["select_method", "skip", "stop_human_review"],
+        decisions_allowed=decisions,
         notes=hic_out.get("notes", []),
         auto_decidable=False,
     )
@@ -514,6 +287,7 @@ def block_hic_scaffolding(state: TopLevelState) -> dict:
             "final_assembly_for_annotation": hic_out.get("final_assembly_for_annotation"),
             "chromosome_scaffolded_assembly_candidate_ref": hic_out.get("chromosome_scaffolded_assembly_candidate_ref"),
             "hic_review_bundle_ref": hic_out.get("hic_review_bundle_ref"),
+            "method_candidates": candidates,
             "notes": hic_out.get("notes", []),
             "blocked_at": datetime.now(timezone.utc).isoformat(),
         },
@@ -526,7 +300,7 @@ def apply_hic_scaffolding_resume_decision(state: TopLevelState, request: ResumeR
     if request.stage != "hic_scaffolding":
         raise ResumeValidationError("Hi-C resume requires stage hic_scaffolding")
     hic_out = _hic_output(state)
-    allowed = {"select_method", "skip", "stop_human_review"}
+    allowed = {"select_method", "accept_candidate", "skip", "stop_human_review"}
     if request.decision not in allowed:
         raise ResumeValidationError(f"unsupported hic_scaffolding decision: {request.decision}")
     if request.decision == "select_method":
@@ -536,11 +310,19 @@ def apply_hic_scaffolding_resume_decision(state: TopLevelState, request: ResumeR
             raise ResumeValidationError(f"unknown hic_scaffolding method_name: {request.method_name}")
         if not request.notes and not request.metadata.get("contact_map_policy"):
             raise ResumeValidationError("hic_scaffolding select_method requires contact-map policy notes or metadata")
+    elif request.decision == "accept_candidate":
+        if not request.method_name:
+            raise ResumeValidationError("hic_scaffolding accept_candidate requires method_name")
+        candidate = dict((hic_out.get("method_candidates") or {}).get(request.method_name) or {})
+        if candidate.get("status") != "executed" or not candidate.get("scaffold_fasta"):
+            raise ResumeValidationError("hic_scaffolding accept_candidate requires an executed scaffold candidate")
     elif request.decision == "skip" and request.method_name:
         raise ResumeValidationError("hic_scaffolding skip decision must not include method_name")
 
     pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
     final_assembly_for_annotation = hic_out.get("final_assembly_for_annotation") or pre_hic_assembly_ref
+    if request.decision == "accept_candidate":
+        final_assembly_for_annotation = str(hic_out["method_candidates"][request.method_name]["scaffold_fasta"])
     if not pre_hic_assembly_ref or not final_assembly_for_annotation:
         raise ResumeValidationError("hic_scaffolding resume requires pre_hic_assembly_ref")
 
@@ -695,100 +477,19 @@ def fail_hic_scaffolding(state: TopLevelState) -> dict:
     }
 
 
-def _write_yahs_review_bundle(
-    state: TopLevelState,
-    hic_out: dict[str, Any],
-    attempt: FrozenAttemptSpec,
-    result: dict[str, Any],
-) -> str:
-    session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
-    out_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "yahs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    review_bundle_ref = out_dir / "hic_review_bundle.json"
-    payload = {
-        "session_id": session_id,
-        "method_name": HIC_YAHS_METHOD,
-        "status": "yahs_executed_review_required",
-        "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
-        "final_assembly_for_annotation": hic_out.get("final_assembly_for_annotation"),
-        "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
-        "hic_alignment_ref": attempt.metadata.get("hic_alignment_ref"),
-        "stdout_path": result.get("stdout_path"),
-        "stderr_path": result.get("stderr_path"),
-        "review_required": True,
-        "notes": ["contact_map_policy_required_before_promotion", "pre_hic_assembly_preserved_as_annotation_fallback"],
-    }
-    review_bundle_ref.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(review_bundle_ref)
-
-
-def _write_yahs_qc_report(
-    state: TopLevelState,
-    hic_out: dict[str, Any],
-    attempt: FrozenAttemptSpec,
-    result: dict[str, Any],
-) -> str:
-    session_id = state["session_id"]
-    data_dir = Path(state.get("data_dir", "data"))
-    out_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "yahs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    qc_report_ref = out_dir / "hic_qc_report.json"
-    payload = {
-        "session_id": session_id,
-        "method_name": HIC_YAHS_METHOD,
-        "status": "available",
-        "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
-        "hic_alignment_ref": attempt.metadata.get("hic_alignment_ref"),
-        "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
-        "return_code": result.get("return_code"),
-        "notes": ["qc_thresholds_not_applied", "contact_map_policy_required_before_promotion"],
-    }
-    qc_report_ref.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(qc_report_ref)
-
-
-def _validate_hic_methods(methods: list[str]) -> str | None:
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-    missing = [method for method in methods if method not in registry.methods]
-    if missing:
-        return f"hic_scaffolding descriptors missing: {missing}"
-    return None
-
-
-def _local_yahs_enabled(hic_out: dict[str, Any]) -> bool:
-    method = hic_out.get("primary_method") or hic_out.get("selected_method_name")
-    return hic_out.get("execution_mode") == "local" and method == HIC_YAHS_METHOD
-
-
 def _hic_plan_notes(hic_out: dict[str, Any]) -> list[str]:
     notes = [
         "contact_map_policy_required",
         "pre_hic_assembly_preserved_as_annotation_fallback",
     ]
-    if _local_yahs_enabled(hic_out):
-        if _hic_alignment_path(hic_out)[1]:
-            notes.append("alignment_required_before_yahs")
-        else:
-            notes.append("yahs_execution_requested")
+    method = hic_out.get("primary_method") or hic_out.get("selected_method_name")
+    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox" and hic_out.get("execution_mode") == "local":
+        notes.append("juicer_3ddna_execution_requested")
+    elif method == "hic_scaffolding.candidate.yahs" and hic_out.get("execution_mode") == "local":
+        notes.append("yahs_execution_requested")
     else:
         notes.append("execution_deferred_to_method_specific_task")
     return notes
-
-
-def _hic_alignment_path(hic_out: dict[str, Any]) -> tuple[Path | None, str | None]:
-    for key in ["hic_alignment_bam_ref", "hic_alignment_ref"]:
-        value = hic_out.get(key)
-        if value:
-            path = Path(str(value))
-            if path.exists():
-                return path, None
-            return None, "alignment_required_before_yahs"
-    for value in hic_out.get("hic_alignment_paths") or []:
-        path = Path(str(value))
-        if path.exists():
-            return path, None
-    return None, "alignment_required_before_yahs"
 
 
 def _hic_alignment_assets(state: TopLevelState) -> list[dict[str, Any]]:
@@ -806,17 +507,24 @@ def _hic_alignment_assets(state: TopLevelState) -> list[dict[str, Any]]:
     ]
 
 
-def _safe_path_id(value: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
-    return safe or "yahs"
+def _hic_merged_nodups_assets(state: TopLevelState) -> list[dict[str, Any]]:
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return []
+    registry_path = Path(registry_ref)
+    if not registry_path.exists():
+        return []
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    return [
+        asset
+        for asset in registry.get("assets", [])
+        if str(asset.get("asset_type", "")) in {"hic_merged_nodups", "merged_nodups_txt", "juicer_merged_nodups"}
+    ]
 
 
-def _unique_refs(refs: list[str]) -> list[str]:
-    unique = []
-    for ref in refs:
-        if ref not in unique:
-            unique.append(ref)
-    return unique
+def _local_method_enabled(hic_out: dict[str, Any]) -> bool:
+    method = hic_out.get("primary_method") or hic_out.get("selected_method_name")
+    return hic_out.get("execution_mode") == "local" and method in set(HIC_CANDIDATE_METHODS)
 
 
 def _final_assembly_ref(state: TopLevelState) -> str | None:

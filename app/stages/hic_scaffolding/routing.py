@@ -30,30 +30,28 @@ def route_after_scaffold_plan(state: TopLevelState) -> str:
     hic_out = _output(state)
     if hic_out.get("status") in FAIL_STATUSES:
         return "fail"
-    method = hic_out.get("primary_method") or hic_out.get("selected_method_name")
-    if hic_out.get("execution_mode") == "local" and method == "hic_scaffolding.candidate.yahs":
-        return "freeze_yahs"
+    return _next_method(hic_out)
+
+
+def _next_method(hic_out: dict) -> str:
+    methods = hic_out.get("selected_methods") or [hic_out.get("primary_method") or hic_out.get("selected_method_name")]
+    completed = set(hic_out.get("completed_method_names") or [])
+    method = next((item for item in methods if item and item not in completed), None)
+    if hic_out.get("execution_mode") != "local" or not method:
+        return "block"
+    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
+        return "juicer_3ddna"
+    if method == "hic_scaffolding.candidate.yahs":
+        return "yahs"
     return "block"
 
 
-def route_after_yahs_freeze(state: TopLevelState) -> str:
-    """Route after freezing a YaHS attempt."""
-    status = _output(state).get("status")
-    if status in FAIL_STATUSES:
+def route_after_method_subgraph(state: TopLevelState) -> str:
+    """Route after a method-specific Hi-C lifecycle subgraph."""
+    output = _output(state)
+    if output.get("status") in FAIL_STATUSES:
         return "fail"
-    if status == "yahs_frozen":
-        return "run_yahs"
-    return "block"
-
-
-def route_after_yahs_run(state: TopLevelState) -> str:
-    """Route after local YaHS execution."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect_yahs"
-
-
-def route_after_yahs_collect(state: TopLevelState) -> str:
-    """Route after collecting YaHS artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "block"
+    return _next_method(output)
 
 
 def route_after_skip(state: TopLevelState) -> str:

@@ -91,7 +91,8 @@ hard to resume when these facts are mixed.
 
 ## Stage Shape
 
-Each stage should evolve from the current placeholder into:
+Executable stages use the following shape; planning-only methods may stop after
+their planning/review nodes:
 
 ```text
 enter -> validate_inputs -> plan_methods -> method_family_subgraph
@@ -100,14 +101,13 @@ enter -> validate_inputs -> plan_methods -> method_family_subgraph
 
 The method family subgraph owns package-specific logic. For example, `assembly` can later contain `flye`, `nextdenovo`, and `canu` families without changing the parent graph.
 
-## Current Scaffold Status
+## Current Implementation Status
 
-Current placeholder stages use `app/stages/factory.py` and advance immediately.
-That behavior exists only to prove parent graph routing and file layout. Phase 1
-must replace `inventory` with real manifest validation and asset registration.
-
-The graph smoke should route through all stages and finish at `done`. That does
-not mean the biological pipeline is implemented.
+The top-level graph contains real inventory, read-QC, assembly, review, Hi-C,
+repeat, gene-annotation, and function-annotation stages. Methods remain
+individually scoped: unsupported methods are represented as planning contracts,
+while supported methods freeze an auditable command and run through the shared
+execution lifecycle.
 
 ## Extension Rule
 

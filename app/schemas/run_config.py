@@ -270,6 +270,100 @@ class AssemblyReviewRunConfig(BaseModel):
     max_reruns: int = Field(default=3, ge=1, le=10)
 
 
+class Juicer3DDNARunParameters(BaseModel):
+    """Tool-specific Juicer + 3D-DNA settings, separate from input assets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    restriction_enzyme: str | None = None
+    chrom_sizes_ref: str | None = None
+    threads: int | None = Field(default=None, gt=0)
+    juicer_command: str = "juicer.sh"
+    juicer_extra_args: list[str] = Field(default_factory=list)
+    three_dna_command: str = "run-asm-pipeline.sh"
+    three_dna_extra_args: list[str] = Field(default_factory=list)
+
+
+HiCMethod = Literal["juicer_3ddna_juicebox", "yahs"]
+HiCInputMode = Literal["auto", "raw_reads", "merged_nodups"]
+
+
+class HiCScaffoldingPlanCandidate(BaseModel):
+    """A possibly incomplete Hi-C method candidate produced during planning.
+
+    This is deliberately not accepted by ``RunConfig``.  It records what the
+    TUI still needs to ask before a candidate becomes execution-ready.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: HiCMethod
+    input_mode: HiCInputMode | None = None
+    chromosome_count: int | None = Field(default=None, gt=0)
+    merged_nodups_ref: str | None = None
+    hic_alignment_ref: str | None = None
+    juicer_3ddna_parameters: Juicer3DDNARunParameters | None = None
+    status: Literal["needs_clarification", "ready_to_execute"] = "needs_clarification"
+    missing_fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _derive_readiness(self) -> "HiCScaffoldingPlanCandidate":
+        missing: list[str] = []
+        if self.method == "juicer_3ddna_juicebox":
+            if self.input_mode is None:
+                missing.append("input_mode")
+            if self.chromosome_count is None:
+                missing.append("chromosome_count")
+            if self.input_mode == "merged_nodups" and not self.merged_nodups_ref:
+                missing.append("merged_nodups_ref")
+            if self.input_mode == "raw_reads":
+                params = self.juicer_3ddna_parameters
+                if not params or not params.restriction_enzyme:
+                    missing.append("juicer_3ddna_parameters.restriction_enzyme")
+                if not params or not params.chrom_sizes_ref:
+                    missing.append("juicer_3ddna_parameters.chrom_sizes_ref")
+                if not params or params.threads is None:
+                    missing.append("juicer_3ddna_parameters.threads")
+        elif not self.hic_alignment_ref:
+            missing.append("hic_alignment_ref")
+        self.missing_fields = missing
+        self.status = "ready_to_execute" if not missing else "needs_clarification"
+        return self
+
+
+class HiCScaffoldingRunConfig(BaseModel):
+    """Strict, execution-ready Hi-C configuration consumed by ``gene-agent run``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: HiCMethod = "juicer_3ddna_juicebox"
+    methods: list[HiCMethod] | None = None
+    input_mode: HiCInputMode | None = None
+    chromosome_count: int | None = Field(default=None, gt=0)
+    merged_nodups_ref: str | None = None
+    hic_alignment_ref: str | None = None
+    juicer_3ddna_parameters: Juicer3DDNARunParameters | None = None
+
+    @model_validator(mode="after")
+    def _require_ready_candidates(self) -> "HiCScaffoldingRunConfig":
+        methods = self.methods or [self.method]
+        for method in methods:
+            candidate = HiCScaffoldingPlanCandidate(
+                method=method,
+                input_mode=self.input_mode if method == "juicer_3ddna_juicebox" else None,
+                chromosome_count=self.chromosome_count if method == "juicer_3ddna_juicebox" else None,
+                merged_nodups_ref=self.merged_nodups_ref if method == "juicer_3ddna_juicebox" else None,
+                hic_alignment_ref=self.hic_alignment_ref if method == "yahs" else None,
+                juicer_3ddna_parameters=self.juicer_3ddna_parameters if method == "juicer_3ddna_juicebox" else None,
+            )
+            if candidate.status != "ready_to_execute":
+                raise ValueError(
+                    f"run_config: hic_scaffolding.{method} is not execution-ready; "
+                    f"missing {candidate.missing_fields}"
+                )
+        return self
+
+
 class FunctionAnnotationRunConfig(BaseModel):
     """Run-config block for user-supplied function database provenance."""
 
@@ -298,6 +392,7 @@ class RunConfig(BaseModel):
     genome_survey: GenomeSurveyRunConfig | None = None
     assembly: AssemblyRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
+    hic_scaffolding: HiCScaffoldingRunConfig | None = None
     gene_annotation: GeneAnnotationRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig | None = None
@@ -306,6 +401,8 @@ class RunConfig(BaseModel):
     def _require_method_parameters_when_assembly_local(self) -> "RunConfig":
         if "assembly" in self.local_exec:
             validate_local_assembly_execution(self.assembly)
+        if "hic_scaffolding" in self.local_exec and self.hic_scaffolding is None:
+            raise ValueError("run_config: local_exec includes 'hic_scaffolding' but hic_scaffolding execution config is missing")
         return self
 
     @model_validator(mode="after")
@@ -321,7 +418,6 @@ class RunConfig(BaseModel):
                 "'read_qc' is not in local_exec"
             )
         return self
-
 
 def load_run_config(path: str | Path) -> RunConfig:
     """Load and validate a run-config JSON file.

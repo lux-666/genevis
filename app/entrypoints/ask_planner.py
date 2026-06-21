@@ -17,7 +17,7 @@ from app.schemas.ask_plan import (
     save_ask_plan,
 )
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import RunConfig
+from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.stages import STAGE_ORDER
 
@@ -45,7 +45,7 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "genome_survey": "choose_many",
     "assembly": "choose_many",
     "assembly_review": "choose_many",
-    "hic_scaffolding": "choose_one",
+    "hic_scaffolding": "choose_many",
     "repeat_annotation": "choose_many",
     "gene_annotation": "choose_many",
     "function_annotation": "choose_many",
@@ -209,15 +209,15 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     ],
     "hic_scaffolding": [
         {
-            "method_name": "hic_scaffolding.candidate.yahs",
+            "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
             "execution_support": "executable",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 8},
+            "required_parameters": ["input_mode", "chromosome_count"],
+            "parameter_defaults": {"input_mode": "raw_reads"},
         },
         {
-            "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-            "execution_support": "planned_only",
-            "required_parameters": [],
+            "method_name": "hic_scaffolding.candidate.yahs",
+            "execution_support": "executable",
+            "required_parameters": ["hic_alignment_ref"],
             "parameter_defaults": {},
         },
     ],
@@ -405,7 +405,7 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
     if stage == "read_qc":
         return list(READ_QC_DEFAULT_METHODS)
     if stage == "hic_scaffolding":
-        return "hic_scaffolding.candidate.yahs"
+        return ["hic_scaffolding.candidate.juicer_3ddna_juicebox", "hic_scaffolding.candidate.yahs"]
     if stage == "repeat_annotation":
         return ["repeat_annotation.masking.repeatmasker"]
     if stage == "gene_annotation":
@@ -558,6 +558,12 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
         ar_config = _build_assembly_review_config(plan)
         if ar_config:
             payload["assembly_review"] = ar_config
+    if "hic_scaffolding" in local_stages:
+        hic_config = _build_hic_scaffolding_config(plan)
+        if hic_config:
+            payload["hic_scaffolding"] = hic_config
+        else:
+            payload["local_exec"].remove("hic_scaffolding")
     if "function_annotation" in local_stages:
         fn_config = _build_function_annotation_config(plan)
         if fn_config:
@@ -602,6 +608,77 @@ def _build_assembly_execution_config(
 
     parameter_key = f"{config_method}_parameters"
     return {"assembly_method": config_method, parameter_key: params}
+
+
+def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
+    """Build a strict execution config from only ready Hi-C plan candidates."""
+    candidates = _hic_scaffolding_plan_candidates(plan)
+    ready = [candidate for candidate in candidates if candidate.status == "ready_to_execute"]
+    if not ready:
+        return None
+
+    payload: dict[str, Any] = {
+        "methods": [candidate.method for candidate in ready],
+        "method": ready[0].method,
+    }
+    juicer = next((candidate for candidate in ready if candidate.method == "juicer_3ddna_juicebox"), None)
+    if juicer:
+        payload.update(
+            {
+                "input_mode": juicer.input_mode,
+                "chromosome_count": juicer.chromosome_count,
+                "merged_nodups_ref": juicer.merged_nodups_ref,
+                "juicer_3ddna_parameters": juicer.juicer_3ddna_parameters.model_dump(exclude_none=True)
+                if juicer.juicer_3ddna_parameters
+                else None,
+            }
+        )
+    yahs = next((candidate for candidate in ready if candidate.method == "yahs"), None)
+    if yahs:
+        payload["hic_alignment_ref"] = yahs.hic_alignment_ref
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _hic_scaffolding_plan_candidates(plan: AskPlanState) -> list[HiCScaffoldingPlanCandidate]:
+    """Represent selected methods as permissive plan candidates before execution."""
+    selected = (plan.selected_methods or {}).get("hic_scaffolding")
+    methods = selected if isinstance(selected, list) else [selected] if selected else []
+    executable = [
+        method
+        for method in methods
+        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
+    ]
+    candidates: list[HiCScaffoldingPlanCandidate] = []
+    for method in executable:
+        params = dict((plan.method_parameters or {}).get(method) or {})
+        if method.endswith("juicer_3ddna_juicebox"):
+            tool_keys = {
+                "restriction_enzyme",
+                "chrom_sizes_ref",
+                "threads",
+                "juicer_command",
+                "juicer_extra_args",
+                "three_dna_command",
+                "three_dna_extra_args",
+            }
+            tool_params = {key: value for key, value in params.items() if key in tool_keys}
+            candidates.append(
+                HiCScaffoldingPlanCandidate(
+                    method="juicer_3ddna_juicebox",
+                    input_mode=params.get("input_mode"),
+                    chromosome_count=params.get("chromosome_count"),
+                    merged_nodups_ref=params.get("merged_nodups_ref"),
+                    juicer_3ddna_parameters=Juicer3DDNARunParameters.model_validate(tool_params),
+                )
+            )
+        else:
+            candidates.append(
+                HiCScaffoldingPlanCandidate(
+                    method="yahs",
+                    hic_alignment_ref=params.get("hic_alignment_ref"),
+                )
+            )
+    return candidates
 
 
 def write_ask_run_config(plan: AskPlanState) -> Path:
@@ -774,6 +851,9 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["method_parameters"] = plan.method_parameters
     if plan.stage_parameters:
         summary["stage_parameters"] = plan.stage_parameters
+    hic_candidates = _hic_scaffolding_plan_candidates(plan)
+    if hic_candidates:
+        summary["hic_scaffolding_plan_candidates"] = [candidate.model_dump(mode="json") for candidate in hic_candidates]
     method_status: dict[str, str] = {}
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
@@ -813,7 +893,7 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
         recommended.extend(["read_qc", "genome_survey", "assembly", "assembly_review"])
     if "assembly_fasta_registered" in asset_types:
         recommended.append("assembly_review")
-    if "hic_reads_registered" in asset_types or "hic_alignment_bam" in asset_types:
+    if {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
         recommended.append("hic_scaffolding")
     has_assembly_path = "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types
     if has_assembly_path:
@@ -1220,7 +1300,7 @@ def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
     asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
     order = plan.resolved_execution_order or []
     if "hic_scaffolding" in order:
-        if "hic_reads_registered" not in asset_types and "hic_alignment_bam" not in asset_types:
+        if not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
             warnings.append("hic_scaffolding: no Hi-C reads in manifest; stage will skip at runtime")
     assembly_available = "assembly" in order or "assembly_fasta_registered" in asset_types
     if "assembly_review" in order and not assembly_available:

@@ -74,6 +74,11 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - yahs
+  hic_scaffolding.candidate.juicer_3ddna_juicebox:
+    conda_env: env_geno_exec
+    required_tools:
+      - juicer.sh
+      - run-asm-pipeline.sh
   repeat_annotation.masking.repeatmasker:
     conda_env: env_geno_exec
     required_tools:

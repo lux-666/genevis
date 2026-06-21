@@ -27,7 +27,7 @@ The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
 (SeqKit), `genome_survey` (Jellyfish + GenomeScope2), `assembly` (Flye),
 `assembly_review` (QUAST + BUSCO when offline lineage provenance is supplied),
-`hic_scaffolding` (YaHS), `repeat_annotation` (RepeatMasker for provided
+`hic_scaffolding` (Juicer + 3D-DNA or YaHS), `repeat_annotation` (RepeatMasker for provided
 libraries), `gene_annotation` (Miniprot + AUGUSTUS runners, EVM merge,
 BUSCO), `function_annotation` (DIAMOND blastp). Real-data smoke validation
 for the annotation runners is pending (Phase 7 task 08). All remaining

@@ -28,6 +28,7 @@ _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "raw_isoseq_or_long_rna_reads",
     "hic_reads_registered",
     "hic_alignment_bam",
+    "hic_merged_nodups",
     "assembly_fasta_registered",
     "repeat_library",
     "reference_proteins",

@@ -150,7 +150,8 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "hic_scaffolding.candidate.yahs.threads": "CPU threads for YaHS",
+    "hic_scaffolding.candidate.yahs.hic_alignment_ref": "materialized Hi-C alignment BAM for YaHS",
+    "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count": "haploid chromosome count, e.g. 22 for 2n=44",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
 }
@@ -490,7 +491,14 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
     print("  Press Enter to accept [default], or type a new value.\n")
+    hic_method = "hic_scaffolding.candidate.juicer_3ddna_juicebox"
+    handled = set()
+    if hic_method in _selected_method_names(plan):
+        params[hic_method] = _prompt_juicer_3ddna_parameters(dict(defaults.get(hic_method) or {}))
+        handled = {field for field in req.required_fields if field.startswith(hic_method + ".")}
     for field in req.required_fields:
+        if field in handled:
+            continue
         method_key, _, param_name = field.rpartition(".")
         if not method_key:
             method_key = param_name
@@ -530,6 +538,39 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
         method_parameters=params or None,
         stage_parameters=stage_params or None,
     )
+
+
+def _prompt_juicer_3ddna_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
+    """Collect the mode-dependent minimum needed for a real Hi-C attempt."""
+    mode = _prompt_text_value("[hic_scaffolding / juicer_3ddna_juicebox] input_mode (raw_reads or merged_nodups)", defaults.get("input_mode", "raw_reads"))
+    result: dict[str, Any] = {
+        "input_mode": mode,
+        "chromosome_count": _prompt_text_value(
+            "[hic_scaffolding / juicer_3ddna_juicebox] chromosome_count", defaults.get("chromosome_count")
+        ),
+    }
+    if mode == "merged_nodups":
+        result["merged_nodups_ref"] = _prompt_text_value(
+            "[hic_scaffolding / juicer_3ddna_juicebox] merged_nodups_ref", defaults.get("merged_nodups_ref")
+        )
+    else:
+        result["restriction_enzyme"] = _prompt_text_value(
+            "[hic_scaffolding / juicer_3ddna_juicebox] restriction_enzyme", defaults.get("restriction_enzyme")
+        )
+        result["chrom_sizes_ref"] = _prompt_text_value(
+            "[hic_scaffolding / juicer_3ddna_juicebox] chrom_sizes_ref", defaults.get("chrom_sizes_ref")
+        )
+        result["threads"] = _prompt_text_value(
+            "[hic_scaffolding / juicer_3ddna_juicebox] threads", defaults.get("threads", 8)
+        )
+    return result
+
+
+def _selected_method_names(plan: AskPlanState) -> set[str]:
+    names: set[str] = set()
+    for value in (plan.selected_methods or {}).values():
+        names.update(value if isinstance(value, list) else [value])
+    return names
 
 
 def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, Any]]:
@@ -783,6 +824,12 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
         "platform": ("shared_parameters", "platform"),
         "read_type": ("shared_parameters", "read_type"),
         "threads": ("assembly.candidate.flye", "threads"),
+        "hic_input_mode": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "input_mode"),
+        "hic_chromosome_count": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "chromosome_count"),
+        "hic_restriction_enzyme": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "restriction_enzyme"),
+        "hic_chrom_sizes_ref": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "chrom_sizes_ref"),
+        "hic_threads": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "threads"),
+        "hic_merged_nodups_ref": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "merged_nodups_ref"),
     }
     existing = dict(plan.method_parameters or {})
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}

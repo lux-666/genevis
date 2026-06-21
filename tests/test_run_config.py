@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.run_config import RunConfig, load_run_config
+from app.schemas.run_config import HiCScaffoldingPlanCandidate, RunConfig, load_run_config
 
 
 class RunConfigSchemaTests(unittest.TestCase):
@@ -618,6 +618,47 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.read_qc is not None
         assert config.read_qc.length_filter is not None
         self.assertFalse(config.read_qc.length_filter.approved)
+
+
+    def test_hic_3ddna_parameters_are_accepted(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["hic_scaffolding"],
+                "hic_scaffolding": {
+                    "method": "juicer_3ddna_juicebox",
+                    "input_mode": "merged_nodups",
+                    "chromosome_count": 22,
+                    "merged_nodups_ref": "/data/merged_nodups.txt",
+                    "juicer_3ddna_parameters": {"three_dna_extra_args": ["-r", "2"]},
+                },
+            }
+        )
+
+        self.assertEqual(config.hic_scaffolding.method, "juicer_3ddna_juicebox")
+        self.assertEqual(config.hic_scaffolding.chromosome_count, 22)
+
+    def test_hic_plan_candidate_allows_missing_execution_inputs(self):
+        candidate = HiCScaffoldingPlanCandidate(
+            method="juicer_3ddna_juicebox",
+            input_mode="merged_nodups",
+        )
+
+        self.assertEqual(candidate.status, "needs_clarification")
+        self.assertEqual(candidate.missing_fields, ["chromosome_count", "merged_nodups_ref"])
+
+    def test_local_hic_execution_rejects_incomplete_candidate(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["hic_scaffolding"],
+                    "hic_scaffolding": {
+                        "method": "juicer_3ddna_juicebox",
+                        "input_mode": "merged_nodups",
+                    },
+                }
+            )
+
+        self.assertIn("not execution-ready", str(ctx.exception))
 
 
 class RunConfigLoaderTests(unittest.TestCase):

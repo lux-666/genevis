@@ -387,6 +387,25 @@ def _run_session(args: argparse.Namespace) -> int:
             review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
         review_out["max_reruns"] = run_config.assembly_review.max_reruns
         stage_outputs["assembly_review"] = review_out
+    if run_config and run_config.hic_scaffolding:
+        hic_out = dict(stage_outputs.get("hic_scaffolding") or {})
+        requested_methods = run_config.hic_scaffolding.methods or [run_config.hic_scaffolding.method]
+        hic_out["selected_methods"] = [
+            "hic_scaffolding.candidate.juicer_3ddna_juicebox"
+            if method == "juicer_3ddna_juicebox"
+            else "hic_scaffolding.candidate.yahs"
+            for method in requested_methods
+        ]
+        hic_out["primary_method"] = hic_out["selected_methods"][0]
+        for key in ["input_mode", "chromosome_count", "merged_nodups_ref", "hic_alignment_ref"]:
+            value = getattr(run_config.hic_scaffolding, key)
+            if value is not None:
+                hic_out[key] = value
+        if run_config.hic_scaffolding.juicer_3ddna_parameters:
+            hic_out["juicer_3ddna_parameters"] = run_config.hic_scaffolding.juicer_3ddna_parameters.model_dump(
+                exclude_none=True
+            )
+        stage_outputs["hic_scaffolding"] = hic_out
     if run_config and run_config.review_policy:
         for review_stage in ["assembly", "assembly_review", "hic_scaffolding"]:
             stage_out = dict(stage_outputs.get(review_stage) or {})

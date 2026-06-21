@@ -1,14 +1,18 @@
 method_name: hic_scaffolding.candidate.juicer_3ddna_juicebox
 stage: hic_scaffolding
 package_ref: juicer
-goal: "Plan a Juicer plus 3D-DNA plus Juicebox Hi-C scaffolding candidate without execution."
+goal: "Execute a Juicer plus 3D-DNA chromosome-scaffolding candidate through the frozen-attempt lifecycle, then require Juicebox review."
 required_inputs:
   - name: final_assembly
     type: draft_assembly
     description: "Reviewed assembly FASTA before Hi-C scaffolding."
   - name: hic_reads
     type: hic_reads_registered
-    description: "Registered Hi-C reads."
+    description: "Registered paired Hi-C reads for Juicer, or a materialized merged_nodups.txt handoff for direct 3D-DNA."
+optional_inputs:
+  - name: merged_nodups
+    type: hic_merged_nodups
+    description: "Materialized Juicer merged_nodups.txt; when present, Juicer is bypassed and 3D-DNA runs directly."
 expected_outputs:
   - name: chromosome_scaffolded_assembly
     type: chromosome_scaffolded_assembly

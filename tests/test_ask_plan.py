@@ -1036,9 +1036,37 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
         methods = result.choices["methods_by_stage"]["hic_scaffolding"]
-        yahs = next(m for m in methods if m["method_name"] == "hic_scaffolding.candidate.yahs")
-        self.assertEqual(yahs["execution_support"], "executable")
-        self.assertEqual(result.choices["defaults"]["hic_scaffolding"], "hic_scaffolding.candidate.yahs")
+        three_dna = next(m for m in methods if m["method_name"] == "hic_scaffolding.candidate.juicer_3ddna_juicebox")
+        self.assertEqual(three_dna["execution_support"], "executable")
+        self.assertEqual(
+            result.choices["defaults"]["hic_scaffolding"],
+            ["hic_scaffolding.candidate.juicer_3ddna_juicebox", "hic_scaffolding.candidate.yahs"],
+        )
+
+    def test_incomplete_hic_candidates_remain_planned_not_local_execution(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={
+                "hic_scaffolding": [
+                    "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "hic_scaffolding.candidate.yahs",
+                ]
+            },
+            method_parameters={
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {"input_mode": "merged_nodups"},
+            },
+        )
+
+        payload = build_run_config_payload(plan)
+        summary = build_run_plan_summary(plan)
+
+        self.assertNotIn("hic_scaffolding", payload["local_exec"])
+        self.assertNotIn("hic_scaffolding", payload)
+        candidates = summary["hic_scaffolding_plan_candidates"]
+        self.assertEqual(candidates[0]["status"], "needs_clarification")
+        self.assertIn("chromosome_count", candidates[0]["missing_fields"])
+        self.assertEqual(candidates[1]["missing_fields"], ["hic_alignment_ref"])
 
     def test_repeat_annotation_method_selection(self):
         plan = _base_plan(
@@ -1151,7 +1179,7 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
                 "gene_annotation": ["gene_annotation.candidate.braker3"],
             },
             method_parameters={
-                "hic_scaffolding.candidate.yahs": {"threads": 8},
+                "hic_scaffolding.candidate.yahs": {"hic_alignment_ref": "/data/hic.bam"},
             },
             confirmed=True,
         )

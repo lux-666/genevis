@@ -64,8 +64,9 @@ Implemented:
 - real `assembly_review` stage with opt-in local QUAST, `quast_summary.json`,
   action-provenance artifacts for pass/purge/polish, and a human gate that
   does not invent thresholds
-- real `hic_scaffolding` stage with opt-in local YaHS, scaffold/skip policy,
-  pre-Hi-C assembly preservation, and contact-map human review block
+- real `hic_scaffolding` stage with opt-in Juicer + 3D-DNA and YaHS candidates,
+  raw-read or `merged_nodups.txt` inputs, candidate comparison, pre-Hi-C
+  preservation, and contact-map human review
 - real `repeat_annotation` stage with opt-in local RepeatMasker for provided
   libraries and softmasked genome handoff
 - `gene_annotation` with executable Miniprot + AUGUSTUS runners, EVM merge,
@@ -102,7 +103,7 @@ Not implemented:
   [`docs/deployment/mac_dev_server_pull.md`](docs/deployment/mac_dev_server_pull.md))
 - executable bioinformatics methods beyond the slices above (Merqury,
   minimap2 coverage, purge_dups, contamination check; Canu,
-  hifiasm; Juicer/3D-DNA/Juicebox and raw Hi-C alignment; EDTA, RepeatModeler,
+  hifiasm; raw Hi-C BAM generation for YaHS; EDTA, RepeatModeler,
   TRF, de novo repeat library; BRAKER3, MAKER, HISAT2,
   StringTie, IsoQuant, GeMoMa; InterProScan, eggNOG-mapper, KofamScan)
 - requested-stage routing (the `--stages` flag is intentionally not exposed)

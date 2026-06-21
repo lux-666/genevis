@@ -70,6 +70,37 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         script.chmod(0o755)
         return bin_dir
 
+    def _fake_juicer_3ddna_bin(self, tmpdir: str, *, fail_3ddna: bool = False) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        juicer = bin_dir / "juicer.sh"
+        juicer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "top = pathlib.Path(args[args.index('-d') + 1])\n"
+            "(top / 'aligned').mkdir(parents=True, exist_ok=True)\n"
+            "(top / 'aligned' / 'merged_nodups.txt').write_text('merged\\n', encoding='utf-8')\n"
+            "print('fake juicer ok')\n",
+            encoding="utf-8",
+        )
+        three_dna = bin_dir / "run-asm-pipeline.sh"
+        three_dna.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "if " + repr(fail_3ddna) + ":\n"
+            "    print('fake 3ddna failed', file=sys.stderr)\n"
+            "    sys.exit(9)\n"
+            "pathlib.Path('input_assembly.FINAL.fasta').write_text('>scaffold1\\nACGT\\n', encoding='utf-8')\n"
+            "pathlib.Path('input_assembly.FINAL.assembly').write_text('assembly\\n', encoding='utf-8')\n"
+            "pathlib.Path('review.hic').write_text('hic\\n', encoding='utf-8')\n"
+            "print('fake 3ddna ok')\n",
+            encoding="utf-8",
+        )
+        juicer.chmod(0o755)
+        three_dna.chmod(0o755)
+        return bin_dir
+
     def test_missing_final_assembly_ref_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
@@ -421,6 +452,100 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(events[-1]["event_type"], "review_requested")
             self.assertFalse(events[-1]["auto_decidable"])
+
+    def test_local_3ddna_uses_precomputed_merged_nodups_and_registers_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            merged_nodups = Path(tmpdir) / "merged_nodups.txt"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            merged_nodups.write_text("merged\n", encoding="utf-8")
+            bin_dir = self._fake_juicer_3ddna_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:hic_merged_nodups:merged_nodups.txt",
+                        "asset_type": "hic_merged_nodups",
+                        "path": str(merged_nodups),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                    "juicer_3ddna_parameters": {"chromosome_count": 22},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
+            self.assertTrue(Path(hic["chromosome_scaffolded_assembly_candidate_ref"]).exists())
+            self.assertIn("juicer_3ddna_executed", hic["notes"])
+            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn(str(merged_nodups), script_text)
+            self.assertNotIn("juicer.sh -d", script_text)
+            artifact_types = {
+                json.loads(line)["artifact_type"]
+                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
+            }
+            self.assertIn("hic_scaffolding.contact_map", artifact_types)
+            self.assertIn("hic_scaffolding.3ddna_assembly", artifact_types)
+
+    def test_local_3ddna_raw_reads_runs_juicer_before_3ddna(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            read1 = Path(tmpdir) / "hic_R1.fq.gz"
+            read2 = Path(tmpdir) / "hic_R2.fq.gz"
+            chrom_sizes = Path(tmpdir) / "chrom.sizes"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            read1.write_text("r1\n", encoding="utf-8")
+            read2.write_text("r2\n", encoding="utf-8")
+            chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
+            bin_dir = self._fake_juicer_3ddna_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
+                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                    "juicer_3ddna_parameters": {
+                        "input_mode": "raw_reads",
+                        "chromosome_count": 22,
+                        "restriction_enzyme": "MboI",
+                        "chrom_sizes_ref": str(chrom_sizes),
+                        "threads": 2,
+                    },
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
+            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn("juicer.sh -d", script_text)
+            self.assertIn("-s MboI", script_text)
+            self.assertIn("run-asm-pipeline.sh", script_text)
+            self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
 
 
 if __name__ == "__main__":

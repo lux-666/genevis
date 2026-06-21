@@ -281,6 +281,12 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
                 "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
                 "decisions_allowed": decisions_allowed or [],
                 "candidate_methods": _candidate_methods(active_interrupt),
+                "executed_candidate_methods": [
+                    name
+                    for name, candidate in dict(active_interrupt.get("method_candidates") or {}).items()
+                    if candidate.get("status") == "executed"
+                ],
+                "method_candidates": dict(active_interrupt.get("method_candidates") or {}),
                 "requires_structured_resume": True,
             },
         )

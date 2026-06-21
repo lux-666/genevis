@@ -147,7 +147,7 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="hic_scaffolding",
         gate_id="hic_scaffolding",
-        decisions_allowed=("select_method", "skip", "stop_human_review"),
+        decisions_allowed=("select_method", "accept_candidate", "skip", "stop_human_review"),
         decision_applier="app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_resume_decision",
         prompt_adapter="hic_scaffolding",
         template_preferred_decision="select_method",

@@ -83,9 +83,19 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
         for m in methods:
             print(f"  - {m}")
 
+    candidates = requirements.get("method_candidates") or {}
+    if candidates:
+        print("\nexecuted_candidates:")
+        for method, candidate in candidates.items():
+            print(f"  [{method}] {candidate.get('status')}")
+            for key in ("scaffold_fasta", "review_bundle_ref", "qc_report_ref"):
+                if candidate.get(key):
+                    print(f"    {key}: {candidate[key]}")
+
     interrupt = (summary.get("latest_review_request") or {}).get("payload", {})
     for key in ("pre_hic_assembly_ref", "final_assembly_for_annotation",
-                "scaffold_plan_ref", "hic_review_bundle_ref"):
+                "scaffold_plan_ref", "hic_review_bundle_ref",
+                "chromosome_scaffolded_assembly_candidate_ref", "hic_qc_report_ref"):
         val = interrupt.get(key) or requirements.get(key)
         if val:
             print(f"{key}: {val}")
@@ -100,6 +110,7 @@ def _render_generic_gate(requirements: dict) -> None:
         for cid in candidate_ids:
             print(f"  - {cid}")
     methods = requirements.get("candidate_methods") or []
+    executed = requirements.get("executed_candidate_methods") or []
     if methods:
         print("\ncandidate_methods:")
         for method in methods:
@@ -192,18 +203,20 @@ def prompt_hic_scaffolding_decision(
     """Prompt the operator for a hic_scaffolding decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
     methods = requirements.get("candidate_methods") or []
+    executed = requirements.get("executed_candidate_methods") or []
 
     decision = _prompt_choice("decision", decisions)
     if decision is None:
         return None
 
     method_name = None
-    if decision == "select_method":
-        if len(methods) == 1:
-            method_name = methods[0]
+    if decision in {"select_method", "accept_candidate"}:
+        choices = executed if decision == "accept_candidate" else methods
+        if len(choices) == 1:
+            method_name = choices[0]
             print(f"  auto-selected method: {method_name}")
-        elif methods:
-            method_name = _prompt_choice("method", methods)
+        elif choices:
+            method_name = _prompt_choice("method", choices)
             if method_name is None:
                 return None
         else:
