@@ -24,21 +24,11 @@ def route_after_plan(state: TopLevelState) -> str:
         return "fail"
     if read_qc_out.get("skip_reason") == "local_execution_not_enabled":
         return "filter"
-    return "freeze"
+    return "stats"
 
 
-def route_after_freeze(state: TopLevelState) -> str:
-    """Route after freezing the SeqKit attempt; short-circuit on preflight block."""
-    return "fail" if _status(state) in FAIL_STATUSES else "run"
-
-
-def route_after_run(state: TopLevelState) -> str:
-    """Route after local execution."""
-    return "fail" if _status(state) in FAIL_STATUSES else "collect"
-
-
-def route_after_collect(state: TopLevelState) -> str:
-    """Route after artifact collection."""
+def route_after_stats(state: TopLevelState) -> str:
+    """Route after the SeqKit stats method subgraph returns."""
     return "fail" if _status(state) in FAIL_STATUSES else "filter"
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,8 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.stages.assembly_review.builder import build_stage
+from app.stages.assembly_review.method_application.busco import build_busco_graph
+from app.stages.assembly_review.method_application.quast import build_quast_graph
 from app.schemas.state import initial_state
 
 
@@ -47,6 +50,34 @@ class AssemblyReviewDescriptorTests(unittest.TestCase):
 
 
 class AssemblyReviewStageTests(unittest.TestCase):
+    def test_outer_graph_routes_to_metric_subgraphs(self):
+        outer_nodes = set(build_stage().get_graph().nodes)
+        quast_nodes = set(build_quast_graph().get_graph().nodes)
+        busco_nodes = set(build_busco_graph().get_graph().nodes)
+
+        self.assertIn("quast", outer_nodes)
+        self.assertIn("busco", outer_nodes)
+        self.assertNotIn("freeze_quast", outer_nodes)
+        self.assertNotIn("run_busco", outer_nodes)
+        for nodes in [quast_nodes, busco_nodes]:
+            self.assertIn("freeze", nodes)
+            self.assertIn("run", nodes)
+            self.assertIn("collect", nodes)
+
+    def test_metric_method_modules_do_not_depend_on_parent_stage_modules(self):
+        for module_path in [
+            Path("app/stages/assembly_review/method_application/quast.py"),
+            Path("app/stages/assembly_review/method_application/busco.py"),
+        ]:
+            tree = ast.parse(module_path.read_text(encoding="utf-8"))
+            imports = [
+                node.module or ""
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+            ]
+            self.assertNotIn("app.stages.assembly_review.nodes", imports)
+            self.assertNotIn("app.stages.assembly_review.routing", imports)
+
     def _build_state(
         self,
         *,
@@ -1068,7 +1099,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         import os
         from unittest.mock import patch
         from app.execution.env_resolver import EnvSpec
-        from app.stages.assembly_review.nodes import freeze_quast_attempts
+        from app.stages.assembly_review.method_application.quast import freeze_quast_attempts
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1106,10 +1137,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     ],
                 }
                 with patch(
-                    "app.stages.assembly_review.nodes._validate_review_methods",
+                    "app.stages.assembly_review.method_application.quast.review_methods_error",
                     return_value=None,
                 ), patch(
-                    "app.stages.assembly_review.nodes.resolve_method_env",
+                    "app.stages.assembly_review.method_application.quast.resolve_review_method_env",
                     return_value=(EnvSpec(conda_env="env_geno_exec"), None),
                 ):
                     result = freeze_quast_attempts(state)

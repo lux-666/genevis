@@ -23,48 +23,26 @@ def route_after_plan_metrics(state: TopLevelState) -> str:
     if ar_out.get("status") in FAIL_STATUSES:
         return "fail"
     if ar_out.get("execution_mode") == "local":
-        return "freeze_quast"
+        return "quast"
     return "evaluate_rules"
 
 
-def route_after_quast_freeze(state: TopLevelState) -> str:
-    """Route after freezing QUAST attempts."""
+def route_after_quast(state: TopLevelState) -> str:
+    """Route after the QUAST method subgraph returns."""
     ar_out = _output(state)
     if ar_out.get("status") in FAIL_STATUSES:
         return "fail"
-    if ar_out.get("status") == "quast_frozen":
-        return "run_quast"
+    if ar_out.get("status") == "evaluating":
+        return "busco"
     return "evaluate_rules"
 
 
-def route_after_quast_run(state: TopLevelState) -> str:
-    """Route after running QUAST attempts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect_quast"
-
-
-def route_after_quast_collect(state: TopLevelState) -> str:
-    """Route after collecting QUAST artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "freeze_busco"
-
-
-def route_after_busco_freeze(state: TopLevelState) -> str:
-    """Route after freezing BUSCO attempts."""
+def route_after_busco(state: TopLevelState) -> str:
+    """Route after the BUSCO method subgraph returns."""
     ar_out = _output(state)
     if ar_out.get("status") in FAIL_STATUSES:
         return "fail"
-    if ar_out.get("status") == "busco_frozen":
-        return "run_busco"
     return "evaluate_rules"
-
-
-def route_after_busco_run(state: TopLevelState) -> str:
-    """Route after running BUSCO attempts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect_busco"
-
-
-def route_after_busco_collect(state: TopLevelState) -> str:
-    """Route after collecting BUSCO artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "evaluate_rules"
 
 
 def route_from_evaluation(state: TopLevelState) -> str:

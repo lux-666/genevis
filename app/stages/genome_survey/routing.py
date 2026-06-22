@@ -36,28 +36,18 @@ def route_after_full_plan(state: TopLevelState) -> str:
     if status in FAIL_STATUSES:
         return "fail"
     if status == "local_execution_planned":
-        return "freeze_jellyfish"
+        return "jellyfish"
     return "commit"
 
 
-def route_after_freeze(state: TopLevelState) -> str:
-    """Route after freezing a local attempt; short-circuit on preflight block."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "run"
+def route_after_jellyfish(state: TopLevelState) -> str:
+    """Route after the Jellyfish method subgraph returns."""
+    return "genomescope2" if _output(state).get("status") == "jellyfish_collected" else "fail"
 
 
-def route_after_run(state: TopLevelState) -> str:
-    """Route after a local attempt run."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect"
-
-
-def route_after_collect_jellyfish(state: TopLevelState) -> str:
-    """Route after Jellyfish artifact collection."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "freeze_genomescope2"
-
-
-def route_after_collect_genomescope2(state: TopLevelState) -> str:
-    """Route after GenomeScope2 artifact collection."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "write_result"
+def route_after_genomescope2(state: TopLevelState) -> str:
+    """Route after the GenomeScope2 method subgraph returns."""
+    return "write_result" if _output(state).get("status") == "genomescope2_collected" else "fail"
 
 
 def route_after_plan(state: TopLevelState) -> str:

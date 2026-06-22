@@ -4,24 +4,17 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import resolve_method_env
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
-from app.stages.base import absolute_data_dir
 from app.schemas.artifacts import (
-    GENOME_SURVEY_KMER_DB,
-    GENOME_SURVEY_KMER_HIST,
-    GENOME_SURVEY_MODEL_SUMMARY,
     ArtifactMeta,
     GenomeSurveyResult,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 
 FULL_SURVEY_METHODS = [
@@ -34,8 +27,6 @@ EXECUTED_FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
     "genome_survey.model.genomescope2",
 ]
-JELLYFISH_METHOD = "genome_survey.kmer_count.jellyfish"
-GENOMESCOPE2_METHOD = "genome_survey.model.genomescope2"
 GENOME_SURVEY_METHOD = "genome_survey.contract"
 NO_LOW_ERROR_SHORT_READS = "no_low_error_short_reads"
 
@@ -184,233 +175,6 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
             "candidate_methods": result.candidate_methods,
             "estimates": result.estimates,
             "notes": result.notes,
-        },
-    )
-
-
-def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
-    """Freeze the Jellyfish count/histo attempt."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "local_execution_planned":
-        return {}
-
-    session_id = state["session_id"]
-    data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_method_env(
-        survey_out,
-        stage="genome_survey",
-        method_name=JELLYFISH_METHOD,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-    )
-    if blocked is not None:
-        return _update_genome_survey_output(state, blocked)
-
-    working_dir = data_dir / "work" / "genome_survey" / session_id / "jellyfish"
-    artifact_dir = data_dir / "artifacts" / "genome_survey" / session_id
-    working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    params = dict(survey_out["survey_parameters"])
-    assets = (survey_out.get("resolved_assets") or {}).get("clean_short_dna_reads") or []
-    read_paths = [str(Path(asset["path"])) for asset in assets]
-    kmer_db = artifact_dir / "jellyfish_kmers.jf"
-    kmer_hist = artifact_dir / "kmer_hist.tsv"
-    script_path = working_dir / "run_jellyfish.sh"
-    reads_arg = " ".join(shlex.quote(path) for path in read_paths)
-    script_path.write_text(
-        "set -e\n"
-        f"jellyfish count -C -m {int(params['kmer_size'])} -s {shlex.quote(str(params['hash_size']))} "
-        f"-t {int(params['threads'])} {reads_arg} -o {shlex.quote(str(kmer_db))}\n"
-        f"jellyfish histo -t {int(params['threads'])} {shlex.quote(str(kmer_db))} > {shlex.quote(str(kmer_hist))}\n",
-        encoding="utf-8",
-    )
-    script_path.chmod(0o755)
-
-    attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:genome_survey:jellyfish",
-        session_id=session_id,
-        stage="genome_survey",
-        method_name=JELLYFISH_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        expected_outputs=[kmer_db, kmer_hist],
-        env=survey_out.get("env"),
-        env_spec=env_spec,
-        metadata={
-            "input_asset_refs": survey_out.get("clean_short_dna_read_refs", []),
-            "kmer_size": params["kmer_size"],
-            "kmer_db_path": str(kmer_db),
-            "kmer_hist_path": str(kmer_hist),
-        },
-    )
-    return _update_genome_survey_output(
-        state,
-        {
-            "status": "jellyfish_frozen",
-            "jellyfish_frozen_attempt": attempt.model_dump(mode="json"),
-            "kmer_db_path": str(kmer_db),
-            "kmer_hist_path": str(kmer_hist),
-        },
-    )
-
-
-def run_jellyfish_attempt(state: TopLevelState) -> dict:
-    """Run the frozen Jellyfish attempt locally."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "jellyfish_frozen":
-        return {}
-    return _run_attempt(state, "jellyfish_frozen_attempt", "jellyfish_execution_result", "jellyfish_ran")
-
-
-def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
-    """Collect Jellyfish k-mer database, histogram, and command logs."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "jellyfish_ran":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(survey_out["jellyfish_frozen_attempt"])
-    result = survey_out["jellyfish_execution_result"]
-    artifacts = _attempt_artifacts(
-        attempt,
-        result,
-        {
-            str(Path(survey_out["kmer_db_path"])): GENOME_SURVEY_KMER_DB,
-            str(Path(survey_out["kmer_hist_path"])): GENOME_SURVEY_KMER_HIST,
-        },
-    )
-    _record_attempt_success(state, attempt, artifacts)
-
-    substeps = dict(survey_out.get("substeps") or {})
-    substeps["kmer_count"] = {
-        **dict(substeps.get("kmer_count") or {}),
-        "name": "kmer_count",
-        "status": "executed",
-        "method_name": attempt.method_name,
-        "kmer_db_ref": survey_out["kmer_db_path"],
-        "kmer_hist_ref": survey_out["kmer_hist_path"],
-    }
-    return _update_genome_survey_output(
-        state,
-        {
-            "status": "jellyfish_collected",
-            "kmer_db_artifact_ref": survey_out["kmer_db_path"],
-            "kmer_hist_artifact_ref": survey_out["kmer_hist_path"],
-            "artifact_refs": [
-                *list(survey_out.get("artifact_refs") or []),
-                *[str(artifact.file_path) for artifact in artifacts],
-            ],
-            "substeps": substeps,
-        },
-    )
-
-
-def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
-    """Freeze the GenomeScope2 model attempt."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "jellyfish_collected":
-        return {}
-
-    session_id = state["session_id"]
-    data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_method_env(
-        survey_out,
-        stage="genome_survey",
-        method_name=GENOMESCOPE2_METHOD,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-    )
-    if blocked is not None:
-        return _update_genome_survey_output(state, blocked)
-
-    working_dir = data_dir / "work" / "genome_survey" / session_id / "genomescope2"
-    artifact_dir = data_dir / "artifacts" / "genome_survey" / session_id / "genomescope2"
-    working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-
-    params = dict(survey_out["survey_parameters"])
-    summary_path = artifact_dir / "summary.txt"
-    script_path = working_dir / "run_genomescope2.sh"
-    script_path.write_text(
-        "set -e\n"
-        f"mkdir -p {shlex.quote(str(artifact_dir))}\n"
-        f"genomescope2 -i {shlex.quote(str(Path(survey_out['kmer_hist_path'])))} "
-        f"-o {shlex.quote(str(artifact_dir))} -k {int(params['kmer_size'])}\n"
-        f"test -f {shlex.quote(str(summary_path))}\n",
-        encoding="utf-8",
-    )
-    script_path.chmod(0o755)
-
-    attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:genome_survey:genomescope2",
-        session_id=session_id,
-        stage="genome_survey",
-        method_name=GENOMESCOPE2_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        expected_outputs=[summary_path],
-        env=survey_out.get("env"),
-        env_spec=env_spec,
-        metadata={
-            "kmer_hist_path": survey_out.get("kmer_hist_path"),
-            "summary_path": str(summary_path),
-        },
-    )
-    return _update_genome_survey_output(
-        state,
-        {
-            "status": "genomescope2_frozen",
-            "genomescope2_frozen_attempt": attempt.model_dump(mode="json"),
-            "genomescope2_summary_path": str(summary_path),
-            "genomescope2_output_dir": str(artifact_dir),
-        },
-    )
-
-
-def run_genomescope2_attempt(state: TopLevelState) -> dict:
-    """Run the frozen GenomeScope2 attempt locally."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "genomescope2_frozen":
-        return {}
-    return _run_attempt(state, "genomescope2_frozen_attempt", "genomescope2_execution_result", "genomescope2_ran")
-
-
-def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
-    """Collect GenomeScope2 summary and command logs."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("status") != "genomescope2_ran":
-        return {}
-
-    attempt = FrozenAttemptSpec.model_validate(survey_out["genomescope2_frozen_attempt"])
-    result = survey_out["genomescope2_execution_result"]
-    artifacts = _attempt_artifacts(
-        attempt,
-        result,
-        {str(Path(survey_out["genomescope2_summary_path"])): GENOME_SURVEY_MODEL_SUMMARY},
-    )
-    _record_attempt_success(state, attempt, artifacts)
-
-    substeps = dict(survey_out.get("substeps") or {})
-    substeps["genome_model"] = {
-        **dict(substeps.get("genome_model") or {}),
-        "name": "genome_model",
-        "status": "executed",
-        "method_name": attempt.method_name,
-        "summary_ref": survey_out["genomescope2_summary_path"],
-    }
-    return _update_genome_survey_output(
-        state,
-        {
-            "status": "genomescope2_collected",
-            "genomescope2_summary_ref": survey_out["genomescope2_summary_path"],
-            "genomescope2_output_dir_ref": survey_out["genomescope2_output_dir"],
-            "artifact_refs": [
-                *list(survey_out.get("artifact_refs") or []),
-                *[str(artifact.file_path) for artifact in artifacts],
-            ],
-            "substeps": substeps,
         },
     )
 
@@ -632,81 +396,6 @@ def _record_result(
             "artifact_refs": artifact_refs,
         },
     )
-
-
-def _run_attempt(
-    state: TopLevelState,
-    attempt_key: str,
-    result_key: str,
-    next_status: str,
-) -> dict:
-    survey_out = _genome_survey_output(state)
-    attempt = FrozenAttemptSpec.model_validate(survey_out[attempt_key])
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label=attempt.method_name,
-    )
-    if not outcome.success:
-        return _update_genome_survey_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                result_key: outcome.result.model_dump(mode="json"),
-            },
-        )
-
-    return _update_genome_survey_output(
-        state,
-        {"status": next_status, result_key: outcome.result.model_dump(mode="json")},
-    )
-
-
-def _attempt_artifacts(
-    attempt: FrozenAttemptSpec,
-    execution_result: dict[str, Any],
-    artifact_types_by_path: dict[str, str],
-) -> list[ArtifactMeta]:
-    artifacts: list[ArtifactMeta] = []
-    for path in attempt.expected_outputs:
-        if not path.exists():
-            raise FileNotFoundError(f"expected output missing: {path}")
-        artifacts.append(
-            ArtifactMeta.from_file(
-                path,
-                stage="genome_survey",
-                method_name=attempt.method_name,
-                artifact_type=artifact_types_by_path[str(path)],
-                metadata={"attempt_id": attempt.attempt_id},
-            )
-        )
-    for path, artifact_type in [
-        (Path(execution_result["stdout_path"]), "command.stdout"),
-        (Path(execution_result["stderr_path"]), "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="genome_survey",
-                    method_name=attempt.method_name,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
-    return artifacts
-
-
-def _record_attempt_success(state: TopLevelState, attempt: FrozenAttemptSpec, artifacts: list[ArtifactMeta]) -> None:
-    data_dir = Path(state.get("data_dir", "data"))
-    append_artifact_records(data_dir, attempt.session_id, artifacts)
-    ledger = Ledger(data_dir)
-    artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-    ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)
-    for artifact in artifact_payloads:
-        ledger.record_artifact_registered(attempt.session_id, artifact, attempt_id=attempt.attempt_id)
 
 
 def _validate_methods(method_names: list[str]) -> str | None:

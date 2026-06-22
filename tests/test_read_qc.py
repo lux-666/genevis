@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import inspect
 from pathlib import Path
 
 from app.control.lifecycle import inspect_session
@@ -15,6 +16,10 @@ from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.read_qc.builder import build_stage
+from app.stages.read_qc.method_application.make_fofn import build_make_fofn_graph
+from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
+from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
+from app.stages.read_qc.method_application import make_fofn, seqkit_length_filter, seqkit_stats
 
 
 class ReadQCSeqKitDescriptorTests(unittest.TestCase):
@@ -56,6 +61,31 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
 
 
 class ReadQCSeqKitStageTests(unittest.TestCase):
+    def test_outer_graph_routes_to_method_subgraphs(self):
+        outer_nodes = set(build_stage().get_graph().nodes)
+        stats_nodes = set(build_seqkit_stats_graph().get_graph().nodes)
+        filter_nodes = set(build_seqkit_length_filter_graph().get_graph().nodes)
+        fofn_nodes = set(build_make_fofn_graph().get_graph().nodes)
+
+        self.assertIn("seqkit_stats", outer_nodes)
+        self.assertIn("seqkit_length_filter", outer_nodes)
+        self.assertIn("make_fofn", outer_nodes)
+        self.assertNotIn("freeze_seqkit_attempt", outer_nodes)
+        self.assertNotIn("maybe_run_length_filter", outer_nodes)
+        self.assertIn("freeze", stats_nodes)
+        self.assertIn("run", stats_nodes)
+        self.assertIn("collect", stats_nodes)
+        self.assertIn("freeze", filter_nodes)
+        self.assertIn("run", filter_nodes)
+        self.assertIn("collect", filter_nodes)
+        self.assertIn("make", fofn_nodes)
+
+    def test_method_subgraphs_do_not_import_parent_stage_modules(self):
+        for module in [seqkit_stats, seqkit_length_filter, make_fofn]:
+            source = inspect.getsource(module)
+            self.assertNotIn("app.stages.read_qc.nodes", source)
+            self.assertNotIn("app.stages.read_qc.routing", source)
+
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
@@ -234,6 +264,24 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
             self.assertIn("artifact_registered", event_types)
+
+    def test_multi_file_quality_summary_weights_by_bases_before_read_count(self):
+        from app.stages.read_qc.method_application.lifecycle import parse_seqkit_summary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_path = Path(tmpdir) / "seqkit_stats.tsv"
+            stats_path.write_text(
+                "file\tnum_seqs\tsum_len\tmin_len\tavg_len\tmax_len\tN50\tQ20(%)\tQ30(%)\tAvgQual\n"
+                "long.fastq\t1\t1000\t1000\t1000\t1000\t1000\t90\t80\t30\n"
+                "short.fastq\t9\t90\t10\t10\t10\t10\t10\t5\t12\n",
+                encoding="utf-8",
+            )
+
+            summary = parse_seqkit_summary(stats_path)
+
+        self.assertAlmostEqual(summary["q20_percent"], ((90 * 1000) + (10 * 90)) / 1090)
+        self.assertAlmostEqual(summary["q30_percent"], ((80 * 1000) + (5 * 90)) / 1090)
+        self.assertAlmostEqual(summary["avg_qual"], ((30 * 1000) + (12 * 90)) / 1090)
 
     def test_without_filter_thresholds_skips_filter_and_writes_raw_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -755,7 +803,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         # The runner sets cwd to data_dir/work/.../seqkit_stats, so a raw
         # relative redirect target lands at a non-existent nested path. The
         # script must therefore embed an absolute artifact path.
-        from app.stages.read_qc.nodes import freeze_seqkit_attempt
+        from app.stages.read_qc.method_application.seqkit_stats import freeze_seqkit_attempt
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

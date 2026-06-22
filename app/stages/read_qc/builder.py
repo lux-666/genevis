@@ -5,27 +5,25 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
+from app.stages.read_qc.method_application import (
+    build_make_fofn_graph,
+    build_seqkit_length_filter_graph,
+    build_seqkit_stats_graph,
+)
 from app.stages.read_qc.nodes import (
-    collect_seqkit_artifacts,
     commit_read_qc,
     enter_read_qc,
     fail_read_qc,
-    freeze_seqkit_attempt,
-    make_fofn,
-    maybe_run_length_filter,
     plan_length_filter,
     plan_seqkit_stats,
     resolve_raw_long_reads,
-    run_seqkit_stats,
 )
 from app.stages.read_qc.routing import (
-    route_after_collect,
-    route_after_freeze,
     route_after_length_filter,
     route_after_make_fofn,
     route_after_plan,
     route_after_resolve,
-    route_after_run,
+    route_after_stats,
 )
 
 
@@ -36,12 +34,10 @@ def build_stage():
     graph.add_node("enter", enter_read_qc)
     graph.add_node("resolve_raw_long_reads", resolve_raw_long_reads)
     graph.add_node("plan_seqkit_stats", plan_seqkit_stats)
-    graph.add_node("freeze_seqkit_attempt", freeze_seqkit_attempt)
-    graph.add_node("run_seqkit_stats", run_seqkit_stats)
-    graph.add_node("collect_seqkit_artifacts", collect_seqkit_artifacts)
+    graph.add_node("seqkit_stats", build_seqkit_stats_graph())
     graph.add_node("plan_length_filter", plan_length_filter)
-    graph.add_node("maybe_run_length_filter", maybe_run_length_filter)
-    graph.add_node("make_fofn", make_fofn)
+    graph.add_node("seqkit_length_filter", build_seqkit_length_filter_graph())
+    graph.add_node("make_fofn", build_make_fofn_graph())
     graph.add_node("commit", commit_read_qc)
     graph.add_node("fail", fail_read_qc)
 
@@ -55,26 +51,16 @@ def build_stage():
     graph.add_conditional_edges(
         "plan_seqkit_stats",
         route_after_plan,
-        {"freeze": "freeze_seqkit_attempt", "filter": "plan_length_filter", "fail": "fail"},
+        {"stats": "seqkit_stats", "filter": "plan_length_filter", "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "freeze_seqkit_attempt",
-        route_after_freeze,
-        {"run": "run_seqkit_stats", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "run_seqkit_stats",
-        route_after_run,
-        {"collect": "collect_seqkit_artifacts", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "collect_seqkit_artifacts",
-        route_after_collect,
+        "seqkit_stats",
+        route_after_stats,
         {"filter": "plan_length_filter", "fail": "fail"},
     )
-    graph.add_edge("plan_length_filter", "maybe_run_length_filter")
+    graph.add_edge("plan_length_filter", "seqkit_length_filter")
     graph.add_conditional_edges(
-        "maybe_run_length_filter",
+        "seqkit_length_filter",
         route_after_length_filter,
         {"fofn": "make_fofn", "fail": "fail"},
     )

@@ -1,0 +1,148 @@
+"""Shared lifecycle helpers for executable genome-survey methods."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable
+
+from langgraph.graph import END, START, StateGraph
+
+from app.control.ledger import Ledger
+from app.execution.artifacts import append_artifact_records
+from app.execution.method_runner import run_frozen_attempt
+from app.schemas.artifacts import ArtifactMeta
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.state import TopLevelState
+
+
+def build_method_graph(
+    freeze: Callable[[TopLevelState], dict],
+    run: Callable[[TopLevelState], dict],
+    collect: Callable[[TopLevelState], dict],
+    *,
+    frozen_status: str,
+    ran_status: str,
+):
+    """Build the common freeze -> run -> collect method subgraph."""
+    graph = StateGraph(TopLevelState)
+    graph.add_node("freeze", freeze)
+    graph.add_node("run", run)
+    graph.add_node("collect", collect)
+    graph.add_node("done", lambda _state: {})
+    graph.add_edge(START, "freeze")
+    graph.add_conditional_edges(
+        "freeze",
+        lambda state: "run" if _status(state) == frozen_status else "done",
+        {"run": "run", "done": "done"},
+    )
+    graph.add_conditional_edges(
+        "run",
+        lambda state: "collect" if _status(state) == ran_status else "done",
+        {"collect": "collect", "done": "done"},
+    )
+    graph.add_edge("collect", "done")
+    graph.add_edge("done", END)
+    return graph.compile()
+
+
+def _status(state: TopLevelState) -> str | None:
+    return genome_survey_output(state).get("status")
+
+
+def genome_survey_output(state: TopLevelState) -> dict[str, Any]:
+    """Return a shallow copy of the genome-survey stage output."""
+    return dict((state.get("stage_outputs") or {}).get("genome_survey", {}))
+
+
+def update_genome_survey_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
+    """Merge a method update into the genome-survey stage output."""
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["genome_survey"] = {**genome_survey_output(state), **payload}
+    return {"stage_outputs": outputs}
+
+
+def run_method_attempt(
+    state: TopLevelState,
+    *,
+    frozen_status: str,
+    frozen_attempt_key: str,
+    execution_result_key: str,
+    ran_status: str,
+) -> dict:
+    """Run one frozen genome-survey method attempt and persist its outcome."""
+    output = genome_survey_output(state)
+    if output.get("status") != frozen_status:
+        return {}
+
+    attempt = FrozenAttemptSpec.model_validate(output[frozen_attempt_key])
+    outcome = run_frozen_attempt(
+        attempt,
+        data_dir=state.get("data_dir", "data"),
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+        fail_label=attempt.method_name,
+    )
+    result = outcome.result.model_dump(mode="json")
+    if not outcome.success:
+        return update_genome_survey_output(
+            state,
+            {"status": "failed", "reason": outcome.error, execution_result_key: result},
+        )
+    return update_genome_survey_output(
+        state,
+        {"status": ran_status, execution_result_key: result},
+    )
+
+
+def attempt_artifacts(
+    attempt: FrozenAttemptSpec,
+    execution_result: dict[str, Any],
+    artifact_types_by_path: dict[str, str],
+) -> list[ArtifactMeta]:
+    """Build artifact metadata for expected outputs and captured command logs."""
+    artifacts: list[ArtifactMeta] = []
+    for path in attempt.expected_outputs:
+        if not path.exists():
+            raise FileNotFoundError(f"expected output missing: {path}")
+        artifacts.append(
+            ArtifactMeta.from_file(
+                path,
+                stage="genome_survey",
+                method_name=attempt.method_name,
+                artifact_type=artifact_types_by_path[str(path)],
+                metadata={"attempt_id": attempt.attempt_id},
+            )
+        )
+    for path, artifact_type in [
+        (Path(execution_result["stdout_path"]), "command.stdout"),
+        (Path(execution_result["stderr_path"]), "command.stderr"),
+    ]:
+        if path.exists():
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    path,
+                    stage="genome_survey",
+                    method_name=attempt.method_name,
+                    artifact_type=artifact_type,
+                    metadata={"attempt_id": attempt.attempt_id},
+                )
+            )
+    return artifacts
+
+
+def record_attempt_success(
+    state: TopLevelState,
+    attempt: FrozenAttemptSpec,
+    artifacts: list[ArtifactMeta],
+) -> None:
+    """Register method artifacts and append successful-attempt ledger events."""
+    data_dir = Path(state.get("data_dir", "data"))
+    append_artifact_records(data_dir, attempt.session_id, artifacts)
+    ledger = Ledger(data_dir)
+    artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
+    ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)
+    for artifact in artifact_payloads:
+        ledger.record_artifact_registered(
+            attempt.session_id,
+            artifact,
+            attempt_id=attempt.attempt_id,
+        )

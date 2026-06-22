@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import tempfile
@@ -11,6 +12,8 @@ from pathlib import Path
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.genome_survey.builder import build_stage
+from app.stages.genome_survey.method_application.genomescope2 import build_genomescope2_graph
+from app.stages.genome_survey.method_application.jellyfish import build_jellyfish_graph
 from app.stages.genome_survey.nodes import _parse_genomescope_summary
 
 
@@ -31,6 +34,48 @@ class GenomeSurveyDescriptorTests(unittest.TestCase):
 
 
 class GenomeSurveyStageTests(unittest.TestCase):
+    def test_method_modules_do_not_depend_on_parent_stage_modules(self):
+        method_modules = [
+            Path("app/stages/genome_survey/method_application/jellyfish.py"),
+            Path("app/stages/genome_survey/method_application/genomescope2.py"),
+        ]
+        forbidden = {
+            "app.stages.genome_survey.nodes",
+            "app.stages.genome_survey.routing",
+        }
+
+        for module_path in method_modules:
+            tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+            imported_modules = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module is not None:
+                        imported_modules.add(node.module)
+                    if node.module == "app.stages.genome_survey":
+                        imported_modules.update(
+                            f"app.stages.genome_survey.{alias.name}" for alias in node.names
+                        )
+            self.assertTrue(
+                forbidden.isdisjoint(imported_modules),
+                f"{module_path} must not depend on parent stage modules",
+            )
+
+    def test_outer_graph_routes_to_method_subgraphs(self):
+        outer_nodes = set(build_stage().get_graph().nodes)
+        jellyfish_nodes = set(build_jellyfish_graph().get_graph().nodes)
+        genomescope2_nodes = set(build_genomescope2_graph().get_graph().nodes)
+
+        self.assertIn("jellyfish", outer_nodes)
+        self.assertIn("genomescope2", outer_nodes)
+        self.assertNotIn("freeze_jellyfish_attempt", outer_nodes)
+        self.assertNotIn("run_genomescope2_attempt", outer_nodes)
+        for nodes in [jellyfish_nodes, genomescope2_nodes]:
+            self.assertIn("freeze", nodes)
+            self.assertIn("run", nodes)
+            self.assertIn("collect", nodes)
+
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
         path.write_text(
