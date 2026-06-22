@@ -186,7 +186,24 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.genome_survey.survey_parameters.kmer_size, 21)
         self.assertEqual(config.genome_survey.survey_parameters.hash_size, "1G")
         self.assertEqual(config.genome_survey.survey_parameters.threads, 4)
-        self.assertIsNone(config.genome_survey.survey_parameters.read_length)
+
+    def test_genome_survey_read_length_is_rejected(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["genome_survey"],
+                    "genome_survey": {
+                        "survey_parameters": {
+                            "kmer_size": 21,
+                            "hash_size": "1G",
+                            "threads": 4,
+                            "read_length": 150,
+                        }
+                    },
+                }
+            )
+
+        self.assertIn("read_length", str(ctx.exception))
 
     def test_read_qc_seqkit_filter_requires_threshold_when_approved(self):
         with self.assertRaises(ValidationError) as ctx:

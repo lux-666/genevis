@@ -211,7 +211,6 @@ class GenomeSurveyRunParameters(BaseModel):
     kmer_size: int = Field(gt=0)
     hash_size: str
     threads: int = Field(default=4, gt=0)
-    read_length: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _hash_size_must_not_be_empty(self) -> "GenomeSurveyRunParameters":

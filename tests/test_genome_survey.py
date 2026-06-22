@@ -302,7 +302,6 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "survey_parameters": {
                         "kmer_size": 21,
-                        "read_length": 150,
                         "hash_size": "10M",
                     },
                 }
@@ -365,7 +364,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
                         "GENOME_SURVEY_CALLED": str(called_marker),
                     },
-                    "survey_parameters": {"kmer_size": 21, "read_length": 150},
+                    "survey_parameters": {"kmer_size": 21},
                 }
             }
 
@@ -404,7 +403,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "survey_parameters": {"kmer_size": 21, "read_length": 150},
+                    "survey_parameters": {"kmer_size": 21},
                 }
             }
 
@@ -551,7 +550,6 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                     "execution_mode": "local",
                     "survey_parameters": {
                         "kmer_size": 21,
-                        "read_length": 150,
                         "hash_size": "10M",
                     },
                 }
@@ -610,7 +608,6 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                     "execution_mode": "local",
                     "survey_parameters": {
                         "kmer_size": 21,
-                        "read_length": 150,
                         "hash_size": "10M",
                     },
                 }
@@ -706,7 +703,6 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
                     "execution_mode": "local",
                     "survey_parameters": {
                         "kmer_size": 21,
-                        "read_length": 150,
                         "hash_size": "10M",
                     },
                 }
