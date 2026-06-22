@@ -14,7 +14,6 @@ from app.stages.genome_survey.nodes import (
     enter_genome_survey,
     fail_genome_survey,
     plan_full_kmer_survey,
-    plan_long_read_fallback,
     resolve_survey_inputs,
     select_survey_mode,
     write_full_survey_result,
@@ -31,7 +30,7 @@ from app.stages.genome_survey.routing import (
 
 
 def build_stage():
-    """Build the genome survey subgraph for full/fallback/skip contracts."""
+    """Build the genome survey subgraph for full-survey or explicit-prior skip."""
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_genome_survey)
@@ -41,7 +40,6 @@ def build_stage():
     graph.add_node("jellyfish", build_jellyfish_graph())
     graph.add_node("genomescope2", build_genomescope2_graph())
     graph.add_node("write_full_survey_result", write_full_survey_result)
-    graph.add_node("plan_long_read_fallback", plan_long_read_fallback)
     graph.add_node("write_survey_skip", write_survey_skip)
     graph.add_node("commit", commit_genome_survey)
     graph.add_node("fail", fail_genome_survey)
@@ -58,7 +56,6 @@ def build_stage():
         route_after_select,
         {
             "full": "plan_full_kmer_survey",
-            "fallback": "plan_long_read_fallback",
             "skip": "write_survey_skip",
             "fail": "fail",
         },
@@ -80,11 +77,6 @@ def build_stage():
     )
     graph.add_conditional_edges(
         "write_full_survey_result",
-        route_after_plan,
-        {"commit": "commit", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "plan_long_read_fallback",
         route_after_plan,
         {"commit": "commit", "fail": "fail"},
     )

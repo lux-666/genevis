@@ -5,9 +5,9 @@ install_channel: conda
 entry_patterns:
   - "jellyfish count -C -m {kmer_size} -s {hash_size} -t {threads} {reads} -o {output_jf}"
   - "jellyfish histo -t {threads} {input_jf} > {histogram_tsv}"
-help_summary: "Jellyfish k-mer counter for low-error short DNA read genome survey."
+help_summary: "Jellyfish k-mer counter for genome survey from available DNA reads."
 known_pitfalls:
-  - "Use low-error short DNA reads; do not treat noisy long reads as equivalent GenomeScope input."
+  - "Survey-derived genome size is required before assembly unless the operator supplied an explicit genome size."
 resource_defaults:
   cpu_cores: 8
   memory_gb: 16.0

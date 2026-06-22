@@ -91,7 +91,7 @@ class GenomeSurveyResult(BaseModel):
     """Compact genome survey contract written by the genome_survey stage."""
 
     session_id: str
-    mode: Literal["full", "fallback_low_confidence", "skipped"]
+    mode: Literal["full", "skipped"]
     status: Literal["planned", "completed", "skipped"]
     confidence: Literal["high", "low", "none"]
     input_asset_refs: list[str] = Field(default_factory=list)

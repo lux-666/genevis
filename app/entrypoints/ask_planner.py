@@ -35,6 +35,10 @@ _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
     "assembly.candidate.canu",
     "assembly.candidate.hifiasm",
 }
+_GENOME_SURVEY_EXECUTABLE_METHODS = {
+    "genome_survey.kmer_count.jellyfish",
+    "genome_survey.model.genomescope2",
+}
 
 # ---------------------------------------------------------------------------
 # Unified method registry — all stages and their methods
@@ -779,7 +783,7 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         and (not has_raw_long_reads or "platform" in shared)
     ):
         all_fields.append("shared_parameters.read_type")
-    if _assembly_needs_shared_genome_size(plan):
+    if _genome_size_must_be_collected(plan):
         all_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
@@ -791,6 +795,14 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         all_fields.append(FUNCTION_DATABASE_PROVENANCE_FIELD)
     display_fields = all_fields if all_fields else missing_fields
     choices: dict[str, Any] = {"defaults": defaults, "shared_defaults": shared_defaults, "stage_defaults": stage_defaults}
+    if _can_defer_genome_size_to_survey(plan):
+        choices["deferred_shared_parameters"] = {
+            "estimated_genome_size": {
+                "value": shared_defaults.get("estimated_genome_size"),
+                "source": "user_or_genome_survey",
+                "status": "provided" if shared_defaults.get("estimated_genome_size") else "awaiting_genome_survey",
+            }
+        }
     if warnings:
         choices["warnings"] = warnings
     return AskClarificationRequest(
@@ -970,13 +982,14 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
     known = _all_known_methods()
     for stage, value in methods.items():
         method_list = value if isinstance(value, list) else [value]
+        stage_methods = {m["method_name"] for m in _STAGE_METHODS.get(stage, [])}
         for method in method_list:
             if not method or not method.strip():
                 raise ValueError(f"empty method name for stage {stage!r}")
-            if method not in known:
-                stage_methods = [m["method_name"] for m in _STAGE_METHODS.get(stage, [])]
+            if method not in stage_methods:
+                reason = "unknown method" if method not in known else "method is not valid"
                 raise ValueError(
-                    f"unknown method {method!r} for stage {stage!r}; "
+                    f"{reason} {method!r} for stage {stage!r}; "
                     f"known methods: {sorted(stage_methods)}"
                 )
         if stage == "read_qc":
@@ -987,6 +1000,17 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
                 raise ValueError(f"read_qc method selection requires {READ_QC_STATS_METHOD}")
             if READ_QC_HANDOFF_METHOD not in method_list:
                 raise ValueError(f"read_qc method selection requires {READ_QC_HANDOFF_METHOD}")
+        if stage == "genome_survey":
+            executable = {
+                method
+                for method in method_list
+                if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
+            }
+            if executable and executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
+                raise ValueError(
+                    "genome_survey executable selection requires both "
+                    "genome_survey.kmer_count.jellyfish and genome_survey.model.genomescope2"
+                )
 
 
 def _normalize_selected_methods(methods: dict[str, str | list[str]]) -> dict[str, str | list[str]]:
@@ -1066,10 +1090,10 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
         return True
     if _assembly_needs_shared_read_type(plan) and "read_type" not in merged_shared:
         return True
-    if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in merged_shared:
+    if _genome_size_must_be_collected(plan) and "estimated_genome_size" not in merged_shared:
         return True
     if (plan.resolved_execution_order or []) and any(
-        method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE | _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE
+        method in _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE
         for _, method in _iter_selected_methods(plan)
     ) and plan.shared_parameters is None and not method_overrides:
         return True
@@ -1121,7 +1145,7 @@ def _missing_parameters_and_defaults(
     )
     if _assembly_needs_shared_read_type(plan) and "read_type" not in shared_defaults:
         missing_fields.append("shared_parameters.read_type")
-    if _assembly_needs_shared_genome_size(plan) and "estimated_genome_size" not in shared_defaults:
+    if _genome_size_must_be_collected(plan) and "estimated_genome_size" not in shared_defaults:
         missing_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
@@ -1241,6 +1265,37 @@ def _assembly_needs_shared_read_type(plan: AskPlanState) -> bool:
 
 def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
     return any(method in _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE for _, method in _iter_selected_methods(plan))
+
+
+def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
+    """Defer only when executable Survey will run before assembly with DNA reads."""
+    order = plan.resolved_execution_order or []
+    if "genome_survey" not in order or "assembly" not in order:
+        return False
+    if order.index("genome_survey") > order.index("assembly"):
+        return False
+    selected = (plan.selected_methods or {}).get("genome_survey")
+    method_list = selected if isinstance(selected, list) else [selected] if selected else []
+    executable = {
+        method
+        for method in method_list
+        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
+    }
+    if executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
+        return False
+    manifest = _load_manifest(plan.manifest_ref)
+    return bool(
+        manifest
+        and any(
+            asset.asset_type
+            in {"raw_short_dna_reads", "clean_short_dna_reads", "raw_long_reads", "clean_long_reads"}
+            for asset in manifest.assets
+        )
+    )
+
+
+def _genome_size_must_be_collected(plan: AskPlanState) -> bool:
+    return _assembly_needs_shared_genome_size(plan) and not _can_defer_genome_size_to_survey(plan)
 
 
 def _method_specific_shared_overrides(plan: AskPlanState) -> dict[str, Any]:

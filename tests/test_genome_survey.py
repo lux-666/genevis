@@ -183,12 +183,17 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 ],
             )
 
-            result = build_stage().invoke(self._state(tmpdir, str(registry)))
+            state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
+
+            result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["genome_size_source"], "user")
             self.assertEqual(survey["skip_reason"], None)
             self.assertIn("genome_survey.kmer_count.jellyfish", survey["candidate_methods"])
             self.assertIn("genome_survey.model.genomescope2", survey["candidate_methods"])
@@ -197,6 +202,50 @@ class GenomeSurveyStageTests(unittest.TestCase):
             payload = json.loads(artifact_ref.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "full")
             self.assertEqual(payload["confidence"], "high")
+
+    def test_full_mode_with_raw_short_reads_writes_high_confidence_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_r1 = Path(tmpdir) / "short_R1.fq.gz"
+            short_r2 = Path(tmpdir) / "short_R2.fq.gz"
+            for path in [short_r1, short_r2]:
+                path.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_short_dna_reads:short_R1.fq.gz",
+                        "asset_type": "raw_short_dna_reads",
+                        "path": str(short_r1),
+                        "platform": "illumina",
+                    },
+                    {
+                        "asset_id": "s1:raw_short_dna_reads:short_R2.fq.gz",
+                        "asset_type": "raw_short_dna_reads",
+                        "path": str(short_r2),
+                        "platform": "illumina",
+                    },
+                ],
+            )
+
+            state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["mode"], "full")
+            self.assertEqual(survey["confidence"], "high")
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["genome_size_source"], "user")
+            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(
+                survey["survey_input_refs"],
+                ["s1:raw_short_dna_reads:short_R1.fq.gz", "s1:raw_short_dna_reads:short_R2.fq.gz"],
+            )
+            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
 
     def test_local_full_mode_runs_jellyfish_and_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -247,6 +296,47 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["estimates"]["genome_size"], 12345)
+            self.assertEqual(survey["genome_size_prior"], 12345)
+
+    def test_local_full_mode_accepts_raw_short_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_reads = Path(tmpdir) / "short.fq"
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_short_dna_reads:short.fq",
+                        "asset_type": "raw_short_dna_reads",
+                        "path": str(short_reads),
+                        "platform": "illumina",
+                    },
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(survey["survey_input_refs"], ["s1:raw_short_dna_reads:short.fq"])
+            payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["input_asset_refs"], ["s1:raw_short_dna_reads:short.fq"])
+            self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
             self.assertEqual(survey["estimates"]["heterozygosity"], 0.001)
             self.assertEqual(survey["estimates"]["repeat_fraction"], 0.2)
             self.assertTrue(Path(survey["kmer_hist_artifact_ref"]).exists())
@@ -279,7 +369,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(event_types.count("attempt_succeeded"), 2)
             self.assertIn("artifact_registered", event_types)
 
-    def test_local_full_mode_keeps_unparseable_genomescope_summary_nonfatal(self):
+    def test_local_full_mode_fails_when_genomescope_summary_has_no_genome_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_reads = Path(tmpdir) / "short.fq"
             short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -309,9 +399,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["current_stage"], "genome_survey")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["last_error"], "genomescope2_genome_size_unavailable")
             survey = result["stage_outputs"]["genome_survey"]
-            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["status"], "failed")
+            self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
+            self.assertIsNone(survey["genome_size_prior"])
             self.assertEqual(
                 survey["estimates"],
                 {"genome_size": None, "heterozygosity": None, "repeat_fraction": None},
@@ -319,6 +413,49 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("genomescope2_genome_size_unparsed", survey["notes"])
             self.assertIn("genomescope2_heterozygosity_unparsed", survey["notes"])
             self.assertIn("genomescope2_repeat_fraction_unparsed", survey["notes"])
+            self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
+
+    def test_local_full_mode_with_unparseable_summary_uses_explicit_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_reads = Path(tmpdir) / "short.fq"
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_short_dna_reads:short.fq",
+                        "asset_type": "clean_short_dna_reads",
+                        "path": str(short_reads),
+                        "platform": "illumina",
+                    }
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir, unparseable_summary=True)
+            state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {
+                        "kmer_size": 21,
+                        "hash_size": "10M",
+                        "threads": 1,
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["genome_size_source"], "user")
+            self.assertEqual(
+                survey["estimates"],
+                {"genome_size": None, "heterozygosity": None, "repeat_fraction": None},
+            )
             self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
 
     def test_parse_genomescope2_summary_table(self):
@@ -339,7 +476,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(estimates["repeat_fraction"], 2469 / 12345)
             self.assertEqual(notes, [])
 
-    def test_local_mode_with_long_reads_only_does_not_run_kmer_tools(self):
+    def test_local_mode_with_long_reads_only_runs_jellyfish_and_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "reads.fastq"
             long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -354,17 +491,13 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     }
                 ],
             )
-            called_marker = Path(tmpdir) / "called"
-            fake_bin = self._fake_survey_bin(tmpdir, fail_if_called=True)
+            fake_bin = self._fake_survey_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "genome_survey": {
                     "execution_mode": "local",
-                    "env": {
-                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "GENOME_SURVEY_CALLED": str(called_marker),
-                    },
-                    "survey_parameters": {"kmer_size": 21},
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
                 }
             }
 
@@ -372,18 +505,14 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
-            self.assertEqual(survey["mode"], "fallback_low_confidence")
-            self.assertEqual(survey["confidence"], "low")
-            self.assertEqual(survey["candidate_methods"], [])
-            self.assertFalse(called_marker.exists())
-            self.assertNotIn("kmer_hist_artifact_ref", survey)
-            ledger_events = [
-                json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
-            ]
-            event_types = [event["event_type"] for event in ledger_events]
-            self.assertNotIn("attempt_started", event_types)
-            self.assertNotIn("attempt_succeeded", event_types)
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "raw_long_reads")
+            self.assertEqual(survey["survey_input_refs"], ["s1:raw_long_reads:reads.fastq"])
+            self.assertEqual(survey["estimates"]["genome_size"], 12345)
+            self.assertEqual(survey["genome_size_prior"], 12345)
+            self.assertEqual(survey["genome_size_source"], "survey")
+            self.assertTrue(Path(survey["kmer_hist_artifact_ref"]).exists())
+            self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
 
     def test_local_full_mode_requires_explicit_hash_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -438,7 +567,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("survey_parameters.kmer_size", result["last_error"])
             self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
 
-    def test_long_read_only_fallback_is_low_confidence(self):
+    def test_explicit_genome_size_keeps_survey_running_but_prior_uses_user_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "BGI_CycloneSEQ.fastq.gz"
             long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -454,29 +583,32 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     }
                 ],
             )
+            fake_bin = self._fake_survey_bin(tmpdir)
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {
-                    "status": "completed",
-                    "summary": {"total_bases": 10_000_000},
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
                 }
             }
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
-            self.assertEqual(survey["mode"], "fallback_low_confidence")
-            self.assertEqual(survey["confidence"], "low")
-            self.assertNotEqual(survey["confidence"], "high")
-            self.assertEqual(survey["estimates"]["coverage"], 5.0)
-            self.assertEqual(survey["candidate_methods"], [])
-            self.assertIn("not_equivalent_to_kmer_survey", survey["notes"])
+            self.assertEqual(survey["mode"], "full")
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "raw_long_reads")
+            self.assertEqual(survey["estimates"]["genome_size"], 12345)
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["genome_size_source"], "user")
             payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(payload["candidate_methods"], [])
-            self.assertIn("not_equivalent_to_kmer_survey", payload["notes"])
+            self.assertEqual(payload["estimates"]["genome_size"], 12345)
+            self.assertEqual(payload["metadata"]["input_family"], "raw_long_reads")
 
-    def test_no_usable_inputs_writes_skip_record(self):
+    def test_no_usable_inputs_fails_with_stable_genome_size_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             rnaseq = Path(tmpdir) / "rna_R1.fq.gz"
             rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -493,13 +625,12 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(self._state(tmpdir, str(registry)))
 
-            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["current_stage"], "genome_survey")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
             survey = result["stage_outputs"]["genome_survey"]
-            self.assertEqual(survey["status"], "skipped")
-            self.assertEqual(survey["mode"], "skipped")
-            self.assertEqual(survey["skip_reason"], "no_low_error_short_reads")
-            self.assertEqual(result["skip_reasons"]["genome_survey"], "no_low_error_short_reads")
-            self.assertTrue(Path(survey["result_artifact_ref"]).exists())
+            self.assertEqual(survey["status"], "failed")
+            self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
+            self.assertIsNone(survey["genome_size_prior"])
 
 
 class GenomeSurveyEnvPreflightTests(unittest.TestCase):

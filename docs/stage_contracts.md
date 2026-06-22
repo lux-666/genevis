@@ -120,12 +120,13 @@ Review triggers:
 
 ## 3. Genome Survey
 
-Purpose: estimate genome size, heterozygosity, and repeat fraction from
-low-error short DNA reads.
+Purpose: estimate genome size, heterozygosity, and repeat fraction from the
+available short or long DNA reads.
 
 Inputs:
 
-- required: `clean_short_dna_reads`
+- required: one of `raw_short_dna_reads`, `clean_short_dna_reads`,
+  `raw_long_reads`, or `clean_long_reads`
 
 Outputs:
 
@@ -134,13 +135,15 @@ Outputs:
 
 Planning rules:
 
-- Run full k-mer survey only when `clean_short_dna_reads` exists.
+- Run Jellyfish plus GenomeScope when short or long DNA reads exist.
 - Use Jellyfish plus GenomeScope as the default full-survey path.
-- Never feed ONT/CLR raw long reads into GenomeScope by default.
-- If short DNA reads are missing but long reads and a size prior exist, record a
-  low-confidence coverage prior; do not label it as a k-mer survey.
-- If no usable survey inputs exist, skip with `no_low_error_short_reads` and set
-  genome size source to `user_or_optional`.
+- If the operator supplied genome size, assembly keeps that value even when
+  survey also estimates genome size.
+- If the operator did not supply genome size, assembly consumes the
+  survey-derived genome size.
+- If no DNA reads exist, or Survey cannot produce genome size and no explicit
+  operator value exists, fail with `GENOME_SIZE_UNAVAILABLE` instead of
+  inventing a prior.
 
 Review triggers:
 

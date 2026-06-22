@@ -4,9 +4,9 @@ language: cli
 install_channel: conda
 entry_patterns:
   - "genomescope2 -i {histogram_tsv} -o {output_dir} -k {kmer_size}"
-help_summary: "GenomeScope2 model fitting for low-error short-read k-mer histograms."
+help_summary: "GenomeScope2 model fitting for genome-survey k-mer histograms."
 known_pitfalls:
-  - "Model confidence depends on low-error short-read k-mer spectra and fit quality."
+  - "If the model summary does not yield genome size and no user genome size exists, assembly must stop."
 resource_defaults:
   cpu_cores: 2
   memory_gb: 8.0

@@ -804,6 +804,8 @@ def _genome_size_prior(state: TopLevelState) -> int | None:
     if inventory.get("genome_size_estimate"):
         return int(inventory["genome_size_estimate"])
     survey = (state.get("stage_outputs") or {}).get("genome_survey") or {}
+    if survey.get("genome_size_prior"):
+        return int(survey["genome_size_prior"])
     estimates = dict(survey.get("estimates") or {})
     for key in ["genome_size_prior", "genome_size"]:
         if estimates.get(key):

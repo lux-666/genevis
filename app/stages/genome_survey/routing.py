@@ -25,8 +25,6 @@ def route_after_select(state: TopLevelState) -> str:
     mode = survey_out.get("selected_mode")
     if mode == "full":
         return "full"
-    if mode == "fallback_low_confidence":
-        return "fallback"
     return "skip"
 
 

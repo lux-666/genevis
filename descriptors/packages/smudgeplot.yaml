@@ -5,7 +5,7 @@ install_channel: conda
 entry_patterns:
   - "smudgeplot.py hetkmers -o {prefix} < {kmer_pairs}"
   - "smudgeplot.py plot {prefix}_coverages.tsv"
-help_summary: "Smudgeplot ploidy/heterozygosity support from low-error short-read k-mers."
+help_summary: "Smudgeplot ploidy/heterozygosity support from k-mer survey data."
 known_pitfalls:
   - "Interpretation requires human review when spectra are abnormal or mixed."
 resource_defaults:

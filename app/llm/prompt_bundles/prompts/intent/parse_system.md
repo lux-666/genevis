@@ -12,7 +12,7 @@ Allowed schema:
   "data_dir": "data",
   "sample_id": "...",
   "platform": "cycloneseq|ont|clr|pacbio_hifi|illumina|unknown",
-  "asset_type_hint": "raw_long_reads|raw_short_dna_reads|raw_rnaseq_reads|raw_isoseq_or_long_rna_reads|hic_reads_registered|hic_alignment_bam|assembly_fasta_registered",
+  "asset_type_hint": "raw_long_reads|clean_long_reads|raw_short_dna_reads|clean_short_dna_reads|raw_rnaseq_reads|raw_isoseq_or_long_rna_reads|hic_reads_registered|hic_alignment_bam|assembly_fasta_registered",
   "target_assembly_level": "contig|scaffold|chromosome",
   "genome_size_estimate": 123456789,
   "requested_stages": ["read_qc|genome_survey|assembly|assembly_dedup|assembly_review|hic_scaffolding|repeat_annotation|gene_annotation|function_annotation"]

@@ -1,11 +1,11 @@
 method_name: genome_survey.kmer_count.jellyfish
 stage: genome_survey
 package_ref: jellyfish
-goal: "Plan Jellyfish k-mer counting for low-error short DNA read genome survey."
+goal: "Plan Jellyfish k-mer counting for genome survey from available DNA reads."
 required_inputs:
-  - name: clean_short_dna_reads
-    type: clean_short_dna_reads
-    description: "Clean low-error short DNA reads."
+  - name: dna_reads
+    type: raw_or_clean_short_or_long_dna_reads
+    description: "Raw or clean short/long DNA reads selected for k-mer survey."
 expected_outputs:
   - name: kmer_histogram
     type: genome_survey_result

@@ -1,4 +1,4 @@
-"""Genome survey stage nodes for full and fallback survey contracts."""
+"""Genome survey stage nodes for Jellyfish/GenomeScope survey contracts."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ EXECUTED_FULL_SURVEY_METHODS = [
     "genome_survey.model.genomescope2",
 ]
 GENOME_SURVEY_METHOD = "genome_survey.contract"
-NO_LOW_ERROR_SHORT_READS = "no_low_error_short_reads"
+GENOME_SIZE_UNAVAILABLE = "GENOME_SIZE_UNAVAILABLE"
 
 
 def _genome_survey_output(state: TopLevelState) -> dict[str, Any]:
@@ -43,6 +43,23 @@ def _update_genome_survey_output(state: TopLevelState, payload: dict[str, Any]) 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
     return _update_genome_survey_output(state, {"status": "failed", "reason": reason})
+
+
+def _survey_input_family(assets: dict[str, Any]) -> str | None:
+    if assets.get("clean_short_dna_reads"):
+        return "clean_short_dna_reads"
+    if assets.get("raw_short_dna_reads"):
+        return "raw_short_dna_reads"
+    if assets.get("clean_long_reads"):
+        return "clean_long_reads"
+    if assets.get("raw_long_reads"):
+        return "raw_long_reads"
+    return None
+
+
+def _survey_input_assets(assets: dict[str, Any]) -> list[dict[str, Any]]:
+    family = _survey_input_family(assets)
+    return list(assets.get(family) or []) if family else []
 
 
 def enter_genome_survey(state: TopLevelState) -> dict:
@@ -64,6 +81,8 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
     assets = registry.get("assets", [])
     clean_short = _assets_of_type(assets, "clean_short_dna_reads")
     raw_short = _assets_of_type(assets, "raw_short_dna_reads")
+    clean_long = _assets_of_type(assets, "clean_long_reads")
+    raw_long = _assets_of_type(assets, "raw_long_reads")
     long_reads = [
         asset
         for asset in assets
@@ -80,6 +99,8 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
             "resolved_assets": {
                 "clean_short_dna_reads": clean_short,
                 "raw_short_dna_reads": raw_short,
+                "clean_long_reads": clean_long,
+                "raw_long_reads": raw_long,
                 "long_reads": long_reads,
             },
         },
@@ -87,26 +108,47 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
 
 
 def select_survey_mode(state: TopLevelState) -> dict:
-    """Select full, fallback, or skipped mode from available inputs."""
+    """Select a full survey or skip only when an explicit prior is available."""
     survey_out = _genome_survey_output(state)
     if survey_out.get("status") != "resolved":
         return {}
 
     assets = survey_out.get("resolved_assets", {})
-    clean_short = assets.get("clean_short_dna_reads") or []
-    long_reads = assets.get("long_reads") or []
-    if clean_short:
-        mode = "full"
-    elif long_reads:
-        mode = "fallback_low_confidence"
-    else:
-        mode = "skipped"
+    input_family = _survey_input_family(assets)
+    if input_family:
+        return _update_genome_survey_output(
+            state,
+            {
+                "status": "selected",
+                "selected_mode": "full",
+                "survey_input_family": input_family,
+                "survey_input_refs": _asset_ids(assets.get(input_family) or []),
+            },
+        )
 
-    return _update_genome_survey_output(state, {"status": "selected", "selected_mode": mode})
+    explicit_prior = _explicit_genome_size_prior(state)
+    if explicit_prior is not None:
+        return _update_genome_survey_output(
+            state,
+            {
+                "status": "selected",
+                "selected_mode": "skipped_explicit_prior",
+                "genome_size_prior": explicit_prior,
+            },
+        )
+    return _update_genome_survey_output(
+        state,
+        {
+            "status": "failed",
+            "error_code": GENOME_SIZE_UNAVAILABLE,
+            "genome_size_prior": None,
+            "reason": "genome survey requires short or long DNA reads when no explicit genome size is provided",
+        },
+    )
 
 
 def plan_full_kmer_survey(state: TopLevelState) -> dict:
-    """Plan or start a full k-mer survey for low-error short DNA reads."""
+    """Plan or start a full k-mer survey for available DNA reads."""
     survey_out = _genome_survey_output(state)
     if survey_out.get("selected_mode") != "full":
         return {}
@@ -116,7 +158,8 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
         return _fail_update(state, descriptor_error)
 
     assets = survey_out.get("resolved_assets", {})
-    input_refs = _asset_ids(assets.get("clean_short_dna_reads") or [])
+    input_family = survey_out.get("survey_input_family") or _survey_input_family(assets)
+    input_refs = survey_out.get("survey_input_refs") or _asset_ids(_survey_input_assets(assets))
     if survey_out.get("execution_mode") == "local":
         params, error = _survey_parameters(survey_out, state)
         if error:
@@ -141,6 +184,8 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
                 "candidate_methods": FULL_SURVEY_METHODS,
                 "executed_methods": EXECUTED_FULL_SURVEY_METHODS,
                 "survey_parameters": params,
+                "survey_input_family": input_family,
+                "survey_input_refs": input_refs,
                 "substeps": substeps,
                 "skip_reason": None,
             },
@@ -159,11 +204,14 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
             "repeat_fraction": None,
         },
         notes=[
-            "full_mode_requires_low_error_short_dna_reads",
+            "full_mode_uses_available_dna_reads",
             "local_execution_not_enabled",
         ],
-        metadata={"input_family": "clean_short_dna_reads"},
+        metadata={"input_family": input_family},
     )
+    prior_update = _genome_size_prior_update(state, result.estimates, "local_execution_not_enabled")
+    if prior_update.get("status") == "failed":
+        return _update_genome_survey_output(state, prior_update)
     return _record_result(
         state,
         result,
@@ -171,10 +219,13 @@ def plan_full_kmer_survey(state: TopLevelState) -> dict:
             "status": "completed",
             "mode": result.mode,
             "confidence": result.confidence,
+            **prior_update,
             "skip_reason": None,
             "candidate_methods": result.candidate_methods,
             "estimates": result.estimates,
             "notes": result.notes,
+            "survey_input_family": input_family,
+            "survey_input_refs": input_refs,
         },
     )
 
@@ -191,21 +242,24 @@ def write_full_survey_result(state: TopLevelState) -> dict:
         mode="full",
         status="completed",
         confidence="high",
-        input_asset_refs=survey_out.get("clean_short_dna_read_refs", []),
+        input_asset_refs=survey_out.get("survey_input_refs", []),
         candidate_methods=FULL_SURVEY_METHODS,
         estimates=estimates,
         notes=[
-            "full_mode_requires_low_error_short_dna_reads",
+            "full_mode_uses_available_dna_reads",
             "executed_jellyfish_and_genomescope2",
             *parse_notes,
         ],
         metadata={
-            "input_family": "clean_short_dna_reads",
+            "input_family": survey_out.get("survey_input_family"),
             "executed_methods": EXECUTED_FULL_SURVEY_METHODS,
             "kmer_hist_ref": survey_out.get("kmer_hist_artifact_ref"),
             "genomescope2_summary_ref": survey_out.get("genomescope2_summary_ref"),
         },
     )
+    prior_update = _genome_size_prior_update(state, result.estimates, "genomescope2_genome_size_unavailable")
+    if prior_update.get("status") == "failed":
+        return _update_genome_survey_output(state, {**prior_update, "estimates": result.estimates, "notes": result.notes})
     return _record_result(
         state,
         result,
@@ -213,6 +267,7 @@ def write_full_survey_result(state: TopLevelState) -> dict:
             "status": "completed",
             "mode": result.mode,
             "confidence": result.confidence,
+            **prior_update,
             "skip_reason": None,
             "candidate_methods": result.candidate_methods,
             "executed_methods": EXECUTED_FULL_SURVEY_METHODS,
@@ -223,55 +278,10 @@ def write_full_survey_result(state: TopLevelState) -> dict:
     )
 
 
-def plan_long_read_fallback(state: TopLevelState) -> dict:
-    """Write a low-confidence CycloneSEQ-only fallback summary."""
-    survey_out = _genome_survey_output(state)
-    if survey_out.get("selected_mode") != "fallback_low_confidence":
-        return {}
-
-    long_reads = (survey_out.get("resolved_assets") or {}).get("long_reads") or []
-    total_bases = _read_qc_total_bases(state)
-    genome_size_prior = _genome_size_prior(state, long_reads)
-    estimates: dict[str, Any] = {
-        "total_bases": total_bases,
-        "genome_size_prior": genome_size_prior,
-    }
-    if total_bases and genome_size_prior:
-        estimates["coverage"] = total_bases / genome_size_prior
-
-    result = GenomeSurveyResult(
-        session_id=state["session_id"],
-        mode="fallback_low_confidence",
-        status="planned",
-        confidence="low",
-        input_asset_refs=_asset_ids(long_reads),
-        candidate_methods=[],
-        estimates=estimates,
-        notes=[
-            "not_equivalent_to_kmer_survey",
-            "coverage_estimate_requires_total_bases_and_genome_size_prior",
-        ],
-        metadata={"input_family": "cycloneseq_long_reads"},
-    )
-    return _record_result(
-        state,
-        result,
-        {
-            "status": "completed",
-            "mode": result.mode,
-            "confidence": result.confidence,
-            "skip_reason": None,
-            "candidate_methods": result.candidate_methods,
-            "estimates": result.estimates,
-            "notes": result.notes,
-        },
-    )
-
-
 def write_survey_skip(state: TopLevelState) -> dict:
-    """Write an explicit skip record for missing usable survey inputs."""
+    """Write an explicit skip record when an operator supplied genome size."""
     survey_out = _genome_survey_output(state)
-    if survey_out.get("selected_mode") != "skipped":
+    if survey_out.get("selected_mode") != "skipped_explicit_prior":
         return {}
 
     result = GenomeSurveyResult(
@@ -282,8 +292,8 @@ def write_survey_skip(state: TopLevelState) -> dict:
         input_asset_refs=[],
         candidate_methods=[],
         estimates={},
-        skip_reason=NO_LOW_ERROR_SHORT_READS,
-        notes=["no_clean_short_dna_reads_or_cycloneseq_long_reads_available"],
+        skip_reason="explicit_genome_size_prior",
+        notes=["genome_survey_skipped_because_explicit_genome_size_prior_is_available"],
     )
     update = _record_result(
         state,
@@ -292,6 +302,7 @@ def write_survey_skip(state: TopLevelState) -> dict:
             "status": "skipped",
             "mode": result.mode,
             "confidence": result.confidence,
+            "genome_size_prior": survey_out.get("genome_size_prior"),
             "skip_reason": result.skip_reason,
             "candidate_methods": [],
             "estimates": {},
@@ -300,23 +311,26 @@ def write_survey_skip(state: TopLevelState) -> dict:
     )
     update["skip_reasons"] = {
         **(state.get("skip_reasons") or {}),
-        "genome_survey": NO_LOW_ERROR_SHORT_READS,
+        "genome_survey": result.skip_reason,
     }
     return update
 
 
 def commit_genome_survey(state: TopLevelState) -> dict:
-    """Advance to assembly after survey planning, fallback, or skip."""
+    """Advance to assembly after survey planning, execution, or skip."""
     survey_out = _genome_survey_output(state)
     committed_keys = [
         "artifact_refs",
         "candidate_methods",
         "confidence",
         "env_target",
+        "error_code",
         "estimates",
         "executed_methods",
         "genomescope2_output_dir_ref",
         "genomescope2_summary_ref",
+        "genome_size_prior",
+        "genome_size_source",
         "kmer_db_artifact_ref",
         "kmer_hist_artifact_ref",
         "method_name",
@@ -325,6 +339,8 @@ def commit_genome_survey(state: TopLevelState) -> dict:
         "notes",
         "reason",
         "result_artifact_ref",
+        "survey_input_family",
+        "survey_input_refs",
         "skip_reason",
         "status",
         "substeps",
@@ -411,59 +427,18 @@ def _survey_parameters(survey_out: dict[str, Any], state: TopLevelState) -> tupl
     missing = [key for key in ["kmer_size", "hash_size"] if key not in raw_params]
     if missing:
         return {}, "genome_survey local execution requires explicit survey_parameters." + missing[0]
-    read_length_raw = raw_params.get("read_length")
-    if read_length_raw is None:
-        read_length_raw = _read_length_from_read_qc(state)
-    if read_length_raw is None:
-        return {}, (
-            "genome_survey local execution requires read_length from "
-            "read_qc.summary.avg_len or explicit survey_parameters.read_length"
-        )
     try:
         kmer_size = int(raw_params["kmer_size"])
-        read_length = int(read_length_raw)
         threads = int(raw_params.get("threads", 1))
     except (TypeError, ValueError):
-        return {}, "genome_survey local execution requires integer kmer_size, read_length, and threads"
-    if kmer_size <= 0 or read_length <= 0 or threads <= 0:
-        return {}, "genome_survey local execution requires positive kmer_size, read_length, and threads"
+        return {}, "genome_survey local execution requires integer kmer_size and threads"
+    if kmer_size <= 0 or threads <= 0:
+        return {}, "genome_survey local execution requires positive kmer_size and threads"
     return {
         "kmer_size": kmer_size,
-        "read_length": read_length,
         "threads": threads,
         "hash_size": str(raw_params["hash_size"]),
     }, None
-
-
-def _read_length_from_read_qc(state: TopLevelState) -> int | None:
-    summary = _read_qc_summary(state)
-    for key in ("avg_len", "n50", "max_len"):
-        value = summary.get(key)
-        if value is None:
-            continue
-        try:
-            parsed = int(round(float(value)))
-        except (TypeError, ValueError):
-            continue
-        if parsed > 0:
-            return parsed
-    return None
-
-
-def _read_qc_summary(state: TopLevelState) -> dict[str, Any]:
-    read_qc = ((state.get("stage_outputs") or {}).get("read_qc") or {})
-    summary = read_qc.get("summary")
-    if isinstance(summary, dict):
-        return summary
-    summary_ref = read_qc.get("summary_artifact_ref")
-    if not summary_ref:
-        return {}
-    try:
-        payload = json.loads(Path(summary_ref).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    loaded = payload.get("summary") if isinstance(payload, dict) else None
-    return loaded if isinstance(loaded, dict) else {}
 
 
 def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:
@@ -534,19 +509,42 @@ def _asset_ids(assets: list[dict[str, Any]]) -> list[str]:
     return [asset.get("asset_id", "") for asset in assets if asset.get("asset_id")]
 
 
-def _read_qc_total_bases(state: TopLevelState) -> int | None:
-    summary = ((state.get("stage_outputs") or {}).get("read_qc") or {}).get("summary") or {}
-    total = summary.get("total_bases", summary.get("sum_len"))
-    return int(total) if total else None
+def _explicit_genome_size_prior(state: TopLevelState) -> int | None:
+    """Return only an operator-provided genome size, never survey output."""
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(exclude_none=True)
+    value = dict(shared).get("estimated_genome_size")
+    if value:
+        return int(value)
 
-
-def _genome_size_prior(state: TopLevelState, assets: list[dict[str, Any]]) -> int | None:
-    inventory_prior = ((state.get("stage_outputs") or {}).get("inventory") or {}).get("genome_size_estimate")
-    if inventory_prior:
-        return int(inventory_prior)
-    for asset in assets:
-        metadata = asset.get("metadata") or {}
-        prior = metadata.get("genome_size_estimate")
-        if prior:
-            return int(prior)
+    assembly = (state.get("stage_outputs") or {}).get("assembly") or {}
+    for params, key in (
+        (assembly.get("flye_parameters") or {}, "estimated_genome_size"),
+        (assembly.get("nextdenovo_parameters") or {}, "genome_size"),
+    ):
+        if params.get(key):
+            return int(params[key])
     return None
+
+
+def _genome_size_prior_update(
+    state: TopLevelState,
+    estimates: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    explicit_prior = _explicit_genome_size_prior(state)
+    if explicit_prior is not None:
+        return {"genome_size_prior": explicit_prior, "genome_size_source": "user"}
+
+    survey_size = estimates.get("genome_size")
+    if survey_size:
+        return {"genome_size_prior": int(survey_size), "genome_size_source": "survey"}
+
+    return {
+        "status": "failed",
+        "error_code": GENOME_SIZE_UNAVAILABLE,
+        "genome_size_prior": None,
+        "genome_size_source": None,
+        "reason": reason,
+    }

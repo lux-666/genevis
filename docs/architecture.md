@@ -32,7 +32,7 @@ START
     -> END
 ```
 
-`genome_survey` and `hic_scaffolding` are domain stages but must be skippable by planner policy. Genome survey runs only when low-error short DNA reads are registered. Hi-C scaffolding runs only when Hi-C assets exist and the user requests chromosome-level assembly.
+`genome_survey` and `hic_scaffolding` are domain stages but must be skippable by planner policy. Genome survey runs when raw/clean short or long DNA reads are registered; assembly requires either an explicit user genome size or a survey-derived genome size. Hi-C scaffolding runs only when Hi-C assets exist and the user requests chromosome-level assembly.
 
 The parent graph must stay thin. It should route by `current_stage`, call a
 compiled stage subgraph, then return to `route_controller`. It should not inspect

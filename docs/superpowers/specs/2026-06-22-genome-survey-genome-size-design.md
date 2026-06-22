@@ -19,10 +19,11 @@ assembly.
 ## Flow
 
 1. The ask/planner flow may defer `genome_size` only when Genome Survey is
-   selected and short DNA reads are present; otherwise it keeps collecting the
-   value as an assembly parameter.
-2. When clean short DNA reads are available, the existing Genome Survey stage
-   runs before assembly.
+   selected before assembly, executable Jellyfish plus GenomeScope2 are chosen,
+   and raw/clean short or long DNA reads are present; otherwise it keeps
+   collecting the value as an assembly parameter.
+2. When raw/clean short or long DNA reads are available, the existing Genome
+   Survey stage runs before assembly.
 3. On success, Genome Survey writes its genome-size estimate into the existing
    `genome_size_prior` path. Assembly consumes that field without requiring a
    second representation.
@@ -45,7 +46,9 @@ assembly.
 The failure is intentional: do not ask for a late user override or silently
 select another assembler. Preserve a human-readable reason and the underlying
 survey failure details alongside the stable error code. An explicit user value
-may skip Survey when clean short DNA reads are unavailable.
+may skip Survey only when no short or long DNA reads are available; if reads are
+available, Survey still runs and the explicit user value remains the assembly
+prior.
 
 ## Tests
 

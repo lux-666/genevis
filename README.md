@@ -20,8 +20,9 @@ inventory -> read_qc -> genome_survey -> assembly -> assembly_review
 -> hic_scaffolding -> repeat_annotation -> gene_annotation -> function_annotation
 ```
 
-`genome_survey` plans a full k-mer survey only when low-error short DNA reads
-exist; CycloneSEQ-only projects get an explicit low-confidence fallback record.
+`genome_survey` runs Jellyfish + GenomeScope2 when short or long DNA reads are
+available. If the operator supplies genome size, assembly uses that value;
+otherwise assembly uses the survey-derived genome size.
 `hic_scaffolding` runs only when Hi-C assets exist and chromosome-level assembly
 is requested.
 
@@ -55,8 +56,9 @@ Implemented:
 - real `read_qc` stage with SeqKit stats, optional `seqkit seq` min-length
   filtering, stable `long_reads.fofn` / `filtered_long_reads.fofn`, and
   `read_qc_summary.json`
-- real `genome_survey` stage with full Jellyfish + GenomeScope2 opt-in
-  execution, CycloneSEQ-only low-confidence fallback, and explicit skip record
+- real `genome_survey` stage with Jellyfish + GenomeScope2 opt-in execution
+  over short or long DNA reads, survey-derived genome size handoff to assembly,
+  and explicit skip/fail records when no DNA reads are available
 - real `assembly` stage with deterministic candidate planning, opt-in local
   Flye and NextDenovo execution (method-specific parameter validation →
   `blocked_param`), and materialized `draft_assembly.fasta`; Canu and hifiasm

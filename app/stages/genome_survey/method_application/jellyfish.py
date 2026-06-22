@@ -63,7 +63,8 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     params = dict(output["survey_parameters"])
-    assets = (output.get("resolved_assets") or {}).get("clean_short_dna_reads") or []
+    input_family = output.get("survey_input_family") or "clean_short_dna_reads"
+    assets = (output.get("resolved_assets") or {}).get(input_family) or []
     read_paths = [str(Path(asset["path"])) for asset in assets]
     kmer_db = artifact_dir / "jellyfish_kmers.jf"
     kmer_hist = artifact_dir / "kmer_hist.tsv"
@@ -89,7 +90,8 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
         env=output.get("env"),
         env_spec=env_spec,
         metadata={
-            "input_asset_refs": output.get("clean_short_dna_read_refs", []),
+            "input_asset_refs": output.get("survey_input_refs", []),
+            "input_family": input_family,
             "kmer_size": params["kmer_size"],
             "kmer_db_path": str(kmer_db),
             "kmer_hist_path": str(kmer_hist),

@@ -191,8 +191,10 @@ class AssemblyStageTests(unittest.TestCase):
                 },
                 "genome_survey": {
                     "status": "completed",
-                    "mode": "fallback_low_confidence",
-                    "estimates": {"genome_size_prior": 2_000_000},
+                    "mode": "full",
+                    "genome_size_prior": 2_000_000,
+                    "genome_size_source": "survey",
+                    "estimates": {"genome_size": 2_000_000},
                     "result_artifact_ref": str(Path(tmpdir) / "genome_survey_result.json"),
                 },
                 "assembly": {

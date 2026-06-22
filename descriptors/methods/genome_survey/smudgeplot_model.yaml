@@ -5,7 +5,7 @@ goal: "Plan Smudgeplot support for k-mer based ploidy and heterozygosity review.
 required_inputs:
   - name: kmer_pairs
     type: genome_survey_result
-    description: "Short-read k-mer pair coverage material derived from a k-mer counter."
+    description: "K-mer pair coverage material derived from the selected survey reads."
 expected_outputs:
   - name: genome_survey_result
     type: genome_survey_result

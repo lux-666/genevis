@@ -1,13 +1,14 @@
-# 04 Genome Survey Full And Fallback Modes
+# 04 Genome Survey K-mer Survey Modes
 
 Task status: implemented.
 
 ## Goal
 
-Add a real `genome_survey` contract after read QC with two modes:
+Add a real `genome_survey` contract after read QC with one executable survey
+path over available DNA reads:
 
-- full mode with low-error short DNA reads;
-- low-confidence fallback mode with CycloneSEQ long reads only.
+- Jellyfish + GenomeScope2 survey over short DNA reads when available;
+- otherwise Jellyfish + GenomeScope2 survey over long DNA reads when available.
 
 ## Files
 
@@ -23,11 +24,12 @@ Add a real `genome_survey` contract after read QC with two modes:
 ## Project Context
 
 `genome_survey` is currently a placeholder stage. This task should replace it
-with a deterministic planner/contract stage, not a full Jellyfish execution
-stage.
+with a deterministic planner/contract stage and later executable Jellyfish +
+GenomeScope2 method path.
 
-The project already documents that `genome_survey` is skippable. Existing
-assembly inputs and long-read-only CycloneSEQ projects must not be blocked here.
+The project already documents that `genome_survey` is skippable only when no
+DNA-read survey input exists. Long-read-only ONT/CLR/CycloneSEQ projects still
+run the survey path.
 
 ## Node Plan
 
@@ -37,19 +39,18 @@ Replace the placeholder with:
 enter_genome_survey
 -> resolve_survey_inputs
 -> select_survey_mode
--> plan_full_kmer_survey or plan_long_read_fallback or write_survey_skip
+-> plan_full_kmer_survey or write_survey_skip
 -> commit_genome_survey
 ```
 
 Suggested nodes:
 
-- `resolve_survey_inputs`: read asset registry refs for short DNA reads and
-  long-read stats/FOFN refs.
-- `select_survey_mode`: choose `full`, `fallback_low_confidence`, or `skipped`.
+- `resolve_survey_inputs`: read asset registry refs for raw/clean short DNA
+  reads and raw/clean long DNA reads.
+- `select_survey_mode`: choose `full` survey for available short or long DNA
+  reads, or explicit skip/failure when no DNA reads are available.
 - `plan_full_kmer_survey`: descriptor-backed plan for Jellyfish/Meryl and
   GenomeScope2/Smudgeplot.
-- `plan_long_read_fallback`: compact coverage/genome-size estimate with low
-  confidence.
 - `write_survey_skip`: explicit skip record for no usable inputs.
 
 ## Reuse From `rna_agent`
@@ -67,9 +68,10 @@ Do not copy:
 
 ## Optimization Notes
 
-- Store confidence explicitly: `high` only for valid short-read k-mer survey,
-  `low` for CycloneSEQ-only fallback.
-- Make assembly consume survey as a prior; do not make it a hard prerequisite.
+- Store the survey input family explicitly so downstream consumers know whether
+  the run used short or long DNA reads.
+- Make assembly consume survey as a prior; if neither user nor Survey provides
+  genome size, stop before assembly with `GENOME_SIZE_UNAVAILABLE`.
 - Keep abnormal spectrum/model-fit review for a later real survey execution
   task.
 
@@ -77,7 +79,8 @@ Do not copy:
 
 Condition:
 
-- `clean_short_dna_reads` exists
+- `raw_short_dna_reads`, `clean_short_dna_reads`, `raw_long_reads`, or
+  `clean_long_reads` exists
 
 Candidates:
 
@@ -95,85 +98,66 @@ Outputs:
 - repeat fraction estimate
 - confidence label
 
-## Fallback Mode Contract
-
-Condition:
-
-- only CycloneSEQ `raw_long_reads` / `clean_long_reads` exists
-
-Allowed behavior:
-
-- estimate coverage from total bases and human/user genome-size prior when
-  available;
-- produce rough genome size note only if input data supports it;
-- set confidence low.
-
-Required guardrail:
-
-- Do not pretend long-read-only fallback is equivalent to Jellyfish/Meryl plus
-  GenomeScope2/Smudgeplot.
-
 ## Tasks
 
-- [x] Add route decision for full mode, fallback mode, and skipped mode.
+- [x] Add route decision for full survey mode and skipped/failed mode.
 - [x] Add `genome_survey_result` artifact schema.
-- [x] Add skip reason `no_low_error_short_reads`.
-- [x] Add low-confidence fallback summary for CycloneSEQ-only projects.
+- [x] Add stable failure/skip handling when no DNA reads exist.
+- [x] Add long-read survey support for ONT/CLR/CycloneSEQ-only projects.
 - [x] Add descriptor placeholders for Jellyfish, Meryl, GenomeScope2, and
   Smudgeplot.
-- [x] Add tests for full mode with short reads.
-- [x] Add tests for fallback mode with only long reads.
-- [x] Add tests that long-read-only mode cannot be marked high-confidence k-mer
-  survey.
+- [x] Add tests for survey mode with short reads.
+- [x] Add tests for survey mode with only long reads.
+- [x] Add tests that user-provided genome size remains the assembly prior even
+  when survey also produces a genome-size estimate.
 
 ## Implemented State
 
 - `app/stages/genome_survey/builder.py` now builds a real deterministic
   subgraph instead of the generic placeholder.
 - `app/stages/genome_survey/nodes.py` resolves asset registry inputs, chooses
-  `full`, `fallback_low_confidence`, or `skipped`, writes a compact
+  `full` survey or explicit skip/failure, writes a compact
   `genome_survey_result.json`, appends artifact metadata, and advances to
-  `assembly`.
+  `assembly` only when a user or survey genome-size prior exists.
 - `app/schemas/artifacts.py` defines `GenomeSurveyResult` for compact survey
   contract artifacts.
 - `descriptors/packages/` and `descriptors/methods/genome_survey/` now include
   placeholders for Jellyfish, Meryl, GenomeScope2, and Smudgeplot. These are
   planning descriptors, not executable method implementations.
-- Full mode requires `clean_short_dna_reads` and is marked `confidence: high`.
-- CycloneSEQ long-read fallback is marked `confidence: low`, may compute rough
-  coverage only when total bases and a genome-size prior are available, and
-  carries the guardrail note `not_equivalent_to_kmer_survey`.
-- Skipped mode writes `skip_reason: no_low_error_short_reads` so downstream
-  stages can inspect the reason without blocking assembly.
+- Full survey mode runs when short or long DNA reads are available.
+- If the operator supplied genome size, assembly uses that value; otherwise it
+  uses the survey-derived genome size.
+- Skipped mode is reserved for explicit user genome size with no DNA-read survey
+  input. Failure mode covers no usable DNA reads without explicit genome size, or
+  survey execution that cannot produce genome size without explicit genome size.
 - `tests/test_genome_survey.py` covers descriptor loading, missing registry,
-  full mode, low-confidence fallback, and skip behavior.
+  short-read survey, long-read survey, explicit genome-size precedence,
+  estimate-less survey failure, and no-usable-input behavior.
 
 改动要点：
 
 - `app/stages/genome_survey/builder.py` 将 `genome_survey` 从 placeholder 换成
-  full/fallback/skipped 三分支规划子图。
+  full survey / skip-fail 规划子图。
 - `app/stages/genome_survey/nodes.py` 解析 asset registry 中的 short DNA reads、long
-  reads 和 read QC summary，选择 full k-mer survey、CycloneSEQ-only low-confidence
-  fallback 或显式 skip。
+  reads，选择 Jellyfish + GenomeScope2 survey 或显式 skip/fail。
 - `app/schemas/artifacts.py` 的 `GenomeSurveyResult` 是下游 assembly 读取的 compact
   survey contract；图状态只保存 ref、mode、confidence、summary。
 - `descriptors/packages/{jellyfish,meryl,genomescope2,smudgeplot}.yaml` 和
   `descriptors/methods/genome_survey/` 只注册规划候选，不执行工具。
-- `tests/test_genome_survey.py` 覆盖 short-read full mode、long-read-only fallback、无可用输入 skip、缺 registry 失败。
+- `tests/test_genome_survey.py` 覆盖 short-read survey、long-read survey、用户 genome size 优先、无可用输入失败、解析不到 genome size 失败、缺 registry 失败。
 
 ## Non-Goals
 
 - Do not run Jellyfish, Meryl, GenomeScope2, or Smudgeplot in this task unless a
   later method-specific task says so.
-- Do not require genome survey before assembly.
-- Do not infer precise genome size from noisy long reads without human-approved
-  policy.
+- Do not start assembly without a user-provided or survey-derived genome size.
+- Do not let survey output override an operator-provided genome size.
 
 ## Acceptance Criteria
 
-- `genome_survey` can express full, fallback, and skipped states.
-- Full mode depends on short DNA reads.
-- Fallback mode is explicitly low-confidence.
+- `genome_survey` can express full survey and skipped/failed states.
+- Full mode depends on short or long DNA reads.
+- User-provided genome size remains preferred over survey-derived genome size.
 - Assembly can later consume `genome_survey_result` as a prior, not a hard
   dependency.
 

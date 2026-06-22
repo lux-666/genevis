@@ -317,6 +317,30 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown method"):
             merge_clarification_response(plan, response)
 
+    def test_method_name_must_belong_to_selected_stage(self):
+        plan = _base_plan(
+            selected_stages=["genome_survey"],
+            resolved_execution_order=["genome_survey"],
+        )
+        response = AskClarificationResponse(
+            kind="method_selection",
+            selected_methods={"genome_survey": "function_annotation.candidate.kofamscan"},
+        )
+        with self.assertRaisesRegex(ValueError, "method is not valid"):
+            merge_clarification_response(plan, response)
+
+    def test_genome_survey_rejects_partial_executable_selection(self):
+        plan = _base_plan(
+            selected_stages=["genome_survey"],
+            resolved_execution_order=["genome_survey"],
+        )
+        response = AskClarificationResponse(
+            kind="method_selection",
+            selected_methods={"genome_survey": ["genome_survey.kmer_count.jellyfish"]},
+        )
+        with self.assertRaisesRegex(ValueError, "requires both"):
+            merge_clarification_response(plan, response)
+
     def test_read_qc_rejects_multiple_filter_choices(self):
         plan = _base_plan(
             selected_stages=["read_qc"],
@@ -348,6 +372,129 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertEqual(result.kind, "parameter_values")
         self.assertTrue(any("read_type" in f for f in result.required_fields))
         self.assertTrue(any("estimated_genome_size" in f for f in result.required_fields))
+
+    def test_raw_short_read_executable_survey_defers_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_reads = Path(tmp) / "long.fq"
+            short_reads = Path(tmp) / "short.fq"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {long_reads}\n    format: fastq\n    platform: ont\n  - asset_type: raw_short_dna_reads\n    paths:\n      - {short_reads}\n    format: fastq\n    platform: illumina\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["genome_survey", "assembly"],
+                resolved_execution_order=["genome_survey", "assembly"],
+                selected_methods={
+                    "genome_survey": [
+                        "genome_survey.kmer_count.jellyfish",
+                        "genome_survey.model.genomescope2",
+                    ],
+                    "assembly": "assembly.candidate.flye",
+                },
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertFalse(any("estimated_genome_size" in field for field in result.required_fields))
+        self.assertEqual(
+            result.choices["deferred_shared_parameters"]["estimated_genome_size"]["status"],
+            "awaiting_genome_survey",
+        )
+
+    def test_clean_short_read_executable_survey_defers_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_reads = Path(tmp) / "long.fq"
+            short_reads = Path(tmp) / "short.fq"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {long_reads}\n    format: fastq\n    platform: ont\n  - asset_type: clean_short_dna_reads\n    paths:\n      - {short_reads}\n    format: fastq\n    platform: illumina\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["genome_survey", "assembly"],
+                resolved_execution_order=["genome_survey", "assembly"],
+                selected_methods={
+                    "genome_survey": [
+                        "genome_survey.kmer_count.jellyfish",
+                        "genome_survey.model.genomescope2",
+                    ],
+                    "assembly": "assembly.candidate.flye",
+                },
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertFalse(any("estimated_genome_size" in field for field in result.required_fields))
+        self.assertEqual(
+            result.choices["deferred_shared_parameters"]["estimated_genome_size"]["status"],
+            "awaiting_genome_survey",
+        )
+
+    def test_long_read_executable_survey_defers_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_reads = Path(tmp) / "long.fq"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {long_reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["genome_survey", "assembly"],
+                resolved_execution_order=["genome_survey", "assembly"],
+                selected_methods={
+                    "genome_survey": [
+                        "genome_survey.kmer_count.jellyfish",
+                        "genome_survey.model.genomescope2",
+                    ],
+                    "assembly": "assembly.candidate.flye",
+                },
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertFalse(any("estimated_genome_size" in field for field in result.required_fields))
+        self.assertEqual(
+            result.choices["deferred_shared_parameters"]["estimated_genome_size"]["status"],
+            "awaiting_genome_survey",
+        )
+
+    def test_planned_only_survey_still_requires_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            long_reads = Path(tmp) / "long.fq"
+            short_reads = Path(tmp) / "short.fq"
+            long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {long_reads}\n    format: fastq\n    platform: ont\n  - asset_type: clean_short_dna_reads\n    paths:\n      - {short_reads}\n    format: fastq\n    platform: illumina\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["genome_survey", "assembly"],
+                resolved_execution_order=["genome_survey", "assembly"],
+                selected_methods={
+                    "genome_survey": [
+                        "genome_survey.kmer_count.meryl",
+                        "genome_survey.model.smudgeplot",
+                    ],
+                    "assembly": "assembly.candidate.flye",
+                },
+            )
+
+            result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertTrue(any("estimated_genome_size" in field for field in result.required_fields))
+        self.assertNotIn("deferred_shared_parameters", result.choices)
 
     def test_manifest_platform_infers_defaults_shows_parameter_step(self):
         with tempfile.TemporaryDirectory() as tmp:

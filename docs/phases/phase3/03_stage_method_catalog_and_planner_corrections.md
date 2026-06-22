@@ -81,18 +81,18 @@ Current descriptors are biologically valid but must stay gated:
 - `genome_survey.model.genomescope2`
 - `genome_survey.model.smudgeplot`
 
-Current code already prevents full k-mer survey from running on ONT/CLR-only
-long reads. It writes either full mode with `clean_short_dna_reads`, a
-low-confidence long-read fallback record, or a skip record.
+Current code runs the full k-mer survey path on available raw/clean short or
+long DNA reads. The old low-confidence long-read fallback contract has been
+removed.
 
 Corrections:
 
-- Keep Jellyfish/Meryl/GenomeScope2/Smudgeplot behind
-  `clean_short_dna_reads`.
-- Never default full k-mer survey on `clean_long_reads`.
-- Clarify whether long-read-only projects should write
-  `fallback_low_confidence` or pure skip. If kept, the fallback must be clearly
-  a low-confidence prior/coverage note, not a k-mer survey.
+- Keep Jellyfish/Meryl/GenomeScope2/Smudgeplot behind available DNA reads:
+  `raw_short_dna_reads`, `clean_short_dna_reads`, `raw_long_reads`, or
+  `clean_long_reads`.
+- Default full k-mer survey on long reads when short reads are unavailable.
+- Fail with `GENOME_SIZE_UNAVAILABLE` before assembly if neither explicit user
+  genome size nor survey-derived genome size exists.
 - Treat `genome_survey_result` as an assembly-planning prior, not an assembly
   input.
 

@@ -23,7 +23,9 @@ Compression = Literal["gzip", "bzip2", "xz", "none", "unknown"]
 
 _ACCEPTED_MANIFEST_ASSET_TYPES: set[AssetType] = {
     "raw_long_reads",
+    "clean_long_reads",
     "raw_short_dna_reads",
+    "clean_short_dna_reads",
     "raw_rnaseq_reads",
     "raw_isoseq_or_long_rna_reads",
     "hic_reads_registered",

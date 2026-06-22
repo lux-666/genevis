@@ -10,8 +10,12 @@ runtime:
 
 planner:
   genome_survey:
-    run_only_with_asset: clean_short_dna_reads
-    skip_reason_without_short_reads: no_low_error_short_reads
+    run_with_any_asset:
+      - raw_short_dna_reads
+      - clean_short_dna_reads
+      - raw_long_reads
+      - clean_long_reads
+    error_without_size_or_reads: GENOME_SIZE_UNAVAILABLE
   assembly:
     primary_input: clean_long_reads
     default_candidates:
