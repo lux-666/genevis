@@ -24,23 +24,42 @@ workflow gate, or routing decision.
 ## Data and resolution rules
 
 `species_alias.tsv` is a hand-maintained mapping with a Chinese-name column, a
-canonical scientific-name column, and optional aliases or notes. The resolver
-accepts either an alias/Chinese name or an already scientific name.
+canonical scientific-name column, and optional aliases, genus, family, order,
+or notes. The resolver accepts either an alias/Chinese name or an already
+scientific name. Taxonomic hints allow fallback for targets, such as species
+absent from the local assembly table, whose lineage cannot otherwise be
+recovered locally.
 
 The evidence builder searches `Metazoa.ncbi.tsv` in this order:
 
 1. Exact canonical scientific-name match.
 2. If exact matching returns no assembly, same-genus assemblies, based on the
    first taxonomic token of the canonical scientific name.
+3. If same-genus matching returns no useful assembly, same-family assemblies,
+   using `Metazoa.ncbi.lineage` and an alias-table family hint when necessary.
+4. If same-family matching returns no useful assembly, same-order assemblies,
+   using `Metazoa.ncbi.lineage` and an alias-table order hint when necessary.
 
 For each selected public assembly, retain accession, assembly method, total
 sequence length, chromosome count, contig and scaffold counts, contig and
-scaffold N50, GC percentage, and BUSCO lineage when available. The builder
-returns an explicit matching mode (`exact`, `same_genus`, or `unavailable`) and
-never asserts that a related species is the target species.
+scaffold N50, GC percentage, and BUSCO lineage when available. BUSCO fields are
+omitted or null when unavailable. The builder returns an explicit matching mode
+(`exact`, `same_genus`, `same_family`, `same_order`, or `unavailable`) and never
+asserts that a related species is the target species.
 
-The pack is bounded to a small, deterministic set of useful records so the LLM
-receives evidence rather than the entire NCBI table.
+Records representing the same assembly are deduplicated before selection. A
+RefSeq `GCF` record is preferred over its matching GenBank `GCA` counterpart.
+Alternate-haplotype assemblies are excluded from the primary evidence summary;
+when useful for traceability, they may be retained in a separately marked
+secondary list and must not count as independent primary evidence.
+
+The primary evidence set is sorted deterministically by: primary assembly ahead
+of alternate haplotype; RefSeq `GCF` ahead of GenBank `GCA`; higher scaffold
+N50; higher contig N50; fewer scaffolds then contigs when the N50s tie; and
+accession as the final stable tiebreaker. Keep at most five exact-match records
+or, for a fallback level, at most five records from the first level with useful
+assemblies. This bounds LLM context without making evidence selection
+non-repeatable.
 
 ## Flow
 
@@ -61,6 +80,10 @@ stage output. Report generation renders a `Related-species sanity check`
 section. The LLM receives the pack together with the project's own assembly,
 survey, and review metrics.
 
+Each pack records its local source provenance, including the paths to
+`Metazoa.ncbi.tsv`, `Metazoa.ncbi.lineage`, and `species_alias.tsv`, so a later
+reader can identify the reference-data version used by the review.
+
 ## Failure and degradation semantics
 
 This node is non-blocking. Missing species metadata, an unresolved alias,
@@ -72,18 +95,26 @@ unchanged.
 The LLM prompt must state that related-species values are comparative evidence
 only. It should identify plausible or implausible differences, describe what
 they might mean, and recommend follow-up checks; it must not treat such values
-as truth or advise altering a previously executed assembly.
+as truth or advise altering a previously executed assembly. It may recommend
+follow-up checks or re-review, but must not reinterpret this evidence as
+user-provided priors or automatic-failure thresholds.
 
 ## Tests
 
 - Chinese name resolves through the alias table; scientific name bypasses alias
   lookup.
 - Exact NCBI assembly matches take precedence over same-genus records.
-- A target with no exact assembly returns selected same-genus evidence.
+- A target with no exact assembly falls back in order through same genus, same
+  family, and same order, stopping at the first level with useful records.
+- GCF/GCA counterparts are counted once with the GCF record selected; alternate
+  haplotypes are excluded or explicitly separated from primary evidence.
+- Record ordering, five-record bounds, and accession tie-breaking are stable.
 - Missing target name, alias, source file, or matching assemblies yields a
   non-blocking explanatory pack.
 - The assembly-review graph includes the new node without adding a top-level
   stage or route.
-- The JSON and Markdown reports contain the evidence artifact and section.
+- The JSON and Markdown reports contain the evidence artifact, source
+  provenance, and sanity-check section.
 - LLM recommendation context includes both the project's result metrics and
-  the related-species evidence, with the non-substitution constraint.
+  the related-species evidence, with the non-substitution and
+  non-automatic-failure constraints.
