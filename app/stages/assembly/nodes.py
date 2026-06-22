@@ -524,6 +524,7 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "input_type",
         "method_application_notes",
         "primary_method",
+        "primary_long_read_platform",
         "rejected_candidates",
         "selected_candidate_plans",
         "selected_candidate_refs",

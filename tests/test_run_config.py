@@ -232,6 +232,12 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert config.assembly_review.quast is not None
         self.assertEqual(config.assembly_review.quast.threads, 4)
 
+    def test_assembly_dedup_is_not_a_local_exec_stage(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate({"local_exec": ["assembly_dedup"]})
+
+        self.assertIn("assembly_dedup", str(ctx.exception))
+
     def test_invalid_shared_read_type_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(

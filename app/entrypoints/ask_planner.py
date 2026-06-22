@@ -890,7 +890,7 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
     asset_types = {asset.asset_type for asset in manifest.assets}
     recommended: list[str] = []
     if "raw_long_reads" in asset_types:
-        recommended.extend(["read_qc", "genome_survey", "assembly", "assembly_review"])
+        recommended.extend(["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review"])
     if "assembly_fasta_registered" in asset_types:
         recommended.append("assembly_review")
     if {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:

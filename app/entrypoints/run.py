@@ -323,7 +323,6 @@ def _run_session(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
     requested_stages = list(run_config.requested_stages) if run_config and run_config.requested_stages else None

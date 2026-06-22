@@ -1,0 +1,27 @@
+method_name: assembly_dedup.purge_dups
+stage: assembly_dedup
+package_ref: purge_dups
+goal: "Remove haplotigs and overlaps from a draft assembly using purge_dups."
+required_inputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Materialized draft assembly FASTA."
+  - name: clean_long_reads
+    type: clean_long_reads
+    description: "Long reads used for depth evidence."
+expected_outputs:
+  - name: purged_assembly
+    type: draft_assembly
+    description: "Purged assembly FASTA for downstream review."
+review_rules:
+  - purged_assembly_exists
+human_review_triggers:
+  - purge_depth_distribution_uncertain
+defaults:
+  cutoffs_strategy: calcuts_auto
+  get_seqs_exclude_haplotigs: true
+resource_hints:
+  cpu_cores: 8
+  memory_gb: 16.0
+  gpu_required: false
+  walltime_hours: 2.0

@@ -45,6 +45,7 @@ methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
   assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
+  assembly_dedup.purge_dups: assembly_dedup/purge_dups.yaml
   assembly_review.eval.quast: assembly_review/quast_eval.yaml
   assembly_review.eval.busco: assembly_review/busco_eval.yaml
   assembly_review.eval.merqury: assembly_review/merqury_eval.yaml
@@ -100,6 +101,8 @@ by_stage:
     - assembly.candidate.hifiasm
     - assembly.candidate.nextdenovo
     - assembly.candidate.canu
+  assembly_dedup:
+    - assembly_dedup.purge_dups
   assembly_review:
     - assembly_review.eval.quast
     - assembly_review.eval.busco

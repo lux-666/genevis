@@ -96,6 +96,21 @@ def resolve_candidates(state: TopLevelState) -> dict:
             "final_assembly_ref": (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta"),
         })
 
+    # A successful dedup stage adds a second candidate; it never replaces raw.
+    dedup_out = stage_outputs.get("assembly_dedup", {})
+    purged_ref = dedup_out.get("purged_assembly_ref")
+    if purged_ref:
+        candidates.append({
+            "candidate_id": f"{dedup_out.get('candidate_id') or 'assembly'}:assembly_dedup.purge_dups",
+            "method_name": "assembly_dedup.purge_dups",
+            "source": "assembly_dedup_stage",
+            "bundle_ref": dedup_out.get("purged_candidate_ref"),
+            "status": dedup_out.get("status", "completed"),
+            "final_assembly_ref": purged_ref,
+            "pre_dedup_assembly_ref": dedup_out.get("input_assembly_ref"),
+            "purged_assembly_ref": purged_ref,
+        })
+
     # Build review plan
     review_plan = AssemblyReviewPlan(
         status="evaluating" if candidates else "failed",

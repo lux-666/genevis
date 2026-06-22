@@ -12,6 +12,7 @@ from app.graph.checkpointer import (
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.state import TopLevelState
 from app.stages.assembly.builder import build_stage as build_assembly_stage
+from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
 from app.stages.function_annotation.builder import build_stage as build_function_annotation_stage
 from app.stages.gene_annotation.builder import build_stage as build_gene_annotation_stage
@@ -53,6 +54,7 @@ def build_graph(
     graph.add_node("read_qc_stage", build_read_qc_stage())
     graph.add_node("genome_survey_stage", build_genome_survey_stage())
     graph.add_node("assembly_stage", build_assembly_stage())
+    graph.add_node("assembly_dedup_stage", build_assembly_dedup_stage())
     graph.add_node("assembly_review_stage", build_assembly_review_stage())
     graph.add_node("hic_scaffolding_stage", build_hic_scaffolding_stage())
     graph.add_node("repeat_annotation_stage", build_repeat_annotation_stage())
@@ -68,6 +70,7 @@ def build_graph(
             "read_qc_stage": "read_qc_stage",
             "genome_survey_stage": "genome_survey_stage",
             "assembly_stage": "assembly_stage",
+            "assembly_dedup_stage": "assembly_dedup_stage",
             "assembly_review_stage": "assembly_review_stage",
             "hic_scaffolding_stage": "hic_scaffolding_stage",
             "repeat_annotation_stage": "repeat_annotation_stage",
@@ -82,6 +85,7 @@ def build_graph(
         "read_qc_stage",
         "genome_survey_stage",
         "assembly_stage",
+        "assembly_dedup_stage",
         "assembly_review_stage",
         "hic_scaffolding_stage",
         "repeat_annotation_stage",

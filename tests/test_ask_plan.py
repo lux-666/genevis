@@ -282,6 +282,14 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         self.assertIn("assembly_review.eval.mapping_coverage", method_names)
         self.assertNotIn("assembly_review.check.merqury", method_names)
 
+    def test_assembly_dedup_is_default_auto_without_method_or_parameter_questions(self):
+        plan = _base_plan(
+            selected_stages=["assembly_dedup"],
+            resolved_execution_order=["assembly_dedup"],
+        )
+        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(result.kind, "confirm")
+
     def test_read_qc_only_asks_for_filter_choice(self):
         plan = _base_plan(
             selected_stages=["read_qc"],
@@ -610,6 +618,18 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertEqual(payload["shared_parameters"]["estimated_genome_size"], 2000000)
         self.assertEqual(payload["assembly"]["flye_parameters"], {"threads": 8, "read_type": "nano-raw", "estimated_genome_size": 2000000})
 
+    def test_build_run_config_keeps_assembly_dedup_out_of_local_exec(self):
+        plan = _base_plan(
+            selected_stages=["assembly_dedup"],
+            resolved_execution_order=["assembly_dedup"],
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["local_exec"], [])
+        self.assertEqual(payload["requested_stages"], ["assembly_dedup"])
+
     def test_build_run_config_for_assembly_goal_uses_requested_boundary(self):
         plan = _base_plan(
             selected_stages=["assembly"],
@@ -915,7 +935,7 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
     def test_all_stages_available_regardless_of_manifest(self):
         available = _all_selectable_stages()
         expected = [
-            "read_qc", "genome_survey", "assembly", "assembly_review",
+            "read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review",
             "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
         ]
         self.assertEqual(available, expected)
@@ -923,7 +943,7 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
     def test_all_stages_excludes_inventory(self):
         available = _all_selectable_stages()
         expected = [
-            "read_qc", "genome_survey", "assembly", "assembly_review",
+            "read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review",
             "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
         ]
         self.assertEqual(available, expected)
@@ -938,8 +958,13 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
                 encoding="utf-8",
             )
             recommended = _recommended_stages_from_manifest(str(manifest))
+            self.assertEqual(
+                recommended[:5],
+                ["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review"],
+            )
             self.assertIn("read_qc", recommended)
             self.assertIn("assembly", recommended)
+            self.assertIn("assembly_dedup", recommended)
             self.assertIn("repeat_annotation", recommended)
             self.assertIn("gene_annotation", recommended)
             self.assertIn("function_annotation", recommended)

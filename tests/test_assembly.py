@@ -206,7 +206,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
@@ -276,7 +276,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(len(assembly["selected_candidate_refs"]), 2)
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
@@ -315,7 +315,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
             self.assertIn("assembly.candidate.hifiasm", assembly["selected_methods"])
@@ -340,7 +340,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
             self.assertEqual(assembly["fallback_method"], None)
@@ -381,7 +381,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertFalse(called_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "planned")
@@ -465,7 +465,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
@@ -528,7 +528,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["input_type"], "long_reads.fofn")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
@@ -562,7 +562,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
             flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
@@ -651,7 +651,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertFalse(called_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
@@ -694,7 +694,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertTrue(called_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
@@ -824,7 +824,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
             script_text = flye_script.read_text(encoding="utf-8")
@@ -871,7 +871,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "assembly_review")
+            self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
             flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"

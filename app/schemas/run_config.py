@@ -25,6 +25,7 @@ RequestableStage = Literal[
     "read_qc",
     "genome_survey",
     "assembly",
+    "assembly_dedup",
     "assembly_review",
     "hic_scaffolding",
     "repeat_annotation",

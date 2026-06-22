@@ -181,14 +181,47 @@ Review triggers:
 - assembler memory fallback required
 - assembly output missing or clearly too small/large
 
-## 5. Assembly Review
+## 5. Assembly Dedup
 
-Purpose: evaluate draft assembly and decide whether polish or purge actions are
-needed.
+Purpose: automatically produce a conservative purge_dups candidate before
+assembly review, while preserving the raw assembly candidate.
 
 Inputs:
 
 - required: `draft_assembly`
+- required: `clean_long_reads`
+
+Outputs:
+
+- `purged_assembly` candidate, alongside the unchanged raw candidate
+- read-alignment BAM, coverage statistics, `PB.stat`, calcuts cutoffs,
+  self-alignment PAF, and duplicate BED evidence
+- pass-through raw candidates when no materialized draft assembly or long-read
+  evidence input is available
+
+Planning rules:
+
+- Use `assembly_dedup.purge_dups` as the stage method.
+- Run automatically once its required materialized inputs are available; it is
+  not controlled by `local_exec`.
+- Generate read-depth evidence and cutoffs with the fixed `calcuts_auto`
+  strategy, then run `get_seqs -e` for conservative purging.
+- Preserve the raw candidate and present both raw and purged candidates to
+  `assembly_review`.
+
+Review triggers:
+
+- depth evidence is missing or ambiguous
+- purged assembly differs substantially from draft assembly
+
+## 6. Assembly Review
+
+Purpose: evaluate deduplicated or draft assembly and decide whether polish or
+additional purge actions are needed.
+
+Inputs:
+
+- required: `draft_assembly` or `purged_assembly` from `assembly_dedup`
 - optional: `clean_long_reads`
 - optional: `clean_short_dna_reads`
 
@@ -230,7 +263,7 @@ Review triggers:
 
 This stage is the main mandatory human gate.
 
-## 6. Hi-C Scaffolding
+## 7. Hi-C Scaffolding
 
 Purpose: produce chromosome-scale scaffolds when Hi-C data and project goals
 justify it.
@@ -260,7 +293,7 @@ Review triggers:
 - abnormal cis/trans or contact distribution
 - contact map suggests misjoins
 
-## 7. Repeat Annotation
+## 8. Repeat Annotation
 
 Purpose: produce repeat library, repeat annotation, and masked genome for gene
 structure annotation.
@@ -287,7 +320,7 @@ Planning rules:
 - Propagate explicit high-fragmentation or low-confidence assembly signals into
   repeat annotation confidence without inventing numeric thresholds.
 
-## 8. Gene Annotation
+## 9. Gene Annotation
 
 Purpose: generate gene models, transcripts, and predicted proteins.
 
@@ -364,7 +397,7 @@ Non-goals for adoption path:
 - Evidence conflicts are recorded as review triggers only; they do not block
   adoption or alter the adopted refs.
 
-## 9. Function Annotation
+## 10. Function Annotation
 
 Purpose: annotate predicted proteins with domains, homology, KO, pathway, and
 database-derived function.

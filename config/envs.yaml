@@ -30,6 +30,8 @@ stages:
     conda_env: env_geno_exec
   assembly:
     conda_env: env_geno_exec
+  assembly_dedup:
+    conda_env: env_geno_exec
   assembly_review:
     conda_env: env_geno_exec
   hic_scaffolding:
@@ -62,6 +64,16 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - nextDenovo
+  assembly_dedup.purge_dups:
+    conda_env: env_geno_exec
+    required_tools:
+      - minimap2
+      - samtools
+      - pbcstat
+      - calcuts
+      - gzip
+      - purge_dups
+      - get_seqs
   assembly_review.eval.quast:
     conda_env: env_geno_exec
     required_tools:
