@@ -26,6 +26,7 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
+from app.storage.paths import SessionPaths, default_data_root, locate_session_data_dir
 
 
 _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
@@ -44,7 +45,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser = subparsers.add_parser("run", help="Run a genome workflow session")
     run_parser.add_argument("--session-id", help="Unique session identifier; generated when omitted")
     run_parser.add_argument("--manifest", required=True, help="Path to input manifest YAML/JSON")
-    run_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    run_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
     run_parser.add_argument(
         "--local-exec",
         action="append",
@@ -132,7 +133,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a workflow session from durable records")
     inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
-    inspect_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    inspect_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
     inspect_parser.add_argument("--filter", action="append", default=[], help="Filter inspect output, currently supports decided_by=<origin>")
     inspect_parser.add_argument("--json", action="store_true", help="Emit a machine-readable inspect summary")
     inspect_parser.add_argument(
@@ -157,7 +158,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Path to a JSON decision file matching ResumeReviewRequest",
     )
-    resume_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    resume_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
     resume_parser.add_argument(
         "--max-blocked-seconds",
         type=float,
@@ -179,7 +180,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Interactively review and resume a blocked human gate",
     )
     review_parser.add_argument("--session-id", required=True, help="Session identifier to review")
-    review_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    review_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
     review_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -197,7 +198,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "tui",
         help="Interactive workflow launcher with automatic human-gate handling",
     )
-    tui_parser.add_argument("--data-dir", default="data", help="Output data directory")
+    tui_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
     return parser.parse_args(argv)
 
 
@@ -323,6 +324,11 @@ def _run_session(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+    # From this point on every runtime writer receives the session-local
+    # directory.  Stage code can therefore keep its existing relative
+    # artifact/work layout without spilling files into the shared root.
+    run_dir = SessionPaths(data_dir, request.session_id).run_dir
+    request = request.model_copy(update={"data_dir": str(run_dir)})
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
     requested_stages = list(run_config.requested_stages) if run_config and run_config.requested_stages else None
@@ -572,8 +578,8 @@ def _interactive_gate_loop(
 def _run_ask(args: argparse.Namespace) -> int:
     from app.entrypoints.ask_interactive import apply_set_params, is_interactive, run_interactive_loop
     from app.entrypoints.ask_planner import (
-        ask_plan_path,
         clarification_template,
+        locate_ask_plan_path,
         merge_clarification_response,
         next_clarification,
         save_plan_to_default_path,
@@ -594,8 +600,8 @@ def _run_ask(args: argparse.Namespace) -> int:
 
     try:
         if getattr(args, "resume_session", None):
-            data_dir = args.data_dir or "data"
-            ref = ask_plan_path(data_dir, args.resume_session)
+            data_dir = args.data_dir or default_data_root()
+            ref = locate_ask_plan_path(data_dir, args.resume_session)
             plan = load_ask_plan(ref)
         elif getattr(args, "ask_plan", None):
             plan = load_ask_plan(args.ask_plan)
@@ -669,7 +675,7 @@ def _create_ask_plan(args: argparse.Namespace) -> "AskPlanState":
     from app.entrypoints.manifest_materializer import materialize_entry_manifest
     from app.schemas.ask_plan import AskPlanState
 
-    data_dir = args.data_dir or "data"
+    data_dir = args.data_dir or default_data_root()
     defaults = {
         "session_id": args.session_id or generate_session_id(data_dir),
         "data_dir": data_dir,
@@ -693,7 +699,7 @@ def _run_ask_with_explicit_config(args: argparse.Namespace) -> int:
     if not getattr(args, "request_text", None):
         print("error: request_text is required for gene-agent ask --run-config", file=sys.stderr)
         return 1
-    data_dir = args.data_dir or "data"
+    data_dir = args.data_dir or default_data_root()
     defaults = {
         "session_id": args.session_id or generate_session_id(data_dir),
         "data_dir": data_dir,
@@ -714,13 +720,16 @@ def _run_ask_with_explicit_config(args: argparse.Namespace) -> int:
     return _run_session(structured_args)
 
 
-def generate_session_id(data_dir: str | Path = "data", *, now: datetime | None = None) -> str:
+def generate_session_id(data_dir: str | Path | None = None, *, now: datetime | None = None) -> str:
     date = (now or datetime.now()).strftime("%Y%m%d")
-    ledger_root = Path(data_dir) / "ledger"
+    root = Path(data_dir or default_data_root())
     pattern = re.compile(rf"^gene-{date}-(\d{{6}})$")
     max_index = 0
-    if ledger_root.exists():
-        for child in ledger_root.iterdir():
+    session_roots = [root / "runs", root / "ledger"]
+    for session_root in session_roots:
+        if not session_root.exists():
+            continue
+        for child in session_root.iterdir():
             if not child.is_dir():
                 continue
             match = pattern.match(child.name)
@@ -735,7 +744,7 @@ def _run_inspect(args: argparse.Namespace) -> int:
     filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
     if filters is None:
         return 1
-    data_dir = _resolve_data_dir(args.data_dir)
+    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
     summary = inspect_session(args.session_id, data_dir)
     template_path = getattr(args, "write_decision_template", None)
     if template_path:
@@ -748,7 +757,7 @@ def _run_inspect(args: argparse.Namespace) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
         resume_command = (
-            f"gene-agent resume --session-id {args.session_id} --data-dir {data_dir} "
+            f"gene-agent resume --session-id {args.session_id} --data-dir {args.data_dir} "
             f"--decision-file {out_path} --checkpointer sqlite"
         )
         summary["decision_template_written"] = str(out_path)
@@ -909,7 +918,8 @@ def _run_resume(args: argparse.Namespace) -> int:
 
     from app.graph.checkpointer import checkpoint_db_path
 
-    db_path = checkpoint_db_path(args.data_dir)
+    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    db_path = checkpoint_db_path(data_dir)
     if not db_path.exists():
         print(
             f"error: no durable checkpoint database at {db_path}; "
@@ -919,7 +929,7 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         return 1
 
-    graph = build_graph(backend=backend, data_dir=args.data_dir)
+    graph = build_graph(backend=backend, data_dir=str(data_dir))
     config = {"configurable": {"thread_id": args.session_id}}
     snapshot = graph.get_state(config)
     # New LangGraph versions can return a default snapshot rather than
@@ -940,11 +950,11 @@ def _run_resume(args: argparse.Namespace) -> int:
 
     state = snapshot.values
 
-    ledger = Ledger(args.data_dir)
+    ledger = Ledger(data_dir)
     resume_event_payload = {
         "source": "cli",
         "checkpointer": backend,
-        "data_dir": str(args.data_dir),
+        "data_dir": str(data_dir),
         "decision_file_ref": str(args.decision_file),
         "max_blocked_seconds": getattr(args, "max_blocked_seconds", None),
         "decision": {
@@ -1053,7 +1063,7 @@ def _run_review(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    data_dir = _resolve_data_dir(args.data_dir)
+    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
     return run_interactive_review(
         args.session_id,
         data_dir,
@@ -1070,12 +1080,12 @@ def _run_tui(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
-    args = _parse_args(argv)
     # Load .env once at the entry point so every subcommand (run, ask,
     # inspect, resume) sees the same secrets without re-implementing the
     # loader in each branch. setdefault semantics mean already-exported
     # environment variables still win.
     _load_dotenv_without_override()
+    args = _parse_args(argv)
     if args.command == "run":
         return _run_session(args)
     if args.command == "ask":

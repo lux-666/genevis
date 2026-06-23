@@ -8,6 +8,7 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
+from app.storage.publish import shell_publish_file
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
@@ -84,7 +85,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         f" --genome-size {shlex.quote(str(params['estimated_genome_size']))}"
         f" --threads {params['threads']}\n"
         f"test -f {shlex.quote(str(output_dir / 'assembly.fasta'))}\n"
-        f"cp {shlex.quote(str(output_dir / 'assembly.fasta'))} {shlex.quote(str(draft))}\n",
+        f"{shell_publish_file(output_dir / 'assembly.fasta', draft)}\n",
         encoding="utf-8",
     )
     script.chmod(0o755)

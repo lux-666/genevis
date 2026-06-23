@@ -11,6 +11,7 @@ from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.storage.publish import shell_publish_variable
 from app.stages.base import absolute_data_dir
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     HiCMethodLifecycle,
@@ -246,14 +247,14 @@ def _script(
                 for value in [params["three_dna_command"], *params["three_dna_extra_args"], str(input_assembly), str(merged_nodups)]
             ),
             "for candidate in input_assembly.FINAL.fasta input_assembly.final.fasta input_assembly.FINAL.fa ./*.FINAL.fasta; do",
-            "  if test -f \"$candidate\"; then cp \"$candidate\" " + shlex.quote(str(scaffold_fasta)) + "; break; fi",
+            "  if test -f \"$candidate\"; then " + shell_publish_variable("candidate", scaffold_fasta) + "; break; fi",
             "done",
             f"test -f {shlex.quote(str(scaffold_fasta))}",
             "for candidate in input_assembly.FINAL.assembly input_assembly.assembly ./*.assembly; do",
-            "  if test -f \"$candidate\"; then cp \"$candidate\" " + shlex.quote(str(assembly_file)) + "; break; fi",
+            "  if test -f \"$candidate\"; then " + shell_publish_variable("candidate", assembly_file) + "; break; fi",
             "done",
             "for candidate in ./*.hic; do",
-            "  if test -f \"$candidate\"; then cp \"$candidate\" " + shlex.quote(str(contact_map)) + "; break; fi",
+            "  if test -f \"$candidate\"; then " + shell_publish_variable("candidate", contact_map) + "; break; fi",
             "done",
         ]
     )

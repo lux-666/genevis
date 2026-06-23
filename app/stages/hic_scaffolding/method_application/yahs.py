@@ -8,6 +8,7 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
+from app.storage.publish import shell_publish_file
 from app.schemas.artifacts import HIC_SCAFFOLD_AGP
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
@@ -78,8 +79,8 @@ def freeze_yahs_attempt(state: TopLevelState) -> dict:
         f"mkdir -p {shlex.quote(str(out_prefix.parent))} {shlex.quote(str(artifact_dir))}\n"
         f"yahs -o {shlex.quote(str(out_prefix))} {shlex.quote(str(assembly))} {shlex.quote(str(alignment))}\n"
         f"test -f {shlex.quote(str(yahs_fasta))}\n"
-        f"cp {shlex.quote(str(yahs_fasta))} {shlex.quote(str(scaffold_fasta))}\n"
-        f"if test -f {shlex.quote(str(yahs_agp))}; then cp {shlex.quote(str(yahs_agp))} {shlex.quote(str(scaffold_agp))}; fi\n",
+        f"{shell_publish_file(yahs_fasta, scaffold_fasta)}\n"
+        f"if test -f {shlex.quote(str(yahs_agp))}; then {shell_publish_file(yahs_agp, scaffold_agp)}; fi\n",
         encoding="utf-8",
     )
     script.chmod(0o755)

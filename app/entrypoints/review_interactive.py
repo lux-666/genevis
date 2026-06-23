@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.review.gates import find_review_gate, registered_review_stage_label
+from app.storage.paths import locate_session_data_dir
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +761,7 @@ def run_interactive_review(
     dry_run: bool = False,
 ) -> int:
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
+    data_dir = str(locate_session_data_dir(data_dir, session_id))
     from app.control.lifecycle import (
         DurableResumeUnavailableError,
         ResumeValidationError,

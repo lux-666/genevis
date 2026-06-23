@@ -23,6 +23,7 @@ from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
+from app.storage.publish import shell_publish_file
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
@@ -794,7 +795,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         f" --genome-size {shlex.quote(str(genome_size))}"
         f" --threads {threads}\n"
         f"test -f {shlex.quote(str(flye_out_dir / 'assembly.fasta'))}\n"
-        f"cp {shlex.quote(str(flye_out_dir / 'assembly.fasta'))} {shlex.quote(str(draft_assembly))}\n",
+        f"{shell_publish_file(flye_out_dir / 'assembly.fasta', draft_assembly)}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)

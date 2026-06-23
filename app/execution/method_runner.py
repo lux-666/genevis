@@ -23,6 +23,7 @@ from app.execution.env_dispatch import attach_conda_fields
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.storage.publish import publish_execution_logs
 
 
 class AttemptRunner(Protocol):
@@ -94,7 +95,7 @@ def run_frozen_attempt(
     ledger.create_session(attempt.session_id, input_manifest_ref)
     ledger.record_attempt_started(attempt.session_id, attempt)
 
-    result = (runner or LocalRunner()).run(attempt)
+    result = publish_execution_logs(data_dir, attempt, (runner or LocalRunner()).run(attempt))
     if not result.success:
         if cleanup_outputs:
             for path in attempt.expected_outputs:

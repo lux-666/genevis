@@ -423,7 +423,18 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
 
 
 def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
-    return Path(data_dir) / "ask_plans" / session_id / "ask_plan.json"
+    from app.storage.paths import SessionPaths
+
+    return SessionPaths(data_dir, session_id).ask_plan_path
+
+
+def locate_ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
+    """Find a persisted clarification plan in either supported layout."""
+    current = ask_plan_path(data_dir, session_id)
+    if current.exists():
+        return current
+    legacy = Path(data_dir) / "ask_plans" / session_id / "ask_plan.json"
+    return legacy if legacy.exists() else current
 
 
 def save_plan_to_default_path(plan: AskPlanState) -> Path:
@@ -688,7 +699,9 @@ def _hic_scaffolding_plan_candidates(plan: AskPlanState) -> list[HiCScaffoldingP
 def write_ask_run_config(plan: AskPlanState) -> Path:
     plan = _auto_fill_inferred_defaults(plan)
     payload = build_run_config_payload(plan)
-    path = Path(plan.data_dir) / "run_configs" / plan.session_id / "ask_run_config.json"
+    from app.storage.paths import SessionPaths
+
+    path = SessionPaths(plan.data_dir, plan.session_id).run_config_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

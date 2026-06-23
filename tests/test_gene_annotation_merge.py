@@ -166,7 +166,7 @@ class EVMRunTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "out=\"\"\n"
                 "for arg in \"$@\"; do case \"$arg\" in --genome) shift; genome=\"$1\";; esac; shift; done\n"
-                "printf '##gff-version 3\\nctg1\\tEVM\\tgene\\t1\\t1000\\t.\\t+\\t.\\tID=evm_g1\\n' > /dev/stdout\n",
+                "printf '##gff-version 3\\nctg1\\tEVM\\tgene\\t1\\t1000\\t.\\t+\\t.\\tID=evm_g1\\n'\n",
                 encoding="utf-8",
             )
         evm.chmod(0o755)

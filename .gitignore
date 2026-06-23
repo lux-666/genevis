@@ -12,6 +12,7 @@ __pycache__/
 !.env.example
 
 data/
+data_archive/
 !data/
 data/*
 !data/reference/

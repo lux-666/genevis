@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.storage.paths import ledger_session_dir
+
+
+def _artifact_ref(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Keep the ledger referential while the artifact index owns metadata."""
+    return {
+        key: artifact.get(key)
+        for key in ("artifact_id", "file_path", "artifact_type", "stage", "method_name")
+    }
 
 
 class Ledger:
@@ -18,7 +27,7 @@ class Ledger:
 
     def session_dir(self, session_id: str) -> Path:
         """Return the ledger directory for a session."""
-        return self.data_dir / "ledger" / session_id
+        return ledger_session_dir(self.data_dir, session_id)
 
     def create_session(self, session_id: str, input_manifest_ref: str) -> None:
         """Create session metadata if it does not already exist."""
@@ -92,7 +101,7 @@ class Ledger:
                 "attempt_id": attempt.attempt_id,
                 "stage": attempt.stage,
                 "method_name": attempt.method_name,
-                "artifacts": artifacts or [],
+                "artifacts": [_artifact_ref(artifact) for artifact in artifacts or []],
             },
         )
 
@@ -130,7 +139,7 @@ class Ledger:
             "artifact_registered",
             {
                 "attempt_id": attempt_id,
-                "artifact": artifact,
+                "artifact": _artifact_ref(artifact),
             },
         )
 

@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.manifest import Platform
+from app.storage.paths import default_data_root
 from app.schemas.run_config import RequestableStage
 
 EntryAssetTypeHint = Literal[
@@ -31,7 +32,7 @@ class EntryRequest(BaseModel):
     session_id: str | None = Field(default=None, min_length=1)
     manifest: str | None = Field(default=None, min_length=1)
     source_paths: list[str] = Field(default_factory=list)
-    data_dir: str = Field(default="data", min_length=1)
+    data_dir: str = Field(default_factory=default_data_root, min_length=1)
     sample_id: str | None = Field(default=None, min_length=1)
     platform: Platform = "unknown"
     asset_type_hint: EntryAssetTypeHint | None = None

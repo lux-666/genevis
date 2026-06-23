@@ -14,6 +14,7 @@ from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
+from app.storage.publish import shell_publish_file
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.policy import evaluate
@@ -276,11 +277,11 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
         f"cp {shlex.quote(str(assembly_ref))} {shlex.quote(str(work_assembly))}\n"
         f"RepeatMasker -lib {shlex.quote(str(library_ref))} -gff -xsmall {shlex.quote(str(work_assembly))}\n"
         f"test -f {shlex.quote(str(work_assembly) + '.masked')}\n"
-        f"cp {shlex.quote(str(work_assembly) + '.masked')} {shlex.quote(str(softmasked_genome))}\n"
-        f"if test -f {shlex.quote(str(work_assembly) + '.out.gff')}; then cp {shlex.quote(str(work_assembly) + '.out.gff')} {shlex.quote(str(repeat_gff3))}; "
-        f"elif test -f {shlex.quote(str(work_assembly) + '.gff')}; then cp {shlex.quote(str(work_assembly) + '.gff')} {shlex.quote(str(repeat_gff3))}; "
+        f"{shell_publish_file(str(work_assembly) + '.masked', softmasked_genome)}\n"
+        f"if test -f {shlex.quote(str(work_assembly) + '.out.gff')}; then {shell_publish_file(str(work_assembly) + '.out.gff', repeat_gff3)}; "
+        f"elif test -f {shlex.quote(str(work_assembly) + '.gff')}; then {shell_publish_file(str(work_assembly) + '.gff', repeat_gff3)}; "
         "else exit 7; fi\n"
-        f"if test -f {shlex.quote(str(work_assembly) + '.hardmasked')}; then cp {shlex.quote(str(work_assembly) + '.hardmasked')} {shlex.quote(str(hardmasked_genome))}; fi\n",
+        f"if test -f {shlex.quote(str(work_assembly) + '.hardmasked')}; then {shell_publish_file(str(work_assembly) + '.hardmasked', hardmasked_genome)}; fi\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)

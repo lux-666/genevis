@@ -8,6 +8,7 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
+from app.storage.publish import shell_publish_file
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.constants import NEXTDENOVO_METHOD
@@ -85,7 +86,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         nextdenovo_work_dir / "nextdenovo.asm.fasta",
     ]
     output_checks = "\n".join(
-        f"if [ -f {shlex.quote(str(path))} ]; then cp {shlex.quote(str(path))} {shlex.quote(str(draft))}; exit 0; fi"
+        f"if [ -f {shlex.quote(str(path))} ]; then {shell_publish_file(path, draft)}; exit 0; fi"
         for path in candidates
     )
     script.write_text(

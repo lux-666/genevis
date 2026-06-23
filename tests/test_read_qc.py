@@ -15,6 +15,7 @@ from app.control.lifecycle import inspect_session
 from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.storage.paths import SessionPaths
 from app.stages.read_qc.builder import build_stage
 from app.stages.read_qc.method_application.make_fofn import build_make_fofn_graph
 from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
@@ -896,17 +897,27 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "phase4-readqc-smoke"
+            run_config = Path(tmpdir) / "read_qc_only_run_config.json"
+            run_config.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["read_qc"],
+                        "requested_stages": ["read_qc"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             argv = [
                 "run",
                 "--session-id", session_id,
                 "--manifest", "tests/fixtures/phase4/read_qc_manifest.yaml",
                 "--data-dir", tmpdir,
-                "--local-exec", "read_qc",
+                "--run-config", str(run_config),
             ]
             rc = run_main(argv)
             self.assertEqual(rc, 0)
 
-            artifact_dir = Path(tmpdir) / "artifacts" / "read_qc" / session_id
+            artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc" / session_id
             stats = artifact_dir / "seqkit_stats.tsv"
             summary = artifact_dir / "read_qc_summary.json"
             fofn = artifact_dir / "long_reads.fofn"
