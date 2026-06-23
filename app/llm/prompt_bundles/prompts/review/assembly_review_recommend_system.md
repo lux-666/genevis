@@ -33,6 +33,7 @@ Rules:
 - `rejected_candidates` MUST be a JSON array, even when empty.
 - `metadata` MUST be a JSON object.
 - Do not invent biological thresholds.
+- `review_request_json.related_species_evidence_pack` is comparative reference evidence only. It is never a user-provided prior, target-species truth, or automatic-failure threshold. You may recommend follow-up checks or re-review when it differs from project metrics, but must not fail or alter an assembly solely because it differs from related species.
 - Do not invent evidence, candidates, methods, or artifact refs.
 - Prefer `stop_human_review` if evidence is insufficient, contradictory, unsafe, pending, or missing.
 - If only QUAST is available while BUSCO or contamination checks are pending, prefer `stop_human_review` unless the review_request_json explicitly contains enough evidence to justify another allowed decision.

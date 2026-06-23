@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records, read_artifact_records
@@ -24,7 +26,10 @@ from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
+from app.reference.ncbi_metazoa import build_related_species_evidence_pack as _build_related_species_evidence_pack
+from app.reference.ncbi_metazoa import species_name_from_metadata
 from app.stages.base import absolute_data_dir
+from app.stages.assembly_review.routing import FAIL_STATUSES
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
@@ -33,6 +38,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_REPORT,
     ASSEMBLY_REVIEW_REPORT_DATA,
+    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     ArtifactMeta,
     AssemblyCandidateBundle,
     AssemblyEvalBundle,
@@ -236,6 +242,34 @@ def evaluate_review_rules(state: TopLevelState) -> dict:
     return {"stage_outputs": outputs}
 
 
+def build_related_species_evidence_pack(state: TopLevelState) -> dict:
+    """Build non-blocking local NCBI evidence for the review report and LLM."""
+    stage_outputs = state.get("stage_outputs") or {}
+    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    if ar_out.get("status") in FAIL_STATUSES:
+        return {}
+
+    species_name = _target_species_name(state)
+    evidence_pack = _build_related_species_evidence_pack(species_name)
+    existing_ref = ar_out.get("related_species_evidence_pack_ref")
+    if existing_ref and _json_artifact_payload_matches(existing_ref, evidence_pack):
+        return {}
+
+    evidence_ref = _write_json_artifact(
+        state,
+        "related_species_evidence_pack.json",
+        evidence_pack,
+        artifact_type=ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
+    )
+    outputs = dict(stage_outputs)
+    outputs["assembly_review"] = {
+        **ar_out,
+        "related_species_evidence_pack": evidence_pack,
+        "related_species_evidence_pack_ref": evidence_ref,
+    }
+    return {"stage_outputs": outputs}
+
+
 def human_review_gate(state: TopLevelState) -> dict:
     """Set an active interrupt for unresolved assembly review decisions."""
     stage_outputs = state.get("stage_outputs") or {}
@@ -265,6 +299,7 @@ def human_review_gate(state: TopLevelState) -> dict:
         auto_decidable=_assembly_review_auto_decidable(ar_out),
         report_refs=report_refs,
         candidate_comparison_context=comparison_context,
+        related_species_evidence_pack=dict(ar_out.get("related_species_evidence_pack") or {}),
     )
 
     request_ref = _write_json_artifact(
@@ -1100,6 +1135,28 @@ def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -
     return existing == payload
 
 
+def _target_species_name(state: TopLevelState) -> str | None:
+    """Read optional species metadata without making manifest parsing a gate."""
+    manifest_ref = state.get("input_manifest_ref")
+    if not manifest_ref:
+        return None
+    path = Path(str(manifest_ref))
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        raw = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+    except (OSError, json.JSONDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    metadata = dict(raw.get("user_metadata") or {})
+    for key in ("target_species", "species_name", "scientific_name", "organism", "species", "chinese_name"):
+        if key in raw:
+            metadata.setdefault(key, raw[key])
+    return species_name_from_metadata(metadata)
+
+
 def _ensure_assembly_review_reports(
     state: TopLevelState,
     ar_out: dict[str, Any],
@@ -1132,6 +1189,8 @@ def _ensure_assembly_review_reports(
     }
     if ar_out.get("candidate_comparison_ref"):
         report_refs["candidate_comparison"] = str(ar_out["candidate_comparison_ref"])
+    if ar_out.get("related_species_evidence_pack_ref"):
+        report_refs["related_species_evidence_pack"] = str(ar_out["related_species_evidence_pack_ref"])
 
     if len(candidates) >= 2:
         comparison_ref = _write_report_text_artifact_if_changed(
@@ -1179,7 +1238,9 @@ def _assembly_review_report_payload(
         "raw_refs": {
             "eval_bundle_ref": ar_out.get("eval_bundle_ref"),
             "candidate_comparison_ref": ar_out.get("candidate_comparison_ref"),
+            "related_species_evidence_pack_ref": ar_out.get("related_species_evidence_pack_ref"),
         },
+        "related_species_sanity_check": dict(ar_out.get("related_species_evidence_pack") or {}),
         "notes": [
             "thresholds_not_applied_without_human_approval",
             "report_informs_human_decision_only",
@@ -1314,6 +1375,8 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
             + " |"
         )
 
+    _append_related_species_sanity_check(lines, payload.get("related_species_sanity_check") or {})
+
     lines.extend(["", "## Evidence Refs", ""])
     raw_refs = payload.get("raw_refs") or {}
     for key, value in raw_refs.items():
@@ -1340,6 +1403,48 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
         lines.append(f"- {note}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _append_related_species_sanity_check(lines: list[str], pack: dict[str, Any]) -> None:
+    lines.extend(["", "## Related-species sanity check", ""])
+    if not pack:
+        lines.append("- Reference evidence was not generated.")
+        return
+    target = pack.get("target") or {}
+    lines.extend([
+        f"- Target: {_markdown_cell(target.get('canonical_scientific_name') or target.get('input_name'))}",
+        f"- Matching mode: {_markdown_cell(pack.get('matching_mode'))}",
+        "- This evidence is comparative only; it is not an assembly prior or automatic-failure threshold.",
+        "",
+    ])
+    records = pack.get("selected_records") or []
+    if records:
+        lines.extend([
+            "| Organism | Accession | Assembly | Total length | Chromosomes | Contig N50 | Scaffold N50 | GC | BUSCO lineage |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ])
+        for record in records:
+            busco = record.get("busco") or {}
+            lines.append(
+                "| " + " | ".join(
+                    _markdown_cell(value) for value in [
+                        record.get("organism_name"), record.get("accession"), record.get("assembly_name"),
+                        record.get("total_sequence_length_bp"), record.get("chromosome_count"),
+                        record.get("contig_n50_bp"), record.get("scaffold_n50_bp"), record.get("gc_percent"),
+                        busco.get("lineage"),
+                    ]
+                ) + " |"
+            )
+    else:
+        lines.append("- No useful related-species primary assemblies were found.")
+    excluded = pack.get("excluded_alternate_haplotype_records") or []
+    if excluded:
+        lines.append(f"- Excluded alternate-haplotype records: {', '.join(str(record.get('accession')) for record in excluded)}")
+    summary = pack.get("computed_summary") or {}
+    if summary:
+        lines.extend(["", "Computed summary:", "", "```json", json.dumps(summary, ensure_ascii=False, sort_keys=True), "```"])
+    for note in pack.get("notes") or []:
+        lines.append(f"- Reference note: {note}")
 
 
 def _markdown_cell(value: Any) -> str:

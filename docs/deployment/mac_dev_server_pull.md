@@ -35,6 +35,27 @@ Not tracked in git:
 - server-local run configs with private paths
 - large bioinformatics databases
 
+The NCBI Metazoa assembly snapshot is a special case: its large TSV, lineage,
+and JSON exports stay untracked, but its tracked manifest and alias table pin
+the exact TSV/lineage content consumed by assembly review. (The JSON export may
+be copied beside them for offline inspection but is not read at runtime.) After
+pulling the code on the server, install or verify the same snapshot in the
+project checkout before an assembly review:
+
+```bash
+python scripts/install_ncbi_metazoa_reference.py \
+  --source-dir /shared/reference/ncbi_metazoa
+# Or, after an operator has already copied the files:
+python scripts/install_ncbi_metazoa_reference.py --verify-only
+```
+
+The command performs no download. It records the exported-at/source-version
+metadata and verifies the SHA-256 checksums in
+`data/reference/ncbi_metazoa/reference_manifest.json`. A mismatch must be
+resolved by provisioning the pinned snapshot or updating the manifest in a
+reviewed commit; assembly review will otherwise mark the reference evidence as
+unavailable with an explicit version-mismatch reason.
+
 ## Mac Workflow
 
 ```bash

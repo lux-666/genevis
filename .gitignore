@@ -12,6 +12,15 @@ __pycache__/
 !.env.example
 
 data/
+!data/
+data/*
+!data/reference/
+data/reference/*
+!data/reference/ncbi_metazoa/
+data/reference/ncbi_metazoa/*
+!data/reference/ncbi_metazoa/README.md
+!data/reference/ncbi_metazoa/reference_manifest.json
+!data/reference/ncbi_metazoa/species_alias.tsv
 logs/
 /reports/
 pid*.log.info

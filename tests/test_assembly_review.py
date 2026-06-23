@@ -57,6 +57,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
         self.assertIn("quast", outer_nodes)
         self.assertIn("busco", outer_nodes)
+        self.assertIn("related_species_sanity_check", outer_nodes)
         self.assertNotIn("freeze_quast", outer_nodes)
         self.assertNotIn("run_busco", outer_nodes)
         for nodes in [quast_nodes, busco_nodes]:

@@ -100,6 +100,27 @@ class ReviewRecommenderTests(unittest.TestCase):
             self.assertIn("session_id:\ns1", chat.messages[1]["content"])
             self.assertIn("review_request_json:", chat.messages[1]["content"])
 
+    def test_recommender_context_includes_related_species_evidence_pack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request = ReviewPayload(
+                stage="assembly_review",
+                reason="review",
+                decisions_allowed=["stop_human_review"],
+                related_species_evidence_pack={
+                    "matching_mode": "same_genus",
+                    "selected_records": [{"accession": "GCF_019176455.1"}],
+                    "computed_summary": {"selected_record_count": 1},
+                },
+            )
+            chat = _FakeChat(json.dumps({"decision": "stop_human_review"}))
+
+            recommend_review_decision(
+                session_id="s1", stage="assembly_review", request=request, data_dir=tmp, chat_model=chat,
+            )
+
+            self.assertIn("related_species_evidence_pack", chat.messages[1]["content"])
+            self.assertIn("GCF_019176455.1", chat.messages[1]["content"])
+
     def test_recommender_normalizes_common_llm_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["stop_human_review"])

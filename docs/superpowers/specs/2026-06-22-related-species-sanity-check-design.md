@@ -49,6 +49,8 @@ asserts that a related species is the target species.
 
 Records representing the same assembly are deduplicated before selection. A
 RefSeq `GCF` record is preferred over its matching GenBank `GCA` counterpart.
+The deduplication key is the accession numeric core, so `GCF_019176455.1` and
+`GCA_019176455.1` are one assembly for evidence selection.
 Alternate-haplotype assemblies are excluded from the primary evidence summary;
 when useful for traceability, they may be retained in a separately marked
 secondary list and must not count as independent primary evidence.
@@ -83,6 +85,13 @@ survey, and review metrics.
 Each pack records its local source provenance, including the paths to
 `Metazoa.ncbi.tsv`, `Metazoa.ncbi.lineage`, and `species_alias.tsv`, so a later
 reader can identify the reference-data version used by the review.
+Family and order fallbacks join lineage records to assembly records by taxid,
+not by organism-name text. A scientific-name input is still matched against
+the alias table so it may obtain its family/order hints.
+
+The pack includes both bounded `selected_records` and a `computed_summary`
+(counts plus min/median/max values for comparable assembly metrics) for direct
+use in Markdown reports and LLM context.
 
 ## Failure and degradation semantics
 

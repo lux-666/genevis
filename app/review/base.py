@@ -41,6 +41,7 @@ class ReviewPayload(BaseModel):
     auto_decidable: bool = True
     report_refs: dict[str, str] = Field(default_factory=dict)
     candidate_comparison_context: dict[str, Any] = Field(default_factory=dict)
+    related_species_evidence_pack: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResumeReviewRequest(BaseModel):

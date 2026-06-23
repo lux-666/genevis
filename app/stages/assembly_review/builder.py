@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from app.schemas.state import TopLevelState
 from app.stages.assembly_review.method_application import build_busco_graph, build_quast_graph
 from app.stages.assembly_review.nodes import (
+    build_related_species_evidence_pack,
     enter_assembly_review,
     evaluate_review_rules,
     fail_assembly_review,
@@ -38,6 +39,7 @@ def build_stage():
     graph.add_node("quast", build_quast_graph())
     graph.add_node("busco", build_busco_graph())
     graph.add_node("evaluate_rules", evaluate_review_rules)
+    graph.add_node("related_species_sanity_check", build_related_species_evidence_pack)
     graph.add_node("generate_comparison", generate_candidate_comparison)
     graph.add_node("human_gate", human_review_gate)
     graph.add_node("fail", fail_assembly_review)
@@ -64,8 +66,9 @@ def build_stage():
         route_after_busco,
         {"evaluate_rules": "evaluate_rules", "fail": "fail"},
     )
+    graph.add_edge("evaluate_rules", "related_species_sanity_check")
     graph.add_conditional_edges(
-        "evaluate_rules",
+        "related_species_sanity_check",
         route_from_evaluation,
         {
             "generate_comparison": "generate_comparison",
