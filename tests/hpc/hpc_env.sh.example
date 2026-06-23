@@ -1,0 +1,62 @@
+# ============================================================
+#  HPC Integration Test Configuration
+#  Copy this file to hpc_env.sh and fill in YOUR paths.
+# ============================================================
+
+# ---- Project root (auto-detected from script location) ----
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# ---- Conda environment ----
+# Name of the conda env that has all bioinformatics tools installed.
+# Required tools: seqkit, jellyfish, genomescope2, flye, minimap2,
+#   samtools, pbcstat, calcuts, purge_dups, get_seqs, quast.py,
+#   busco, juicer.sh, run-asm-pipeline.sh, yahs
+CONDA_ENV="env_geno_exec"
+
+# ---- Test data paths ----
+# At minimum you need LONG_READS. For full coverage add SHORT_DNA and HIC.
+
+# ONT or PacBio CLR long reads (FASTQ/FASTA, gzipped ok).  Space-separated for multiple files.
+LONG_READS="/path/to/long_reads.fq.gz"
+
+# Illumina short DNA reads (paired, gzipped).  Space-separated R1 R2.
+SHORT_DNA_R1="/path/to/short_R1.fq.gz"
+SHORT_DNA_R2="/path/to/short_R2.fq.gz"
+
+# Hi-C reads (paired, gzipped).  Space-separated R1 R2.
+HIC_R1="/path/to/hic_R1.fq.gz"
+HIC_R2="/path/to/hic_R2.fq.gz"
+
+# ---- Biological parameters ----
+GENOME_SIZE_ESTIMATE=500000000    # estimated genome size in bp
+PLATFORM="ont"                    # ont | clr | pacbio_hifi | cycloneseq
+SAMPLE_ID="hpc_test_sample"
+SPECIES="Danio rerio"             # for related-species sanity check
+
+# ---- Assembly method ----
+ASSEMBLY_METHOD="flye"            # flye | nextdenovo
+FLYE_READ_TYPE="nano-raw"        # nano-raw | nano-hq | pacbio-raw | pacbio-hifi
+ASSEMBLY_THREADS=8
+
+# ---- BUSCO lineage ----
+BUSCO_LINEAGE_PATH="/db/busco/actinopterygii_odb10"
+BUSCO_LINEAGE_NAME="actinopterygii_odb10"
+
+# ---- Hi-C scaffolding ----
+HIC_RESTRICTION_ENZYME="DpnII"
+HIC_CHROMOSOME_COUNT=25
+# Path to chrom.sizes file (required for Juicer+3D-DNA execution).
+# If empty, Hi-C scaffolding will be planned but not executed.
+# You can generate one from your assembly:
+#   samtools faidx assembly.fasta && cut -f1,2 assembly.fasta.fai > chrom.sizes
+HIC_CHROM_SIZES=""
+
+# ---- Test output root ----
+# All test sessions will be created under this directory.
+TEST_DATA_ROOT="${PROJECT_ROOT}/data_hpc_test"
+
+# ---- Checkpointer ----
+CHECKPOINTER="sqlite"
+
+# ---- Run unit tests first? (true/false) ----
+RUN_UNIT_TESTS=true

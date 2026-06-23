@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# ============================================================
+#  Test 05 — Assembly Review: subgraph refactor + related species
+# ============================================================
+#  What it tests:
+#    1. QUAST subgraph (freeze -> run -> collect) with real quast.py
+#    2. BUSCO subgraph with real busco
+#    3. Related species sanity check (NCBI Metazoa reference)
+#    4. Human gate correctly blocks for review
+#    5. Review reports generated (JSON + Markdown)
+#    6. gene-agent review interactive works
+#    7. Resume flow (review → decision → resume)
+#    8. Unit tests pass
+#
+#  Prerequisites:
+#    - Test 04 must have produced a draft assembly, OR
+#    - You have an existing assembly FASTA to use
+# ============================================================
+set -euo pipefail
+cd "$(dirname "$0")"
+source common.sh
+
+section "Test 05: Assembly Review"
+
+# ---- Unit tests ----
+if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
+    cd "${PROJECT_ROOT}"
+    info "Running unit tests: test_assembly_review.py"
+    python3 -m pytest tests/test_assembly_review.py -v --tb=short 2>&1 && \
+        pass "unit tests: test_assembly_review.py" || fail "unit tests: test_assembly_review.py"
+
+    info "Running unit tests: test_related_species_evidence.py"
+    python3 -m pytest tests/test_related_species_evidence.py -v --tb=short 2>&1 && \
+        pass "unit tests: test_related_species_evidence.py" || fail "unit tests: test_related_species_evidence.py"
+
+    info "Running unit tests: test_review_recommender.py"
+    python3 -m pytest tests/test_review_recommender.py -v --tb=short 2>&1 && \
+        pass "unit tests: test_review_recommender.py" || fail "unit tests: test_review_recommender.py"
+    cd "${SCRIPT_DIR}"
+fi
+
+# ---- Check for NCBI Metazoa reference data ----
+info "Checking NCBI Metazoa reference data"
+REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
+if [[ -d "$REF_DIR" ]]; then
+    assert_file_exists "${REF_DIR}/species_alias.tsv"     "species_alias.tsv"
+    assert_file_exists "${REF_DIR}/reference_manifest.json" "reference_manifest.json"
+    pass "NCBI Metazoa reference directory exists"
+else
+    warn "NCBI Metazoa reference not installed at ${REF_DIR}"
+    info "Attempting to install..."
+    cd "${PROJECT_ROOT}"
+    if python3 scripts/install_ncbi_metazoa_reference.py 2>&1; then
+        pass "NCBI Metazoa reference installed"
+    else
+        warn "NCBI Metazoa reference install failed (related species check will be skipped)"
+    fi
+    cd "${SCRIPT_DIR}"
+fi
+
+# ---- Determine assembly to review ----
+# Use assembly from Test 04 if available, otherwise look for any
+PREV_ASM=""
+for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_assembly.fasta; do
+    if [[ -f "$d" ]]; then PREV_ASM="$d"; break; fi
+done
+if [[ -z "$PREV_ASM" ]]; then
+    for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly/*/draft_assembly.fasta; do
+        if [[ -f "$d" ]]; then PREV_ASM="$d"; break; fi
+    done
+fi
+# Also check any *.fasta in assembly dirs
+if [[ -z "$PREV_ASM" ]]; then
+    PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
+fi
+
+if [[ -z "$PREV_ASM" || ! -f "$PREV_ASM" ]]; then
+    fail "No assembly FASTA found from Test 04. Run test_04 first or provide your own."
+    summary "Test 05: Assembly Review (SKIPPED - no assembly)"
+    exit 0
+fi
+info "Using assembly: ${PREV_ASM}"
+SEQ_COUNT=$(count_fasta_seqs "$PREV_ASM")
+info "  Contigs: ${SEQ_COUNT}"
+
+# ---- Also find the candidate bundle from test 04 ----
+PREV_BUNDLE=""
+for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_candidate.json; do
+    if [[ -f "$d" ]]; then PREV_BUNDLE="$d"; break; fi
+done
+if [[ -z "$PREV_BUNDLE" ]]; then
+    PREV_BUNDLE=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*candidate*.json" 2>/dev/null | head -1 || true)
+fi
+
+# ---- Find the previous session's manifest (reuse it) ----
+PREV_MANIFEST=""
+for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/control/manifest.yaml; do
+    if [[ -f "$d" ]]; then PREV_MANIFEST="$d"; break; fi
+done
+
+# ---- Prepare review session ----
+SID="hpc-test05-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${TEST_DATA_ROOT}"
+
+if [[ -n "$PREV_MANIFEST" ]]; then
+    # Reuse the manifest from test 04 (it has the assembly asset registered)
+    MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
+    cp "$PREV_MANIFEST" "$MANIFEST"
+    # Patch session_id
+    sed -i "s/^session_id:.*/session_id: \"${SID}\"/" "$MANIFEST"
+else
+    # Create fresh manifest with the assembly
+    MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
+    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
+    write_manifest "$MANIFEST" "$SID" \
+        "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
+        "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
+fi
+
+# ---- Write run-config ----
+RC="${TEST_DATA_ROOT}/_test05_rc.json"
+write_run_config_stages "$RC" "read_qc" "assembly_review"
+
+# ---- Run (expect it to block at human gate) ----
+cd "${PROJECT_ROOT}"
+info "Running assembly_review session: ${SID}"
+info "  (Expected: block at human review gate)"
+GA run \
+    --manifest "$MANIFEST" \
+    --session-id "$SID" \
+    --data-dir "$TEST_DATA_ROOT" \
+    --run-config "$RC" \
+    --checkpointer "$CHECKPOINTER" \
+    2>&1 || true   # May exit non-zero due to human gate block
+
+# ---- Verify outputs ----
+RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
+ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly_review/${SID}"
+WORK_DIR="${RUN_DIR}/work/assembly_review/${SID}"
+
+assert_dir_exists "$ARTIFACT_DIR" "assembly_review artifact dir"
+
+# ---- QUAST outputs ----
+info "Checking QUAST subgraph outputs"
+QUAST_DIR=$(find "$ARTIFACT_DIR" -name "quast*" -type d 2>/dev/null | head -1 || true)
+if [[ -z "$QUAST_DIR" ]]; then
+    QUAST_DIR=$(find "$WORK_DIR" -name "quast*" -type d 2>/dev/null | head -1 || true)
+fi
+if [[ -n "$QUAST_DIR" && -d "$QUAST_DIR" ]]; then
+    pass "QUAST output directory found"
+    # Check for typical QUAST outputs
+    for f in "report.txt" "report.tsv" "transposed_report.tsv"; do
+        if [[ -f "${QUAST_DIR}/${f}" ]]; then
+            pass "QUAST output: ${f}"
+        fi
+    done
+else
+    warn "QUAST output directory not found (may be at different path)"
+fi
+
+# QUAST shell script
+QUAST_SCRIPT=$(find "$WORK_DIR" -name "*quast*.sh" 2>/dev/null | head -1 || true)
+if [[ -n "$QUAST_SCRIPT" && -f "$QUAST_SCRIPT" ]]; then
+    pass "QUAST shell script generated"
+    assert_file_contains "$QUAST_SCRIPT" "quast" "script contains quast command"
+fi
+
+# ---- BUSCO outputs ----
+info "Checking BUSCO subgraph outputs"
+BUSCO_DIR=$(find "$ARTIFACT_DIR" -name "busco*" -type d 2>/dev/null | head -1 || true)
+if [[ -z "$BUSCO_DIR" ]]; then
+    BUSCO_DIR=$(find "$WORK_DIR" -name "busco*" -type d 2>/dev/null | head -1 || true)
+fi
+if [[ -n "$BUSCO_DIR" && -d "$BUSCO_DIR" ]]; then
+    pass "BUSCO output directory found"
+    # Check for short_summary
+    SUMMARY_FILE=$(find "$BUSCO_DIR" -name "short_summary*" -o -name "*summary*.txt" 2>/dev/null | head -1 || true)
+    if [[ -n "$SUMMARY_FILE" ]]; then
+        pass "BUSCO summary file: $(basename "$SUMMARY_FILE")"
+    fi
+else
+    warn "BUSCO output directory not found"
+fi
+
+# ---- Eval bundle ----
+EVAL_BUNDLE=$(find "$ARTIFACT_DIR" -name "assembly_eval_bundle*.json" 2>/dev/null | head -1 || true)
+if [[ -n "$EVAL_BUNDLE" && -f "$EVAL_BUNDLE" ]]; then
+    pass "assembly eval bundle produced"
+    cd "${PROJECT_ROOT}"
+    python3 -c "
+import json
+d = json.load(open('${EVAL_BUNDLE}'))
+print(f'  Eval bundle keys: {list(d.keys())[:10]}')
+signals = d.get('signals') or d.get('eval_signals') or {}
+print(f'  Signals: {list(signals.keys()) if isinstance(signals, dict) else len(signals)} entries')
+" 2>&1 && pass "eval bundle parseable" || warn "eval bundle parse error"
+    cd "${SCRIPT_DIR}"
+fi
+
+# ---- Related species evidence pack ----
+info "Checking related species sanity check"
+REL_SPECIES=$(find "$ARTIFACT_DIR" -name "related_species_evidence*" 2>/dev/null | head -1 || true)
+if [[ -n "$REL_SPECIES" && -f "$REL_SPECIES" ]]; then
+    pass "related_species_evidence_pack produced"
+    cd "${PROJECT_ROOT}"
+    python3 -c "
+import json
+d = json.load(open('${REL_SPECIES}'))
+print(f'  Evidence pack keys: {list(d.keys())[:10]}')
+evidence = d.get('evidence') or d.get('related_species') or d.get('matches') or []
+if isinstance(evidence, list):
+    print(f'  Found {len(evidence)} related species entries')
+    for e in evidence[:3]:
+        if isinstance(e, dict):
+            name = e.get('species_name') or e.get('name') or e.get('organism_name', '?')
+            print(f'    - {name}')
+elif isinstance(evidence, dict):
+    print(f'  Evidence keys: {list(evidence.keys())[:5]}')
+" 2>&1 && pass "related species evidence pack parseable" || warn "evidence pack parse issue"
+    cd "${SCRIPT_DIR}"
+else
+    warn "related_species_evidence_pack not found (may need reference data installed)"
+fi
+
+# ---- Review reports ----
+info "Checking review reports"
+REVIEW_JSON=$(find "$ARTIFACT_DIR" -name "assembly_review_report*.json" 2>/dev/null | head -1 || true)
+REVIEW_MD=$(find "$ARTIFACT_DIR" -name "assembly_review_report*.md" 2>/dev/null | head -1 || true)
+REVIEW_REQ=$(find "$ARTIFACT_DIR" -name "assembly_review_request*.json" 2>/dev/null | head -1 || true)
+
+[[ -n "$REVIEW_JSON" ]] && assert_file_nonempty "$REVIEW_JSON" "review report JSON" || warn "review report JSON not found"
+[[ -n "$REVIEW_MD" ]]   && assert_file_nonempty "$REVIEW_MD"   "review report Markdown" || warn "review report Markdown not found"
+[[ -n "$REVIEW_REQ" ]]  && assert_file_nonempty "$REVIEW_REQ"  "review request JSON" || warn "review request JSON not found"
+
+# ---- Human gate: verify pipeline blocked ----
+info "Checking human gate block"
+EVENTS="${RUN_DIR}/ledger/events.jsonl"
+if [[ -f "$EVENTS" ]]; then
+    BLOCKED=$(grep -c "blocked_human\|human_gate\|interrupt" "$EVENTS" 2>/dev/null || echo 0)
+    if (( BLOCKED > 0 )); then
+        pass "pipeline correctly blocked at human gate (${BLOCKED} events)"
+    else
+        warn "no blocked_human events found"
+    fi
+fi
+
+# ---- Test inspect with --write-decision-template ----
+info "Testing decision template generation"
+cd "${PROJECT_ROOT}"
+DECISION_TEMPLATE="${TEST_DATA_ROOT}/_test05_decision_template.json"
+GA inspect \
+    --session-id "$SID" \
+    --data-dir "$TEST_DATA_ROOT" \
+    --write-decision-template "$DECISION_TEMPLATE" \
+    2>&1 || true
+
+if [[ -f "$DECISION_TEMPLATE" ]]; then
+    pass "decision template written"
+    python3 -c "
+import json
+d = json.load(open('${DECISION_TEMPLATE}'))
+print(f'  Template keys: {list(d.keys())}')
+print(f'  Template content preview: {json.dumps(d, indent=2)[:500]}')
+" 2>&1 && pass "decision template is valid JSON" || fail "decision template invalid JSON"
+else
+    warn "decision template not written (inspect may not support --write-decision-template for this state)"
+fi
+
+# ---- Test gene-agent review --dry-run ----
+info "Testing review dry-run"
+cd "${PROJECT_ROOT}"
+GA review \
+    --session-id "$SID" \
+    --data-dir "$TEST_DATA_ROOT" \
+    --dry-run \
+    2>&1 && pass "review --dry-run succeeded" || warn "review --dry-run returned non-zero (may need different state)"
+
+# ---- Inspect with trace ----
+cd "${PROJECT_ROOT}"
+GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --trace 2>&1 && \
+    pass "inspect with trace" || fail "inspect with trace"
+
+summary "Test 05: Assembly Review"

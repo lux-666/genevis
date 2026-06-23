@@ -32,3 +32,7 @@ docs/beginner_mainline_guide.md
 *.egg-info/
 dist/
 build/
+
+# HPC integration tests
+tests/hpc/hpc_env.sh
+data_hpc_test/
