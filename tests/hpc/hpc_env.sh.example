@@ -8,7 +8,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # ---- Conda environment ----
 # Name of the conda env that has all bioinformatics tools installed.
-# Required tools: seqkit, jellyfish, genomescope2, flye, minimap2,
+# Required tools: seqkit, jellyfish, genomescope2, flye or nextDenovo, minimap2,
 #   samtools, pbcstat, calcuts, purge_dups, get_seqs, quast.py,
 #   busco, juicer.sh, run-asm-pipeline.sh, yahs
 CONDA_ENV="env_geno_exec"
@@ -37,8 +37,10 @@ SAMPLE_ID="hpc_test_sample"
 SPECIES="Danio rerio"             # for related-species sanity check
 
 # ---- Assembly method ----
-ASSEMBLY_METHOD="flye"            # flye | nextdenovo
-FLYE_READ_TYPE="nano-raw"        # nano-raw | nano-hq | pacbio-raw | pacbio-hifi
+# NextDenovo is the default HPC smoke assembler. Switch to flye only when
+# that is the intended route and its tool is installed in env_geno_exec.
+ASSEMBLY_METHOD="nextdenovo"      # flye | nextdenovo
+FLYE_READ_TYPE="nano-raw"         # used only when ASSEMBLY_METHOD=flye
 ASSEMBLY_THREADS=8
 
 # ---- BUSCO lineage ----

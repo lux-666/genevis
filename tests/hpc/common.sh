@@ -114,6 +114,31 @@ PY
     fi
 }
 
+require_conda_tools() {
+    # Usage: require_conda_tools tool [tool ...]
+    # Return non-zero only after checking every tool, so an HPC operator gets
+    # one actionable list instead of discovering missing packages after an
+    # expensive upstream method has already run.
+    local tool
+    local missing=()
+    if ! command -v conda >/dev/null 2>&1; then
+        fail "conda is not on PATH; cannot preflight ${CONDA_ENV}"
+        return 1
+    fi
+    for tool in "$@"; do
+        if conda run -n "${CONDA_ENV}" bash -lc "command -v $(printf '%q' "$tool") >/dev/null" >/dev/null 2>&1; then
+            pass "tool available in ${CONDA_ENV}: ${tool}"
+        else
+            fail "tool missing from ${CONDA_ENV}: ${tool}"
+            missing+=("${tool}")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        info "Missing tools: ${missing[*]}"
+        return 1
+    fi
+}
+
 # -------------------------------------------------------------------
 #  FASTA / FASTQ helpers
 # -------------------------------------------------------------------

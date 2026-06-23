@@ -55,6 +55,30 @@ assert 'assembly_dedup' in str(vals) or 'assembly_dedup' in str(DomainStage), \
 print(f'DomainStage includes assembly_dedup')
 " 2>&1 && pass "assembly_dedup in DomainStage" || fail "assembly_dedup missing from DomainStage"
 
+# ---- Tool preflight ----
+# Do this before creating a session or launching an expensive assembler.  A
+# completed draft is not useful to this integration test unless purge_dups can
+# also run, so missing tools are a fast, explicit test failure.
+case "${ASSEMBLY_METHOD}" in
+    flye) ASSEMBLER_TOOL="flye" ;;
+    nextdenovo) ASSEMBLER_TOOL="nextDenovo" ;;
+    *)
+        fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected flye or nextdenovo)"
+        summary "Test 04: Assembly + Assembly Dedup"
+        exit 1
+        ;;
+esac
+
+info "Preflighting assembler and assembly_dedup dependencies"
+if ! require_conda_tools \
+    seqkit "$ASSEMBLER_TOOL" minimap2 samtools pbcstat calcuts purge_dups get_seqs
+then
+    info "Install the missing dedup tools before rerunning, for example:"
+    info "  conda install -n ${CONDA_ENV} -c conda-forge -c bioconda purge_dups"
+    summary "Test 04: Assembly + Assembly Dedup (missing tools)"
+    exit 1
+fi
+
 # ---- Prepare manifest ----
 SID="hpc-test04-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test04_manifest.yaml"
