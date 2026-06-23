@@ -14,12 +14,15 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONDA_ENV="env_geno_exec"
 
 # ---- Test data paths ----
-# At minimum you need LONG_READS. For full coverage add SHORT_DNA and HIC.
+# Only LONG_READS is required.  Genome survey uses them directly when short
+# reads are absent; SHORT_DNA takes precedence when supplied.  Add Hi-C for
+# real scaffolding coverage.
 
 # ONT or PacBio CLR long reads (FASTQ/FASTA, gzipped ok).  Space-separated for multiple files.
 LONG_READS="/path/to/long_reads.fq.gz"
 
-# Illumina short DNA reads (paired, gzipped).  Space-separated R1 R2.
+# Optional Illumina short DNA reads (paired, gzipped). When set, test_03
+# prefers these over long reads for k-mer survey.
 SHORT_DNA_R1="/path/to/short_R1.fq.gz"
 SHORT_DNA_R2="/path/to/short_R2.fq.gz"
 

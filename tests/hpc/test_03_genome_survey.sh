@@ -17,16 +17,26 @@ source common.sh
 section "Test 03: Genome Survey"
 
 # ---- Verify input data ----
-info "Checking input data (short DNA reads required)"
-if [[ -z "${SHORT_DNA_R1}" || ! -f "${SHORT_DNA_R1}" ]]; then
-    fail "SHORT_DNA_R1 not set or file missing: ${SHORT_DNA_R1}"
-    echo "  Genome survey requires Illumina short reads."
-    echo "  Set SHORT_DNA_R1 and SHORT_DNA_R2 in hpc_env.sh"
-    summary "Test 03: Genome Survey (SKIPPED)"
-    exit 0
+# The stage supports both input families. Prefer paired short reads when both
+# are configured, otherwise exercise the long-read-only route used by the
+# normal ONT/PacBio workflow.
+info "Checking genome-survey inputs"
+USE_SHORT_DNA=false
+if [[ -n "${SHORT_DNA_R1:-}" || -n "${SHORT_DNA_R2:-}" ]]; then
+    if [[ -z "${SHORT_DNA_R1:-}" || -z "${SHORT_DNA_R2:-}" ]]; then
+        fail "SHORT_DNA_R1 and SHORT_DNA_R2 must be supplied together"
+    else
+        assert_file_nonempty "$SHORT_DNA_R1" "short DNA R1"
+        assert_file_nonempty "$SHORT_DNA_R2" "short DNA R2"
+        USE_SHORT_DNA=true
+        info "Using paired short DNA reads for genome survey"
+    fi
+else
+    for f in $LONG_READS; do
+        assert_file_nonempty "$f" "long-read survey input: $(basename "$f")"
+    done
+    info "No short DNA reads configured; using raw long reads for genome survey"
 fi
-assert_file_nonempty "$SHORT_DNA_R1" "short DNA R1"
-assert_file_nonempty "$SHORT_DNA_R2" "short DNA R2"
 
 # ---- Unit tests ----
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
@@ -67,17 +77,19 @@ print('fallback_low_confidence correctly removed')
 " 2>&1 && pass "fallback_low_confidence removed from GenomeSurveyResult.mode" || \
     fail "fallback_low_confidence still in GenomeSurveyResult.mode"
 
-# ---- Prepare manifest with short reads ----
+# ---- Prepare manifest with the selected survey input family ----
 SID="hpc-test03-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test03_manifest.yaml"
 mkdir -p "${TEST_DATA_ROOT}"
 
 LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
-SR_PATHS="${SHORT_DNA_R1},${SHORT_DNA_R2}"
 MANIFEST_GENOME_SIZE_ESTIMATE=""
-write_manifest "$MANIFEST" "$SID" \
-    "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
-    "raw_short_dna_reads:${SR_PATHS}:illumina:paired"
+MANIFEST_ASSETS=("raw_long_reads:${LR_PATHS}:${PLATFORM}:single")
+if [[ "$USE_SHORT_DNA" == "true" ]]; then
+    SR_PATHS="${SHORT_DNA_R1},${SHORT_DNA_R2}"
+    MANIFEST_ASSETS+=("raw_short_dna_reads:${SR_PATHS}:illumina:paired")
+fi
+write_manifest "$MANIFEST" "$SID" "${MANIFEST_ASSETS[@]}"
 unset MANIFEST_GENOME_SIZE_ESTIMATE
 
 # ---- Write run-config enabling genome_survey ----
