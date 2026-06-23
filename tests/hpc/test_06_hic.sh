@@ -129,6 +129,7 @@ print(f'HiCInputMode values: {list(mode_vals)}')
 print(f'HiCMethod values: {list(method_vals)}')
 assert 'raw_reads' in mode_vals, 'raw_reads missing'
 assert 'merged_nodups' in mode_vals, 'merged_nodups missing'
+assert 'auto' in mode_vals, 'auto missing'
 assert 'juicer_3ddna_juicebox' in method_vals, 'juicer_3ddna_juicebox missing'
 assert 'yahs' in method_vals, 'yahs missing'
 print('Hi-C Literal types: PASS')
@@ -144,6 +145,20 @@ type_str = str(atype)
 assert 'hic_merged_nodups' in type_str, f'hic_merged_nodups not in asset types: {type_str}'
 print('hic_merged_nodups in accepted asset types')
 " 2>&1 && pass "hic_merged_nodups in manifest asset types" || fail "hic_merged_nodups not in asset types"
+
+python3 -c "
+from app.schemas.run_config import HiCScaffoldingPlanCandidate
+
+candidate = HiCScaffoldingPlanCandidate(
+    method='juicer_3ddna_juicebox',
+    input_mode='merged_nodups',
+    chromosome_count=${HIC_CHROMOSOME_COUNT},
+    merged_nodups_ref='/tmp/merged_nodups.txt',
+    juicer_3ddna_parameters={'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}', 'chrom_sizes_ref': '/tmp/chrom.sizes', 'threads': 4},
+)
+assert candidate.status == 'ready_to_execute', candidate
+print('merged_nodups Juicer candidate is execution-ready')
+" 2>&1 && pass "merged_nodups planning contract" || fail "merged_nodups planning contract"
 
 cd "${SCRIPT_DIR}"
 
@@ -230,6 +245,9 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     if [[ -n "$JUICER_SCRIPT" ]]; then
         pass "Hi-C shell script generated: $(basename "$JUICER_SCRIPT")"
         assert_file_contains "$JUICER_SCRIPT" "juicer\|3d-dna\|run-asm-pipeline" "script has Juicer/3D-DNA commands"
+        assert_file_contains "$JUICER_SCRIPT" "published artifact conflicts" "Hi-C script rejects conflicting replay output"
+    else
+        fail "Hi-C shell script not found"
     fi
 
     # Output files
@@ -243,6 +261,13 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --trace 2>&1 && \
         pass "inspect Hi-C session" || fail "inspect Hi-C session"
+
+    if [[ -f "${RUN_DIR}/ledger/events.jsonl" ]]; then
+        assert_ledger_has_method_attempt "${RUN_DIR}/ledger/events.jsonl" "hic_scaffolding.candidate.juicer_3ddna_juicebox"
+        assert_no_duplicate_method_attempts "${RUN_DIR}/ledger/events.jsonl" "Hi-C ledger has no duplicate attempts"
+    else
+        fail "Hi-C ledger events.jsonl not found"
+    fi
 else
     info "Skipping real Hi-C execution (no Hi-C data configured)"
     info "Schema and unit tests still validate the Hi-C code paths"

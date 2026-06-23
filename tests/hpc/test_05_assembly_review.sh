@@ -9,7 +9,7 @@
 #    4. Human gate correctly blocks for review
 #    5. Review reports generated (JSON + Markdown)
 #    6. gene-agent review interactive works
-#    7. Resume flow (review → decision → resume)
+#    7. Durable decision-template generation and non-interactive review validation
 #    8. Unit tests pass
 #
 #  Prerequisites:
@@ -42,18 +42,18 @@ fi
 # ---- Check for NCBI Metazoa reference data ----
 info "Checking NCBI Metazoa reference data"
 REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
-if [[ -d "$REF_DIR" ]]; then
+if [[ -f "${REF_DIR}/Metazoa.ncbi.tsv" && -f "${REF_DIR}/Metazoa.ncbi.lineage" ]]; then
     assert_file_exists "${REF_DIR}/species_alias.tsv"     "species_alias.tsv"
     assert_file_exists "${REF_DIR}/reference_manifest.json" "reference_manifest.json"
-    pass "NCBI Metazoa reference directory exists"
+    pass "NCBI Metazoa reference data is installed"
 else
-    warn "NCBI Metazoa reference not installed at ${REF_DIR}"
+    warn "NCBI Metazoa reference data incomplete at ${REF_DIR}"
     info "Attempting to install..."
     cd "${PROJECT_ROOT}"
     if python3 scripts/install_ncbi_metazoa_reference.py 2>&1; then
         pass "NCBI Metazoa reference installed"
     else
-        warn "NCBI Metazoa reference install failed (related species check will be skipped)"
+        fail "NCBI Metazoa reference install failed"
     fi
     cd "${SCRIPT_DIR}"
 fi
@@ -92,30 +92,18 @@ if [[ -z "$PREV_BUNDLE" ]]; then
     PREV_BUNDLE=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*candidate*.json" 2>/dev/null | head -1 || true)
 fi
 
-# ---- Find the previous session's manifest (reuse it) ----
-PREV_MANIFEST=""
-for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/control/manifest.yaml; do
-    if [[ -f "$d" ]]; then PREV_MANIFEST="$d"; break; fi
-done
-
 # ---- Prepare review session ----
 SID="hpc-test05-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "${TEST_DATA_ROOT}"
 
-if [[ -n "$PREV_MANIFEST" ]]; then
-    # Reuse the manifest from test 04 (it has the assembly asset registered)
-    MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
-    cp "$PREV_MANIFEST" "$MANIFEST"
-    # Patch session_id
-    sed -i "s/^session_id:.*/session_id: \"${SID}\"/" "$MANIFEST"
-else
-    # Create fresh manifest with the assembly
-    MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
-    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
-    write_manifest "$MANIFEST" "$SID" \
-        "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
-        "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
-fi
+# A fresh session cannot see Test 04's stage_outputs. Register the produced
+# assembly explicitly; reusing its original raw-read manifest only exercises
+# planning and cannot validate the QUAST/BUSCO execution subgraphs.
+MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
+LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
+write_manifest "$MANIFEST" "$SID" \
+    "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
+    "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
 
 # ---- Write run-config ----
 RC="${TEST_DATA_ROOT}/_test05_rc.json"
@@ -155,7 +143,7 @@ if [[ -n "$QUAST_DIR" && -d "$QUAST_DIR" ]]; then
         fi
     done
 else
-    warn "QUAST output directory not found (may be at different path)"
+    fail "QUAST output directory not found"
 fi
 
 # QUAST shell script
@@ -163,6 +151,8 @@ QUAST_SCRIPT=$(find "$WORK_DIR" -name "*quast*.sh" 2>/dev/null | head -1 || true
 if [[ -n "$QUAST_SCRIPT" && -f "$QUAST_SCRIPT" ]]; then
     pass "QUAST shell script generated"
     assert_file_contains "$QUAST_SCRIPT" "quast" "script contains quast command"
+else
+    fail "QUAST shell script not found"
 fi
 
 # ---- BUSCO outputs ----
@@ -179,7 +169,7 @@ if [[ -n "$BUSCO_DIR" && -d "$BUSCO_DIR" ]]; then
         pass "BUSCO summary file: $(basename "$SUMMARY_FILE")"
     fi
 else
-    warn "BUSCO output directory not found"
+    fail "BUSCO output directory not found"
 fi
 
 # ---- Eval bundle ----
@@ -207,6 +197,7 @@ if [[ -n "$REL_SPECIES" && -f "$REL_SPECIES" ]]; then
 import json
 d = json.load(open('${REL_SPECIES}'))
 print(f'  Evidence pack keys: {list(d.keys())[:10]}')
+assert d.get('target', {}).get('input_name') == '${SPECIES}', d.get('target')
 evidence = d.get('evidence') or d.get('related_species') or d.get('matches') or []
 if isinstance(evidence, list):
     print(f'  Found {len(evidence)} related species entries')
@@ -219,7 +210,7 @@ elif isinstance(evidence, dict):
 " 2>&1 && pass "related species evidence pack parseable" || warn "evidence pack parse issue"
     cd "${SCRIPT_DIR}"
 else
-    warn "related_species_evidence_pack not found (may need reference data installed)"
+    fail "related_species_evidence_pack not found"
 fi
 
 # ---- Review reports ----
@@ -228,9 +219,9 @@ REVIEW_JSON=$(find "$ARTIFACT_DIR" -name "assembly_review_report*.json" 2>/dev/n
 REVIEW_MD=$(find "$ARTIFACT_DIR" -name "assembly_review_report*.md" 2>/dev/null | head -1 || true)
 REVIEW_REQ=$(find "$ARTIFACT_DIR" -name "assembly_review_request*.json" 2>/dev/null | head -1 || true)
 
-[[ -n "$REVIEW_JSON" ]] && assert_file_nonempty "$REVIEW_JSON" "review report JSON" || warn "review report JSON not found"
-[[ -n "$REVIEW_MD" ]]   && assert_file_nonempty "$REVIEW_MD"   "review report Markdown" || warn "review report Markdown not found"
-[[ -n "$REVIEW_REQ" ]]  && assert_file_nonempty "$REVIEW_REQ"  "review request JSON" || warn "review request JSON not found"
+[[ -n "$REVIEW_JSON" ]] && assert_file_nonempty "$REVIEW_JSON" "review report JSON" || fail "review report JSON not found"
+[[ -n "$REVIEW_MD" ]]   && assert_file_nonempty "$REVIEW_MD"   "review report Markdown" || fail "review report Markdown not found"
+[[ -n "$REVIEW_REQ" ]]  && assert_file_nonempty "$REVIEW_REQ"  "review request JSON" || fail "review request JSON not found"
 
 # ---- Human gate: verify pipeline blocked ----
 info "Checking human gate block"
@@ -240,8 +231,13 @@ if [[ -f "$EVENTS" ]]; then
     if (( BLOCKED > 0 )); then
         pass "pipeline correctly blocked at human gate (${BLOCKED} events)"
     else
-        warn "no blocked_human events found"
+        fail "no blocked_human events found"
     fi
+    assert_ledger_has_method_attempt "$EVENTS" "assembly_review.eval.quast"
+    assert_ledger_has_method_attempt "$EVENTS" "assembly_review.eval.busco"
+    assert_no_duplicate_method_attempts "$EVENTS" "assembly-review ledger has no duplicate attempts"
+else
+    fail "assembly-review ledger events.jsonl not found"
 fi
 
 # ---- Test inspect with --write-decision-template ----

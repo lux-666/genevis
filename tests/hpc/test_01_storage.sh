@@ -76,18 +76,25 @@ else
 fi
 
 # ---- Test 4: Check sqlite checkpoint was created ----
-CKPT_DB="${RUN_DIR}/checkpoints/checkpoints.db"
+CKPT_DB="${RUN_DIR}/checkpoints/checkpoints.sqlite"
 if [[ -f "$CKPT_DB" ]]; then
-    pass "sqlite checkpoint DB created at checkpoints/checkpoints.db"
+    pass "sqlite checkpoint DB created at checkpoints/checkpoints.sqlite"
     # Verify it has tables
-    TABLE_COUNT=$(sqlite3 "$CKPT_DB" "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
+    TABLE_COUNT=$(python3 - "$CKPT_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as connection:
+    print(connection.execute("SELECT count(*) FROM sqlite_master WHERE type='table'").fetchone()[0])
+PY
+)
     if (( TABLE_COUNT > 0 )); then
         pass "checkpoint DB has ${TABLE_COUNT} tables"
     else
         fail "checkpoint DB has no tables"
     fi
 else
-    warn "sqlite checkpoint DB not found (may not be created if graph didn't invoke)"
+    fail "sqlite checkpoint DB not found"
 fi
 
 # ---- Test 5: Ledger event log ----
@@ -107,8 +114,9 @@ echo "hello replay" > "${PUBLISH_TEST_DIR}/src/test.txt"
 
 cd "${PROJECT_ROOT}"
 python3 -c "
-from app.storage.publish import publish_file
+from app.storage.publish import publish_file, shell_publish_file
 from pathlib import Path
+import subprocess
 src = Path('${PUBLISH_TEST_DIR}/src/test.txt')
 dst = Path('${PUBLISH_TEST_DIR}/dst/test.txt')
 
@@ -132,6 +140,16 @@ try:
     exit(1)
 except FileExistsError:
     pass  # expected
+
+# Generated method scripts use this helper, so cover its replay semantics too.
+shell_source = src.with_name('shell-source.txt')
+shell_destination = dst.with_name('shell-destination.txt')
+shell_source.write_text('shell replay')
+subprocess.run(shell_publish_file(shell_source, shell_destination), shell=True, check=True)
+shell_source.write_text('shell replay')
+subprocess.run(shell_publish_file(shell_source, shell_destination), shell=True, check=True)
+assert shell_destination.read_text() == 'shell replay'
+assert not shell_source.exists()
 
 print('publish_file: all replay-safe checks passed')
 " 2>&1 && pass "publish_file() replay safety" || fail "publish_file() replay safety"

@@ -76,13 +76,17 @@ cd "${PROJECT_ROOT}"
 info "Running assembly + dedup session: ${SID}"
 info "  Method: ${ASSEMBLY_METHOD}"
 info "  This may take a while for real assembly..."
-GA run \
+if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --run-config "$RC" \
     --checkpointer "$CHECKPOINTER" \
-    2>&1
+    2>&1; then
+    pass "assembly + dedup session completed without CLI error"
+else
+    fail "assembly + dedup session returned a CLI error"
+fi
 
 # ---- Verify assembly outputs ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
@@ -111,6 +115,15 @@ if [[ -n "$DRAFT_ASM" && -f "$DRAFT_ASM" ]]; then
 else
     fail "draft assembly FASTA not found"
     # Try to continue with dedup checks anyway
+fi
+
+# The storage refactor changed method scripts from cp to replay-safe publish.
+ASM_SCRIPT=$(find "${RUN_DIR}/work/assembly/${SID}" -name "*.sh" -type f 2>/dev/null | head -1 || true)
+if [[ -n "$ASM_SCRIPT" ]]; then
+    pass "assembly method script generated: $(basename "$ASM_SCRIPT")"
+    assert_file_contains "$ASM_SCRIPT" "published artifact conflicts" "assembly script rejects conflicting replay output"
+else
+    fail "assembly method script not found"
 fi
 
 # ---- Verify assembly candidate bundle ----
@@ -242,6 +255,14 @@ if dedup_events:
 else:
     print('No assembly_dedup events found (stage may have been skipped)')
 " 2>&1
+
+if [[ -f "${RUN_DIR}/ledger/events.jsonl" ]]; then
+    assert_ledger_has_method_attempt "${RUN_DIR}/ledger/events.jsonl" "assembly.candidate.${ASSEMBLY_METHOD}"
+    assert_ledger_has_method_attempt "${RUN_DIR}/ledger/events.jsonl" "assembly_dedup.purge_dups"
+    assert_no_duplicate_method_attempts "${RUN_DIR}/ledger/events.jsonl" "assembly/dedup ledger has no duplicate attempts"
+else
+    fail "assembly/dedup ledger events.jsonl not found"
+fi
 
 # ---- Inspect ----
 cd "${PROJECT_ROOT}"

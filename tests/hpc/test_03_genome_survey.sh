@@ -74,25 +74,30 @@ mkdir -p "${TEST_DATA_ROOT}"
 
 LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
 SR_PATHS="${SHORT_DNA_R1},${SHORT_DNA_R2}"
+MANIFEST_GENOME_SIZE_ESTIMATE=""
 write_manifest "$MANIFEST" "$SID" \
     "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
     "raw_short_dna_reads:${SR_PATHS}:illumina:paired"
+unset MANIFEST_GENOME_SIZE_ESTIMATE
 
 # ---- Write run-config enabling genome_survey ----
 RC="${TEST_DATA_ROOT}/_test03_rc.json"
-write_run_config_stages "$RC" "read_qc" "genome_survey"
+write_genome_survey_run_config "$RC"
 
 # ---- Run ----
 cd "${PROJECT_ROOT}"
 info "Running genome_survey session: ${SID}"
-GA run \
+if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --run-config "$RC" \
     --checkpointer "$CHECKPOINTER" \
-    2>&1
-RC_EXIT=$?
+    2>&1; then
+    pass "genome_survey session completed without CLI error"
+else
+    fail "genome_survey session returned a CLI error"
+fi
 
 # ---- Verify outputs ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
@@ -141,10 +146,11 @@ if [[ -n "$SURVEY_RESULT" ]]; then
     python3 -c "
 import json
 d = json.load(open('${SURVEY_RESULT}'))
-# Check for genome_size_prior or genome_size in the result
-has_size = any(k in d for k in ['genome_size_prior', 'genome_size', 'estimated_genome_size'])
+# GenomeSurveyResult persists estimates; genome_size_prior is the companion
+# top-level stage-output handoff consumed by assembly.
+has_size = 'genome_size' in d.get('estimates', {})
 if has_size:
-    size = d.get('genome_size_prior') or d.get('genome_size') or d.get('estimated_genome_size')
+    size = d['estimates']['genome_size']
     print(f'Genome size estimate: {size}')
 else:
     print(f'Result keys: {list(d.keys())}')
@@ -155,31 +161,38 @@ else:
             print(f'Found in nested result: {d[\"result\"].get(\"genome_size_prior\", d[\"result\"].get(\"genome_size\"))}')
 assert has_size or 'result' in d, 'no genome size field found in survey result'
 " 2>&1 && pass "genome_size field present in survey result" || fail "genome_size field missing from survey result"
+    python3 -c "
+import json
+d = json.load(open('${SURVEY_RESULT}'))
+assert d['status'] == 'completed', d
+assert d['mode'] == 'full', d
+assert d.get('skip_reason') is None, d
+assert 'genome_size' in d['estimates'], d
+print('full survey result produced genome-size estimates:', d['estimates']['genome_size'])
+" 2>&1 && pass "genome_survey executed instead of explicit-prior skip" || fail "genome_survey did not execute full survey"
     cd "${SCRIPT_DIR}"
 else
-    warn "Could not find genome_survey_result JSON to verify contract"
+    fail "Could not find genome_survey_result JSON to verify contract"
 fi
 
 # ---- Verify genome_size_prior flows to assembly stage ----
 info "Checking genome_size_prior propagation to assembly"
 cd "${PROJECT_ROOT}"
 python3 -c "
-# Verify that the assembly stage nodes can read genome_size_prior from survey output
-from app.stages.assembly import nodes as asm_nodes
-import inspect
-src = inspect.getsource(asm_nodes)
-if 'genome_size_prior' in src or 'genome_size' in src:
-    print('assembly stage references genome_size_prior/genome_size')
-else:
-    print('WARNING: assembly stage may not read genome_size from survey')
-" 2>&1 && pass "assembly stage genome_size wiring check" || warn "assembly stage genome_size wiring unclear"
+from app.stages.assembly.nodes import _genome_size_prior
+state = {'stage_outputs': {'genome_survey': {'genome_size_prior': 123456789}}}
+assert _genome_size_prior(state) == 123456789
+print('assembly resolves genome_survey.genome_size_prior before fallback estimates')
+" 2>&1 && pass "assembly stage genome_size wiring check" || fail "assembly stage genome_size wiring broken"
 
 # ---- Ledger ----
 EVENTS="${RUN_DIR}/ledger/events.jsonl"
 if [[ -f "$EVENTS" ]]; then
-    JELLY_OK=$(grep -c "jellyfish" "$EVENTS" 2>/dev/null || echo 0)
-    GS_OK=$(grep -c "genomescope" "$EVENTS" 2>/dev/null || echo 0)
-    pass "ledger records jellyfish(${JELLY_OK}) genomescope(${GS_OK}) events"
+    assert_ledger_has_method_attempt "$EVENTS" "genome_survey.kmer_count.jellyfish"
+    assert_ledger_has_method_attempt "$EVENTS" "genome_survey.model.genomescope2"
+    assert_no_duplicate_method_attempts "$EVENTS" "genome_survey ledger has no duplicate attempts"
+else
+    fail "ledger events.jsonl not found"
 fi
 
 # ---- Inspect ----

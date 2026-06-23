@@ -65,6 +65,55 @@ assert_json_field() {
     else fail "$desc"; fi
 }
 
+assert_ledger_has_method_attempt() {
+    # Require a successful attempt for one exact method, rather than merely
+    # finding a stage name somewhere in the JSONL ledger.
+    local events="$1" method_name="$2" desc="${3:-ledger succeeded: $2}"
+    if python3 - "$events" "$method_name" <<'PY' 2>/dev/null
+import json
+import sys
+
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert any(
+    event.get("event_type") == "attempt_succeeded"
+    and event.get("method_name") == sys.argv[2]
+    for event in events
+)
+PY
+    then
+        pass "$desc"
+    else
+        fail "$desc"
+    fi
+}
+
+assert_no_duplicate_method_attempts() {
+    # Replaying a blocked session must not re-run a completed method attempt.
+    local events="$1" desc="${2:-no duplicate method attempts}"
+    if python3 - "$events" <<'PY' 2>/dev/null
+import collections
+import json
+import sys
+
+counts = collections.Counter()
+for line in open(sys.argv[1], encoding="utf-8"):
+    if not line.strip():
+        continue
+    event = json.loads(line)
+    if event.get("event_type") != "attempt_started":
+        continue
+    key = (event.get("stage"), event.get("method_name"), event.get("attempt_id"))
+    counts[key] += 1
+duplicates = {key: count for key, count in counts.items() if count > 1}
+assert not duplicates, duplicates
+PY
+    then
+        pass "$desc"
+    else
+        fail "$desc"
+    fi
+}
+
 # -------------------------------------------------------------------
 #  FASTA / FASTQ helpers
 # -------------------------------------------------------------------
@@ -85,10 +134,21 @@ write_manifest() {
     cat > "$out" <<YAML
 session_id: "${session_id}"
 sample_id: "${SAMPLE_ID}"
+user_metadata:
+  species: "${SPECIES:-}"
 assets:
 YAML
     for spec in "$@"; do
         IFS=: read -r atype paths plat lay <<< "$spec"
+        local format="fastq" compression="gzip"
+        case "$atype" in
+            assembly_fasta_registered|repeat_library|reference_proteins)
+                format="fasta"; compression="none" ;;
+            hic_alignment_bam)
+                format="bam"; compression="none" ;;
+            hic_merged_nodups)
+                format="unknown"; compression="none" ;;
+        esac
         cat >> "$out" <<YAML
   - asset_type: ${atype}
     paths:
@@ -100,14 +160,19 @@ YAML
         cat >> "$out" <<YAML
     platform: ${plat}
     layout: ${lay}
-    format: fastq
-    compression: gzip
+    format: ${format}
+    compression: ${compression}
 YAML
     done
     cat >> "$out" <<YAML
 target_assembly_level: chromosome
-genome_size_estimate: ${GENOME_SIZE_ESTIMATE}
 YAML
+    # GenomeScope must run without an operator-provided size. Individual tests
+    # can set MANIFEST_GENOME_SIZE_ESTIMATE="" deliberately.
+    local manifest_size="${MANIFEST_GENOME_SIZE_ESTIMATE-${GENOME_SIZE_ESTIMATE}}"
+    if [[ -n "$manifest_size" ]]; then
+        echo "genome_size_estimate: ${manifest_size}" >> "$out"
+    fi
 }
 
 # -------------------------------------------------------------------
@@ -134,9 +199,9 @@ rc['shared_parameters'] = {
 if 'read_qc' in stages:
     rc['read_qc'] = {
         'length_filter': {
-            'method': 'skip',
-            'approved': False,
-            'thresholds': {},
+            'method': '${READ_QC_LENGTH_FILTER_METHOD:-skip}',
+            'approved': ${READ_QC_LENGTH_FILTER_APPROVED:-False},
+            'thresholds': {'min_len': ${READ_QC_MIN_LEN:-1}} if '${READ_QC_LENGTH_FILTER_METHOD:-skip}' == 'read_qc.length_filter.seqkit_seq' else {},
         }
     }
 
@@ -202,6 +267,26 @@ if 'hic_scaffolding' in stages:
 
 json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 " "$out"
+}
+
+write_genome_survey_run_config() {
+    # Deliberately omits shared_parameters.estimated_genome_size: that value
+    # sends the stage down its explicit-prior skip route.
+    local out="$1"
+    python3 - "$out" <<'PY'
+import json
+import sys
+
+json.dump(
+    {
+        "local_exec": ["read_qc", "genome_survey"],
+        "read_qc": {"length_filter": {"method": "skip", "approved": False, "thresholds": {}}},
+        "genome_survey": {"survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}},
+    },
+    open(sys.argv[1], "w", encoding="utf-8"),
+    indent=2,
+)
+PY
 }
 
 # -------------------------------------------------------------------

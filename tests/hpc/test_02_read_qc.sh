@@ -46,19 +46,25 @@ write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LR_PATHS}:${PLATFORM}:single
 
 # ---- Write run-config enabling read_qc ----
 RC="${TEST_DATA_ROOT}/_test02_rc.json"
+READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
+READ_QC_LENGTH_FILTER_APPROVED="True"
 write_run_config_stages "$RC" "read_qc"
+unset READ_QC_LENGTH_FILTER_METHOD READ_QC_LENGTH_FILTER_APPROVED
 
 # ---- Run ----
 cd "${PROJECT_ROOT}"
 info "Running read_qc session: ${SID}"
-GA run \
+if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --run-config "$RC" \
     --checkpointer "$CHECKPOINTER" \
-    2>&1
-RC_EXIT=$?
+    2>&1; then
+    pass "read_qc session completed without CLI error"
+else
+    fail "read_qc session returned a CLI error"
+fi
 
 # ---- Verify directory structure ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
@@ -103,12 +109,33 @@ print(f'read_qc_summary.json valid: {s.get(\"num_seqs\", \"?\")} reads, {s.get(\
     cd "${SCRIPT_DIR}"
 fi
 
-# ---- Verify shell script was generated ----
+# ---- Verify method scripts and executable length-filter branch ----
 STATS_SCRIPT="${WORK_DIR}/seqkit_stats/run_seqkit_stats.sh"
 assert_file_exists "$STATS_SCRIPT" "seqkit_stats shell script generated"
 if [[ -f "$STATS_SCRIPT" ]]; then
     assert_file_contains "$STATS_SCRIPT" "seqkit stats" "script contains seqkit stats command"
     assert_file_contains "$STATS_SCRIPT" "set -e"       "script has set -e guard"
+fi
+
+FILTER_SCRIPT="${WORK_DIR}/length_filter/run_length_filter.sh"
+assert_file_exists "$FILTER_SCRIPT" "length-filter shell script generated"
+if [[ -f "$FILTER_SCRIPT" ]]; then
+    assert_file_contains "$FILTER_SCRIPT" "seqkit seq -m ${READ_QC_MIN_LEN}" "script contains configured seqkit length filter"
+    assert_file_contains "$FILTER_SCRIPT" "post_filter_seqkit_stats.tsv" "script collects post-filter statistics"
+fi
+
+FILTERED_FOFN="${ARTIFACT_DIR}/filtered_long_reads.fofn"
+FILTERED_SUMMARY="${ARTIFACT_DIR}/post_filter_read_qc_summary.json"
+assert_file_nonempty "$FILTERED_FOFN" "filtered long-read FOFN produced"
+assert_file_nonempty "$FILTERED_SUMMARY" "post-filter summary produced"
+if [[ -f "$FILTERED_FOFN" ]]; then
+    FOFN_LINES=$(wc -l < "$FILTERED_FOFN")
+    EXPECTED_FOFN_LINES=$(wc -w <<< "$LONG_READS")
+    if (( FOFN_LINES == EXPECTED_FOFN_LINES )); then
+        pass "filtered FOFN contains every configured long-read input"
+    else
+        fail "filtered FOFN has ${FOFN_LINES} paths; expected ${EXPECTED_FOFN_LINES}"
+    fi
 fi
 
 # ---- Verify execution logs were published ----
@@ -138,20 +165,11 @@ fi
 # ---- Verify ledger ----
 EVENTS="${RUN_DIR}/ledger/events.jsonl"
 if [[ -f "$EVENTS" ]]; then
-    ATTEMPT_OK=$(grep -c "attempt_succeeded" "$EVENTS" 2>/dev/null || echo 0)
-    if (( ATTEMPT_OK > 0 )); then
-        pass "ledger records ${ATTEMPT_OK} attempt_succeeded events"
-    else
-        # Check if there are any attempt events at all
-        ATTEMPT_ANY=$(grep -c "attempt_" "$EVENTS" 2>/dev/null || echo 0)
-        if (( ATTEMPT_ANY > 0 )); then
-            fail "ledger has attempt events but no attempt_succeeded"
-        else
-            warn "no attempt events in ledger"
-        fi
-    fi
+    assert_ledger_has_method_attempt "$EVENTS" "read_qc.long_read_stats.seqkit_stats"
+    assert_ledger_has_method_attempt "$EVENTS" "read_qc.length_filter.seqkit_seq"
+    assert_no_duplicate_method_attempts "$EVENTS" "read_qc ledger has no duplicate attempts"
 else
-    warn "ledger events.jsonl not found"
+    fail "ledger events.jsonl not found"
 fi
 
 # ---- Inspect the session ----

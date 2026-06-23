@@ -36,7 +36,7 @@ fi
 
 # ---- Critical test files ----
 cd "${PROJECT_ROOT}"
-for test_file in test_entrypoints.py test_run_config.py test_ask_plan.py test_ask_interactive.py; do
+for test_file in test_entrypoints.py test_run_config.py test_ask_plan.py test_ask_interactive.py test_durable_resume.py test_storage_paths.py; do
     if [[ -f "tests/${test_file}" ]]; then
         info "Running: ${test_file}"
         if python3 -m pytest "tests/${test_file}" -v --tb=short 2>&1; then
@@ -133,6 +133,19 @@ for cmd in run ask inspect resume review; do
         fail "CLI: gene-agent ${cmd} --help"
     fi
 done
+
+# ---- Storage/replay contract is importable from every stage adapter ----
+python3 -c "
+from app.storage.publish import shell_publish_file, shell_publish_variable
+from app.stages.assembly.method_application import flye, nextdenovo
+from app.stages.hic_scaffolding.method_application import juicer_3ddna, yahs
+
+assert callable(shell_publish_file) and callable(shell_publish_variable)
+for module in [flye, nextdenovo, juicer_3ddna, yahs]:
+    source = open(module.__file__, encoding='utf-8').read()
+    assert 'shell_publish_' in source, module.__name__
+print('all refactored assembly/Hi-C adapters use replay-safe publishing')
+" 2>&1 && pass "replay-safe publishing wired into method adapters" || fail "replay-safe publishing wiring"
 
 # ---- Descriptor registry: assembly_dedup registered ----
 cd "${PROJECT_ROOT}"
