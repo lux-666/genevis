@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -327,7 +328,13 @@ def _run_session(args: argparse.Namespace) -> int:
     # From this point on every runtime writer receives the session-local
     # directory.  Stage code can therefore keep its existing relative
     # artifact/work layout without spilling files into the shared root.
-    run_dir = SessionPaths(data_dir, request.session_id).run_dir
+    paths = SessionPaths(data_dir, request.session_id)
+    _materialize_run_layout(
+        paths,
+        manifest_path=manifest_path,
+        run_config_path=Path(run_config_path) if run_config_path else None,
+    )
+    run_dir = paths.run_dir
     request = request.model_copy(update={"data_dir": str(run_dir)})
     Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
 
@@ -475,6 +482,27 @@ def _run_session(args: argparse.Namespace) -> int:
         return 1
 
     return 0
+
+
+def _materialize_run_layout(
+    paths: SessionPaths,
+    *,
+    manifest_path: Path,
+    run_config_path: Path | None,
+) -> None:
+    """Create the per-session storage contract before stage execution starts."""
+    for directory in (
+        paths.run_dir,
+        paths.control_dir,
+        paths.artifacts_dir,
+        paths.work_dir,
+        paths.ledger_dir,
+        paths.checkpoints_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(manifest_path, paths.manifest_path)
+    if run_config_path is not None:
+        shutil.copy2(run_config_path, paths.run_config_path)
 
 
 def _interactive_gate_loop(
@@ -745,6 +773,8 @@ def _run_inspect(args: argparse.Namespace) -> int:
     if filters is None:
         return 1
     data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    if data_dir is None:
+        data_dir = Path(_resolve_data_dir(args.data_dir))
     summary = inspect_session(args.session_id, data_dir)
     template_path = getattr(args, "write_decision_template", None)
     if template_path:
@@ -919,6 +949,8 @@ def _run_resume(args: argparse.Namespace) -> int:
     from app.graph.checkpointer import checkpoint_db_path
 
     data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    if data_dir is None:
+        data_dir = Path(_resolve_data_dir(args.data_dir))
     db_path = checkpoint_db_path(data_dir)
     if not db_path.exists():
         print(
@@ -1064,9 +1096,11 @@ def _run_review(args: argparse.Namespace) -> int:
         )
         return 1
     data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    if data_dir is None:
+        data_dir = Path(_resolve_data_dir(args.data_dir))
     return run_interactive_review(
         args.session_id,
-        data_dir,
+        str(data_dir),
         dry_run=getattr(args, "dry_run", False),
     )
 

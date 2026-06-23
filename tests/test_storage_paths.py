@@ -173,7 +173,4 @@ class SessionPathsTests(unittest.TestCase):
             legacy.mkdir(parents=True)
 
             self.assertEqual(locate_session_data_dir(tmpdir, "old-session"), Path(tmpdir).resolve())
-            self.assertEqual(
-                locate_session_data_dir(tmpdir, "new-session"),
-                (Path(tmpdir) / "runs" / "new-session").resolve(strict=False),
-            )
+            self.assertIsNone(locate_session_data_dir(tmpdir, "new-session"))

@@ -1135,6 +1135,47 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
 
+    def test_run_session_materializes_storage_contract_before_graph_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_payload = {"local_exec": ["read_qc"]}
+            config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            data_dir = root / "data"
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(data_dir),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            paths = SessionPaths(data_dir, "s1")
+            for directory in (
+                paths.run_dir,
+                paths.control_dir,
+                paths.artifacts_dir,
+                paths.work_dir,
+                paths.ledger_dir,
+                paths.checkpoints_dir,
+            ):
+                self.assertTrue(directory.exists(), directory)
+            self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
+            self.assertEqual(paths.run_config_path.read_text(encoding="utf-8"), config_path.read_text(encoding="utf-8"))
+
     def test_run_config_seeds_nextdenovo_method_and_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

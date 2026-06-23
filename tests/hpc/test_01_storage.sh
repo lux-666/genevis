@@ -109,6 +109,7 @@ fi
 # ---- Test 6: Replay-safe publish (manual test) ----
 info "Testing publish_file() replay safety"
 PUBLISH_TEST_DIR="${TEST_DATA_ROOT}/_publish_test"
+rm -rf "${PUBLISH_TEST_DIR}"
 mkdir -p "${PUBLISH_TEST_DIR}/src" "${PUBLISH_TEST_DIR}/dst"
 echo "hello replay" > "${PUBLISH_TEST_DIR}/src/test.txt"
 

@@ -22,8 +22,8 @@ LONG_READS="/path/to/long_reads.fq.gz"
 
 # Optional Illumina short DNA reads (paired, gzipped). When set, test_03
 # prefers these over long reads for k-mer survey.
-SHORT_DNA_R1="/path/to/short_R1.fq.gz"
-SHORT_DNA_R2="/path/to/short_R2.fq.gz"
+SHORT_DNA_R1=""
+SHORT_DNA_R2=""
 
 # Hi-C reads (paired, gzipped).  Space-separated R1 R2.
 HIC_R1="/path/to/hic_R1.fq.gz"

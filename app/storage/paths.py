@@ -68,7 +68,7 @@ class SessionPaths:
         return self.control_dir / "run_config.json"
 
 
-def locate_session_data_dir(data_root: str | Path, session_id: str) -> Path:
+def locate_session_data_dir(data_root: str | Path, session_id: str) -> Path | None:
     """Find a session's active layout without relocating legacy records.
 
     New-layout sessions take precedence.  The legacy flat root remains a
@@ -76,14 +76,17 @@ def locate_session_data_dir(data_root: str | Path, session_id: str) -> Path:
     working after the layout change.
     """
     if is_session_run_dir(data_root, session_id):
-        return Path(data_root).expanduser().resolve(strict=False)
+        path = Path(data_root).expanduser().resolve(strict=False)
+        if path.exists():
+            return path
+        return None
     paths = SessionPaths(data_root, session_id)
     if paths.run_dir.exists():
         return paths.run_dir
     root = paths.data_root
     if (root / "ledger" / session_id).exists() or (root / "artifacts" / session_id).exists():
         return root
-    return paths.run_dir
+    return None
 
 
 def is_session_run_dir(data_dir: str | Path, session_id: str) -> bool:

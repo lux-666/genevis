@@ -761,7 +761,8 @@ def run_interactive_review(
     dry_run: bool = False,
 ) -> int:
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
-    data_dir = str(locate_session_data_dir(data_dir, session_id))
+    located = locate_session_data_dir(data_dir, session_id)
+    data_dir = str(located or Path(data_dir).expanduser().resolve(strict=False))
     from app.control.lifecycle import (
         DurableResumeUnavailableError,
         ResumeValidationError,
