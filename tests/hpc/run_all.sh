@@ -38,13 +38,15 @@ source hpc_env.sh
 source common.sh
 
 START_STEP="${1:-0}"
+ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
+[[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
 
 echo ""
 echo "============================================================"
 echo "  Gene Agent HPC Integration Tests"
 echo "  Project: ${PROJECT_ROOT}"
 echo "  Data:    ${TEST_DATA_ROOT}"
-echo "  Conda:   ${CONDA_ENV}"
+echo "  Envs:    ${ENV_CONFIG}"
 echo "  Start:   Step ${START_STEP}"
 echo "  Time:    $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
@@ -57,18 +59,13 @@ info "Pre-flight checks"
 assert_dir_exists "${PROJECT_ROOT}" "project root"
 assert_file_exists "${PROJECT_ROOT}/pyproject.toml" "pyproject.toml"
 
-# Conda env
+# Conda binary. Individual tests resolve the exact target from ENV_CONFIG for
+# each method; a named CONDA_ENV in hpc_env.sh would be a conflicting map.
 if command -v conda &>/dev/null; then
-    if conda env list | grep -q "^${CONDA_ENV} "; then
-        pass "conda env '${CONDA_ENV}' exists"
-    else
-        fail "conda env '${CONDA_ENV}' not found"
-        echo "  Available envs:"
-        conda env list
-        exit 1
-    fi
+    pass "conda is on PATH"
 else
-    warn "conda not on PATH — tools must be available via other means"
+    fail "conda is not on PATH; configured method environments cannot run"
+    exit 1
 fi
 
 # Input data

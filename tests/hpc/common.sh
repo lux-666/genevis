@@ -114,29 +114,46 @@ PY
     fi
 }
 
-require_conda_tools() {
-    # Usage: require_conda_tools tool [tool ...]
-    # Return non-zero only after checking every tool, so an HPC operator gets
-    # one actionable list instead of discovering missing packages after an
-    # expensive upstream method has already run.
-    local tool
-    local missing=()
-    if ! command -v conda >/dev/null 2>&1; then
-        fail "conda is not on PATH; cannot preflight ${CONDA_ENV}"
-        return 1
+preflight_configured_methods() {
+    # Usage: preflight_configured_methods STAGE METHOD [STAGE METHOD ...]
+    # Resolve exactly as the application does: method -> stage -> default in
+    # config/envs.local.yaml when present, otherwise config/envs.yaml. Do not
+    # introduce a second HPC-only environment map.
+    local output status=0 line outcome method target detail
+    if (( $# == 0 || $# % 2 != 0 )); then
+        fail "preflight_configured_methods requires STAGE METHOD pairs"
+        return 2
     fi
-    for tool in "$@"; do
-        if conda run -n "${CONDA_ENV}" bash -lc "command -v $(printf '%q' "$tool") >/dev/null" >/dev/null 2>&1; then
-            pass "tool available in ${CONDA_ENV}: ${tool}"
+    if ! output=$(python3 - "$@" <<'PY'
+import sys
+
+from app.execution.env_resolver import EnvResolver, preflight
+
+resolver = EnvResolver()
+failed = False
+for stage, method in zip(sys.argv[1::2], sys.argv[2::2]):
+    spec = resolver.resolve(stage=stage, method_name=method)
+    result = preflight(spec)
+    if result.status == "ok":
+        print(f"OK\t{method}\t{spec.display_target()}\t")
+    else:
+        failed = True
+        print(f"FAIL\t{method}\t{result.env_target}\t{result.detail}")
+raise SystemExit(1 if failed else 0)
+PY
+    ); then
+        status=1
+    fi
+
+    while IFS=$'\t' read -r outcome method target detail; do
+        [[ -z "$outcome" ]] && continue
+        if [[ "$outcome" == "OK" ]]; then
+            pass "configured method ready: ${method} (${target})"
         else
-            fail "tool missing from ${CONDA_ENV}: ${tool}"
-            missing+=("${tool}")
+            fail "configured method blocked: ${method} (${target}) — ${detail}"
         fi
-    done
-    if (( ${#missing[@]} > 0 )); then
-        info "Missing tools: ${missing[*]}"
-        return 1
-    fi
+    done <<< "$output"
+    return "$status"
 }
 
 # -------------------------------------------------------------------

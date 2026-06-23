@@ -60,8 +60,7 @@ print(f'DomainStage includes assembly_dedup')
 # completed draft is not useful to this integration test unless purge_dups can
 # also run, so missing tools are a fast, explicit test failure.
 case "${ASSEMBLY_METHOD}" in
-    flye) ASSEMBLER_TOOL="flye" ;;
-    nextdenovo) ASSEMBLER_TOOL="nextDenovo" ;;
+    flye|nextdenovo) ;;
     *)
         fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected flye or nextdenovo)"
         summary "Test 04: Assembly + Assembly Dedup"
@@ -69,12 +68,18 @@ case "${ASSEMBLY_METHOD}" in
         ;;
 esac
 
-info "Preflighting assembler and assembly_dedup dependencies"
-if ! require_conda_tools \
-    seqkit "$ASSEMBLER_TOOL" minimap2 samtools pbcstat calcuts purge_dups get_seqs
+if [[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]]; then
+    info "Preflighting with config/envs.local.yaml"
+else
+    info "Preflighting with config/envs.yaml"
+fi
+ASSEMBLER_METHOD="assembly.candidate.${ASSEMBLY_METHOD}"
+if ! preflight_configured_methods \
+    read_qc read_qc.long_read_stats.seqkit_stats \
+    assembly "$ASSEMBLER_METHOD" \
+    assembly_dedup assembly_dedup.purge_dups
 then
-    info "Install the missing dedup tools before rerunning, for example:"
-    info "  conda install -n ${CONDA_ENV} -c conda-forge -c bioconda purge_dups"
+    info "Fix the displayed environment target in config/envs.yaml, then install its missing tools."
     summary "Test 04: Assembly + Assembly Dedup (missing tools)"
     exit 1
 fi

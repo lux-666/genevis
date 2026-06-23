@@ -14,12 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
-from app.execution.env_resolver import (
-    DEFAULT_CONFIG_PATH,
-    EnvResolver,
-    EnvSpec,
-    preflight,
-)
+from app.execution.env_resolver import EnvResolver, EnvSpec, preflight
 
 
 def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
@@ -57,7 +52,9 @@ def resolve_method_env(
     if has_explicit_path_override(stage_out):
         return None, None
 
-    resolver = EnvResolver(config_path or DEFAULT_CONFIG_PATH)
+    # ``None`` lets EnvResolver choose config/envs.local.yaml when the
+    # operator has supplied a host-specific mapping.
+    resolver = EnvResolver(config_path)
     spec = resolver.resolve(stage=stage, method_name=method_name)
     result = preflight(spec)
     if result.status == "ok":

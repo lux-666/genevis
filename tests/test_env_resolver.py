@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from app.execution import env_resolver
 from app.execution.env_resolver import (
     DEFAULT_CONFIG_PATH,
     EnvResolver,
@@ -20,6 +22,35 @@ from app.schemas.descriptors import FrozenAttemptSpec
 
 
 class EnvResolverPrecedenceTests(unittest.TestCase):
+    def test_implicit_resolver_prefers_envs_local_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "envs.yaml"
+            local = root / "envs.local.yaml"
+            shared.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
+            local.write_text("default:\n  fallback_prefix: /cluster/envs/tool_env\n", encoding="utf-8")
+            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", shared), patch.object(
+                env_resolver, "LOCAL_CONFIG_PATH", local
+            ):
+                resolver = EnvResolver()
+
+            self.assertEqual(resolver.config_path, local)
+            self.assertEqual(resolver.resolve(stage="unknown").conda_prefix, "/cluster/envs/tool_env")
+
+    def test_implicit_resolver_falls_back_to_shared_envs_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared = root / "envs.yaml"
+            local = root / "envs.local.yaml"
+            shared.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
+            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", shared), patch.object(
+                env_resolver, "LOCAL_CONFIG_PATH", local
+            ):
+                resolver = EnvResolver()
+
+            self.assertEqual(resolver.config_path, shared)
+            self.assertEqual(resolver.resolve(stage="unknown").conda_env, "shared_env")
+
     def test_default_envs_yaml_loads_and_covers_core_mainline(self):
         resolver = EnvResolver(DEFAULT_CONFIG_PATH)
 

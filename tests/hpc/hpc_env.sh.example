@@ -6,12 +6,11 @@
 # ---- Project root (auto-detected from script location) ----
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# ---- Conda environment ----
-# Name of the conda env that has all bioinformatics tools installed.
-# Required tools: seqkit, jellyfish, genomescope2, flye or nextDenovo, minimap2,
-#   samtools, pbcstat, calcuts, purge_dups, get_seqs, quast.py,
-#   busco, juicer.sh, run-asm-pipeline.sh, yahs
-CONDA_ENV="env_geno_exec"
+# ---- Tool environments ----
+# Tool environments are resolved from ${PROJECT_ROOT}/config/envs.local.yaml
+# when it exists, otherwise config/envs.yaml. Copy the shared file to the
+# ignored local file and set its method/stage entries to this HPC's conda_env
+# or conda_prefix values; do not add a second mapping here.
 
 # ---- Test data paths ----
 # Only LONG_READS is required.  Genome survey uses them directly when short

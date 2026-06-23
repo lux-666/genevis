@@ -1,6 +1,7 @@
 """Stage- and method-specific conda environment resolution for local execution.
 
-The resolver loads `config/envs.yaml`, answers "what conda env should method X
+The resolver loads ``config/envs.local.yaml`` when present, otherwise
+``config/envs.yaml``, answers "what conda env should method X
 run in", and runs the small preflight probes (env exists, required tool inside
 the env). Call sites pass the results into :class:`app.execution.local_runner.LocalRunner`.
 """
@@ -17,6 +18,12 @@ from pydantic import BaseModel, Field, model_validator
 
 
 DEFAULT_CONFIG_PATH = Path("config/envs.yaml")
+LOCAL_CONFIG_PATH = Path("config/envs.local.yaml")
+
+
+def active_config_path() -> Path:
+    """Return the uncommitted local mapping when present, else the shared one."""
+    return LOCAL_CONFIG_PATH if LOCAL_CONFIG_PATH.exists() else DEFAULT_CONFIG_PATH
 
 PreflightStatus = Literal["ok", "blocked_env", "missing_tool"]
 
@@ -78,10 +85,10 @@ def _entry(raw: dict, keys: tuple[str, ...]) -> dict | None:
 
 
 class EnvResolver:
-    """Resolve conda environments for stages and methods from envs.yaml."""
+    """Resolve conda environments for stages and methods from the active config."""
 
-    def __init__(self, config_path: Path | str = DEFAULT_CONFIG_PATH) -> None:
-        self.config_path = Path(config_path)
+    def __init__(self, config_path: Path | str | None = None) -> None:
+        self.config_path = Path(config_path) if config_path is not None else active_config_path()
         self._raw = _load_raw(self.config_path)
         default_section = self._raw.get("default") or {}
         self.conda_bin: str = str(default_section.get("conda_bin") or "conda")
