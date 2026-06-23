@@ -217,10 +217,16 @@ if 'genome_survey' in stages:
 
 # Assembly config
 if 'assembly' in stages:
+    assembly_route = {
+        'cycloneseq': 'cyclone',
+        'pacbio_hifi': 'hifi',
+    }.get('${PLATFORM}', 'ont')
     rc['assembly'] = {
         'assembly_method': '${ASSEMBLY_METHOD}',
         'target_level': 'draft',
-        'assembly_route': 'auto',
+        # This is an unattended integration test. An explicit route avoids
+        # the interactive LLM/human route-selection gate before Flye starts.
+        'assembly_route': assembly_route,
     }
     if '${ASSEMBLY_METHOD}' == 'flye':
         rc['assembly']['flye_parameters'] = {
@@ -293,9 +299,10 @@ PY
 #  gene-agent runner
 # -------------------------------------------------------------------
 GA() {
-    # Run gene-agent with common flags.
+    # HPC tests must never consume the terminal at a human-review gate.
+    # A blocked gate is reported and asserted by the owning script instead.
     info "gene-agent $*"
-    python3 -m app.entrypoints.run "$@"
+    python3 -m app.entrypoints.run "$@" </dev/null
 }
 
 # -------------------------------------------------------------------
