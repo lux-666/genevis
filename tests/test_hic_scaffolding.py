@@ -100,6 +100,15 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         )
         juicer.chmod(0o755)
         three_dna.chmod(0o755)
+        bwa = bin_dir / "bwa"
+        bwa.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "if sys.argv[1:] and sys.argv[1] == 'index':\n"
+            "    pathlib.Path(sys.argv[2] + '.bwt').write_text('index\\n', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        bwa.chmod(0o755)
         return bin_dir
 
     def test_missing_final_assembly_ref_fails_terminally(self):
@@ -566,6 +575,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             script_text = script.read_text(encoding="utf-8")
             self.assertIn("juicer.sh -d", script_text)
             self.assertIn("-s MboI", script_text)
+            self.assertIn("bwa index", script_text)
+            self.assertIn("juicer/reference.fasta", script_text)
             self.assertIn("run-asm-pipeline.sh", script_text)
             self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
 

@@ -223,13 +223,16 @@ def _script(
     lines = ["set -e", f"mkdir -p {shlex.quote(str(three_dna_dir))} {shlex.quote(str(scaffold_fasta.parent))}"]
     if params["input_mode"] == "raw_reads":
         fastq_dir = juicer_dir / "fastq"
+        juicer_reference = juicer_dir / "reference.fasta"
         jp = params["juicer_parameters"]
         lines.append(f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(generated_mnd.parent))}")
         for index, read_path in enumerate(params["hic_read_paths"], start=1):
             link = fastq_dir / f"{index}_{Path(read_path).name}"
             lines.append(f"ln -sfn {shlex.quote(read_path)} {shlex.quote(str(link))}")
+        lines.append(f"cp {shlex.quote(str(assembly))} {shlex.quote(str(juicer_reference))}")
+        lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
         command = [
-            jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(assembly),
+            jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
             "-p", jp["chrom_sizes_ref"], "-t", str(jp["threads"]), *jp["extra_args"],
         ]
         lines.append(" ".join(shlex.quote(str(value)) for value in command))
