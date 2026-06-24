@@ -86,6 +86,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "import pathlib, sys\n"
             "args = sys.argv[1:]\n"
             "top = pathlib.Path(args[args.index('-d') + 1])\n"
+            "if (top / 'aligned').exists():\n"
+            "    print('Juicer requires a fresh aligned directory', file=sys.stderr)\n"
+            "    sys.exit(12)\n"
             "(top / 'aligned').mkdir(parents=True, exist_ok=True)\n"
             "(top / 'aligned' / 'merged_nodups.txt').write_text('merged\\n', encoding='utf-8')\n"
             "print('fake juicer ok')\n",

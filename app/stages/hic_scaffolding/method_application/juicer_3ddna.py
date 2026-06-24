@@ -241,7 +241,7 @@ def _script(
         site_genome_name = juicer_reference.stem
         site_file = site_dir / f"{site_genome_name}_{jp['restriction_enzyme']}.txt"
         lines.append(
-            f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(generated_mnd.parent))} {shlex.quote(str(site_dir))}"
+            f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(site_dir))}"
         )
         for index, read_path in enumerate(params["hic_read_paths"], start=1):
             link = fastq_dir / f"{index}_{Path(read_path).name}"
