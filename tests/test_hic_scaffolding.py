@@ -111,8 +111,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             generator.write_text(
                 "#!/usr/bin/env python3\n"
                 "import pathlib, sys\n"
-                "enzyme, reference = sys.argv[1:]\n"
-                "pathlib.Path(pathlib.Path(reference).name + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
+                "enzyme, genome, reference = sys.argv[1:]\n"
+                "pathlib.Path(genome + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
                 encoding="utf-8",
             )
             generator.chmod(0o755)
@@ -592,6 +592,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("juicer.sh -d", script_text)
             self.assertIn("-s MboI", script_text)
             self.assertIn("generate_site_positions.py", script_text)
+            self.assertIn("MboI reference", script_text)
+            self.assertIn("reference.fasta", script_text)
+            self.assertIn("reference_MboI.txt", script_text)
             self.assertIn("-y \"$site_file\"", script_text)
             self.assertNotIn("/aidenlab/restriction_sites", script_text)
             self.assertIn("bwa index", script_text)

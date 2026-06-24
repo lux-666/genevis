@@ -238,7 +238,8 @@ def _script(
         site_dir = juicer_dir / "restriction_sites"
         juicer_reference = juicer_dir / "reference.fasta"
         jp = params["juicer_parameters"]
-        site_marker = site_dir / ".site_generator_started"
+        site_genome_name = juicer_reference.stem
+        site_file = site_dir / f"{site_genome_name}_{jp['restriction_enzyme']}.txt"
         lines.append(
             f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(generated_mnd.parent))} {shlex.quote(str(site_dir))}"
         )
@@ -246,19 +247,16 @@ def _script(
             link = fastq_dir / f"{index}_{Path(read_path).name}"
             lines.append(f"ln -sfn {shlex.quote(read_path)} {shlex.quote(str(link))}")
         lines.append(f"cp {shlex.quote(str(assembly))} {shlex.quote(str(juicer_reference))}")
-        lines.append(f"touch {shlex.quote(str(site_marker))}")
-        generator_command = [*jp["site_generator_command"], jp["site_generator_path"], jp["restriction_enzyme"], str(juicer_reference)]
+        generator_command = [
+            *jp["site_generator_command"],
+            jp["site_generator_path"],
+            jp["restriction_enzyme"],
+            site_genome_name,
+            str(juicer_reference),
+        ]
         lines.append(f"(cd {shlex.quote(str(site_dir))} && " + " ".join(shlex.quote(str(value)) for value in generator_command) + ")")
-        lines.append(
-            "site_file=$(find "
-            + shlex.quote(str(site_dir))
-            + " -maxdepth 1 -type f ! -name .site_generator_started -newer "
-            + shlex.quote(str(site_marker))
-            + " -print -quit)"
-        )
-        lines.append('test -n "$site_file"')
+        lines.append(f"site_file={shlex.quote(str(site_file))}")
         lines.append('test -s "$site_file"')
-        lines.append(f"rm -f {shlex.quote(str(site_marker))}")
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
