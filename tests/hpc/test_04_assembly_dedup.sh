@@ -203,6 +203,7 @@ fi
 # Core output files
 PURGED_ASM="${DEDUP_ARTIFACT_DIR}/purged_assembly.fasta"
 READ_BAM="${DEDUP_ARTIFACT_DIR}/reads_to_raw_assembly.bam"
+READ_PAF="${DEDUP_ARTIFACT_DIR}/reads_to_raw_assembly.paf.gz"
 BASE_COV="${DEDUP_ARTIFACT_DIR}/PB.base.cov"
 PB_STAT="${DEDUP_ARTIFACT_DIR}/PB.stat"
 CUTOFFS="${DEDUP_ARTIFACT_DIR}/cutoffs"
@@ -210,6 +211,7 @@ SELF_PAF="${DEDUP_ARTIFACT_DIR}/self.paf.gz"
 DUPS_BED="${DEDUP_ARTIFACT_DIR}/dups.bed"
 
 assert_file_nonempty "$READ_BAM"    "minimap2 alignment BAM"
+assert_file_nonempty "$READ_PAF"    "minimap2 alignment PAF for pbcstat"
 assert_file_nonempty "$BASE_COV"    "pbcstat base coverage"
 assert_file_nonempty "$PB_STAT"     "pbcstat statistics"
 assert_file_nonempty "$CUTOFFS"     "calcuts cutoffs"

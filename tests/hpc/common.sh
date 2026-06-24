@@ -156,6 +156,53 @@ PY
     return "$status"
 }
 
+run_configured_method_tool() {
+    # Usage: run_configured_method_tool STAGE METHOD COMMAND [ARG ...]
+    # Run a small helper command inside the exact method environment that the
+    # application will use, rather than trusting the test runner's PATH.
+    local stage="$1" method="$2"
+    shift 2
+    (
+    cd "${PROJECT_ROOT}"
+    python3 - "$stage" "$method" "$@" <<'PY'
+import subprocess
+import sys
+
+from app.execution.env_resolver import EnvResolver
+
+stage, method, *command = sys.argv[1:]
+spec = EnvResolver().resolve(stage=stage, method_name=method)
+result = subprocess.run([*spec.conda_run_prefix(), *command], check=False)
+raise SystemExit(result.returncode)
+PY
+    )
+}
+
+latest_test04_assembly() {
+    # Print the preferred assembly from the newest Test 04 session. Within a
+    # session, use the purged assembly when present, otherwise Flye's draft.
+    local -a runs
+    local run candidate i
+    runs=("${TEST_DATA_ROOT}"/runs/hpc-test04-*)
+    for (( i=${#runs[@]} - 1; i >= 0; i-- )); do
+        run="${runs[$i]}"
+        [[ -d "$run" ]] || continue
+        for candidate in "$run"/artifacts/assembly_dedup/*/purged_assembly.fasta; do
+            if [[ -s "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+        for candidate in "$run"/artifacts/assembly/*/draft_assembly.fasta; do
+            if [[ -s "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 # -------------------------------------------------------------------
 #  FASTA / FASTQ helpers
 # -------------------------------------------------------------------

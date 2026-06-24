@@ -134,17 +134,28 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "if [ \"$1\" = sort ]; then\n"
                 "  shift\n"
+                "  out=''\n"
                 "  while [ \"$#\" -gt 0 ]; do\n"
-                "    if [ \"$1\" = -o ]; then shift; : > \"$1\"; exit 0; fi\n"
+                "    if [ \"$1\" = -o ]; then shift; out=\"$1\"; fi\n"
                 "    shift\n"
                 "  done\n"
+                "  /bin/cat > /dev/null\n"
+                "  : > \"$out\"\n"
+                "  exit 0\n"
                 "fi\n"
                 "if [ \"$1\" = index ]; then : > \"$2.bai\"; fi\n",
                 encoding="utf-8",
             )
             samtools.chmod(0o755)
             pbcstat = bin_dir / "pbcstat"
-            pbcstat.write_text("#!/bin/sh\nprintf 'stats\\n' > PB.stat\nprintf 'cov\\n' > PB.base.cov\n", encoding="utf-8")
+            pbcstat.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in *.paf.gz) ;; *) exit 9;; esac\n"
+                "test -s \"$1\"\n"
+                "printf 'stats\\n' > PB.stat\n"
+                "printf 'cov\\n' > PB.base.cov\n",
+                encoding="utf-8",
+            )
             pbcstat.chmod(0o755)
             calcuts = bin_dir / "calcuts"
             calcuts.write_text("#!/bin/sh\nprintf 'cutoffs\\n'\n", encoding="utf-8")
@@ -185,6 +196,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(Path(dedup["purged_assembly_ref"]).read_text(encoding="utf-8"), draft.read_text(encoding="utf-8"))
             self.assertEqual(draft.read_text(encoding="utf-8"), ">contig1\nACGT\n")
             self.assertTrue(Path(dedup["purged_candidate_ref"]).exists())
+            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_dedup" / "s1" / "reads_to_raw_assembly.paf.gz").is_file())
             self.assertEqual(dedup["cutoffs_strategy"], "calcuts_auto")
             self.assertTrue(any(ref.endswith("dups.bed") for ref in dedup["artifact_refs"]))
             event_types = [event["event_type"] for event in Ledger(tmpdir).read_events("s1")]

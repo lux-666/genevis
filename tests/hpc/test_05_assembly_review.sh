@@ -68,21 +68,16 @@ if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
 fi
 
 # ---- Determine assembly to review ----
-# Prefer an explicitly configured review assembly; otherwise use a successful
-# Test 04 artifact or any existing assembly artifact.
+# Prefer an explicitly configured review assembly; otherwise use the preferred
+# artifact from the newest Test 04 session, then any existing assembly artifact.
 PREV_ASM="${REVIEW_ASSEMBLY:-}"
 if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
     fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
     summary "Test 05: Assembly Review (SKIPPED - invalid REVIEW_ASSEMBLY)"
     exit 0
 fi
-for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_assembly.fasta; do
-    if [[ -z "$PREV_ASM" && -f "$d" ]]; then PREV_ASM="$d"; break; fi
-done
 if [[ -z "$PREV_ASM" ]]; then
-    for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly/*/draft_assembly.fasta; do
-        if [[ -f "$d" ]]; then PREV_ASM="$d"; break; fi
-    done
+    PREV_ASM=$(latest_test04_assembly || true)
 fi
 # Also check any *.fasta in assembly dirs
 if [[ -z "$PREV_ASM" ]]; then

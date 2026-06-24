@@ -172,17 +172,18 @@ cd "${SCRIPT_DIR}"
 if [[ "$HIC_AVAILABLE" == "true" ]]; then
     info "Starting real Hi-C scaffolding test"
 
-    # Prefer an explicitly configured assembly, otherwise use a successful
-    # Test 04 artifact or any existing assembly artifact.
+    # Prefer an explicitly configured assembly, otherwise use the preferred
+    # artifact from the newest Test 04 session, then any existing assembly
+    # artifact.
     PREV_ASM="${REVIEW_ASSEMBLY:-}"
     if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
         fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
         summary "Test 06: Hi-C Scaffolding"
         exit 0
     fi
-    for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_assembly.fasta; do
-        if [[ -z "$PREV_ASM" && -f "$d" ]]; then PREV_ASM="$d"; break; fi
-    done
+    if [[ -z "$PREV_ASM" ]]; then
+        PREV_ASM=$(latest_test04_assembly || true)
+    fi
     if [[ -z "$PREV_ASM" ]]; then
         PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
     fi
@@ -197,13 +198,14 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
         info "Generating chrom.sizes from assembly (samtools faidx)"
         HIC_CHROM_SIZES="${TEST_DATA_ROOT}/_test06_chrom.sizes"
-        if command -v samtools &>/dev/null; then
-            samtools faidx "$PREV_ASM"
+        if run_configured_method_tool \
+            "hic_scaffolding" "hic_scaffolding.candidate.juicer_3ddna_juicebox" \
+            samtools faidx "$PREV_ASM"; then
             cut -f1,2 "${PREV_ASM}.fai" > "$HIC_CHROM_SIZES"
             pass "chrom.sizes generated ($(wc -l < "$HIC_CHROM_SIZES") sequences)"
             rm -f "${PREV_ASM}.fai"  # clean up
         else
-            warn "samtools not available; cannot generate chrom.sizes"
+            warn "samtools failed in the configured Hi-C method environment; cannot generate chrom.sizes"
             warn "Hi-C execution will be skipped (schema tests still run)"
             HIC_CHROM_SIZES=""
         fi
