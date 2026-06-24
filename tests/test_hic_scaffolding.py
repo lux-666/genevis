@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.graph.routing import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.hic_scaffolding.builder import build_stage
@@ -147,7 +148,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "t2t")
+            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "skipped")
             self.assertEqual(hic["mode"], "skipped_no_hic")
@@ -187,7 +188,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "t2t")
+            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "skipped")
             self.assertEqual(hic["mode"], "skipped_not_chromosome_level")
