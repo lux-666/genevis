@@ -71,6 +71,7 @@ methods:
       - samtools
       - pbcstat
       - calcuts
+      - split_fa
       - gzip
       - purge_dups
       - get_seqs

@@ -157,6 +157,9 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
             pbcstat.chmod(0o755)
+            split_fa = bin_dir / "split_fa"
+            split_fa.write_text("#!/bin/sh\n/bin/cat \"$1\"\n", encoding="utf-8")
+            split_fa.chmod(0o755)
             calcuts = bin_dir / "calcuts"
             calcuts.write_text("#!/bin/sh\nprintf 'cutoffs\\n'\n", encoding="utf-8")
             calcuts.chmod(0o755)
@@ -197,6 +200,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(draft.read_text(encoding="utf-8"), ">contig1\nACGT\n")
             self.assertTrue(Path(dedup["purged_candidate_ref"]).exists())
             self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_dedup" / "s1" / "reads_to_raw_assembly.paf.gz").is_file())
+            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_dedup" / "s1" / "raw_assembly.split.fasta").is_file())
             self.assertEqual(dedup["cutoffs_strategy"], "calcuts_auto")
             self.assertTrue(any(ref.endswith("dups.bed") for ref in dedup["artifact_refs"]))
             event_types = [event["event_type"] for event in Ledger(tmpdir).read_events("s1")]

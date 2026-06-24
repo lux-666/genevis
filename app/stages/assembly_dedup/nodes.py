@@ -121,6 +121,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
     script_path = work_dir / "run_purge_dups.sh"
     read_bam = artifact_dir / "reads_to_raw_assembly.bam"
     read_paf = artifact_dir / "reads_to_raw_assembly.paf.gz"
+    split_assembly = artifact_dir / "raw_assembly.split.fasta"
     base_cov = artifact_dir / "PB.base.cov"
     pb_stat = artifact_dir / "PB.stat"
     cutoffs = artifact_dir / "cutoffs"
@@ -147,7 +148,9 @@ def run_purge_dups(state: TopLevelState) -> dict:
         f"pbcstat {shlex.quote(str(read_paf))}\n"
         "test -s PB.base.cov && test -s PB.stat\n"
         f"calcuts {shlex.quote(str(pb_stat))} > {shlex.quote(str(cutoffs))}\n"
-        f"minimap2 -t 8 -x asm5 -DP {shlex.quote(str(input_assembly_ref))} {shlex.quote(str(input_assembly_ref))} "
+        f"split_fa {shlex.quote(str(input_assembly_ref))} > {shlex.quote(str(split_assembly))}\n"
+        f"test -s {shlex.quote(str(split_assembly))}\n"
+        f"minimap2 -t 8 -x asm5 -DP {shlex.quote(str(split_assembly))} {shlex.quote(str(split_assembly))} "
         f"| gzip -c > {shlex.quote(str(self_paf))}\n"
         f"purge_dups -2 -T {shlex.quote(str(cutoffs))} -c {shlex.quote(str(base_cov))} "
         f"{shlex.quote(str(self_paf))} > {shlex.quote(str(dups_bed))}\n"
@@ -165,7 +168,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
         method_name=ASSEMBLY_DEDUP_METHOD,
         script_path=script_path,
         working_dir=work_dir,
-        expected_outputs=[read_bam, read_paf, base_cov, pb_stat, cutoffs, self_paf, dups_bed, output_assembly_ref],
+        expected_outputs=[read_bam, read_paf, split_assembly, base_cov, pb_stat, cutoffs, self_paf, dups_bed, output_assembly_ref],
         env=dedup_out.get("env"),
         env_spec=env_spec,
         metadata={
@@ -176,6 +179,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
             "long_reads_ref": str(long_reads_ref),
             "read_bam_ref": str(read_bam),
             "read_paf_ref": str(read_paf),
+            "split_assembly_ref": str(split_assembly),
             "base_cov_ref": str(base_cov),
             "pb_stat_ref": str(pb_stat),
             "cutoffs_ref": str(cutoffs),
@@ -188,6 +192,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
         data_dir=data_dir,
         input_manifest_ref=input_manifest_ref,
         fail_label="assembly_dedup purge_dups",
+        cleanup_outputs=False,
     )
     result = outcome.result.model_dump(mode="json")
     if not outcome.success:
@@ -220,6 +225,7 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
     for key, artifact_type in [
         ("read_bam_ref", "assembly_dedup.read_alignment_bam"),
         ("read_paf_ref", "assembly_dedup.read_alignment_paf"),
+        ("split_assembly_ref", "assembly_dedup.split_assembly"),
         ("base_cov_ref", "assembly_dedup.base_coverage"),
         ("pb_stat_ref", "assembly_dedup.pb_stat"),
         ("cutoffs_ref", "assembly_dedup.cutoffs"),
