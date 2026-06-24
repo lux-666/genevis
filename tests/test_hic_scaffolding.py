@@ -86,6 +86,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "import pathlib, sys\n"
             "args = sys.argv[1:]\n"
             "top = pathlib.Path(args[args.index('-d') + 1])\n"
+            "fastqs = {path.name for path in (top / 'fastq').iterdir()}\n"
+            "if not {'hic_001_R1.fastq.gz', 'hic_001_R2.fastq.gz'} <= fastqs:\n"
+            "    print('Juicer-compatible R1/R2 FASTQ links are required', file=sys.stderr)\n"
+            "    sys.exit(13)\n"
             "if (top / 'aligned').exists():\n"
             "    print('Juicer requires a fresh aligned directory', file=sys.stderr)\n"
             "    sys.exit(12)\n"
@@ -599,6 +603,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("reference.fasta", script_text)
             self.assertIn("reference_MboI.txt", script_text)
             self.assertIn("-y \"$site_file\"", script_text)
+            self.assertIn("hic_001_R1.fastq.gz", script_text)
+            self.assertIn("hic_001_R2.fastq.gz", script_text)
             self.assertNotIn("/aidenlab/restriction_sites", script_text)
             self.assertIn("bwa index", script_text)
             self.assertIn("juicer/reference.fasta", script_text)

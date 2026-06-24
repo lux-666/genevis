@@ -189,6 +189,8 @@ def _parameters(state: TopLevelState, output: dict[str, Any]) -> tuple[dict[str,
 
     if len(read_paths) < 2:
         return {}, _missing_block("at least two registered Hi-C read paths for Juicer")
+    if len(read_paths) % 2:
+        return {}, _parameter_block("hic_read_paths", [str(path) for path in read_paths], "must contain ordered R1/R2 pairs")
     missing_paths = [str(path) for path in read_paths if not path.exists()]
     if missing_paths:
         return {}, _parameter_block("hic_read_paths", missing_paths, "registered Hi-C read paths do not exist")
@@ -244,7 +246,11 @@ def _script(
             f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(site_dir))}"
         )
         for index, read_path in enumerate(params["hic_read_paths"], start=1):
-            link = fastq_dir / f"{index}_{Path(read_path).name}"
+            pair_index = (index + 1) // 2
+            mate = "R1" if index % 2 else "R2"
+            # Juicer scans only ``*_R*.fastq*`` and pairs by ``_R1``/``_R2``.
+            # Normalize arbitrary registered read names without copying data.
+            link = fastq_dir / f"hic_{pair_index:03d}_{mate}.fastq.gz"
             lines.append(f"ln -sfn {shlex.quote(read_path)} {shlex.quote(str(link))}")
         lines.append(f"cp {shlex.quote(str(assembly))} {shlex.quote(str(juicer_reference))}")
         generator_command = [
