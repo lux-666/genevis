@@ -169,9 +169,15 @@ class AssemblyDedupStageTests(unittest.TestCase):
             get_seqs = bin_dir / "get_seqs"
             get_seqs.write_text(
                 "#!/bin/sh\n"
+                "prefix=''\n"
                 "last=''\n"
-                "for arg in \"$@\"; do last=\"$arg\"; done\n"
-                "/bin/cat \"$last\"\n",
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = -p ]; then shift; prefix=\"$1\"; fi\n"
+                "  last=\"$1\"\n"
+                "  shift\n"
+                "done\n"
+                "/bin/cat \"$last\" > \"${prefix}.purged.fa\"\n"
+                ": > \"${prefix}.hap.fa\"\n",
                 encoding="utf-8",
             )
             get_seqs.chmod(0o755)

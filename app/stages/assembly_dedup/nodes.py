@@ -127,6 +127,8 @@ def run_purge_dups(state: TopLevelState) -> dict:
     cutoffs = artifact_dir / "cutoffs"
     self_paf = artifact_dir / "self.paf.gz"
     dups_bed = artifact_dir / "dups.bed"
+    get_seqs_prefix = artifact_dir / "purged_assembly"
+    get_seqs_primary = Path(f"{get_seqs_prefix}.purged.fa")
     script_path.write_text(
         "set -euo pipefail\n"
         f"reads_ref={shlex.quote(str(long_reads_ref))}\n"
@@ -154,8 +156,8 @@ def run_purge_dups(state: TopLevelState) -> dict:
         f"| gzip -c > {shlex.quote(str(self_paf))}\n"
         f"purge_dups -2 -T {shlex.quote(str(cutoffs))} -c {shlex.quote(str(base_cov))} "
         f"{shlex.quote(str(self_paf))} > {shlex.quote(str(dups_bed))}\n"
-        f"get_seqs -e {shlex.quote(str(dups_bed))} {shlex.quote(str(input_assembly_ref))} "
-        f"> {shlex.quote(str(output_assembly_ref))}\n"
+        f"get_seqs -e -p {shlex.quote(str(get_seqs_prefix))} {shlex.quote(str(dups_bed))} {shlex.quote(str(input_assembly_ref))}\n"
+        f"mv {shlex.quote(str(get_seqs_primary))} {shlex.quote(str(output_assembly_ref))}\n"
         f"test -s {shlex.quote(str(output_assembly_ref))}\n",
         encoding="utf-8",
     )

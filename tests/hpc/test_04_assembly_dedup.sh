@@ -192,6 +192,7 @@ if [[ -f "$DEDUP_SCRIPT" ]]; then
     assert_file_contains "$DEDUP_SCRIPT" "split_fa"    "script: split_fa"
     assert_file_contains "$DEDUP_SCRIPT" "purge_dups"  "script: purge_dups"
     assert_file_contains "$DEDUP_SCRIPT" "get_seqs"    "script: get_seqs"
+    assert_file_contains "$DEDUP_SCRIPT" "get_seqs -e -p" "script: get_seqs writes named outputs"
     assert_file_contains "$DEDUP_SCRIPT" "set -euo"    "script: strict mode"
 
     # Check FOFN handling
