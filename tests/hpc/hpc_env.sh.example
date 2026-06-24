@@ -46,9 +46,10 @@ REVIEW_ASSEMBLY=""
 NCBI_REFERENCE_SOURCE_DIR=""
 
 # ---- Assembly method ----
-# NextDenovo is the default HPC smoke assembler. Switch to flye only when
-# that is the intended route and its tool is installed in env_geno_exec.
-ASSEMBLY_METHOD="nextdenovo"      # flye | nextdenovo
+# Flye is the default end-to-end assembler for the assembly_dedup smoke test.
+# NextDenovo remains available for targeted experiments, but is not required
+# to validate the Flye → purge_dups integration path.
+ASSEMBLY_METHOD="flye"             # flye | nextdenovo
 FLYE_READ_TYPE="nano-raw"         # used only when ASSEMBLY_METHOD=flye
 ASSEMBLY_THREADS=8
 
