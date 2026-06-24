@@ -86,6 +86,10 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "import pathlib, sys\n"
             "args = sys.argv[1:]\n"
             "top = pathlib.Path(args[args.index('-d') + 1])\n"
+            "scripts_dir = pathlib.Path(args[args.index('-D') + 1]) if '-D' in args else None\n"
+            "if scripts_dir is None or not (scripts_dir / 'scripts' / 'common' / 'chimeric_sam.awk').is_file():\n"
+            "    print('Juicer helper scripts directory must be passed with -D', file=sys.stderr)\n"
+            "    sys.exit(14)\n"
             "fastqs = {path.name for path in (top / 'fastq').iterdir()}\n"
             "if not {'hic_001_R1.fastq.gz', 'hic_001_R2.fastq.gz'} <= fastqs:\n"
             "    print('Juicer-compatible R1/R2 FASTQ links are required', file=sys.stderr)\n"
@@ -113,6 +117,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         )
         juicer.chmod(0o755)
         three_dna.chmod(0o755)
+        helper = Path(tmpdir) / "scripts" / "common" / "chimeric_sam.awk"
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("# fake Juicer helper\n", encoding="utf-8")
         if with_site_generator:
             generator = bin_dir / "generate_site_positions.py"
             generator.write_text(
@@ -603,6 +610,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("reference.fasta", script_text)
             self.assertIn("reference_MboI.txt", script_text)
             self.assertIn("-y \"$site_file\"", script_text)
+            self.assertIn("-D ", script_text)
             self.assertIn("hic_001_R1.fastq.gz", script_text)
             self.assertIn("hic_001_R2.fastq.gz", script_text)
             self.assertNotIn("/aidenlab/restriction_sites", script_text)

@@ -74,6 +74,14 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
         if generator_blocked is not None:
             return update_hic_output(state, generator_blocked)
         parameters["juicer_parameters"].update(generator)
+        scripts_dir, scripts_blocked = _resolve_juicer_scripts_dir(
+            env_spec=env_spec,
+            stage_env=output.get("env"),
+            juicer_command=parameters["juicer_parameters"]["command"],
+        )
+        if scripts_blocked is not None:
+            return update_hic_output(state, scripts_blocked)
+        parameters["juicer_parameters"]["scripts_dir"] = scripts_dir
 
     working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "juicer_3ddna"
     artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "juicer_3ddna"
@@ -122,6 +130,7 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
             "chromosome_count": parameters["chromosome_count"],
             "juicer_parameters": parameters.get("juicer_parameters", {}),
             "juicer_site_generator": parameters.get("juicer_parameters", {}).get("site_generator_path"),
+            "juicer_scripts_dir": parameters.get("juicer_parameters", {}).get("scripts_dir"),
             "three_dna_command": parameters["three_dna_command"],
             "three_dna_extra_args": parameters["three_dna_extra_args"],
             "scaffold_fasta": str(scaffold_fasta),
@@ -266,7 +275,7 @@ def _script(
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
-            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-t", str(jp["threads"]), *jp["extra_args"],
+            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-D", jp["scripts_dir"], "-t", str(jp["threads"]), *jp["extra_args"],
         ]
         lines.append(" ".join("\"$site_file\"" if value == "${site_file}" else shlex.quote(str(value)) for value in command))
         lines.append(f"test -f {shlex.quote(str(generated_mnd))}")
@@ -384,6 +393,56 @@ exit 127
         "site_generator_path": generator_path,
         "site_generator_command": [] if interpreter == "direct" else [interpreter],
     }, None
+
+
+def _resolve_juicer_scripts_dir(
+    *,
+    env_spec: Any,
+    stage_env: Any,
+    juicer_command: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Locate the Juicer installation root that contains its helper scripts."""
+    probe = r'''
+set -eu
+juicer_command="$1"
+juicer_path="$(command -v "$juicer_command")" || {
+  echo "Juicer command is unavailable while resolving its scripts directory: $juicer_command" >&2
+  exit 127
+}
+for root in "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
+  test -n "$root" && test -d "$root" || continue
+  helper="$(find "$root" -type f -path '*/scripts/common/chimeric_sam.awk' -print -quit 2>/dev/null || true)"
+  test -n "$helper" || continue
+  scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
+  test -f "$scripts_dir/scripts/common/chimeric_sam.awk" || continue
+  printf '%s\n' "$scripts_dir"
+  exit 0
+done
+echo "Juicer helper scripts (scripts/common/chimeric_sam.awk) were not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
+exit 127
+'''
+    if env_spec is not None:
+        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "juicer-scripts-preflight", juicer_command]
+        env = None
+        env_target = env_spec.display_target()
+    else:
+        command = ["sh", "-c", probe, "juicer-scripts-preflight", juicer_command]
+        env = os.environ.copy()
+        if isinstance(stage_env, dict):
+            env.update({str(key): str(value) for key, value in stage_env.items()})
+        env_target = "explicit PATH override"
+    result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    scripts_dir = result.stdout.strip()
+    if result.returncode == 0 and scripts_dir:
+        return scripts_dir, None
+    detail = (result.stderr or result.stdout or "").strip()
+    return "", {
+        "status": "missing_tool",
+        "reason": detail or f"Juicer helper scripts are unavailable in {env_target}",
+        "env_target": env_target,
+        "missing_tools": ["scripts/common/chimeric_sam.awk"],
+        "method_name": METHOD,
+    }
 
 
 def _positive_int(value: Any, _name: str) -> int | None:
