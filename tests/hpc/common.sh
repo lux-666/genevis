@@ -243,7 +243,7 @@ if 'read_qc' in stages:
         'length_filter': {
             'method': '${READ_QC_LENGTH_FILTER_METHOD:-skip}',
             'approved': ${READ_QC_LENGTH_FILTER_APPROVED:-False},
-            'thresholds': {'min_len': ${READ_QC_MIN_LEN:-1}} if '${READ_QC_LENGTH_FILTER_METHOD:-skip}' == 'read_qc.length_filter.seqkit_seq' else {},
+            'thresholds': {'min_len': ${READ_QC_MIN_LEN:-1000}} if '${READ_QC_LENGTH_FILTER_METHOD:-skip}' == 'read_qc.length_filter.seqkit_seq' else {},
         }
     }
 

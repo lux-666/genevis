@@ -77,4 +77,4 @@ RUN_UNIT_TESTS=true
 
 # ---- Optional Read-QC length-filter coverage ----
 # test_02 uses this executable subgraph instead of only the default skip path.
-READ_QC_MIN_LEN=1
+READ_QC_MIN_LEN=1000
