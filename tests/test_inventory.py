@@ -282,6 +282,7 @@ class InventoryStageTests(unittest.TestCase):
             fa.write_text(">ctg1\nACGTACGT\n")
             manifest = {
                 "session_id": "s4",
+                "target_assembly_level": "chromosome",
                 "assets": [
                     {"asset_type": "assembly_fasta_registered", "paths": [str(fa)]},
                 ],
@@ -298,6 +299,7 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["skip_reasons"]["read_qc"], "existing_assembly_input")
             self.assertEqual(result["skip_reasons"]["genome_survey"], "existing_assembly_input")
             self.assertEqual(result["skip_reasons"]["assembly"], "existing_assembly_input")
+            self.assertEqual(result["stage_outputs"]["inventory"]["target_assembly_level"], "chromosome")
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
             self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
 

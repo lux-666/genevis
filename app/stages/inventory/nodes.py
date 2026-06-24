@@ -171,6 +171,7 @@ def validate_inputs(state: TopLevelState) -> dict:
                 "asset_count": len(manifest.assets),
                 "entry_mode": _entry_mode(manifest),
                 "genome_size_estimate": manifest.genome_size_estimate,
+                "target_assembly_level": manifest.target_assembly_level,
             },
         },
     }
