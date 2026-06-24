@@ -35,6 +35,16 @@ PLATFORM="ont"                    # ont | clr | pacbio_hifi | cycloneseq
 SAMPLE_ID="hpc_test_sample"
 SPECIES="Danio rerio"             # for related-species sanity check
 
+# Optional explicit assembly for test_05 / test_06.  Set this to the longer
+# assembly you want to review; when empty, the tests search successful test_04
+# session artifacts.
+REVIEW_ASSEMBLY=""
+
+# Directory holding the pinned NCBI Metazoa snapshot on this HPC.  It must
+# contain Metazoa.ncbi.tsv and Metazoa.ncbi.lineage; the test copies them into
+# data/reference/ncbi_metazoa and validates them against the tracked manifest.
+NCBI_REFERENCE_SOURCE_DIR=""
+
 # ---- Assembly method ----
 # NextDenovo is the default HPC smoke assembler. Switch to flye only when
 # that is the intended route and its tool is installed in env_geno_exec.

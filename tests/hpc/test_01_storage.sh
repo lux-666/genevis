@@ -127,8 +127,10 @@ assert dst.exists(), 'first publish failed'
 assert dst.read_text() == 'hello replay\n', 'content mismatch'
 
 # Replay: same content should succeed (idempotent)
-# Re-create source to simulate replay
-src.write_text('hello replay')
+# Re-create the byte-identical source to simulate replay.  The initial shell
+# `echo` writes a trailing newline, so omitting it here would correctly be
+# treated as a conflicting publication rather than an idempotent replay.
+src.write_text('hello replay\n')
 publish_file(src, dst)
 assert dst.exists(), 'replay publish failed'
 assert dst.read_text() == 'hello replay\n', 'replay content mismatch'

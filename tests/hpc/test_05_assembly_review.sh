@@ -22,6 +22,30 @@ source common.sh
 
 section "Test 05: Assembly Review"
 
+# ---- Check for NCBI Metazoa reference data ----
+info "Checking NCBI Metazoa reference data"
+REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
+REFERENCE_READY=false
+if [[ -f "${REF_DIR}/Metazoa.ncbi.tsv" && -f "${REF_DIR}/Metazoa.ncbi.lineage" \
+    && -f "${REF_DIR}/species_alias.tsv" && -f "${REF_DIR}/reference_manifest.json" ]]; then
+    assert_file_exists "${REF_DIR}/species_alias.tsv"     "species_alias.tsv"
+    assert_file_exists "${REF_DIR}/reference_manifest.json" "reference_manifest.json"
+    pass "NCBI Metazoa reference data is installed"
+    REFERENCE_READY=true
+elif [[ -n "${NCBI_REFERENCE_SOURCE_DIR:-}" ]]; then
+    info "Installing NCBI Metazoa reference from: ${NCBI_REFERENCE_SOURCE_DIR}"
+    cd "${PROJECT_ROOT}"
+    if python3 scripts/install_ncbi_metazoa_reference.py --source-dir "${NCBI_REFERENCE_SOURCE_DIR}" 2>&1; then
+        pass "NCBI Metazoa reference installed and verified"
+        REFERENCE_READY=true
+    else
+        fail "NCBI Metazoa reference install/verification failed"
+    fi
+    cd "${SCRIPT_DIR}"
+else
+    warn "NCBI Metazoa reference data is unavailable; set NCBI_REFERENCE_SOURCE_DIR to run related-species checks"
+fi
+
 # ---- Unit tests ----
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
@@ -29,9 +53,13 @@ if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     python3 -m pytest tests/test_assembly_review.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly_review.py" || fail "unit tests: test_assembly_review.py"
 
-    info "Running unit tests: test_related_species_evidence.py"
-    python3 -m pytest tests/test_related_species_evidence.py -v --tb=short 2>&1 && \
-        pass "unit tests: test_related_species_evidence.py" || fail "unit tests: test_related_species_evidence.py"
+    if [[ "${REFERENCE_READY}" == "true" ]]; then
+        info "Running unit tests: test_related_species_evidence.py"
+        python3 -m pytest tests/test_related_species_evidence.py -v --tb=short 2>&1 && \
+            pass "unit tests: test_related_species_evidence.py" || fail "unit tests: test_related_species_evidence.py"
+    else
+        warn "Skipping test_related_species_evidence.py because the pinned NCBI snapshot is unavailable"
+    fi
 
     info "Running unit tests: test_review_recommender.py"
     python3 -m pytest tests/test_review_recommender.py -v --tb=short 2>&1 && \
@@ -39,30 +67,17 @@ if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${SCRIPT_DIR}"
 fi
 
-# ---- Check for NCBI Metazoa reference data ----
-info "Checking NCBI Metazoa reference data"
-REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
-if [[ -f "${REF_DIR}/Metazoa.ncbi.tsv" && -f "${REF_DIR}/Metazoa.ncbi.lineage" ]]; then
-    assert_file_exists "${REF_DIR}/species_alias.tsv"     "species_alias.tsv"
-    assert_file_exists "${REF_DIR}/reference_manifest.json" "reference_manifest.json"
-    pass "NCBI Metazoa reference data is installed"
-else
-    warn "NCBI Metazoa reference data incomplete at ${REF_DIR}"
-    info "Attempting to install..."
-    cd "${PROJECT_ROOT}"
-    if python3 scripts/install_ncbi_metazoa_reference.py 2>&1; then
-        pass "NCBI Metazoa reference installed"
-    else
-        fail "NCBI Metazoa reference install failed"
-    fi
-    cd "${SCRIPT_DIR}"
-fi
-
 # ---- Determine assembly to review ----
-# Use assembly from Test 04 if available, otherwise look for any
-PREV_ASM=""
+# Prefer an explicitly configured review assembly; otherwise use a successful
+# Test 04 artifact or any existing assembly artifact.
+PREV_ASM="${REVIEW_ASSEMBLY:-}"
+if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
+    fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
+    summary "Test 05: Assembly Review (SKIPPED - invalid REVIEW_ASSEMBLY)"
+    exit 0
+fi
 for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_assembly.fasta; do
-    if [[ -f "$d" ]]; then PREV_ASM="$d"; break; fi
+    if [[ -z "$PREV_ASM" && -f "$d" ]]; then PREV_ASM="$d"; break; fi
 done
 if [[ -z "$PREV_ASM" ]]; then
     for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly/*/draft_assembly.fasta; do
@@ -83,31 +98,20 @@ info "Using assembly: ${PREV_ASM}"
 SEQ_COUNT=$(count_fasta_seqs "$PREV_ASM")
 info "  Contigs: ${SEQ_COUNT}"
 
-# ---- Also find the candidate bundle from test 04 ----
-PREV_BUNDLE=""
-for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_candidate.json; do
-    if [[ -f "$d" ]]; then PREV_BUNDLE="$d"; break; fi
-done
-if [[ -z "$PREV_BUNDLE" ]]; then
-    PREV_BUNDLE=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*candidate*.json" 2>/dev/null | head -1 || true)
-fi
-
 # ---- Prepare review session ----
 SID="hpc-test05-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "${TEST_DATA_ROOT}"
 
-# A fresh session cannot see Test 04's stage_outputs. Register the produced
-# assembly explicitly; reusing its original raw-read manifest only exercises
-# planning and cannot validate the QUAST/BUSCO execution subgraphs.
+# A fresh session cannot see Test 04's stage outputs.  Register only the
+# existing assembly so inventory selects its existing-assembly shortcut and
+# reaches assembly_review directly; adding raw reads would instead re-enter
+# the assembly route-selection gate.
 MANIFEST="${TEST_DATA_ROOT}/_test05_manifest.yaml"
-LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
-write_manifest "$MANIFEST" "$SID" \
-    "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
-    "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
+write_manifest "$MANIFEST" "$SID" "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
 
 # ---- Write run-config ----
 RC="${TEST_DATA_ROOT}/_test05_rc.json"
-write_run_config_stages "$RC" "read_qc" "assembly_review"
+write_run_config_stages "$RC" "assembly_review"
 
 # ---- Run (expect it to block at human gate) ----
 cd "${PROJECT_ROOT}"

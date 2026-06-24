@@ -67,6 +67,7 @@ rc_data = {
         'chromosome_count': ${HIC_CHROMOSOME_COUNT},
         'juicer_3ddna_parameters': {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
+            'chrom_sizes_ref': '/tmp/chrom.sizes',
             'threads': ${ASSEMBLY_THREADS},
         },
     },
@@ -107,8 +108,13 @@ rc_data = {
     'methods': ['juicer_3ddna_juicebox', 'yahs'],
     'input_mode': 'raw_reads',
     'chromosome_count': ${HIC_CHROMOSOME_COUNT},
+    # YAHS is also selected here, so give the schema an alignment reference.
+    # This is a validation-only fixture; the real execution branch supplies
+    # actual data and does not use this placeholder.
+    'hic_alignment_ref': '/tmp/hic_alignment.bam',
     'juicer_3ddna_parameters': {
         'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
+        'chrom_sizes_ref': '/tmp/chrom.sizes',
         'threads': 4,
     },
 }
@@ -166,10 +172,16 @@ cd "${SCRIPT_DIR}"
 if [[ "$HIC_AVAILABLE" == "true" ]]; then
     info "Starting real Hi-C scaffolding test"
 
-    # Find assembly from previous test
-    PREV_ASM=""
+    # Prefer an explicitly configured assembly, otherwise use a successful
+    # Test 04 artifact or any existing assembly artifact.
+    PREV_ASM="${REVIEW_ASSEMBLY:-}"
+    if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
+        fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
+        summary "Test 06: Hi-C Scaffolding"
+        exit 0
+    fi
     for d in "${TEST_DATA_ROOT}"/runs/hpc-test04-*/artifacts/assembly_dedup/*/purged_assembly.fasta; do
-        if [[ -f "$d" ]]; then PREV_ASM="$d"; break; fi
+        if [[ -z "$PREV_ASM" && -f "$d" ]]; then PREV_ASM="$d"; break; fi
     done
     if [[ -z "$PREV_ASM" ]]; then
         PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
