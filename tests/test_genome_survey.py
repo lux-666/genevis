@@ -476,6 +476,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(estimates["repeat_fraction"], 2469 / 12345)
             self.assertEqual(notes, [])
 
+    def test_parse_genomescope2_summary_table_with_bp_units(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary = Path(tmpdir) / "summary.txt"
+            summary.write_text(
+                "property                      min               max\n"
+                "Genome Haploid Length         108,518 bp        113,750 bp\n"
+                "Genome Repeat Length          88,419 bp         92,682 bp\n",
+                encoding="utf-8",
+            )
+
+            estimates, notes = _parse_genomescope_summary(summary)
+
+            self.assertEqual(estimates["genome_size"], 108518)
+            self.assertEqual(estimates["repeat_fraction"], 88419 / 108518)
+            self.assertEqual(notes, [])
+
     def test_local_mode_with_long_reads_only_runs_jellyfish_and_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "reads.fastq"

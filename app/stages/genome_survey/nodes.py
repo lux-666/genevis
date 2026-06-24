@@ -455,7 +455,17 @@ def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:
         parts = [part for part in re.split(r"\t+| {2,}|=", line_text) if part]
         if len(parts) >= 2:
             key = parts[0].strip().lower()
-            value = parts[1].strip().replace(",", "")
+            raw_value = parts[1].strip()
+            # GenomeScope 2 writes values such as ``108,518 bp`` in its
+            # space-aligned summary table for length fields.  Preserve the
+            # first numeric value (the table's point estimate/minimum) and
+            # discard its unit, without accepting malformed percentage
+            # fields such as ``0.001-0.002``.
+            if key in {"genome_size", "genome size", "haploid_length", "genome haploid length", "genome repeat length"}:
+                numeric_value = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?", raw_value)
+                value = numeric_value.group(0).replace(",", "") if numeric_value else raw_value.replace(",", "")
+            else:
+                value = raw_value.replace(",", "")
         else:
             lower_line = line_text.lower()
             values = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?", line_text)
