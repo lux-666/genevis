@@ -224,17 +224,26 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     MANIFEST="${TEST_DATA_ROOT}/_test06_manifest.yaml"
     mkdir -p "${TEST_DATA_ROOT}"
 
-    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
     HIC_PATHS="${HIC_R1},${HIC_R2}"
 
     write_manifest "$MANIFEST" "$SID" \
-        "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
         "hic_reads_registered:${HIC_PATHS}:illumina:paired" \
         "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
 
     # Write run-config with Hi-C
     RC="${TEST_DATA_ROOT}/_test06_rc.json"
     write_run_config_stages "$RC" "hic_scaffolding"
+    python3 - "$RC" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+config["requested_stages"] = ["hic_scaffolding"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
 
     # Run
     cd "${PROJECT_ROOT}"

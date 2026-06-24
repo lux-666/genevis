@@ -533,6 +533,19 @@ def _final_assembly_ref(state: TopLevelState) -> str | None:
         value = review_out.get(key)
         if value:
             return str(value)
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return None
+    registry_path = Path(str(registry_ref))
+    if not registry_path.exists():
+        return None
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for asset in registry.get("assets", []):
+        if asset.get("asset_type") == "assembly_fasta_registered" and asset.get("path"):
+            return str(asset["path"])
     return None
 
 

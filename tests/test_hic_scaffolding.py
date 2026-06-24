@@ -110,6 +110,27 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("final_assembly_ref", result["last_error"])
 
+    def test_registered_assembly_is_used_when_review_output_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            hic_reads = Path(tmpdir) / "hic_R1.fq.gz"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            hic_reads.write_text("reads\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {"asset_id": "s1:assembly_fasta_registered:final", "asset_type": "assembly_fasta_registered", "path": str(assembly)},
+                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(hic_reads)},
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {"inventory": {"target_assembly_level": "chromosome"}}
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["pre_hic_assembly_ref"], str(assembly))
+
     def test_no_hic_reads_skips_and_continues_with_contig_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"
@@ -126,7 +147,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "t2t")
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "skipped")
             self.assertEqual(hic["mode"], "skipped_no_hic")
@@ -166,7 +187,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            self.assertEqual(result["current_stage"], "repeat_annotation")
+            self.assertEqual(result["current_stage"], "t2t")
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "skipped")
             self.assertEqual(hic["mode"], "skipped_not_chromosome_level")
