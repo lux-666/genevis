@@ -71,7 +71,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         script.chmod(0o755)
         return bin_dir
 
-    def _fake_juicer_3ddna_bin(self, tmpdir: str, *, fail_3ddna: bool = False) -> Path:
+    def _fake_juicer_3ddna_bin(
+        self,
+        tmpdir: str,
+        *,
+        fail_3ddna: bool = False,
+        with_site_generator: bool = True,
+    ) -> Path:
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         juicer = bin_dir / "juicer.sh"
@@ -100,6 +106,16 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         )
         juicer.chmod(0o755)
         three_dna.chmod(0o755)
+        if with_site_generator:
+            generator = bin_dir / "generate_site_positions.py"
+            generator.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "enzyme, reference = sys.argv[1:]\n"
+                "pathlib.Path(pathlib.Path(reference).name + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            generator.chmod(0o755)
         bwa = bin_dir / "bwa"
         bwa.write_text(
             "#!/usr/bin/env python3\n"
@@ -575,10 +591,57 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             script_text = script.read_text(encoding="utf-8")
             self.assertIn("juicer.sh -d", script_text)
             self.assertIn("-s MboI", script_text)
+            self.assertIn("generate_site_positions.py", script_text)
+            self.assertIn("-y \"$site_file\"", script_text)
+            self.assertNotIn("/aidenlab/restriction_sites", script_text)
             self.assertIn("bwa index", script_text)
             self.assertIn("juicer/reference.fasta", script_text)
             self.assertIn("run-asm-pipeline.sh", script_text)
             self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
+
+    def test_local_3ddna_raw_reads_blocks_before_execution_without_site_generator(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            read1 = Path(tmpdir) / "hic_R1.fq.gz"
+            read2 = Path(tmpdir) / "hic_R2.fq.gz"
+            chrom_sizes = Path(tmpdir) / "chrom.sizes"
+            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
+            read1.write_text("r1\n", encoding="utf-8")
+            read2.write_text("r2\n", encoding="utf-8")
+            chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
+            bin_dir = self._fake_juicer_3ddna_bin(tmpdir, with_site_generator=False)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
+                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                    "juicer_3ddna_parameters": {
+                        "input_mode": "raw_reads",
+                        "chromosome_count": 22,
+                        "restriction_enzyme": "DpnII",
+                        "chrom_sizes_ref": str(chrom_sizes),
+                        "threads": 2,
+                    },
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "missing_tool")
+            self.assertEqual(hic["missing_tools"], ["generate_site_positions.py"])
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
 
 
 if __name__ == "__main__":

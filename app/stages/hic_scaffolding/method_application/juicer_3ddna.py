@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +65,15 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
     )
     if env_blocked is not None:
         return update_hic_output(state, env_blocked)
+    if parameters["input_mode"] == "raw_reads":
+        generator, generator_blocked = _resolve_site_generator(
+            env_spec=env_spec,
+            stage_env=output.get("env"),
+            juicer_command=parameters["juicer_parameters"]["command"],
+        )
+        if generator_blocked is not None:
+            return update_hic_output(state, generator_blocked)
+        parameters["juicer_parameters"].update(generator)
 
     working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "juicer_3ddna"
     artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "juicer_3ddna"
@@ -110,6 +121,7 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
             "merged_nodups_path": str(merged_nodups),
             "chromosome_count": parameters["chromosome_count"],
             "juicer_parameters": parameters.get("juicer_parameters", {}),
+            "juicer_site_generator": parameters.get("juicer_parameters", {}).get("site_generator_path"),
             "three_dna_command": parameters["three_dna_command"],
             "three_dna_extra_args": parameters["three_dna_extra_args"],
             "scaffold_fasta": str(scaffold_fasta),
@@ -223,19 +235,36 @@ def _script(
     lines = ["set -e", f"mkdir -p {shlex.quote(str(three_dna_dir))} {shlex.quote(str(scaffold_fasta.parent))}"]
     if params["input_mode"] == "raw_reads":
         fastq_dir = juicer_dir / "fastq"
+        site_dir = juicer_dir / "restriction_sites"
         juicer_reference = juicer_dir / "reference.fasta"
         jp = params["juicer_parameters"]
-        lines.append(f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(generated_mnd.parent))}")
+        site_marker = site_dir / ".site_generator_started"
+        lines.append(
+            f"mkdir -p {shlex.quote(str(fastq_dir))} {shlex.quote(str(generated_mnd.parent))} {shlex.quote(str(site_dir))}"
+        )
         for index, read_path in enumerate(params["hic_read_paths"], start=1):
             link = fastq_dir / f"{index}_{Path(read_path).name}"
             lines.append(f"ln -sfn {shlex.quote(read_path)} {shlex.quote(str(link))}")
         lines.append(f"cp {shlex.quote(str(assembly))} {shlex.quote(str(juicer_reference))}")
+        lines.append(f"touch {shlex.quote(str(site_marker))}")
+        generator_command = [*jp["site_generator_command"], jp["site_generator_path"], jp["restriction_enzyme"], str(juicer_reference)]
+        lines.append(f"(cd {shlex.quote(str(site_dir))} && " + " ".join(shlex.quote(str(value)) for value in generator_command) + ")")
+        lines.append(
+            "site_file=$(find "
+            + shlex.quote(str(site_dir))
+            + " -maxdepth 1 -type f ! -name .site_generator_started -newer "
+            + shlex.quote(str(site_marker))
+            + " -print -quit)"
+        )
+        lines.append('test -n "$site_file"')
+        lines.append('test -s "$site_file"')
+        lines.append(f"rm -f {shlex.quote(str(site_marker))}")
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
-            "-p", jp["chrom_sizes_ref"], "-t", str(jp["threads"]), *jp["extra_args"],
+            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-t", str(jp["threads"]), *jp["extra_args"],
         ]
-        lines.append(" ".join(shlex.quote(str(value)) for value in command))
+        lines.append(" ".join("\"$site_file\"" if value == "${site_file}" else shlex.quote(str(value)) for value in command))
         lines.append(f"test -f {shlex.quote(str(generated_mnd))}")
         merged_nodups = generated_mnd
     else:
@@ -278,6 +307,79 @@ def _merged_nodups_path(state: TopLevelState, output: dict[str, Any], params: di
             if path.exists():
                 return path
     return None
+
+
+def _resolve_site_generator(
+    *,
+    env_spec: Any,
+    stage_env: Any,
+    juicer_command: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Find Juicer's generator in the execution environment before freezing.
+
+    Juicer itself defaults to ``/aidenlab/restriction_sites`` when no ``-y``
+    file is supplied.  We never use that fallback: discover the auxiliary
+    generator from the selected conda environment (or an explicit PATH test
+    override), then make a fresh site file inside this attempt's work tree.
+    """
+    probe = r'''
+set -eu
+juicer_command="$1"
+juicer_path="$(command -v "$juicer_command")" || {
+  echo "Juicer command is unavailable while resolving its site generator: $juicer_command" >&2
+  exit 127
+}
+for root in "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
+  test -n "$root" && test -d "$root" || continue
+  generator="$(find "$root" -type f -name generate_site_positions.py -print -quit 2>/dev/null || true)"
+  test -n "$generator" || continue
+  if test -x "$generator"; then
+    printf '%s\t%s\n' "$generator" direct
+    exit 0
+  fi
+  if python_path="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"; then
+    printf '%s\t%s\n' "$generator" "$python_path"
+    exit 0
+  fi
+  echo "site generator is not executable and Python is unavailable: $generator" >&2
+  exit 127
+done
+echo "generate_site_positions.py was not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
+exit 127
+'''
+    if env_spec is not None:
+        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "site-generator-preflight", juicer_command]
+        env = None
+        env_target = env_spec.display_target()
+    else:
+        command = ["sh", "-c", probe, "site-generator-preflight", juicer_command]
+        env = os.environ.copy()
+        if isinstance(stage_env, dict):
+            env.update({str(key): str(value) for key, value in stage_env.items()})
+        env_target = "explicit PATH override"
+    result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return {}, {
+            "status": "missing_tool",
+            "reason": detail or f"generate_site_positions.py is unavailable in {env_target}",
+            "env_target": env_target,
+            "missing_tools": ["generate_site_positions.py"],
+            "method_name": METHOD,
+        }
+    generator_path, separator, interpreter = result.stdout.strip().partition("\t")
+    if not generator_path or not separator or not interpreter:
+        return {}, {
+            "status": "missing_tool",
+            "reason": f"invalid generate_site_positions.py preflight output in {env_target}",
+            "env_target": env_target,
+            "missing_tools": ["generate_site_positions.py"],
+            "method_name": METHOD,
+        }
+    return {
+        "site_generator_path": generator_path,
+        "site_generator_command": [] if interpreter == "direct" else [interpreter],
+    }, None
 
 
 def _positive_int(value: Any, _name: str) -> int | None:
