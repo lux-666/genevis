@@ -275,11 +275,34 @@ def _script(
         lines.append(f"site_file={shlex.quote(str(site_file))}")
         lines.append('test -s "$site_file"')
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
+        scripts_dir = str(jp["scripts_dir"])
+        compat_scripts_dir = juicer_dir / "juicer_scripts_compat"
+        lines.append(f"juicer_scripts_dir={shlex.quote(scripts_dir)}")
+        lines.append('juicer_scripts_dir_arg="$juicer_scripts_dir"')
+        lines.append(
+            'if test -d "$juicer_scripts_dir/common" && ! test -d "$juicer_scripts_dir/scripts/common"; then'
+        )
+        lines.append(f"  mkdir -p {shlex.quote(str(compat_scripts_dir / 'scripts'))}")
+        lines.append(
+            f"  ln -sfn \"$juicer_scripts_dir/common\" {shlex.quote(str(compat_scripts_dir / 'scripts' / 'common'))}"
+        )
+        lines.append(f"  juicer_scripts_dir_arg={shlex.quote(str(compat_scripts_dir))}")
+        lines.append("fi")
+        lines.append('test -f "$juicer_scripts_dir_arg/scripts/common/chimeric_sam.awk"')
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
-            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-D", jp["scripts_dir"], "-t", str(jp["threads"]), *jp["extra_args"],
+            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-D", "${juicer_scripts_dir_arg}", "-t", str(jp["threads"]), *jp["extra_args"],
         ]
-        lines.append(" ".join("\"$site_file\"" if value == "${site_file}" else shlex.quote(str(value)) for value in command))
+        lines.append(
+            " ".join(
+                "\"$site_file\""
+                if value == "${site_file}"
+                else "\"$juicer_scripts_dir_arg\""
+                if value == "${juicer_scripts_dir_arg}"
+                else shlex.quote(str(value))
+                for value in command
+            )
+        )
         lines.append(f"test -f {shlex.quote(str(generated_mnd))}")
         merged_nodups = generated_mnd
     else:
