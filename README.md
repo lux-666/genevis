@@ -17,7 +17,7 @@ same `env_dispatch` path as of Phase 5 task 01.
 
 ```text
 inventory -> read_qc -> genome_survey -> assembly -> assembly_review
--> hic_scaffolding -> repeat_annotation -> gene_annotation -> function_annotation
+-> hic_scaffolding -> t2t -> repeat_annotation -> gene_annotation -> function_annotation
 ```
 
 `genome_survey` runs Jellyfish + GenomeScope2 when short or long DNA reads are
@@ -69,6 +69,9 @@ Implemented:
 - real `hic_scaffolding` stage with opt-in Juicer + 3D-DNA and YaHS candidates,
   raw-read or `merged_nodups.txt` inputs, candidate comparison, pre-Hi-C
   preservation, and contact-map human review
+- real `t2t` stage with opt-in minimap2 ONT evidence, terminal telomere scans,
+  conservative two-read automatic extension patches, and patched-assembly
+  handoff to annotation without overwriting the input FASTA
 - real `repeat_annotation` stage with opt-in local RepeatMasker for provided
   libraries and softmasked genome handoff
 - `gene_annotation` with executable Miniprot + AUGUSTUS runners, EVM merge,

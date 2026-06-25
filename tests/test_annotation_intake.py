@@ -118,7 +118,7 @@ class AnnotationIntakeTests(unittest.TestCase):
 
             self.assertEqual(
                 plan.resolved_execution_order,
-                ["repeat_annotation", "gene_annotation", "function_annotation"],
+                ["t2t", "repeat_annotation", "gene_annotation", "function_annotation"],
             )
             self.assertNotIn("assembly_review", plan.resolved_execution_order)
 
@@ -152,7 +152,7 @@ class AnnotationIntakeTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(
                 result.final_requested_stages,
-                ["read_qc", "assembly", "assembly_review", "repeat_annotation", "gene_annotation", "function_annotation"],
+                ["read_qc", "assembly", "assembly_review", "t2t", "repeat_annotation", "gene_annotation", "function_annotation"],
             )
             self.assertFalse(result.changed)
             self.assertEqual(result.update["requested_stages"], result.final_requested_stages)

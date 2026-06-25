@@ -396,7 +396,7 @@ class ReviewResumeTests(unittest.TestCase):
         update = resume_review_state(state, request)
 
         self.assertIsNone(update["active_interrupt"])
-        self.assertEqual(update["current_stage"], "repeat_annotation")
+        self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertEqual(hic_out["selected_method_name"], "hic_scaffolding.candidate.yahs")
         self.assertEqual(hic_out["final_assembly_for_annotation"], "pre_hic.fasta")
@@ -434,7 +434,7 @@ class ReviewResumeTests(unittest.TestCase):
 
         update = resume_review_state(state, request)
 
-        self.assertEqual(update["current_stage"], "repeat_annotation")
+        self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertEqual(hic_out["final_assembly_for_annotation"], "pre_hic.fasta")
         self.assertTrue(Path(hic_out["skip_record_ref"]).exists())

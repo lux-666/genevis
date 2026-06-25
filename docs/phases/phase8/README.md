@@ -49,7 +49,8 @@ function_annotation
 - 文档全部使用 `inventory`，不再使用其他输入画像 stage 名。
 - `assembly` stage 改写为多方法 long-read candidate stage。
 - Hi-C 相关任务改写为增强既有 `hic_scaffolding` stage，而不是 assembly 内部 agent。
-- 新增 `t2t` stage 的 schema、builder、routing、stage order、review gate 和测试。
+- 新增 `t2t` stage 的 schema、builder、routing、stage order、minimap2 execution、
+  conservative auto-patch 和测试。
 
 ## Phase 8 MVP
 
@@ -60,14 +61,13 @@ function_annotation
 3. `assembly` 支持多方法 candidate planning/execution，Flye 和 NextDenovo 方法应用已下沉到 method-specific subgraph，后续在同一 package 追加 hifiasm/Canu 等方法。
 4. 保持 `assembly -> assembly_review` 对外 contract 稳定。
 5. 增强现有 `hic_scaffolding` stage 的 chromosome-level candidate/workspace 语义，不新增平行 Hi-C 主线。
-6. 新增 `t2t` stage：telomere/gap/readiness review、review tasks、strict/near T2T final gate。
+6. 新增 `t2t` stage：telomere scan、ONT-backed candidates、保守 auto-patch 与 annotation handoff。
 
 暂不做：
 
 - 重命名 `inventory` 代码。
 - 在 assembly 内部实现独立 Hi-C curation agent。
-- Verkko/HERRO/Dorado/Medaka/Teloclip/TeloComp 的真实执行。
-- 自动修改 genome 以补端粒或 gap。
+- Verkko/HERRO/Dorado/Medaka/Teloclip/TeloComp 的真实执行或 consensus patching。
 
 ## 任务列表
 

@@ -21,6 +21,7 @@ from app.stages.hic_scaffolding.builder import build_stage as build_hic_scaffold
 from app.stages.inventory.builder import build_stage as build_inventory_stage
 from app.stages.read_qc.builder import build_stage as build_read_qc_stage
 from app.stages.repeat_annotation.builder import build_stage as build_repeat_annotation_stage
+from app.stages.t2t.builder import build_stage as build_t2t_stage
 
 
 def build_graph(
@@ -57,6 +58,7 @@ def build_graph(
     graph.add_node("assembly_dedup_stage", build_assembly_dedup_stage())
     graph.add_node("assembly_review_stage", build_assembly_review_stage())
     graph.add_node("hic_scaffolding_stage", build_hic_scaffolding_stage())
+    graph.add_node("t2t_stage", build_t2t_stage())
     graph.add_node("repeat_annotation_stage", build_repeat_annotation_stage())
     graph.add_node("gene_annotation_stage", build_gene_annotation_stage())
     graph.add_node("function_annotation_stage", build_function_annotation_stage())
@@ -73,6 +75,7 @@ def build_graph(
             "assembly_dedup_stage": "assembly_dedup_stage",
             "assembly_review_stage": "assembly_review_stage",
             "hic_scaffolding_stage": "hic_scaffolding_stage",
+            "t2t_stage": "t2t_stage",
             "repeat_annotation_stage": "repeat_annotation_stage",
             "gene_annotation_stage": "gene_annotation_stage",
             "function_annotation_stage": "function_annotation_stage",
@@ -88,6 +91,7 @@ def build_graph(
         "assembly_dedup_stage",
         "assembly_review_stage",
         "hic_scaffolding_stage",
+        "t2t_stage",
         "repeat_annotation_stage",
         "gene_annotation_stage",
         "function_annotation_stage",

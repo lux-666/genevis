@@ -184,13 +184,13 @@ Phase 8 MVP is intentionally small:
 3. Keep `assembly_review` contracts stable.
 4. Keep Hi-C work under existing `hic_scaffolding`, adding clearer final
    assembly refs for downstream T2T when needed.
-5. Add the `t2t` stage, including telomere/gap/readiness checks and a final
-   human gate for strict or weak-evidence cases.
+5. Add the `t2t` stage, including telomere checks, ONT-backed extension
+   candidates, conservative automatic patching, and patched-assembly handoff.
 
 Out of scope for Phase 8 unless a later slice explicitly adds consuming nodes:
 renaming `inventory`, creating a parallel Hi-C stage inside assembly, real Verkko
 execution, HERRO correction, Dorado/Medaka polishing, Merqury QV, Teloclip, or
-TeloComp genome modification.
+TeloComp consensus-based genome modification.
 
 Remaining Phase 8 work lives in `docs/phases/phase8/01_*.md` through
 `06_*.md`: schema/profile deltas, inventory enhancement, assembly method

@@ -40,6 +40,12 @@ SPECIES="Danio rerio"             # for related-species sanity check
 # session artifacts.
 REVIEW_ASSEMBLY=""
 
+# Optional materialized assembly for a future real-data T2T smoke run. Leave
+# empty to run only schema/unit tests; test_07 intentionally does not require
+# a permanent project dataset while the stage is being tuned.
+T2T_ASSEMBLY=""
+T2T_ONT_READS=""
+
 # Directory holding the pinned NCBI Metazoa snapshot on this HPC.  It must
 # contain Metazoa.ncbi.tsv and Metazoa.ncbi.lineage; the test copies them into
 # data/reference/ncbi_metazoa and validates them against the tracked manifest.

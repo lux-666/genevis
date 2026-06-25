@@ -45,6 +45,7 @@ Use these asset names consistently:
 - `genome_survey_result`
 - `hic_reads_registered`
 - `chromosome_scaffolded_assembly`
+- `t2t_finished_assembly`
 - `repeat_annotation`
 - `softmasked_genome`
 - `gene_models`
@@ -296,7 +297,37 @@ Review triggers:
 - abnormal cis/trans or contact distribution
 - contact map suggests misjoins
 
-## 8. Repeat Annotation
+## 8. T2T Finishing
+
+Purpose: inspect terminal telomere evidence and conservatively extend missing
+assembly ends from ONT read evidence without overwriting the input FASTA.
+
+Inputs:
+
+- required: final assembly from `hic_scaffolding` when available, otherwise
+  `assembly_review`
+- optional but required for automatic patching: `clean_long_reads`, falling
+  back to `raw_long_reads`
+
+Outputs:
+
+- per-assembly and per-read telomere scans
+- PAF-backed extension candidates and a finishing report
+- optional `patched_assembly.fa` plus patch records
+- `final_assembly_for_annotation`, which points to the patched FASTA only when
+  a conservative patch is materialized
+
+Planning rules:
+
+- All assembly paths enter this stage. Real scan/alignment/patch execution is
+  opt-in through `local_exec: [t2t]`; disabled execution passes the original
+  assembly forward with a report.
+- Use the configured motif (default `TTAGGG`) and require conservative
+  terminal, overlap, MAPQ, and multi-read support before auto-patching.
+- Preserve the input FASTA. Ambiguous, chimeric, or conflicting evidence is
+  reported as `needs_manual_review` and never patched automatically.
+
+## 9. Repeat Annotation
 
 Purpose: produce repeat library, repeat annotation, and masked genome for gene
 structure annotation.
@@ -323,7 +354,7 @@ Planning rules:
 - Propagate explicit high-fragmentation or low-confidence assembly signals into
   repeat annotation confidence without inventing numeric thresholds.
 
-## 9. Gene Annotation
+## 10. Gene Annotation
 
 Purpose: generate gene models, transcripts, and predicted proteins.
 
@@ -400,7 +431,7 @@ Non-goals for adoption path:
 - Evidence conflicts are recorded as review triggers only; they do not block
   adoption or alter the adopted refs.
 
-## 10. Function Annotation
+## 11. Function Annotation
 
 Purpose: annotate predicted proteins with domains, homology, KO, pathway, and
 database-derived function.

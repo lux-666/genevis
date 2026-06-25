@@ -752,6 +752,11 @@ def _unique_refs(refs: list[str]) -> list[str]:
 
 def _final_assembly_for_annotation(state: TopLevelState) -> str | None:
     outputs = state.get("stage_outputs") or {}
+    t2t_out = outputs.get("t2t") or {}
+    value = t2t_out.get("final_assembly_for_annotation")
+    if value:
+        return str(value)
+
     hic_out = outputs.get("hic_scaffolding") or {}
     value = hic_out.get("final_assembly_for_annotation")
     if value:

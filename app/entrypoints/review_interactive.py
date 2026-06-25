@@ -294,6 +294,53 @@ def prompt_generic_gate_decision(
     return result
 
 
+def prompt_t2t_review_decision(
+    requirements: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Prompt for a T2T candidate-selection decision."""
+    decisions = requirements.get("decisions_allowed", [])
+    candidate_ids = requirements.get("candidate_ids") or []
+
+    decision = _prompt_choice("decision", decisions)
+    if decision is None:
+        return None
+
+    selected_candidate_ids: list[str] = []
+    if decision == "accept_selected_candidates":
+        if not candidate_ids:
+            print("error: no T2T candidates are available to accept", file=sys.stderr)
+            return None
+        print("\ncandidates:")
+        for index, candidate_id in enumerate(candidate_ids, 1):
+            print(f"  {index}. {candidate_id}")
+        try:
+            raw = input("select candidate(s) [comma-separated numbers or ids]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw:
+            return None
+        selected_candidate_ids = _parse_multi_choice(raw, candidate_ids)
+        if not selected_candidate_ids:
+            print(f"invalid candidate selection: {raw!r}", file=sys.stderr)
+            return None
+
+    try:
+        notes_raw = input("notes (optional): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        notes_raw = ""
+
+    result: dict[str, Any] = {
+        "stage": "t2t",
+        "gate_id": requirements.get("gate_id"),
+        "decision": decision,
+        "notes": [notes_raw] if notes_raw else ["interactive review"],
+        "decided_by": "human",
+    }
+    if selected_candidate_ids:
+        result["candidate_ids"] = selected_candidate_ids
+    return result
+
+
 def _prompt_choice(label: str, options: list[str]) -> str | None:
     if not options:
         return None
@@ -315,6 +362,25 @@ def _prompt_choice(label: str, options: list[str]) -> str | None:
             return raw
     print(f"invalid selection: {raw!r}", file=sys.stderr)
     return None
+
+
+def _parse_multi_choice(raw: str, options: list[str]) -> list[str]:
+    selections: list[str] = []
+    for token in [part.strip() for part in raw.split(",") if part.strip()]:
+        choice: str | None = None
+        try:
+            index = int(token) - 1
+        except ValueError:
+            if token in options:
+                choice = token
+        else:
+            if 0 <= index < len(options):
+                choice = options[index]
+        if choice is None:
+            return []
+        if choice not in selections:
+            selections.append(choice)
+    return selections
 
 
 def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
@@ -676,6 +742,8 @@ def collect_gate_decision(
         raw_decision = prompt_assembly_review_decision(requirements)
     elif gate.prompt_adapter == "hic_scaffolding":
         raw_decision = prompt_hic_scaffolding_decision(requirements)
+    elif gate.prompt_adapter == "t2t":
+        raw_decision = prompt_t2t_review_decision(requirements)
     else:
         raw_decision = prompt_generic_gate_decision(requirements)
 

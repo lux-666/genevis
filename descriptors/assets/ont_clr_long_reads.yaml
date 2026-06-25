@@ -5,6 +5,7 @@ asset_types:
     allowed_stages:
       - inventory
       - read_qc
+      - t2t
     produces:
       - clean_long_reads
 
@@ -12,6 +13,7 @@ asset_types:
     allowed_stages:
       - assembly
       - assembly_review
+      - t2t
     allowed_methods:
       assembly:
         - flye

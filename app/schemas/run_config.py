@@ -28,6 +28,7 @@ RequestableStage = Literal[
     "assembly_dedup",
     "assembly_review",
     "hic_scaffolding",
+    "t2t",
     "repeat_annotation",
     "gene_annotation",
     "function_annotation",
@@ -39,6 +40,7 @@ LocalExecStage = Literal[
     "assembly",
     "assembly_review",
     "hic_scaffolding",
+    "t2t",
     "repeat_annotation",
     "gene_annotation",
     "function_annotation",
@@ -56,6 +58,40 @@ ReadQCLengthFilterMethod = Literal[
 ]
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
+
+
+class T2TThresholdProfile(BaseModel):
+    """Conservative evidence thresholds for automatic telomere extension."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_motif_copies: int = Field(default=4, ge=1)
+    terminal_window_bp: int = Field(default=10_000, gt=0)
+    min_mapq: int = Field(default=20, ge=0)
+    max_target_terminal_distance_bp: int = Field(default=1_000, ge=0)
+    min_overlap_bp: int = Field(default=500, gt=0)
+    min_supporting_reads: int = Field(default=2, ge=2)
+
+
+class T2TRunConfig(BaseModel):
+    """Optional finishing controls for the top-level T2T stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
+    telomere_motif: str = "TTAGGG"
+    chromosome_list_ref: str | None = None
+    assembly_fasta_ref: str | None = None
+    ont_reads_ref: str | None = None
+    thresholds: T2TThresholdProfile = Field(default_factory=T2TThresholdProfile)
+
+    @model_validator(mode="after")
+    def _motif_is_dna(self) -> "T2TRunConfig":
+        motif = self.telomere_motif.upper()
+        if len(motif) < 2 or any(base not in "ACGT" for base in motif):
+            raise ValueError("t2t.telomere_motif must be a DNA motif of at least two bases")
+        self.telomere_motif = motif
+        return self
 
 
 class StageReviewPolicyConfig(BaseModel):
@@ -394,6 +430,7 @@ class RunConfig(BaseModel):
     assembly: AssemblyRunConfig | None = None
     assembly_review: AssemblyReviewRunConfig | None = None
     hic_scaffolding: HiCScaffoldingRunConfig | None = None
+    t2t: T2TRunConfig | None = None
     gene_annotation: GeneAnnotationRunConfig | None = None
     function_annotation: FunctionAnnotationRunConfig | None = None
     review_policy: ReviewPolicyConfig | None = None

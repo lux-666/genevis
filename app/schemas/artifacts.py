@@ -36,6 +36,14 @@ HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
 HIC_SCAFFOLD_AGP = "hic_scaffolding.scaffold_agp"
 HIC_REVIEW_BUNDLE = "hic_scaffolding.review_bundle"
 HIC_QC_REPORT = "hic_scaffolding.qc_report"
+T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
+T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
+T2T_TELOMERIC_READS = "t2t.telomeric_reads"
+T2T_EXTENSION_CANDIDATES = "t2t.extension_candidates"
+T2T_STATUS_SUMMARY = "t2t.status_summary"
+T2T_FINISHING_REPORT = "t2t.finishing_report"
+T2T_PATCHED_ASSEMBLY = "t2t.patched_assembly"
+T2T_PATCH_RECORDS = "t2t.patch_records"
 REPEAT_ANNOTATION_PLAN = "repeat_annotation.plan"
 REPEAT_ANNOTATION_BUNDLE = "repeat_annotation.bundle"
 REPEAT_ANNOTATION_GFF3 = "repeat_annotation.gff3"
@@ -216,6 +224,35 @@ class HiCScaffoldDecisionArtifact(BaseModel):
     pre_hic_assembly_ref: str
     final_assembly_for_annotation: str
     hic_read_refs: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class T2TReviewDecisionArtifact(BaseModel):
+    """Human T2T finishing decision recorded as an artifact."""
+
+    session_id: str
+    stage: Literal["t2t"] = "t2t"
+    decision: Literal["accept_selected_candidates", "continue_without_patch", "stop_pipeline"]
+    candidate_ids: list[str] = Field(default_factory=list)
+    input_assembly_ref: str
+    final_assembly_for_annotation: str
+    patched_assembly_ref: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class T2TFinishingBundle(BaseModel):
+    """Compact provenance for a T2T finishing run and its annotation handoff."""
+
+    session_id: str
+    status: str
+    input_assembly_ref: str
+    final_assembly_for_annotation: str
+    ont_reads_ref: str | None = None
+    mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
+    patched_assembly_ref: str | None = None
+    artifact_refs: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

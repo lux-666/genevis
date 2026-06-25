@@ -5,7 +5,7 @@
 - `inventory`：输入画像和 route/method hints。
 - `assembly`：long-read assembly method provenance。
 - `hic_scaffolding`：chromosome-level scaffold/curation candidate provenance。
-- `t2t`：新增 top-level stage 的 readiness、review tasks、final decision artifacts。
+- `t2t`：新增 top-level stage 的 telomere scans、extension candidates、patch records 与 handoff artifacts。
 
 ## 目标
 
@@ -19,7 +19,7 @@
 | long-read assembly 方法选择和执行 | `assembly` | candidate bundle + method provenance |
 | assembly 评估和人工选择 | `assembly_review` | 保持现有 review contract |
 | Hi-C scaffolding / manual curation | `hic_scaffolding` | scaffold candidate / workspace / decision |
-| telomere/gap/T2T readiness | `t2t` | readiness / review tasks / final gate |
+| telomere/T2T finishing | `t2t` | scans / candidates / conservative patch records |
 
 ## Run Config Delta
 

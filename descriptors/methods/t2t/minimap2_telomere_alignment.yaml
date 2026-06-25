@@ -1,0 +1,25 @@
+method_name: t2t.alignment.minimap2
+stage: t2t
+package_ref: minimap2
+goal: "Map ONT long reads to the current assembly for telomere-extension evidence."
+required_inputs:
+  - name: assembly_fasta
+    type: assembly_fasta
+    description: "Current Hi-C or assembly-review FASTA candidate."
+  - name: ont_reads
+    type: clean_long_reads
+    description: "QC-cleaned ONT reads, with raw reads accepted as a fallback."
+expected_outputs:
+  - name: paf
+    type: t2t.read_alignment_paf
+    description: "Primary ONT-to-assembly alignments in PAF format."
+review_rules:
+  - "Patch only assembly ends lacking a telomere signal."
+  - "Require two independent, compatible telomeric reads before auto-patching."
+human_review_triggers:
+  - "Read-tail conflicts, chimeric evidence, or insufficient support leave candidates unpatched."
+resource_hints:
+  cpu_cores: 16
+  memory_gb: 32.0
+  gpu_required: false
+  walltime_hours: 4.0

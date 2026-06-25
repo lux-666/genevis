@@ -36,6 +36,8 @@ stages:
     conda_env: env_geno_exec
   hic_scaffolding:
     conda_env: env_geno_exec
+  t2t:
+    conda_env: env_geno_exec
   repeat_annotation:
     conda_env: env_geno_exec
 
@@ -94,6 +96,10 @@ methods:
       - run-asm-pipeline.sh
       - bwa
       - java
+  t2t.alignment.minimap2:
+    conda_env: env_geno_exec
+    required_tools:
+      - minimap2
   repeat_annotation.masking.repeatmasker:
     conda_env: env_geno_exec
     required_tools:

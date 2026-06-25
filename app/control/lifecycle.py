@@ -587,13 +587,16 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     if requirements.get("candidate_ids"):
         candidate_ids = list(requirements.get("candidate_ids") or [])
         candidate_refs = dict(requirements.get("candidate_final_assembly_refs") or {})
-        selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
         guidance["candidate_ids"] = candidate_ids
         guidance["candidate_final_assembly_refs"] = candidate_refs
-        template["candidate_id"] = selected_candidate
-        if "final_assembly_ref" in gate.required_resume_fields or candidate_refs:
-            template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
-        template["rejected_candidates"] = []
+        if "candidate_ids" in gate.required_resume_fields:
+            template["candidate_ids"] = candidate_ids
+        else:
+            selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
+            template["candidate_id"] = selected_candidate
+            if "final_assembly_ref" in gate.required_resume_fields or candidate_refs:
+                template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
+            template["rejected_candidates"] = []
     if requirements.get("candidate_methods"):
         candidate_methods = list(requirements.get("candidate_methods") or [])
         guidance["candidate_methods"] = candidate_methods

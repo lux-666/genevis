@@ -157,6 +157,18 @@ register_review_gate(
 
 register_review_gate(
     ReviewGateDeclaration(
+        stage="t2t",
+        gate_id="t2t_review",
+        decisions_allowed=("accept_selected_candidates", "continue_without_patch", "stop_pipeline"),
+        decision_applier="app.stages.t2t.nodes:apply_t2t_review_decision",
+        prompt_adapter="t2t",
+        template_preferred_decision="accept_selected_candidates",
+        required_resume_fields=("candidate_ids",),
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
         stage="repeat_annotation",
         gate_id="mask_review",
         decisions_allowed=("accept", "skip"),

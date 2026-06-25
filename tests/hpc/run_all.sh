@@ -96,6 +96,7 @@ TESTS=(
     "4:test_04_assembly_dedup.sh:Assembly + Assembly Dedup"
     "5:test_05_assembly_review.sh:Assembly Review"
     "6:test_06_hic.sh:Hi-C Scaffolding"
+    "7:test_07_t2t.sh:T2T Telomere Finishing"
 )
 
 MASTER_PASS=0

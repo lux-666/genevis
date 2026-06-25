@@ -8,6 +8,7 @@ STAGE_ORDER = [
     "assembly_dedup",
     "assembly_review",
     "hic_scaffolding",
+    "t2t",
     "repeat_annotation",
     "gene_annotation",
     "function_annotation",

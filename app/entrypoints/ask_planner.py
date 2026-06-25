@@ -922,7 +922,7 @@ def _recommended_stages_from_manifest(manifest_ref: str) -> list[str]:
         recommended.append("hic_scaffolding")
     has_assembly_path = "raw_long_reads" in asset_types or "assembly_fasta_registered" in asset_types
     if has_assembly_path:
-        recommended.extend(["repeat_annotation", "gene_annotation", "function_annotation"])
+        recommended.extend(["t2t", "repeat_annotation", "gene_annotation", "function_annotation"])
     if "repeat_library" in asset_types:
         recommended.append("repeat_annotation")
     if "raw_rnaseq_reads" in asset_types or "raw_isoseq_or_long_rna_reads" in asset_types:

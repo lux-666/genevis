@@ -1083,7 +1083,7 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
         available = _all_selectable_stages()
         expected = [
             "read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review",
-            "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
+            "hic_scaffolding", "t2t", "repeat_annotation", "gene_annotation", "function_annotation",
         ]
         self.assertEqual(available, expected)
 
@@ -1091,7 +1091,7 @@ class AskPlannerStageAvailabilityTests(unittest.TestCase):
         available = _all_selectable_stages()
         expected = [
             "read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review",
-            "hic_scaffolding", "repeat_annotation", "gene_annotation", "function_annotation",
+            "hic_scaffolding", "t2t", "repeat_annotation", "gene_annotation", "function_annotation",
         ]
         self.assertEqual(available, expected)
 

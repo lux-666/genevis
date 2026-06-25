@@ -418,6 +418,10 @@ def _run_session(args: argparse.Namespace) -> int:
                 exclude_none=True
             )
         stage_outputs["hic_scaffolding"] = hic_out
+    if run_config and run_config.t2t:
+        t2t_out = dict(stage_outputs.get("t2t") or {})
+        t2t_out.update(run_config.t2t.model_dump(mode="json", exclude_none=True))
+        stage_outputs["t2t"] = t2t_out
     if run_config and run_config.review_policy:
         for review_stage in ["assembly", "assembly_review", "hic_scaffolding"]:
             stage_out = dict(stage_outputs.get(review_stage) or {})
