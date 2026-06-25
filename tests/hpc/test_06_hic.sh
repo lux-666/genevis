@@ -236,6 +236,10 @@ test -n "$generator" || {
   echo "generate_site_positions.py not found in configured Juicer environment" >&2
   exit 127
 }
+command -v java >/dev/null 2>&1 || {
+  echo "java not found in configured Juicer environment" >&2
+  exit 127
+}
 for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
   test -n "$root" && test -d "$root" || continue
   helper="$(find "$root" -type f \( -path "*/common/chimeric_sam.awk" -o -path "*/scripts/common/chimeric_sam.awk" \) -print -quit 2>/dev/null || true)"
@@ -259,8 +263,8 @@ exit 127
 '; then
         pass "Juicer helper scripts available"
     else
-        warn "Juicer helper scripts are missing from the configured Hi-C method environment"
-        warn "Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk (for example /data/work/softs/juicer/CPU), or install the full Juicer scripts tree"
+        warn "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
+        warn "Install/expose Java in the configured Juicer environment and set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk (for example /data/work/softs/juicer/CPU)"
         info "Schema and unit tests above still validate the Hi-C code paths"
         summary "Test 06: Hi-C Scaffolding (schema-only)"
         exit 0

@@ -93,6 +93,7 @@ methods:
       - juicer.sh
       - run-asm-pipeline.sh
       - bwa
+      - java
   repeat_annotation.masking.repeatmasker:
     conda_env: env_geno_exec
     required_tools:

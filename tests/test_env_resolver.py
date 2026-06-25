@@ -90,6 +90,13 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         self.assertTrue(yahs_spec.conda_env or yahs_spec.conda_prefix)
         self.assertEqual(yahs_spec.required_tools, ["yahs"])
 
+        juicer_spec = resolver.resolve(
+            stage="hic_scaffolding",
+            method_name="hic_scaffolding.candidate.juicer_3ddna_juicebox",
+        )
+        self.assertTrue(juicer_spec.conda_env or juicer_spec.conda_prefix)
+        self.assertIn("java", juicer_spec.required_tools)
+
         repeatmasker_spec = resolver.resolve(
             stage="repeat_annotation",
             method_name="repeat_annotation.masking.repeatmasker",
