@@ -220,6 +220,43 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
         exit 0
     fi
 
+    if [[ -n "${HIC_JUICER_SCRIPTS_DIR:-}" ]]; then
+        export JUICER_SCRIPTS_DIR="$HIC_JUICER_SCRIPTS_DIR"
+    fi
+    if run_configured_method_tool \
+        "hic_scaffolding" "hic_scaffolding.candidate.juicer_3ddna_juicebox" \
+        sh -c '
+set -eu
+juicer_path="$(command -v juicer.sh)"
+generator="$(command -v generate_site_positions.py 2>/dev/null || true)"
+if test -z "$generator"; then
+  generator="$(find "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" -type f -name generate_site_positions.py -print -quit 2>/dev/null || true)"
+fi
+test -n "$generator" || {
+  echo "generate_site_positions.py not found in configured Juicer environment" >&2
+  exit 127
+}
+for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
+  test -n "$root" && test -d "$root" || continue
+  helper="$(find "$root" -type f -path "*/scripts/common/chimeric_sam.awk" -print -quit 2>/dev/null || true)"
+  test -n "$helper" || continue
+  scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
+  test -f "$scripts_dir/scripts/common/chimeric_sam.awk" || continue
+  echo "Juicer helper scripts: $scripts_dir"
+  exit 0
+done
+echo "scripts/common/chimeric_sam.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains scripts/common/chimeric_sam.awk." >&2
+exit 127
+'; then
+        pass "Juicer helper scripts available"
+    else
+        warn "Juicer helper scripts are missing from the configured Hi-C method environment"
+        warn "Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains scripts/common/chimeric_sam.awk, or install the full Juicer scripts tree"
+        info "Schema and unit tests above still validate the Hi-C code paths"
+        summary "Test 06: Hi-C Scaffolding (schema-only)"
+        exit 0
+    fi
+
     SID="hpc-test06-$(date +%Y%m%d-%H%M%S)"
     MANIFEST="${TEST_DATA_ROOT}/_test06_manifest.yaml"
     mkdir -p "${TEST_DATA_ROOT}"

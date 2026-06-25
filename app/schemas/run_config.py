@@ -279,6 +279,7 @@ class Juicer3DDNARunParameters(BaseModel):
     chrom_sizes_ref: str | None = None
     threads: int | None = Field(default=None, gt=0)
     juicer_command: str = "juicer.sh"
+    juicer_scripts_dir: str | None = None
     juicer_extra_args: list[str] = Field(default_factory=list)
     three_dna_command: str = "run-asm-pipeline.sh"
     three_dna_extra_args: list[str] = Field(default_factory=list)

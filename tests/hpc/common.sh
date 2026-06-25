@@ -354,6 +354,9 @@ if 'hic_scaffolding' in stages:
             'threads': ${ASSEMBLY_THREADS},
         },
     }
+    juicer_scripts_dir = '${HIC_JUICER_SCRIPTS_DIR:-}'
+    if juicer_scripts_dir:
+        rc['hic_scaffolding']['juicer_3ddna_parameters']['juicer_scripts_dir'] = juicer_scripts_dir
     # chrom_sizes_ref is required for execution; if not set, leave it out
     # (the pipeline will plan but may not execute)
     chrom_sizes = '${HIC_CHROM_SIZES:-}'

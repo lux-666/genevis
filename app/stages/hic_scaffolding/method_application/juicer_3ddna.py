@@ -78,6 +78,7 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
             env_spec=env_spec,
             stage_env=output.get("env"),
             juicer_command=parameters["juicer_parameters"]["command"],
+            explicit_scripts_dir=parameters["juicer_parameters"].get("scripts_dir"),
         )
         if scripts_blocked is not None:
             return update_hic_output(state, scripts_blocked)
@@ -223,6 +224,7 @@ def _parameters(state: TopLevelState, output: dict[str, Any]) -> tuple[dict[str,
         "three_dna_extra_args": extra_args,
         "juicer_parameters": {
             "command": str(raw.get("juicer_command") or "juicer.sh"),
+            "scripts_dir": str(raw.get("juicer_scripts_dir") or "").strip(),
             "restriction_enzyme": enzyme,
             "chrom_sizes_ref": str(chrom_sizes),
             "threads": threads,
@@ -400,16 +402,27 @@ def _resolve_juicer_scripts_dir(
     env_spec: Any,
     stage_env: Any,
     juicer_command: str,
+    explicit_scripts_dir: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Locate the Juicer installation root that contains its helper scripts."""
+    explicit_scripts_dir = str(explicit_scripts_dir or "").strip()
     probe = r'''
 set -eu
 juicer_command="$1"
+explicit_scripts_dir="$2"
+if test -n "$explicit_scripts_dir"; then
+  if test -f "$explicit_scripts_dir/scripts/common/chimeric_sam.awk"; then
+    printf '%s\n' "$explicit_scripts_dir"
+    exit 0
+  fi
+  echo "JUICER scripts directory does not contain scripts/common/chimeric_sam.awk: $explicit_scripts_dir" >&2
+  exit 127
+fi
 juicer_path="$(command -v "$juicer_command")" || {
   echo "Juicer command is unavailable while resolving its scripts directory: $juicer_command" >&2
   exit 127
 }
-for root in "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
+for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
   test -n "$root" && test -d "$root" || continue
   helper="$(find "$root" -type f -path '*/scripts/common/chimeric_sam.awk' -print -quit 2>/dev/null || true)"
   test -n "$helper" || continue
@@ -422,11 +435,11 @@ echo "Juicer helper scripts (scripts/common/chimeric_sam.awk) were not found in 
 exit 127
 '''
     if env_spec is not None:
-        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "juicer-scripts-preflight", juicer_command]
+        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "juicer-scripts-preflight", juicer_command, explicit_scripts_dir]
         env = None
         env_target = env_spec.display_target()
     else:
-        command = ["sh", "-c", probe, "juicer-scripts-preflight", juicer_command]
+        command = ["sh", "-c", probe, "juicer-scripts-preflight", juicer_command, explicit_scripts_dir]
         env = os.environ.copy()
         if isinstance(stage_env, dict):
             env.update({str(key): str(value) for key, value in stage_env.items()})
