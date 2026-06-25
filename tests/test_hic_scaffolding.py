@@ -614,6 +614,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn("reference_MboI.txt", script_text)
             self.assertIn("-y \"$site_file\"", script_text)
             self.assertIn("juicer_scripts_compat", script_text)
+            self.assertIn('java_path="$(command -v java)"', script_text)
+            self.assertIn("/bin/java", script_text)
             self.assertIn("-D \"$juicer_scripts_dir_arg\"", script_text)
             self.assertIn("hic_001_R1.fastq.gz", script_text)
             self.assertIn("hic_001_R2.fastq.gz", script_text)
