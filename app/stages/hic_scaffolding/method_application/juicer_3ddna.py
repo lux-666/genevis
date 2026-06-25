@@ -408,14 +408,38 @@ def _resolve_juicer_scripts_dir(
     explicit_scripts_dir = str(explicit_scripts_dir or "").strip()
     probe = r'''
 set -eu
+helper_root() {
+  root="$1"
+  if test -f "$root/common/chimeric_sam.awk"; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if test -f "$root/scripts/common/chimeric_sam.awk"; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  helper="$(find "$root" -type f \( -path '*/common/chimeric_sam.awk' -o -path '*/scripts/common/chimeric_sam.awk' \) -print -quit 2>/dev/null || true)"
+  test -n "$helper" || return 1
+  case "$helper" in
+    */scripts/common/chimeric_sam.awk)
+      dirname "$(dirname "$(dirname "$helper")")"
+      ;;
+    */common/chimeric_sam.awk)
+      dirname "$(dirname "$helper")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 juicer_command="$1"
 explicit_scripts_dir="$2"
 if test -n "$explicit_scripts_dir"; then
-  if test -f "$explicit_scripts_dir/scripts/common/chimeric_sam.awk"; then
-    printf '%s\n' "$explicit_scripts_dir"
+  if scripts_dir="$(helper_root "$explicit_scripts_dir")"; then
+    printf '%s\n' "$scripts_dir"
     exit 0
   fi
-  echo "JUICER scripts directory does not contain scripts/common/chimeric_sam.awk: $explicit_scripts_dir" >&2
+  echo "JUICER scripts directory does not contain common/chimeric_sam.awk or scripts/common/chimeric_sam.awk: $explicit_scripts_dir" >&2
   exit 127
 fi
 juicer_path="$(command -v "$juicer_command")" || {
@@ -424,14 +448,12 @@ juicer_path="$(command -v "$juicer_command")" || {
 }
 for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
   test -n "$root" && test -d "$root" || continue
-  helper="$(find "$root" -type f -path '*/scripts/common/chimeric_sam.awk' -print -quit 2>/dev/null || true)"
-  test -n "$helper" || continue
-  scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
-  test -f "$scripts_dir/scripts/common/chimeric_sam.awk" || continue
-  printf '%s\n' "$scripts_dir"
-  exit 0
+  if scripts_dir="$(helper_root "$root")"; then
+    printf '%s\n' "$scripts_dir"
+    exit 0
+  fi
 done
-echo "Juicer helper scripts (scripts/common/chimeric_sam.awk) were not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
+echo "Juicer helper scripts (common/chimeric_sam.awk or scripts/common/chimeric_sam.awk) were not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
 exit 127
 '''
     if env_spec is not None:
@@ -453,7 +475,7 @@ exit 127
         "status": "missing_tool",
         "reason": detail or f"Juicer helper scripts are unavailable in {env_target}",
         "env_target": env_target,
-        "missing_tools": ["scripts/common/chimeric_sam.awk"],
+        "missing_tools": ["chimeric_sam.awk"],
         "method_name": METHOD,
     }
 

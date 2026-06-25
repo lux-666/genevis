@@ -238,20 +238,29 @@ test -n "$generator" || {
 }
 for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
   test -n "$root" && test -d "$root" || continue
-  helper="$(find "$root" -type f -path "*/scripts/common/chimeric_sam.awk" -print -quit 2>/dev/null || true)"
+  helper="$(find "$root" -type f \( -path "*/common/chimeric_sam.awk" -o -path "*/scripts/common/chimeric_sam.awk" \) -print -quit 2>/dev/null || true)"
   test -n "$helper" || continue
-  scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
-  test -f "$scripts_dir/scripts/common/chimeric_sam.awk" || continue
+  case "$helper" in
+    */scripts/common/chimeric_sam.awk)
+      scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
+      ;;
+    */common/chimeric_sam.awk)
+      scripts_dir="$(dirname "$(dirname "$helper")")"
+      ;;
+    *)
+      continue
+      ;;
+  esac
   echo "Juicer helper scripts: $scripts_dir"
   exit 0
 done
-echo "scripts/common/chimeric_sam.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains scripts/common/chimeric_sam.awk." >&2
+echo "chimeric_sam.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk, e.g. /data/work/softs/juicer/CPU." >&2
 exit 127
 '; then
         pass "Juicer helper scripts available"
     else
         warn "Juicer helper scripts are missing from the configured Hi-C method environment"
-        warn "Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains scripts/common/chimeric_sam.awk, or install the full Juicer scripts tree"
+        warn "Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk (for example /data/work/softs/juicer/CPU), or install the full Juicer scripts tree"
         info "Schema and unit tests above still validate the Hi-C code paths"
         summary "Test 06: Hi-C Scaffolding (schema-only)"
         exit 0

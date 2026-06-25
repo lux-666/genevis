@@ -88,7 +88,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "args = sys.argv[1:]\n"
             "top = pathlib.Path(args[args.index('-d') + 1])\n"
             "scripts_dir = pathlib.Path(args[args.index('-D') + 1]) if '-D' in args else None\n"
-            "if scripts_dir is None or not (scripts_dir / 'scripts' / 'common' / 'chimeric_sam.awk').is_file():\n"
+            "has_helper = scripts_dir is not None and ((scripts_dir / 'common' / 'chimeric_sam.awk').is_file() or (scripts_dir / 'scripts' / 'common' / 'chimeric_sam.awk').is_file())\n"
+            "if not has_helper:\n"
             "    print('Juicer helper scripts directory must be passed with -D', file=sys.stderr)\n"
             "    sys.exit(14)\n"
             "fastqs = {path.name for path in (top / 'fastq').iterdir()}\n"
@@ -119,7 +120,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         juicer.chmod(0o755)
         three_dna.chmod(0o755)
         if with_helper_scripts:
-            helper = Path(tmpdir) / "scripts" / "common" / "chimeric_sam.awk"
+            helper = Path(tmpdir) / "common" / "chimeric_sam.awk"
             helper.parent.mkdir(parents=True, exist_ok=True)
             helper.write_text("# fake Juicer helper\n", encoding="utf-8")
         if with_site_generator:
@@ -705,7 +706,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "missing_tool")
-            self.assertEqual(hic["missing_tools"], ["scripts/common/chimeric_sam.awk"])
+            self.assertEqual(hic["missing_tools"], ["chimeric_sam.awk"])
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
 
