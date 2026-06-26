@@ -16,6 +16,7 @@ class ProjectScaffoldTests(unittest.TestCase):
                 "assembly_dedup",
                 "assembly_review",
                 "hic_scaffolding",
+                "t2t",
                 "repeat_annotation",
                 "gene_annotation",
                 "function_annotation",
