@@ -104,7 +104,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "args = sys.argv[1:]\n"
             "top = pathlib.Path(args[args.index('-d') + 1])\n"
             "scripts_dir = pathlib.Path(args[args.index('-D') + 1]) if '-D' in args else None\n"
-            "has_helper = scripts_dir is not None and (scripts_dir / 'scripts' / 'common' / 'chimeric_sam.awk').is_file()\n"
+            "has_helper = scripts_dir is not None and (scripts_dir / 'scripts' / 'common' / 'chimeric_blacklist.awk').is_file()\n"
             "if not has_helper:\n"
             "    print('Juicer helper scripts directory must be passed with -D', file=sys.stderr)\n"
             "    sys.exit(14)\n"
@@ -121,7 +121,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             encoding="utf-8",
         )
         juicer_entry.chmod(0o755)
-        canary = juicer_root / "CPU" / "common" / "chimeric_sam.awk"
+        canary = juicer_root / "CPU" / "common" / "chimeric_blacklist.awk"
         canary.write_text("# fake Juicer helper\n", encoding="utf-8")
 
         if with_helper_scripts:
@@ -196,7 +196,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "      - CPU/juicer.sh\n"
             "    canary_paths:\n"
             "      - CPU/juicer.sh\n"
-            "      - CPU/common/chimeric_sam.awk\n"
+            "      - CPU/common/chimeric_blacklist.awk\n"
             "      - misc/generate_site_positions.py\n"
             "      - scripts/common/juicer_tools.jar\n"
             "  three_d_dna:\n"
@@ -698,7 +698,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertNotIn('java_path="$(command -v java)"', script_text)
             self.assertIn(f"juicer_scripts_dir={juicer_root}", script_text)
             self.assertIn("-D \"$juicer_scripts_dir\"", script_text)
-            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/chimeric_sam.awk\"", script_text)
+            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/chimeric_blacklist.awk\"", script_text)
             self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/juicer_tools.jar\"", script_text)
             self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
             self.assertIn("hic_001_R1.fastq.gz", script_text)

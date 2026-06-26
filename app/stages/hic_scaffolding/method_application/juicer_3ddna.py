@@ -280,7 +280,7 @@ def _script(
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
         scripts_dir = str(jp["scripts_dir"])
         lines.append(f"juicer_scripts_dir={shlex.quote(scripts_dir)}")
-        lines.append('test -f "$juicer_scripts_dir/scripts/common/chimeric_sam.awk"')
+        lines.append('test -f "$juicer_scripts_dir/scripts/common/chimeric_blacklist.awk"')
         lines.append('test -f "$juicer_scripts_dir/scripts/common/juicer_tools.jar"')
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
@@ -368,9 +368,9 @@ def _resolve_juicer_run(
         "site_generator_command": interpreter,
     })
     scripts_dir = juicer_root
-    helper = scripts_dir / "scripts" / "common" / "chimeric_sam.awk"
+    helper = scripts_dir / "scripts" / "common" / "chimeric_blacklist.awk"
     jar = scripts_dir / "scripts" / "common" / "juicer_tools.jar"
-    missing = [rel for rel, path in (("scripts/common/chimeric_sam.awk", helper), ("scripts/common/juicer_tools.jar", jar)) if not path.is_file()]
+    missing = [rel for rel, path in (("scripts/common/chimeric_blacklist.awk", helper), ("scripts/common/juicer_tools.jar", jar)) if not path.is_file()]
     if missing:
         reason = "; ".join(missing) + f" missing under {juicer_root}; run `gene-agent bootstrap --apply`"
         return {

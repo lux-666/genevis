@@ -38,7 +38,7 @@ packages:
       - CPU/juicer.sh
     canary_paths:
       - CPU/juicer.sh
-      - CPU/common/chimeric_sam.awk
+      - CPU/common/chimeric_blacklist.awk        # Juicer 1.6+ renamed from chimeric_sam.awk
       - misc/generate_site_positions.py
       - scripts/common/juicer_tools.jar          # bootstrap deploys this symlink
   three_d_dna:
