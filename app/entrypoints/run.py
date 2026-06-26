@@ -200,6 +200,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Interactive workflow launcher with automatic human-gate handling",
     )
     tui_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap",
+        help="Validate envs.yaml and conform external software packages",
+    )
+    bootstrap_parser.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Apply conformance actions (create symlinks). Without this flag, only validation is performed.",
+    )
+    bootstrap_parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to envs.yaml (default: config/envs.yaml)",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -1116,6 +1133,92 @@ def _run_tui(args: argparse.Namespace) -> int:
     return run_tui(data_dir)
 
 
+def _run_bootstrap(args: argparse.Namespace) -> int:
+    """Validate envs.yaml and optionally conform external packages."""
+    from app.execution import env_resolver
+    from app.execution.package_bootstrap import conform_juicer, preflight_all, verify_envs_yaml
+
+    # Determine config path
+    if args.config:
+        config_path = Path(args.config)
+    else:
+        config_path = Path("config/envs.yaml")
+
+    # Step 1: Verify envs.yaml exists and is properly configured
+    print(f"Checking configuration: {config_path}")
+    issues = verify_envs_yaml(config_path)
+    if issues:
+        print("\n❌ Configuration issues found:")
+        for issue in issues:
+            print(f"  - {issue}")
+        return 1
+
+    print("✓ Configuration file is valid")
+
+    # Step 2: Load resolver
+    try:
+        resolver = env_resolver.EnvResolver(config_path)
+    except Exception as e:
+        print(f"\n❌ Failed to load configuration: {e}", file=sys.stderr)
+        return 1
+
+    # Step 3: Run conformance for packages that need it (Juicer)
+    conformance_results = []
+    for package_name, package_spec in resolver.packages.items():
+        if package_spec.conform_on_bootstrap:
+            print(f"\nConformance: {package_name}")
+            if package_name == "juicer":
+                # Get juicer_tools spec if referenced
+                jar_root_ref = package_spec.jar_root_ref
+                juicer_tools_spec = None
+                if jar_root_ref and jar_root_ref in resolver.packages:
+                    juicer_tools_spec = resolver.packages[jar_root_ref]
+
+                if args.apply:
+                    result = conform_juicer(package_spec, juicer_tools_spec)
+                    conformance_results.append(result)
+                    if result.status == "ok":
+                        for action in result.actions_taken:
+                            print(f"  ✓ {action}")
+                    else:
+                        print(f"  ❌ {result.detail}")
+                else:
+                    print(f"  [dry-run] Would conform {package_name} installation")
+                    print(f"    - Create scripts -> CPU symlink if missing")
+                    if juicer_tools_spec:
+                        print(f"    - Link juicer_tools.jar into scripts/common/")
+
+    if not args.apply and any(pkg.conform_on_bootstrap for pkg in resolver.packages.values()):
+        print("\n💡 Run with --apply to execute conformance actions")
+
+    # Step 4: Preflight all packages
+    print("\nPackage preflight:")
+    preflight_results = preflight_all(resolver)
+    all_ok = True
+    for package_name, result in preflight_results:
+        if result.status == "ok":
+            print(f"  ✓ {package_name}: all canary paths present")
+        else:
+            print(f"  ❌ {package_name}: {result.detail}")
+            if result.missing_paths:
+                for path in result.missing_paths:
+                    print(f"      - missing: {path}")
+            all_ok = False
+
+    # Step 5: Summary
+    print("\n" + "=" * 60)
+    if all_ok:
+        print("✓ Bootstrap complete: all packages validated")
+        return 0
+    else:
+        print("❌ Bootstrap incomplete: some packages have missing files")
+        if args.apply:
+            print("   Review the errors above and fix the install_root paths")
+        else:
+            print("   Run with --apply after fixing configuration")
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry."""
     # Load .env once at the entry point so every subcommand (run, ask,
@@ -1136,6 +1239,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_review(args)
     if args.command == "tui":
         return _run_tui(args)
+    if args.command == "bootstrap":
+        return _run_bootstrap(args)
     _parse_args(["--help"])
     return 0
 

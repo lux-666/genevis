@@ -53,7 +53,7 @@ def freeze_yahs_attempt(state: TopLevelState) -> dict:
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         output,
         stage="hic_scaffolding",
         method_name=METHOD,

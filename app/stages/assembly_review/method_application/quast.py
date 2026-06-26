@@ -68,7 +68,7 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
         return update_review_output(state, {"status": "failed", "reason": error})
     session_id = state["session_id"]
     data_dir = absolute_review_data_dir(state)
-    env_spec, blocked = resolve_review_method_env(
+    env_spec, _packages, blocked = resolve_review_method_env(
         output, QUAST_METHOD, session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )

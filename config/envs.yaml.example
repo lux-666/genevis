@@ -1,0 +1,171 @@
+# Stage- and method-specific conda environment mapping for real local
+# execution. Method-level entries override stage-level entries, which in turn
+# override the default fallback.
+#
+# SETUP INSTRUCTIONS:
+# 1. Copy this file to config/envs.yaml:
+#    cp config/envs.yaml.example config/envs.yaml
+# 2. Fill in your conda environment name (e.g., env_geno_exec) in the default section
+# 3. Fill in the install_root paths for external packages (Juicer, 3D-DNA, juicer_tools)
+# 4. Run bootstrap to conform Juicer installation:
+#    python -m app.entrypoints.run bootstrap --apply
+#
+# Two mutually exclusive target forms are supported on any entry:
+#   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
+#   conda_prefix: /opt/conda/envs/x   # abs path   → conda run -p /opt/conda/envs/x
+# Using both on the same entry is rejected at load time.
+#
+# The default section likewise accepts either fallback_env or fallback_prefix
+# (not both):
+#   fallback_env: env_geno_exec
+#   fallback_prefix: /opt/conda/envs/env_geno_exec
+#
+# All bioinformatics tools (seqkit, flye, quast.py, yahs, RepeatMasker, ...)
+# are expected to live in a single shared conda env. The `gene_agent` env is
+# reserved for the orchestrator itself and is not a candidate host for tool binaries.
+
+default:
+  conda_bin: conda
+  fallback_env: your_tool_env              # REPLACE: e.g., env_geno_exec
+  # fallback_prefix: /path/to/your/env    # alternative: use abs path
+
+# External software packages (Juicer, 3D-DNA) are standalone git-clone
+# installs, not conda-env PATH tools. Declare each as a top-level entry under
+# `packages:` with `install_root` (absolute repo path) and `canary_paths`
+# (files relative to install_root). Preflight validates root + canary by
+# filesystem checks only — no PATH, no conda. `package_tools` on a method
+# references these keys by name. Run `gene-agent bootstrap --apply` once after
+# filling to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
+packages:
+  juicer:
+    install_root: /path/to/juicer          # REPLACE: repo root containing CPU/ and misc/
+    conform_on_bootstrap: true             # bootstrap builds scripts/ and links the jar
+    jar_root_ref: juicer_tools             # whose install_root supplies juicer_tools.jar
+    entrypoints:
+      - CPU/juicer.sh
+    canary_paths:
+      - CPU/juicer.sh
+      - CPU/common/chimeric_sam.awk
+      - misc/generate_site_positions.py
+      - scripts/common/juicer_tools.jar    # bootstrap deploys this symlink
+  three_d_dna:
+    install_root: /path/to/3d-dna          # REPLACE: repo root
+    entrypoints:
+      - run-asm-pipeline.sh
+      - run-asm-pipeline-post-review.sh
+    canary_paths:
+      - run-asm-pipeline.sh
+      - run-asm-pipeline-post-review.sh
+      - edit/apply-edits-prep-for-next-round.sh
+      - visualize/run-assembly-visualizer.sh
+  juicer_tools:
+    install_root: /path/to/juicer_tools    # REPLACE: directory containing juicer_tools.jar
+    canary_paths:
+      - juicer_tools.jar
+
+stages:
+  read_qc:
+    conda_env: your_tool_env               # REPLACE or omit to use default fallback
+  genome_survey:
+    conda_env: your_tool_env
+  assembly:
+    conda_env: your_tool_env
+  assembly_dedup:
+    conda_env: your_tool_env
+  assembly_review:
+    conda_env: your_tool_env
+  hic_scaffolding:
+    conda_env: your_tool_env
+  t2t:
+    conda_env: your_tool_env
+  repeat_annotation:
+    conda_env: your_tool_env
+
+methods:
+  read_qc.long_read_stats.seqkit_stats:
+    conda_env: your_tool_env
+    required_tools:
+      - seqkit
+  read_qc.length_filter.seqkit_seq:
+    conda_env: your_tool_env
+    required_tools:
+      - seqkit
+  genome_survey.kmer_count.jellyfish:
+    conda_env: your_tool_env
+    required_tools:
+      - jellyfish
+  genome_survey.model.genomescope2:
+    conda_env: your_tool_env
+    required_tools:
+      - genomescope2
+  assembly.candidate.flye:
+    conda_env: your_tool_env
+    required_tools:
+      - flye
+  assembly.candidate.nextdenovo:
+    conda_env: your_tool_env
+    required_tools:
+      - nextDenovo
+  assembly_dedup.purge_dups:
+    conda_env: your_tool_env
+    required_tools:
+      - minimap2
+      - samtools
+      - pbcstat
+      - calcuts
+      - split_fa
+      - gzip
+      - purge_dups
+      - get_seqs
+  assembly_review.eval.quast:
+    conda_env: your_tool_env
+    required_tools:
+      - quast.py
+  assembly_review.eval.busco:
+    conda_env: your_tool_env
+    required_tools:
+      - busco
+  hic_scaffolding.candidate.yahs:
+    conda_env: your_tool_env
+    required_tools:
+      - yahs
+  hic_scaffolding.candidate.juicer_3ddna_juicebox:
+    conda_env: your_tool_env
+    required_tools:
+      - bwa
+      - java
+    package_tools:
+      - juicer
+      - three_d_dna
+  t2t.alignment.minimap2:
+    conda_env: your_tool_env
+    required_tools:
+      - minimap2
+  repeat_annotation.masking.repeatmasker:
+    conda_env: your_tool_env
+    required_tools:
+      - RepeatMasker
+  gene_annotation.candidate.miniprot:
+    conda_env: your_tool_env
+    required_tools:
+      - miniprot
+  gene_annotation.candidate.augustus:
+    conda_env: your_tool_env
+    required_tools:
+      - augustus
+  gene_annotation.materialize.gffread:
+    conda_env: your_tool_env
+    required_tools:
+      - gffread
+  function_annotation.candidate.diamond:
+    conda_env: your_tool_env
+    required_tools:
+      - diamond
+  gene_annotation.merge.evm:
+    conda_env: your_tool_env
+    required_tools:
+      - EVidenceModeler
+  gene_annotation.busco:
+    conda_env: your_tool_env
+    required_tools:
+      - busco

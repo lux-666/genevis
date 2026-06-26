@@ -45,7 +45,7 @@ def freeze_length_filter_attempt(state: TopLevelState) -> dict:
         return {}
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_read_qc_method_env(output, LENGTH_FILTER_METHOD_NAME, session_id=session_id, data_dir=data_dir, input_manifest_ref=state.get("input_manifest_ref", ""))
+    env_spec, _packages, blocked = resolve_read_qc_method_env(output, LENGTH_FILTER_METHOD_NAME, session_id=session_id, data_dir=data_dir, input_manifest_ref=state.get("input_manifest_ref", ""))
     if blocked is not None:
         return update_read_qc_output(state, blocked)
     min_len = int(output["substeps"]["length_filter"]["thresholds"]["min_len"])

@@ -98,7 +98,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
     if ASSEMBLY_DEDUP_METHOD not in registry.methods:
         return _fail(state, f"assembly dedup descriptor missing: {ASSEMBLY_DEDUP_METHOD}")
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         dedup_out,
         stage="assembly_dedup",
         method_name=ASSEMBLY_DEDUP_METHOD,

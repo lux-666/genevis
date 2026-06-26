@@ -197,7 +197,7 @@ def _freeze_func_method_attempt(
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         function_out,
         stage="function_annotation",
         method_name=method_name,

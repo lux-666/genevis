@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +54,7 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    env_spec, env_blocked = resolve_method_env(
+    env_spec, packages, env_blocked = resolve_method_env(
         output,
         stage="hic_scaffolding",
         method_name=METHOD,
@@ -65,24 +64,28 @@ def freeze_juicer_3ddna_attempt(state: TopLevelState) -> dict:
     )
     if env_blocked is not None:
         return update_hic_output(state, env_blocked)
+
+    package_by_name = {pkg.name: pkg for pkg in packages}
+    juicer_pkg = package_by_name.get("juicer")
+    three_d_dna_pkg = package_by_name.get("three_d_dna")
     if parameters["input_mode"] == "raw_reads":
-        generator, generator_blocked = _resolve_site_generator(
-            env_spec=env_spec,
-            stage_env=output.get("env"),
-            juicer_command=parameters["juicer_parameters"]["command"],
-        )
-        if generator_blocked is not None:
-            return update_hic_output(state, generator_blocked)
-        parameters["juicer_parameters"].update(generator)
-        scripts_dir, scripts_blocked = _resolve_juicer_scripts_dir(
-            env_spec=env_spec,
-            stage_env=output.get("env"),
-            juicer_command=parameters["juicer_parameters"]["command"],
-            explicit_scripts_dir=parameters["juicer_parameters"].get("scripts_dir"),
-        )
-        if scripts_blocked is not None:
-            return update_hic_output(state, scripts_blocked)
-        parameters["juicer_parameters"]["scripts_dir"] = scripts_dir
+        # After `gene-agent bootstrap` conformance, juicer.install_root holds
+        # a `scripts/` symlink to `CPU/`, with juicer_tools.jar linked into
+        # `scripts/common/`. juicer.sh reads helpers via `${juiceDir}/scripts/common`,
+        # so -D points at the repo root (juiceDir), not the scripts subdir.
+        if juicer_pkg is None:
+            return update_hic_output(state, _missing_block("juicer package"))
+        blocked = _resolve_juicer_run(juicer_pkg, output, parameters, state)
+        if blocked is not None:
+            return update_hic_output(state, blocked)
+
+    three_dna_command = parameters["three_dna_command"]
+    if three_d_dna_pkg is not None:
+        # Prefer the absolute entry script from the declared package root.
+        entry = _resolve_entry(three_d_dna_pkg, Path(three_dna_command).name)
+        if entry:
+            three_dna_command = entry
+    parameters["three_dna_command"] = three_dna_command
 
     working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "juicer_3ddna"
     artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "juicer_3ddna"
@@ -275,35 +278,20 @@ def _script(
         lines.append(f"site_file={shlex.quote(str(site_file))}")
         lines.append('test -s "$site_file"')
         lines.append(f"bwa index {shlex.quote(str(juicer_reference))}")
-        lines.append('java_path="$(command -v java)"')
         scripts_dir = str(jp["scripts_dir"])
-        compat_scripts_dir = juicer_dir / "juicer_scripts_compat"
         lines.append(f"juicer_scripts_dir={shlex.quote(scripts_dir)}")
-        lines.append('juicer_scripts_dir_arg="$juicer_scripts_dir"')
-        lines.append(
-            'if test -d "$juicer_scripts_dir/common" && ! test -d "$juicer_scripts_dir/scripts/common"; then'
-        )
-        lines.append(f"  mkdir -p {shlex.quote(str(compat_scripts_dir / 'scripts'))}")
-        lines.append(
-            f"  ln -sfn \"$juicer_scripts_dir/common\" {shlex.quote(str(compat_scripts_dir / 'scripts' / 'common'))}"
-        )
-        lines.append(f"  mkdir -p {shlex.quote(str(compat_scripts_dir / 'bin'))}")
-        lines.append(f"  ln -sfn \"$java_path\" {shlex.quote(str(compat_scripts_dir / 'bin' / 'java'))}")
-        lines.append(f"  export PATH={shlex.quote(str(compat_scripts_dir / 'bin'))}:$PATH")
-        lines.append(f"  juicer_scripts_dir_arg={shlex.quote(str(compat_scripts_dir))}")
-        lines.append("fi")
-        lines.append('command -v java >/dev/null')
-        lines.append('test -f "$juicer_scripts_dir_arg/scripts/common/chimeric_sam.awk"')
+        lines.append('test -f "$juicer_scripts_dir/scripts/common/chimeric_sam.awk"')
+        lines.append('test -f "$juicer_scripts_dir/scripts/common/juicer_tools.jar"')
         command = [
             jp["command"], "-d", str(juicer_dir), "-s", jp["restriction_enzyme"], "-z", str(juicer_reference),
-            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-D", "${juicer_scripts_dir_arg}", "-t", str(jp["threads"]), *jp["extra_args"],
+            "-p", jp["chrom_sizes_ref"], "-y", "${site_file}", "-D", "$juicer_scripts_dir", "-t", str(jp["threads"]), *jp["extra_args"],
         ]
         lines.append(
             " ".join(
                 "\"$site_file\""
                 if value == "${site_file}"
-                else "\"$juicer_scripts_dir_arg\""
-                if value == "${juicer_scripts_dir_arg}"
+                else "\"$juicer_scripts_dir\""
+                if value == "$juicer_scripts_dir"
                 else shlex.quote(str(value))
                 for value in command
             )
@@ -336,6 +324,69 @@ def _script(
     return "\n".join(lines) + "\n"
 
 
+def _resolve_entry(package: Any, name: str) -> str | None:
+    """Return the absolute entry script for ``name`` under ``package``, or None.
+
+    Looks for the entry by basename among the package's declared
+    ``entrypoints`` (e.g. juicer's entry is at ``CPU/juicer.sh``, not repo
+    root), then falls back to ``<install_root>/<name>``.
+    """
+    root = Path(package.install_root)
+    for rel in package.entrypoints:
+        candidate = root / rel
+        if Path(rel).name == name and candidate.is_file():
+            return str(candidate)
+    direct = root / name
+    return str(direct) if direct.is_file() else None
+
+
+def _resolve_juicer_run(
+    juicer_pkg: Any,
+    output: dict[str, Any],
+    parameters: dict[str, Any],
+    state: TopLevelState,
+) -> dict[str, Any] | None:
+    """Resolve juicer package paths for the raw_reads mode script.
+
+    Juicer is invoked via its declared entrypoint (CPU/juicer.sh) and a
+    scripts-dir FS check (root + scripts/common canaries); conformance is
+    produced by `gene-agent bootstrap`.
+    """
+    juicer_root = Path(juicer_pkg.install_root)
+    site_generator = juicer_root / "misc" / "generate_site_positions.py"
+    if not site_generator.is_file():
+        return {
+            "status": "missing_tool",
+            "reason": f"generate_site_positions.py missing under {juicer_root}/misc",
+            "env_target": str(juicer_root),
+            "missing_tools": ["misc/generate_site_positions.py"],
+            "method_name": METHOD,
+        }
+    interpreter = [] if os.access(site_generator, os.X_OK) else ["python3"]
+    parameters["juicer_parameters"].update({
+        "site_generator_path": str(site_generator),
+        "site_generator_command": interpreter,
+    })
+    scripts_dir = juicer_root
+    helper = scripts_dir / "scripts" / "common" / "chimeric_sam.awk"
+    jar = scripts_dir / "scripts" / "common" / "juicer_tools.jar"
+    missing = [rel for rel, path in (("scripts/common/chimeric_sam.awk", helper), ("scripts/common/juicer_tools.jar", jar)) if not path.is_file()]
+    if missing:
+        reason = "; ".join(missing) + f" missing under {juicer_root}; run `gene-agent bootstrap --apply`"
+        return {
+            "status": "missing_tool",
+            "reason": reason,
+            "env_target": str(juicer_root),
+            "missing_tools": missing,
+            "method_name": METHOD,
+        }
+    parameters["juicer_parameters"]["scripts_dir"] = str(scripts_dir)
+    entry = _resolve_entry(juicer_pkg, Path(parameters["juicer_parameters"]["command"]).name)
+    if entry:
+        parameters["juicer_parameters"]["command"] = entry
+    return None
+
+
 def _merged_nodups_path(state: TopLevelState, output: dict[str, Any], params: dict[str, Any]) -> Path | None:
     for value in [params.get("merged_nodups_ref"), output.get("merged_nodups_ref"), output.get("hic_merged_nodups_ref")]:
         if value and Path(str(value)).exists():
@@ -350,162 +401,6 @@ def _merged_nodups_path(state: TopLevelState, output: dict[str, Any], params: di
             if path.exists():
                 return path
     return None
-
-
-def _resolve_site_generator(
-    *,
-    env_spec: Any,
-    stage_env: Any,
-    juicer_command: str,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Find Juicer's generator in the execution environment before freezing.
-
-    Juicer itself defaults to ``/aidenlab/restriction_sites`` when no ``-y``
-    file is supplied.  We never use that fallback: discover the auxiliary
-    generator from the selected conda environment (or an explicit PATH test
-    override), then make a fresh site file inside this attempt's work tree.
-    """
-    probe = r'''
-set -eu
-juicer_command="$1"
-juicer_path="$(command -v "$juicer_command")" || {
-  echo "Juicer command is unavailable while resolving its site generator: $juicer_command" >&2
-  exit 127
-}
-for root in "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
-  test -n "$root" && test -d "$root" || continue
-  generator="$(find "$root" -type f -name generate_site_positions.py -print -quit 2>/dev/null || true)"
-  test -n "$generator" || continue
-  if test -x "$generator"; then
-    printf '%s\t%s\n' "$generator" direct
-    exit 0
-  fi
-  if python_path="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"; then
-    printf '%s\t%s\n' "$generator" "$python_path"
-    exit 0
-  fi
-  echo "site generator is not executable and Python is unavailable: $generator" >&2
-  exit 127
-done
-echo "generate_site_positions.py was not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
-exit 127
-'''
-    if env_spec is not None:
-        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "site-generator-preflight", juicer_command]
-        env = None
-        env_target = env_spec.display_target()
-    else:
-        command = ["sh", "-c", probe, "site-generator-preflight", juicer_command]
-        env = os.environ.copy()
-        if isinstance(stage_env, dict):
-            env.update({str(key): str(value) for key, value in stage_env.items()})
-        env_target = "explicit PATH override"
-    result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        return {}, {
-            "status": "missing_tool",
-            "reason": detail or f"generate_site_positions.py is unavailable in {env_target}",
-            "env_target": env_target,
-            "missing_tools": ["generate_site_positions.py"],
-            "method_name": METHOD,
-        }
-    generator_path, separator, interpreter = result.stdout.strip().partition("\t")
-    if not generator_path or not separator or not interpreter:
-        return {}, {
-            "status": "missing_tool",
-            "reason": f"invalid generate_site_positions.py preflight output in {env_target}",
-            "env_target": env_target,
-            "missing_tools": ["generate_site_positions.py"],
-            "method_name": METHOD,
-        }
-    return {
-        "site_generator_path": generator_path,
-        "site_generator_command": [] if interpreter == "direct" else [interpreter],
-    }, None
-
-
-def _resolve_juicer_scripts_dir(
-    *,
-    env_spec: Any,
-    stage_env: Any,
-    juicer_command: str,
-    explicit_scripts_dir: str | None = None,
-) -> tuple[str, dict[str, Any] | None]:
-    """Locate the Juicer installation root that contains its helper scripts."""
-    explicit_scripts_dir = str(explicit_scripts_dir or "").strip()
-    probe = r'''
-set -eu
-helper_root() {
-  root="$1"
-  if test -f "$root/common/chimeric_sam.awk"; then
-    printf '%s\n' "$root"
-    return 0
-  fi
-  if test -f "$root/scripts/common/chimeric_sam.awk"; then
-    printf '%s\n' "$root"
-    return 0
-  fi
-  helper="$(find "$root" -type f \( -path '*/common/chimeric_sam.awk' -o -path '*/scripts/common/chimeric_sam.awk' \) -print -quit 2>/dev/null || true)"
-  test -n "$helper" || return 1
-  case "$helper" in
-    */scripts/common/chimeric_sam.awk)
-      dirname "$(dirname "$(dirname "$helper")")"
-      ;;
-    */common/chimeric_sam.awk)
-      dirname "$(dirname "$helper")"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-juicer_command="$1"
-explicit_scripts_dir="$2"
-if test -n "$explicit_scripts_dir"; then
-  if scripts_dir="$(helper_root "$explicit_scripts_dir")"; then
-    printf '%s\n' "$scripts_dir"
-    exit 0
-  fi
-  echo "JUICER scripts directory does not contain common/chimeric_sam.awk or scripts/common/chimeric_sam.awk: $explicit_scripts_dir" >&2
-  exit 127
-fi
-juicer_path="$(command -v "$juicer_command")" || {
-  echo "Juicer command is unavailable while resolving its scripts directory: $juicer_command" >&2
-  exit 127
-}
-for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
-  test -n "$root" && test -d "$root" || continue
-  if scripts_dir="$(helper_root "$root")"; then
-    printf '%s\n' "$scripts_dir"
-    exit 0
-  fi
-done
-echo "Juicer helper scripts (common/chimeric_sam.awk or scripts/common/chimeric_sam.awk) were not found in CONDA_PREFIX or near Juicer: $juicer_path" >&2
-exit 127
-'''
-    if env_spec is not None:
-        command = [*env_spec.conda_run_prefix(), "sh", "-c", probe, "juicer-scripts-preflight", juicer_command, explicit_scripts_dir]
-        env = None
-        env_target = env_spec.display_target()
-    else:
-        command = ["sh", "-c", probe, "juicer-scripts-preflight", juicer_command, explicit_scripts_dir]
-        env = os.environ.copy()
-        if isinstance(stage_env, dict):
-            env.update({str(key): str(value) for key, value in stage_env.items()})
-        env_target = "explicit PATH override"
-    result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
-    scripts_dir = result.stdout.strip()
-    if result.returncode == 0 and scripts_dir:
-        return scripts_dir, None
-    detail = (result.stderr or result.stdout or "").strip()
-    return "", {
-        "status": "missing_tool",
-        "reason": detail or f"Juicer helper scripts are unavailable in {env_target}",
-        "env_target": env_target,
-        "missing_tools": ["chimeric_sam.awk"],
-        "method_name": METHOD,
-    }
 
 
 def _positive_int(value: Any, _name: str) -> int | None:

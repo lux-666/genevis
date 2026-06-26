@@ -46,7 +46,7 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         output,
         stage="genome_survey",
         method_name=METHOD_NAME,

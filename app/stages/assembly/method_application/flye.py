@@ -59,7 +59,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, env_blocked = resolve_method_env(
+    env_spec, _packages, env_blocked = resolve_method_env(
         output,
         stage="assembly",
         method_name=FLYE_METHOD,

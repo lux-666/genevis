@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.graph.routing import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
@@ -71,18 +72,33 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         script.chmod(0o755)
         return bin_dir
 
-    def _fake_juicer_3ddna_bin(
+    def _build_juicer_three_d_dna_roots(
         self,
         tmpdir: str,
         *,
         fail_3ddna: bool = False,
         with_site_generator: bool = True,
         with_helper_scripts: bool = True,
-    ) -> Path:
-        bin_dir = Path(tmpdir) / "bin"
+        with_jar: bool = True,
+    ) -> tuple[Path, Path, Path, Path]:
+        """Build conformed Juicer + 3D-DNA install roots plus a tmp envs.yaml.
+
+        Returns ``(bin_dir, juicer_root, three_d_dna_root, envs_yaml)``. The
+        bin_dir holds PATH-resolved helpers (bwa, java stub) the generated
+        script shell still needs; juicer.sh and run-asm-pipeline.sh live at
+        package-relative entry points so the freeze builds absolute paths to
+        them, matching the post-`gene-agent bootstrap` conformed layout.
+        """
+        tmp = Path(tmpdir)
+        bin_dir = tmp / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        juicer = bin_dir / "juicer.sh"
-        juicer.write_text(
+
+        juicer_root = tmp / "juicer_root"
+        (juicer_root / "CPU" / "common").mkdir(parents=True, exist_ok=True)
+        (juicer_root / "misc").mkdir(parents=True, exist_ok=True)
+
+        juicer_entry = juicer_root / "CPU" / "juicer.sh"
+        juicer_entry.write_text(
             "#!/usr/bin/env python3\n"
             "import pathlib, sys\n"
             "args = sys.argv[1:]\n"
@@ -104,8 +120,42 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "print('fake juicer ok')\n",
             encoding="utf-8",
         )
-        three_dna = bin_dir / "run-asm-pipeline.sh"
-        three_dna.write_text(
+        juicer_entry.chmod(0o755)
+        canary = juicer_root / "CPU" / "common" / "chimeric_sam.awk"
+        canary.write_text("# fake Juicer helper\n", encoding="utf-8")
+
+        if with_helper_scripts:
+            # Conformed: scripts/ is a symlink to CPU/ (what `gene-agent
+            # bootstrap --apply` deploys). juicer.sh reads helpers via
+            # ${juiceDir}/scripts/common, and the jar sits at
+            # scripts/common/juicer_tools.jar (-> CPU/common/juicer_tools.jar).
+            scripts_link = juicer_root / "scripts"
+            if not scripts_link.exists():
+                scripts_link.symlink_to(juicer_root / "CPU")
+        # when with_helper_scripts is False, leave no scripts/ tree so package
+        # preflight reports the scripts/common/* canaries missing.
+
+        if with_site_generator:
+            (juicer_root / "misc" / "generate_site_positions.py").write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "enzyme, genome, reference = sys.argv[1:]\n"
+                "pathlib.Path(genome + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (juicer_root / "misc" / "generate_site_positions.py").chmod(0o755)
+
+        if with_jar and with_helper_scripts:
+            (juicer_root / "scripts" / "common" / "juicer_tools.jar").write_text(
+                "fake jar\n", encoding="utf-8"
+            )
+
+        three_d_dna_root = tmp / "three_d_dna_root"
+        three_d_dna_root.mkdir(parents=True, exist_ok=True)
+        (three_d_dna_root / "edit").mkdir(exist_ok=True)
+        (three_d_dna_root / "visualize").mkdir(exist_ok=True)
+        three_d_entry = three_d_dna_root / "run-asm-pipeline.sh"
+        three_d_entry.write_text(
             "#!/usr/bin/env python3\n"
             "import pathlib, sys\n"
             "if " + repr(fail_3ddna) + ":\n"
@@ -117,22 +167,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "print('fake 3ddna ok')\n",
             encoding="utf-8",
         )
-        juicer.chmod(0o755)
-        three_dna.chmod(0o755)
-        if with_helper_scripts:
-            helper = Path(tmpdir) / "common" / "chimeric_sam.awk"
-            helper.parent.mkdir(parents=True, exist_ok=True)
-            helper.write_text("# fake Juicer helper\n", encoding="utf-8")
-        if with_site_generator:
-            generator = bin_dir / "generate_site_positions.py"
-            generator.write_text(
-                "#!/usr/bin/env python3\n"
-                "import pathlib, sys\n"
-                "enzyme, genome, reference = sys.argv[1:]\n"
-                "pathlib.Path(genome + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            generator.chmod(0o755)
+        three_d_entry.chmod(0o755)
+        (three_d_dna_root / "run-asm-pipeline-post-review.sh").write_text(
+            "#!/usr/bin/env python3\nprint('post-review stub')\n", encoding="utf-8"
+        )
+        (three_d_dna_root / "edit" / "apply-edits-prep-for-next-round.sh").write_text("# canary\n", encoding="utf-8")
+        (three_d_dna_root / "visualize" / "run-assembly-visualizer.sh").write_text("# canary\n", encoding="utf-8")
+
         bwa = bin_dir / "bwa"
         bwa.write_text(
             "#!/usr/bin/env python3\n"
@@ -142,7 +183,41 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             encoding="utf-8",
         )
         bwa.chmod(0o755)
-        return bin_dir
+
+        envs_yaml = tmp / "envs.yaml"
+        envs_yaml.write_text(
+            "default:\n"
+            "  conda_bin: conda\n"
+            "  fallback_env: base\n"
+            "packages:\n"
+            "  juicer:\n"
+            f"    install_root: {juicer_root}\n"
+            "    entrypoints:\n"
+            "      - CPU/juicer.sh\n"
+            "    canary_paths:\n"
+            "      - CPU/juicer.sh\n"
+            "      - CPU/common/chimeric_sam.awk\n"
+            "      - misc/generate_site_positions.py\n"
+            "      - scripts/common/juicer_tools.jar\n"
+            "  three_d_dna:\n"
+            f"    install_root: {three_d_dna_root}\n"
+            "    entrypoints:\n"
+            "      - run-asm-pipeline.sh\n"
+            "      - run-asm-pipeline-post-review.sh\n"
+            "    canary_paths:\n"
+            "      - run-asm-pipeline.sh\n"
+            "      - run-asm-pipeline-post-review.sh\n"
+            "      - edit/apply-edits-prep-for-next-round.sh\n"
+            "      - visualize/run-assembly-visualizer.sh\n"
+            "methods:\n"
+            "  hic_scaffolding.candidate.juicer_3ddna_juicebox:\n"
+            "    conda_env: base\n"
+            "    package_tools:\n"
+            "      - juicer\n"
+            "      - three_d_dna\n",
+            encoding="utf-8",
+        )
+        return bin_dir, juicer_root, three_d_dna_root, envs_yaml
 
     def test_missing_final_assembly_ref_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -523,7 +598,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             merged_nodups = Path(tmpdir) / "merged_nodups.txt"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
             merged_nodups.write_text("merged\n", encoding="utf-8")
-            bin_dir = self._fake_juicer_3ddna_bin(tmpdir)
+            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -546,7 +621,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(result["supervision_state"], "blocked_human")
@@ -556,6 +632,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(merged_nodups), script_text)
+            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
             self.assertNotIn("juicer.sh -d", script_text)
             artifact_types = {
                 json.loads(line)["artifact_type"]
@@ -574,7 +651,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             read1.write_text("r1\n", encoding="utf-8")
             read2.write_text("r2\n", encoding="utf-8")
             chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir = self._fake_juicer_3ddna_bin(tmpdir)
+            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -600,29 +677,36 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
             script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
             script_text = script.read_text(encoding="utf-8")
-            self.assertIn("juicer.sh -d", script_text)
+            # juicer.sh and generate_site_positions.py are invoked by absolute
+            # path resolved from the declared juicer package root (post
+            # bootstrap conformance). No compat shim, no PATH-based discovery.
+            self.assertIn(f"{juicer_root}/CPU/juicer.sh -d", script_text)
             self.assertIn("-s MboI", script_text)
-            self.assertIn("generate_site_positions.py", script_text)
+            self.assertIn(f"{juicer_root}/misc/generate_site_positions.py", script_text)
             self.assertIn("MboI reference", script_text)
             self.assertIn("reference.fasta", script_text)
             self.assertIn("reference_MboI.txt", script_text)
             self.assertIn("-y \"$site_file\"", script_text)
-            self.assertIn("juicer_scripts_compat", script_text)
-            self.assertIn('java_path="$(command -v java)"', script_text)
-            self.assertIn("/bin/java", script_text)
-            self.assertIn("-D \"$juicer_scripts_dir_arg\"", script_text)
+            self.assertNotIn("juicer_scripts_compat", script_text)
+            self.assertNotIn('java_path="$(command -v java)"', script_text)
+            self.assertIn(f"juicer_scripts_dir={juicer_root}", script_text)
+            self.assertIn("-D \"$juicer_scripts_dir\"", script_text)
+            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/chimeric_sam.awk\"", script_text)
+            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/juicer_tools.jar\"", script_text)
+            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
             self.assertIn("hic_001_R1.fastq.gz", script_text)
             self.assertIn("hic_001_R2.fastq.gz", script_text)
             self.assertNotIn("/aidenlab/restriction_sites", script_text)
             self.assertIn("bwa index", script_text)
             self.assertIn("juicer/reference.fasta", script_text)
-            self.assertIn("run-asm-pipeline.sh", script_text)
+            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
             self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
 
     def test_local_3ddna_raw_reads_blocks_before_execution_without_site_generator(self):
@@ -635,7 +719,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             read1.write_text("r1\n", encoding="utf-8")
             read2.write_text("r2\n", encoding="utf-8")
             chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir = self._fake_juicer_3ddna_bin(tmpdir, with_site_generator=False)
+            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(
+                tmpdir, with_site_generator=False
+            )
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -661,11 +747,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "missing_tool")
-            self.assertEqual(hic["missing_tools"], ["generate_site_positions.py"])
+            self.assertIn("misc/generate_site_positions.py", hic["missing_tools"])
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
 
@@ -679,7 +766,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             read1.write_text("r1\n", encoding="utf-8")
             read2.write_text("r2\n", encoding="utf-8")
             chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir = self._fake_juicer_3ddna_bin(tmpdir, with_helper_scripts=False)
+            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(
+                tmpdir, with_helper_scripts=False
+            )
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -705,11 +794,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "missing_tool")
-            self.assertEqual(hic["missing_tools"], ["chimeric_sam.awk"])
+            self.assertIn("scripts/common/juicer_tools.jar", hic["missing_tools"])
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
 

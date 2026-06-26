@@ -14,7 +14,9 @@ from app.execution.env_resolver import (
     DEFAULT_CONFIG_PATH,
     EnvResolver,
     EnvSpec,
+    PackageSpec,
     PreflightResult,
+    package_preflight,
     preflight,
 )
 from app.execution.local_runner import LocalRunner
@@ -22,33 +24,15 @@ from app.schemas.descriptors import FrozenAttemptSpec
 
 
 class EnvResolverPrecedenceTests(unittest.TestCase):
-    def test_implicit_resolver_prefers_envs_local_when_present(self):
+    def test_implicit_resolver_uses_default_config_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            shared = root / "envs.yaml"
-            local = root / "envs.local.yaml"
-            shared.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
-            local.write_text("default:\n  fallback_prefix: /cluster/envs/tool_env\n", encoding="utf-8")
-            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", shared), patch.object(
-                env_resolver, "LOCAL_CONFIG_PATH", local
-            ):
+            config = root / "envs.yaml"
+            config.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
+            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", config):
                 resolver = EnvResolver()
 
-            self.assertEqual(resolver.config_path, local)
-            self.assertEqual(resolver.resolve(stage="unknown").conda_prefix, "/cluster/envs/tool_env")
-
-    def test_implicit_resolver_falls_back_to_shared_envs_yaml(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            shared = root / "envs.yaml"
-            local = root / "envs.local.yaml"
-            shared.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
-            with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", shared), patch.object(
-                env_resolver, "LOCAL_CONFIG_PATH", local
-            ):
-                resolver = EnvResolver()
-
-            self.assertEqual(resolver.config_path, shared)
+            self.assertEqual(resolver.config_path, config)
             self.assertEqual(resolver.resolve(stage="unknown").conda_env, "shared_env")
 
     def test_default_envs_yaml_loads_and_covers_core_mainline(self):
@@ -96,6 +80,10 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         )
         self.assertTrue(juicer_spec.conda_env or juicer_spec.conda_prefix)
         self.assertIn("java", juicer_spec.required_tools)
+        self.assertEqual(juicer_spec.package_tools, ["juicer", "three_d_dna"])
+        juicer_pkg = resolver.packages_for_spec(juicer_spec)
+        self.assertEqual({pkg.name for pkg in juicer_pkg}, {"juicer", "three_d_dna"})
+        self.assertTrue(all(pkg.install_root for pkg in juicer_pkg))
 
         repeatmasker_spec = resolver.resolve(
             stage="repeat_annotation",

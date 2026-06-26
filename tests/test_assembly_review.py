@@ -1142,7 +1142,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     return_value=None,
                 ), patch(
                     "app.stages.assembly_review.method_application.quast.resolve_review_method_env",
-                    return_value=(EnvSpec(conda_env="env_geno_exec"), None),
+                    return_value=(EnvSpec(conda_env="env_geno_exec"), [], None),
                 ):
                     result = freeze_quast_attempts(state)
                 attempts = result.get("stage_outputs", {}).get("assembly_review", {}).get("quast_frozen_attempts", [])

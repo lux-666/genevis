@@ -251,7 +251,7 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         repeat_out,
         stage="repeat_annotation",
         method_name=REPEAT_MASKING_METHOD,

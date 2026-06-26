@@ -1152,7 +1152,7 @@ def _materialize_candidate_proteins(
     proteins_fa = working_dir / "proteins.fa"
     cds_fa = working_dir / "cds.fa"
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         gene_out,
         stage="gene_annotation",
         method_name=GFFREAD_METHOD,
@@ -1281,7 +1281,7 @@ def _freeze_gene_method_attempt(
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         gene_out,
         stage="gene_annotation",
         method_name=method_name,
@@ -1640,7 +1640,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     )
     script_path.chmod(0o755)
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         gene_out, stage="gene_annotation", method_name=EVM_METHOD,
         session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
@@ -1801,7 +1801,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         gene_out, stage="gene_annotation", method_name=GENE_BUSCO_METHOD,
         session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),

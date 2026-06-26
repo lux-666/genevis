@@ -246,7 +246,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
     registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
     if T2T_ALIGNMENT_METHOD not in registry.methods:
         return _fail(state, f"t2t descriptor missing: {T2T_ALIGNMENT_METHOD}")
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         out,
         stage="t2t",
         method_name=T2T_ALIGNMENT_METHOD,

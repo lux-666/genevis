@@ -1648,7 +1648,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -1692,10 +1692,10 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ), patch(
                 "app.stages.gene_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ), patch(
                 "app.stages.gene_annotation.nodes._lineage_or_species_hints",
                 return_value={"augustus_species_model": "test_species"},
@@ -1765,10 +1765,10 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ), patch(
                 "app.stages.gene_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ), patch(
                 "app.stages.gene_annotation.nodes._lineage_or_species_hints",
                 return_value={"augustus_species_model": "test_species"},
@@ -1859,7 +1859,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
                 "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, None),
+                return_value=(None, [], None),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 

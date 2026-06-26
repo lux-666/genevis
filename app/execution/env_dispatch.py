@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
-from app.execution.env_resolver import EnvResolver, EnvSpec, preflight
+from app.execution import env_resolver
+from app.execution.env_resolver import (
+    EnvResolver,
+    EnvSpec,
+    PackagePreflightResult,
+    PackageSpec,
+    package_preflight,
+    preflight,
+)
 
 
 def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
@@ -22,8 +30,10 @@ def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
 
     Existing fake-binary stage tests inject PATH into
     ``stage_outputs[<stage>].env`` to make the planned command run against a
-    stubbed bin directory. When that happens this dispatcher steps aside so
-    the legacy shell execution path in :class:`LocalRunner` stays intact.
+    stubbed bin directory. When that happens this dispatcher steps aside on
+    the conda side so the legacy shell execution path in :class:`LocalRunner`
+    stays intact. Package preflight still runs (it is filesystem-only and
+    independent of conda/PATH).
     """
     env = stage_out.get("env") or {}
     return isinstance(env, dict) and bool(env.get("PATH"))
@@ -38,49 +48,105 @@ def resolve_method_env(
     data_dir: str | Path,
     input_manifest_ref: str,
     config_path: Path | None = None,
-) -> tuple[EnvSpec | None, dict[str, Any] | None]:
-    """Resolve and preflight the conda env for one method.
+) -> tuple[EnvSpec | None, list[PackageSpec], dict[str, Any] | None]:
+    """Resolve and preflight the conda env + external packages for one method.
 
-    Returns ``(spec, None)`` when the caller should attach ``spec``'s conda
-    fields to its ``FrozenAttemptSpec``; ``(None, None)`` when the caller
-    supplied an explicit PATH override and the dispatcher is stepping aside;
-    and ``(None, payload)`` when preflight failed. ``payload`` has
-    ``status`` / ``reason`` / ``env_target`` / ``missing_tools`` /
-    ``method_name`` so callers can merge it into their stage output dict and
-    route to the stage's terminal failure edge.
+    Returns ``(spec, packages, None)`` when the caller should attach ``spec``'s
+    conda fields and use ``packages`` (already preflighted) to build explicit
+    script paths; ``(None, [], None)`` when the caller supplied an explicit
+    PATH override on the conda side (packages still returned empty, since the
+    fake-bin tests don't declare package_tools); and ``(None, [], payload)``
+    when preflight failed. ``payload`` has ``status`` / ``reason`` /
+    ``env_target`` / ``missing_tools`` / ``method_name`` so callers can merge
+    it into their stage output dict and route to the terminal failure edge.
     """
     if has_explicit_path_override(stage_out):
-        return None, None
+        # PATH override: skip conda preflight, but still resolve and preflight
+        # external packages (filesystem-only, independent of conda/PATH) so the
+        # Juicer method can locate entry scripts from the declared roots. When
+        # the env-config is absent (e.g. tests that drive the legacy bypass with
+        # a PATH-only stage output) there are no packages to preflight, fall
+        # through to the legacy ``(None, [], None)`` bypass.
+        config_path = config_path or env_resolver.active_config_path()
+        if config_path and Path(config_path).exists():
+            resolver = EnvResolver(config_path)
+            spec = resolver.resolve(stage=stage, method_name=method_name)
+            packages = resolver.packages_for_spec(spec)
+            for package in packages:
+                check = package_preflight(package)
+                if check.status != "ok":
+                    return None, [], {
+                        "status": "missing_tool",
+                        "reason": check.detail,
+                        "env_target": package.install_root,
+                        "missing_tools": check.missing_paths,
+                        "method_name": method_name,
+                    }
+            return None, packages, None
+        return None, [], None
 
-    # ``None`` lets EnvResolver choose config/envs.local.yaml when the
-    # operator has supplied a host-specific mapping.
+    # ``None`` lets EnvResolver use config/envs.yaml.
     resolver = EnvResolver(config_path)
     spec = resolver.resolve(stage=stage, method_name=method_name)
-    result = preflight(spec)
-    if result.status == "ok":
-        return spec, None
-
-    ledger = Ledger(Path(data_dir))
-    ledger.create_session(session_id, input_manifest_ref)
-    ledger.record_event(
-        session_id,
-        "env_preflight_blocked",
-        {
-            "stage": stage,
+    conda_result = preflight(spec)
+    if conda_result.status != "ok":
+        ledger = Ledger(Path(data_dir))
+        ledger.create_session(session_id, input_manifest_ref)
+        ledger.record_event(
+            session_id,
+            "env_preflight_blocked",
+            {
+                "stage": stage,
+                "method_name": method_name,
+                "status": conda_result.status,
+                "env_target": conda_result.env_target,
+                "missing_tools": conda_result.missing_tools,
+                "detail": conda_result.detail,
+            },
+        )
+        return None, [], {
+            "status": conda_result.status,
+            "reason": conda_result.detail,
+            "env_target": conda_result.env_target,
+            "missing_tools": conda_result.missing_tools,
             "method_name": method_name,
-            "status": result.status,
-            "env_target": result.env_target,
-            "missing_tools": result.missing_tools,
-            "detail": result.detail,
-        },
-    )
-    return None, {
-        "status": result.status,
-        "reason": result.detail,
-        "env_target": result.env_target,
-        "missing_tools": result.missing_tools,
-        "method_name": method_name,
-    }
+        }
+
+    packages = resolver.packages_for_spec(spec)
+    missing_by_package: list[tuple[str, PackagePreflightResult]] = []
+    for package in packages:
+        result = package_preflight(package)
+        if result.status != "ok":
+            missing_by_package.append((package.name, result))
+
+    if missing_by_package:
+        all_missing = [rel for _, result in missing_by_package for rel in result.missing_paths]
+        detail = "; ".join(
+            f"{name}: {result.detail}" for name, result in missing_by_package
+        )
+        ledger = Ledger(Path(data_dir))
+        ledger.create_session(session_id, input_manifest_ref)
+        ledger.record_event(
+            session_id,
+            "env_preflight_blocked",
+            {
+                "stage": stage,
+                "method_name": method_name,
+                "status": "missing_tool",
+                "env_target": packages[0].install_root if packages else "",
+                "missing_tools": all_missing,
+                "detail": detail,
+            },
+        )
+        return None, [], {
+            "status": "missing_tool",
+            "reason": detail,
+            "env_target": packages[0].install_root if packages else "",
+            "missing_tools": all_missing,
+            "method_name": method_name,
+        }
+
+    return spec, packages, None
 
 
 def attach_conda_fields(

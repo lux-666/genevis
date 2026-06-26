@@ -770,7 +770,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         })
         raise ResumeValidationError(f"rerun read path resolution failed: {read_error}")
 
-    env_spec, blocked = resolve_method_env(
+    env_spec, _packages, blocked = resolve_method_env(
         assembly_out,
         stage="assembly",
         method_name=FLYE_METHOD,

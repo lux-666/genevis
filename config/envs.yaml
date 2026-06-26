@@ -22,6 +22,40 @@ default:
   fallback_env: env_geno_exec
   # fallback_prefix: /opt/conda/envs/env_geno_exec  # alternative: use abs path
 
+# External software packages (Juicer, 3D-DNA) are standalone git-clone
+# installs, not conda-env PATH tools. Declare each as a top-level entry under
+# `packages:` with `install_root` (absolute repo path) and `canary_paths`
+# (files relative to install_root). Preflight validates root + canary by
+# filesystem checks only — no PATH, no conda. `package_tools` on a method
+# references these keys by name. Run `gene-agent bootstrap` once after filling
+# to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
+packages:
+  juicer:
+    install_root: /data/work/softs/juicer        # repo root containing CPU/ and misc/
+    conform_on_bootstrap: true                   # bootstrap builds scripts/ and links the jar
+    jar_root_ref: juicer_tools                   # whose install_root supplies juicer_tools.jar
+    entrypoints:
+      - CPU/juicer.sh
+    canary_paths:
+      - CPU/juicer.sh
+      - CPU/common/chimeric_sam.awk
+      - misc/generate_site_positions.py
+      - scripts/common/juicer_tools.jar          # bootstrap deploys this symlink
+  three_d_dna:
+    install_root: /data/work/softs/3d-dna
+    entrypoints:
+      - run-asm-pipeline.sh
+      - run-asm-pipeline-post-review.sh
+    canary_paths:
+      - run-asm-pipeline.sh
+      - run-asm-pipeline-post-review.sh
+      - edit/apply-edits-prep-for-next-round.sh
+      - visualize/run-assembly-visualizer.sh
+  juicer_tools:
+    install_root: /data/work/softs/juicer_tools
+    canary_paths:
+      - juicer_tools.jar
+
 stages:
   read_qc:
     conda_env: env_geno_exec
@@ -92,10 +126,11 @@ methods:
   hic_scaffolding.candidate.juicer_3ddna_juicebox:
     conda_env: env_geno_exec
     required_tools:
-      - juicer.sh
-      - run-asm-pipeline.sh
       - bwa
       - java
+    package_tools:
+      - juicer
+      - three_d_dna
   t2t.alignment.minimap2:
     conda_env: env_geno_exec
     required_tools:

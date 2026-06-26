@@ -66,7 +66,7 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
         return rewrite_eval_bundle(state, {**output, "signals": signals}, status="evaluating")
     session_id = state["session_id"]
     data_dir = absolute_review_data_dir(state)
-    env_spec, blocked = resolve_review_method_env(
+    env_spec, _packages, blocked = resolve_review_method_env(
         output, BUSCO_METHOD, session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )

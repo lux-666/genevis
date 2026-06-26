@@ -43,7 +43,7 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
         return {}
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, blocked = resolve_read_qc_method_env(
+    env_spec, _packages, blocked = resolve_read_qc_method_env(
         output, METHOD_NAME, session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
