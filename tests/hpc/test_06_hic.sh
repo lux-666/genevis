@@ -242,13 +242,13 @@ command -v java >/dev/null 2>&1 || {
 }
 for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
   test -n "$root" && test -d "$root" || continue
-  helper="$(find "$root" -type f \( -path "*/common/chimeric_sam.awk" -o -path "*/scripts/common/chimeric_sam.awk" \) -print -quit 2>/dev/null || true)"
+  helper="$(find "$root" -type f \( -path "*/common/chimeric_blacklist.awk" -o -path "*/scripts/common/chimeric_blacklist.awk" \) -print -quit 2>/dev/null || true)"
   test -n "$helper" || continue
   case "$helper" in
-    */scripts/common/chimeric_sam.awk)
+    */scripts/common/chimeric_blacklist.awk)
       scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
       ;;
-    */common/chimeric_sam.awk)
+    */common/chimeric_blacklist.awk)
       scripts_dir="$(dirname "$(dirname "$helper")")"
       ;;
     *)
@@ -258,13 +258,13 @@ for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${COND
   echo "Juicer helper scripts: $scripts_dir"
   exit 0
 done
-echo "chimeric_sam.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk, e.g. /data/work/softs/juicer/CPU." >&2
+echo "chimeric_blacklist.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_blacklist.awk, e.g. /data/work/softs/juicer/CPU." >&2
 exit 127
 '; then
         pass "Juicer helper scripts available"
     else
         warn "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
-        warn "Install/expose Java in the configured Juicer environment and set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_sam.awk (for example /data/work/softs/juicer/CPU)"
+        warn "Install/expose Java in the configured Juicer environment and set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_blacklist.awk (for example /data/work/softs/juicer/CPU)"
         info "Schema and unit tests above still validate the Hi-C code paths"
         summary "Test 06: Hi-C Scaffolding (schema-only)"
         exit 0
