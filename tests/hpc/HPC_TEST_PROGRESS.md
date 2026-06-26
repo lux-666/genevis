@@ -12,7 +12,7 @@
 
 | Test | 覆盖内容 | 最新状态 | 关键证据 | 当前问题/结论 |
 |---|---|---:|---|---|
-| 00 entrypoints | CLI 入口、关键单元测试、跨阶段 schema/planner 基础兼容性 | ✅ **已修复** | 两个 bug：(1) fake EVM 脚本参数解析；(2) test_intent.py 环境变量污染 | **✅ 已修复！** (1) fake EVM 脚本在 `for` 循环内错误使用 `shift`，已改用 `while` 循环。(2) 单元测试受 HPC 环境变量 `GENE_AGENT_DATA_ROOT` 污染，已添加 `IsolatedEnvTestCase` 基类隔离环境。本地验证通过，待 HPC 重测。 |
+| 00 entrypoints | CLI 入口、关键单元测试、跨阶段 schema/planner 基础兼容性 | ✅ **已修复** | 三个 bug：(1) fake EVM 脚本参数解析；(2) test_intent.py 环境变量污染；(3) test_project_scaffold.py 缺少 t2t stage | **✅ 已修复！** 所有三个 bug 都已修复并本地验证通过，待 HPC 重测。 |
 | 01 storage | run 目录、session、artifact registry、inspect、存储/发布语义 | ✅ PASS | 15 pass / 0 fail | ✅ 稳定通过。 |
 | 02 read_qc | seqkit QC、FOFN、过滤阈值、QC summary、缺工具 preflight | ✅ PASS | **27 pass / 0 fail** | ✅ **已修复！** 之前报告的 `test_missing_tool_in_env_blocks_with_missing_tool_status` 失败已解决。3-tuple 重构后测试通过。 |
 | 03 genome_survey | Jellyfish/GenomeScope2、k-mer histogram、genome size 估计、缺工具 preflight | ✅ PASS | **22 pass / 0 fail** | ✅ **已修复！** 之前报告的 preflight 测试失败已解决。3-tuple 重构后测试通过。 |
@@ -23,9 +23,10 @@
 
 **重要变化（2026-06-26 更新）**：
 - ✅ Tests 02, 03, 04 的失败已全部修复！3-tuple 重构没有破坏这些测试
-- ✅ Test 00 两个 bug 已修复：
-  - fake EVM 脚本参数解析逻辑错误
-  - test_intent.py 环境变量污染导致 `test_entry_request_can_omit_session_id` 失败
+- ✅ Test 00 三个 bug 已全部修复：
+  1. fake EVM 脚本参数解析逻辑错误
+  2. test_intent.py 环境变量污染导致 `test_entry_request_can_omit_session_id` 失败
+  3. test_project_scaffold.py 缺少 t2t stage 导致 `test_domain_stage_order_matches_long_read_pipeline` 失败
 - ⚠️ Test 06 在 HPC 上缺少 Juicer 运行时环境（需要安装并配置）
 
 ## 2. Test 06 修复总结（2026-06-26）
@@ -184,6 +185,39 @@ class IntentParsingTests(IsolatedEnvTestCase):
 - 保持了生产代码的环境变量配置灵活性（不改变生产逻辑）
 - 提供了良好的测试隔离性（测试结果不受外部环境影响）
 - 可复用的基类，其他需要环境隔离的测试也可以使用
+
+### ✅ Test 00 - Bug 3: test_project_scaffold.py 缺少 t2t stage（已修复）
+**问题**：`test_domain_stage_order_matches_long_read_pipeline` 失败
+
+**症状**：
+测试期望的 `STAGE_ORDER` 不包含 `t2t`，但实际代码中已经添加了该 stage
+
+**根因**：
+T2T stage 已添加到 `app/stages/__init__.py` 的 `STAGE_ORDER` 中（位于 `hic_scaffolding` 和 `repeat_annotation` 之间），但测试没有更新
+
+**修复**：
+在测试的期望列表中添加 `"t2t"`：
+```python
+self.assertEqual(
+    STAGE_ORDER,
+    [
+        "inventory",
+        "read_qc",
+        "genome_survey",
+        "assembly",
+        "assembly_dedup",
+        "assembly_review",
+        "hic_scaffolding",
+        "t2t",  # 新增
+        "repeat_annotation",
+        "gene_annotation",
+        "function_annotation",
+    ],
+)
+```
+
+**验证**：
+- ✅ 本地测试通过：所有 3 个 project scaffold 测试通过
 
 ## 4. 当前优先事项（2026-06-26 更新）
 
