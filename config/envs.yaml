@@ -29,6 +29,11 @@ default:
 # filesystem checks only — no PATH, no conda. `package_tools` on a method
 # references these keys by name. Run `gene-agent bootstrap` once after filling
 # to conform Juicer (build scripts -> CPU symlink, link in juicer_tools.jar).
+#
+# Tested versions:
+#   Juicer: 1.6 (https://github.com/aidenlab/juicer)
+#   3D-DNA: 180922 (https://github.com/aidenlab/3d-dna)
+#   juicer_tools: 1.22.01 (https://github.com/aidenlab/juicer/wiki/Download)
 packages:
   juicer:
     install_root: /data/work/softs/juicer        # repo root containing CPU/ and misc/
@@ -52,7 +57,7 @@ packages:
       - edit/apply-edits-prep-for-next-round.sh
       - visualize/run-assembly-visualizer.sh
   juicer_tools:
-    install_root: /data/work/softs/juicer_tools
+    install_root: /data/work/softs/juicer_tools  # directory containing juicer_tools.jar v1.22.01
     canary_paths:
       - juicer_tools.jar
 
