@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from typing import get_args
 
@@ -16,6 +17,30 @@ from app.llm.config import load_llm_profile
 from app.llm.prompts import load_prompt_bundle
 from app.schemas.entry import EntryAssetTypeHint, EntryRequest
 from app.schemas.run_config import RequestableStage
+
+
+class IsolatedEnvTestCase(unittest.TestCase):
+    """Base test case that isolates environment variables.
+
+    Clears environment variables that affect default values (like GENE_AGENT_DATA_ROOT)
+    to ensure tests are not affected by external HPC test harness configuration.
+    """
+
+    _ENV_VARS_TO_ISOLATE = [
+        "GENE_AGENT_DATA_ROOT",
+        "GENE_AGENT_CHECKPOINTER",
+    ]
+
+    def setUp(self):
+        """Save and clear environment variables before each test."""
+        self._env_backup = {}
+        for key in self._ENV_VARS_TO_ISOLATE:
+            if key in os.environ:
+                self._env_backup[key] = os.environ.pop(key)
+
+    def tearDown(self):
+        """Restore environment variables after each test."""
+        os.environ.update(self._env_backup)
 
 
 class _FakeResponse:
@@ -37,7 +62,7 @@ class _FakeModel:
         return _FakeResponse(self.content)
 
 
-class IntentParsingTests(unittest.TestCase):
+class IntentParsingTests(IsolatedEnvTestCase):
     def test_entry_request_converts_to_run_argv(self):
         request = EntryRequest(session_id="s1", manifest="inputs/manifest.yaml")
 

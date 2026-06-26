@@ -12,7 +12,7 @@
 
 | Test | 覆盖内容 | 最新状态 | 关键证据 | 当前问题/结论 |
 |---|---|---:|---|---|
-| 00 entrypoints | CLI 入口、关键单元测试、跨阶段 schema/planner 基础兼容性 | ✅ FAIL → **已修复** | 16 checks pass / 1 fail；fake EVM 脚本参数解析 bug | **✅ 已修复！** fake EVM 脚本在 `for` 循环内错误使用 `shift` 导致参数解析失败。已改用 `while` 循环正确解析。本地验证通过，待 HPC 重测。 |
+| 00 entrypoints | CLI 入口、关键单元测试、跨阶段 schema/planner 基础兼容性 | ✅ **已修复** | 两个 bug：(1) fake EVM 脚本参数解析；(2) test_intent.py 环境变量污染 | **✅ 已修复！** (1) fake EVM 脚本在 `for` 循环内错误使用 `shift`，已改用 `while` 循环。(2) 单元测试受 HPC 环境变量 `GENE_AGENT_DATA_ROOT` 污染，已添加 `IsolatedEnvTestCase` 基类隔离环境。本地验证通过，待 HPC 重测。 |
 | 01 storage | run 目录、session、artifact registry、inspect、存储/发布语义 | ✅ PASS | 15 pass / 0 fail | ✅ 稳定通过。 |
 | 02 read_qc | seqkit QC、FOFN、过滤阈值、QC summary、缺工具 preflight | ✅ PASS | **27 pass / 0 fail** | ✅ **已修复！** 之前报告的 `test_missing_tool_in_env_blocks_with_missing_tool_status` 失败已解决。3-tuple 重构后测试通过。 |
 | 03 genome_survey | Jellyfish/GenomeScope2、k-mer histogram、genome size 估计、缺工具 preflight | ✅ PASS | **22 pass / 0 fail** | ✅ **已修复！** 之前报告的 preflight 测试失败已解决。3-tuple 重构后测试通过。 |
@@ -23,7 +23,9 @@
 
 **重要变化（2026-06-26 更新）**：
 - ✅ Tests 02, 03, 04 的失败已全部修复！3-tuple 重构没有破坏这些测试
-- ✅ Test 00 fake EVM 脚本 bug 已修复（参数解析逻辑错误）
+- ✅ Test 00 两个 bug 已修复：
+  - fake EVM 脚本参数解析逻辑错误
+  - test_intent.py 环境变量污染导致 `test_entry_request_can_omit_session_id` 失败
 - ⚠️ Test 06 在 HPC 上缺少 Juicer 运行时环境（需要安装并配置）
 
 ## 2. Test 06 修复总结（2026-06-26）
@@ -85,7 +87,7 @@ badac48 - Add external package configuration and bootstrap system
 - ✅ Test 04: **42/42 pass** - 完整 assembly + dedup pipeline 稳定走通
 - **结论**：purge_dups 调用链路已修复（可能是输入数据、工具版本或代码修复）
 
-### ❌ Test 00 - EVM 测试环境差异（已修复）
+### ✅ Test 00 - Bug 1: EVM 脚本参数解析（已修复）
 **问题**：HPC 上 EVM 测试失败，但本地通过
 
 **症状**：
@@ -115,7 +117,73 @@ done
 **验证**：
 - ✅ 本地测试通过：`EVMRunTests::test_run_success_sets_evm_ran` PASSED
 - ✅ 本地测试通过：`EVMRunTests::test_run_failure_sets_failed` PASSED
-- ⏳ 待 HPC 验证
+
+### ✅ Test 00 - Bug 2: test_intent.py 环境变量污染（已修复）
+**问题**：`test_entry_request_can_omit_session_id` 在 HPC 环境失败
+
+**症状**：
+期望：
+```python
+["run", "--manifest", "inputs/manifest.yaml", "--data-dir", "data"]
+```
+
+实际得到：
+```python
+["run", "--manifest", "inputs/manifest.yaml", "--data-dir", "/data/work/genevis/data_hpc_test"]
+```
+
+**根因链条**：
+1. **HPC 测试脚本设置全局环境变量**（`tests/hpc/common.sh:416`）：
+   ```bash
+   export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
+   # TEST_DATA_ROOT="/data/work/genevis/data_hpc_test"
+   ```
+
+2. **EntryRequest 使用环境变量作为默认值**（`app/schemas/entry.py:35`）：
+   ```python
+   data_dir: str = Field(default_factory=default_data_root, min_length=1)
+   ```
+
+3. **default_data_root 读取环境变量**（`app/storage/paths.py:18-20`）：
+   ```python
+   def default_data_root() -> str:
+       return os.environ.get("GENE_AGENT_DATA_ROOT", DEFAULT_DATA_ROOT)
+   ```
+
+4. **单元测试没有隔离环境变量**：测试依赖环境变量不被污染，但 HPC 测试脚本在全局设置了它
+
+**修复**：
+创建 `IsolatedEnvTestCase` 基类，自动隔离环境变量：
+```python
+class IsolatedEnvTestCase(unittest.TestCase):
+    """Base test case that isolates environment variables."""
+    
+    _ENV_VARS_TO_ISOLATE = [
+        "GENE_AGENT_DATA_ROOT",
+        "GENE_AGENT_CHECKPOINTER",
+    ]
+    
+    def setUp(self):
+        self._env_backup = {}
+        for key in self._ENV_VARS_TO_ISOLATE:
+            if key in os.environ:
+                self._env_backup[key] = os.environ.pop(key)
+    
+    def tearDown(self):
+        os.environ.update(self._env_backup)
+
+class IntentParsingTests(IsolatedEnvTestCase):
+    # 所有测试自动隔离环境变量
+```
+
+**验证**：
+- ✅ 本地测试通过：所有 29 个 intent 测试通过
+- ✅ 模拟 HPC 环境通过：`GENE_AGENT_DATA_ROOT=/data/work/genevis/data_hpc_test pytest tests/test_intent.py` 全部通过
+
+**设计说明**：
+- 保持了生产代码的环境变量配置灵活性（不改变生产逻辑）
+- 提供了良好的测试隔离性（测试结果不受外部环境影响）
+- 可复用的基类，其他需要环境隔离的测试也可以使用
 
 ## 4. 当前优先事项（2026-06-26 更新）
 
