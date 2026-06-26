@@ -164,8 +164,14 @@ class EVMRunTests(unittest.TestCase):
         else:
             evm.write_text(
                 "#!/bin/sh\n"
-                "out=\"\"\n"
-                "for arg in \"$@\"; do case \"$arg\" in --genome) shift; genome=\"$1\";; esac; shift; done\n"
+                "# Parse --genome argument\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    --genome) genome=\"$2\"; shift 2;;\n"
+                "    *) shift;;\n"
+                "  esac\n"
+                "done\n"
+                "# Output fake EVM GFF3\n"
                 "printf '##gff-version 3\\nctg1\\tEVM\\tgene\\t1\\t1000\\t.\\t+\\t.\\tID=evm_g1\\n'\n",
                 encoding="utf-8",
             )
