@@ -174,6 +174,104 @@ class PlanValidation:
 
 ---
 
+## 设计哲学
+
+### Validation Philosophy
+
+Phase 8.5 的 Preflight Validation 采用 **建议式验证**，而非强制验证。
+
+#### 为什么允许 "Proceed Anyway"？
+
+1. **高级用户场景**: 用户可能有额外的数据来源（未在 manifest 中注册）
+2. **测试和调试**: 开发者可能想看到失败路径的具体错误信息
+3. **渐进式数据准备**: 某些资源可能在运行时动态生成
+
+#### 权衡
+
+✅ **优点**:
+- 不阻塞高级用户的灵活使用
+- 支持边缘场景和实验性工作流
+- TUI 保持友好和非强制
+
+⚠️ **缺点**:
+- 用户可能忽略警告继续执行（然后在运行时失败）
+- 需要用户理解 "proceed anyway" 的风险
+
+#### 未来改进方向
+
+- 添加 `--strict` 模式：强制要求所有资源验证通过
+- 记录用户选择 "proceed anyway" 的次数，提示风险
+- 提供 "试运行" 模式：模拟执行但不实际运行
+
+### Resource Resolution Priority
+
+当多个 stages 都能提供同一个资源时，`resolve_stage_resource()` 按以下优先级选择。
+
+#### Priority Order (高 → 低)
+
+1. **RunConfig Override** (Layer 2)
+   - 用户显式指定的路径
+   - 例: `local_exec = {"hic_scaffolding": {"assembly_fasta_ref": "/custom.fa"}}`
+   - 🎯 最高优先级，跳过所有自动解析
+
+2. **Preferred Stages** (Layer 3a)
+   - ResourceSpec 中声明的 `prefer_stages`
+   - 按列表顺序检查
+   - 例: `prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]`
+
+3. **Auto-Fallback** (Layer 3b)
+   - 如果 preferred stages 都没找到，自动检查所有 stages
+   - 按 **reverse STAGE_ORDER** 顺序（后执行的 stage 优先）
+   - 🔑 关键: 最近执行的 stage 通常产生最"新鲜"的输出
+
+4. **Asset Registry** (Layer 3c)
+   - 用户在 manifest 中注册的 assets
+   - 最后的 fallback
+   - 例: `assembly_fasta_registered`
+
+#### Example: Assembly Resolution
+
+假设执行了这些 stages（按顺序）:
+1. `assembly` → 产生 draft assembly
+2. `assembly_review` → 产生 reviewed assembly
+3. `hic_scaffolding` → 产生 scaffolded assembly
+4. `t2t` → 产生 chromosome-level assembly
+
+现在 `repeat_annotation` 需要 assembly:
+
+**ASSEMBLY_SPEC 配置**:
+```python
+ASSEMBLY_SPEC = ResourceSpec(
+    prefer_stages=["t2t", "hic_scaffolding", "assembly_review"],
+    ...
+)
+```
+
+**解析过程**:
+1. 检查 `prefer_stages[0] = "t2t"` → ✅ 找到，使用 t2t 输出
+2. (不再继续检查后续)
+
+**如果 t2t 没运行**:
+1. 检查 `prefer_stages[0] = "t2t"` → ❌ 未运行
+2. 检查 `prefer_stages[1] = "hic_scaffolding"` → ✅ 找到，使用 hic 输出
+
+**如果 prefer_stages 都没运行**:
+1. Auto-fallback: 按 reverse STAGE_ORDER 检查
+2. 顺序: `t2t` (skip) → `repeat_annotation` (skip) → `hic_scaffolding` (skip) → `assembly_review` → ✅ 找到
+
+#### 为什么用 Reverse STAGE_ORDER？
+
+**原因**: 后执行的 stage 通常是数据的"精炼版本"
+
+- `assembly` → draft (粗糙)
+- `assembly_review` → reviewed (审核后)
+- `hic_scaffolding` → scaffolded (染色体级)
+- `t2t` → chromosome-level (端粒到端粒)
+
+如果用正序，会优先选择 draft assembly（不理想）。
+
+---
+
 ## 实施细节
 
 ### Part 1: 通用 Resource Resolver（✅ 已完成）

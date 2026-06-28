@@ -93,34 +93,54 @@ def resolve_stage_resource(
     4. Asset registry (specified asset_types)
 
     Args:
-        state: TopLevelState
-        resource_spec: What resource to find
+        state: TopLevelState containing stage_outputs and asset_registry_ref
+        resource_spec: Resource requirement specification
         override: Optional run_config override path
 
     Returns:
         ResourceResolution with paths, source, metadata
 
     Examples:
-        # Resolve assembly
-        spec = ResourceSpec(
-            resource_type="assembly",
-            prefer_stages=["t2t", "hic_scaffolding", "assembly_review"],
-            output_keys={
-                "t2t": ["final_assembly_for_downstream"],
-                "hic_scaffolding": ["final_assembly_for_downstream"],
-            },
-            asset_types=["assembly_fasta_registered"],
-        )
-        resolution = resolve_stage_resource(state, resource_spec=spec)
+        # Example 1: Using preferred stages
+        >>> spec = ResourceSpec(
+        ...     resource_type="assembly",
+        ...     prefer_stages=["hic_scaffolding", "assembly_review"],
+        ...     output_keys={
+        ...         "hic_scaffolding": ["final_assembly_for_annotation"],
+        ...         "assembly_review": ["final_assembly_ref"],
+        ...     },
+        ...     asset_types=["assembly_fasta_registered"],
+        ... )
+        >>> resolution = resolve_stage_resource(state, resource_spec=spec)
+        >>> print(resolution.source)  # "hic_scaffolding" (if it ran)
 
-        # Resolve reads
-        spec = ResourceSpec(
-            resource_type="clean_reads",
-            prefer_stages=["read_qc"],
-            output_keys={"read_qc": ["filtered_long_reads_ref"]},
-            asset_types=["clean_long_reads"],
-        )
-        resolution = resolve_stage_resource(state, resource_spec=spec)
+        # Example 2: Auto-fallback to non-preferred stage
+        >>> # Assume only assembly_dedup ran (not in prefer_stages)
+        >>> state.stage_outputs = {
+        ...     "assembly_dedup": {
+        ...         "deduplicated_assembly_ref": "data/dedup.fa"
+        ...     }
+        ... }
+        >>> resolution = resolve_stage_resource(state, resource_spec=spec)
+        >>> print(resolution.source)  # "assembly_dedup" (auto-fallback)
+        >>> print(resolution.source_type)  # "stage_output"
+
+        # Example 3: Fallback to asset registry
+        >>> # No stage outputs available
+        >>> state.stage_outputs = {}
+        >>> # But manifest has registered assembly
+        >>> resolution = resolve_stage_resource(state, resource_spec=spec)
+        >>> print(resolution.source)  # "asset_registry"
+        >>> print(resolution.source_type)  # "asset"
+
+        # Example 4: RunConfig override skips all auto-resolution
+        >>> resolution = resolve_stage_resource(
+        ...     state,
+        ...     resource_spec=spec,
+        ...     override="/custom/path/assembly.fa"
+        ... )
+        >>> print(resolution.source)  # "run_config"
+        >>> print(resolution.path)  # "/custom/path/assembly.fa"
     """
     # 1. RunConfig override
     if override:
