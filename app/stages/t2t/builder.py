@@ -12,6 +12,7 @@ from app.stages.t2t.nodes import (
     enter_t2t,
     fail_t2t,
     freeze_t2t_alignment,
+    gate_t2t_review,
     prepare_t2t_reads,
     resolve_t2t_inputs,
     run_t2t_alignment,
@@ -25,10 +26,11 @@ from app.stages.t2t.routing import (
     route_after_alignment_run,
     route_after_assembly_scan,
     route_after_candidates,
-    route_after_report,
+    route_after_gate,
     route_after_patches,
     route_after_read_prepare,
     route_after_read_scan,
+    route_after_report,
     route_after_resolve,
     route_after_validation,
 )
@@ -48,6 +50,7 @@ def build_stage():
     graph.add_node("apply_patches", apply_t2t_patches)
     graph.add_node("validate_patched", validate_patched_assembly)
     graph.add_node("report", write_t2t_report)
+    graph.add_node("gate_review", gate_t2t_review)
     graph.add_node("commit", commit_t2t)
     graph.add_node("fail", fail_t2t)
 
@@ -62,7 +65,8 @@ def build_stage():
     graph.add_conditional_edges("build_candidates", route_after_candidates, {"apply_patches": "apply_patches", "fail": "fail"})
     graph.add_conditional_edges("apply_patches", route_after_patches, {"validate_patched": "validate_patched", "report": "report", "fail": "fail"})
     graph.add_conditional_edges("validate_patched", route_after_validation, {"report": "report", "fail": "fail"})
-    graph.add_conditional_edges("report", route_after_report, {"commit": "commit", "end": END, "fail": "fail"})
+    graph.add_conditional_edges("report", route_after_report, {"gate_review": "gate_review", "commit": "commit", "fail": "fail"})
+    graph.add_conditional_edges("gate_review", route_after_gate, {"block": END, "commit": "commit"})
     graph.add_edge("commit", END)
     graph.add_edge("fail", END)
     return graph.compile()

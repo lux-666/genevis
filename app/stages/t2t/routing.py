@@ -61,6 +61,11 @@ def route_after_validation(state: TopLevelState) -> str:
 
 
 def route_after_report(state: TopLevelState) -> str:
-    if state.get("supervision_state") == "blocked_human":
-        return "end"
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "commit"
+    output = _output(state)
+    if output.get("status") in FAIL_STATUSES:
+        return "fail"
+    return "gate_review" if output.get("status") == "blocked_human" else "commit"
+
+
+def route_after_gate(state: TopLevelState) -> str:
+    return "block" if state.get("supervision_state") == "blocked_human" else "commit"

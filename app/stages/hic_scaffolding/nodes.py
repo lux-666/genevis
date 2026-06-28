@@ -43,7 +43,12 @@ def enter_hic_scaffolding(state: TopLevelState) -> dict:
 
 def resolve_hic_inputs(state: TopLevelState) -> dict:
     """Resolve reviewed assembly and optional Hi-C inputs."""
-    final_assembly_ref = _final_assembly_ref(state)
+    from app.stages.base import resolve_current_assembly
+
+    final_assembly_ref, source = resolve_current_assembly(
+        state,
+        prefer_stages=["assembly_review"]
+    )
     if not final_assembly_ref:
         return _fail_update(state, "missing final_assembly_ref for hic_scaffolding")
 
@@ -57,6 +62,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
             "status": "resolved",
             "pre_hic_assembly_ref": final_assembly_ref,
             "final_assembly_for_annotation": final_assembly_ref,
+            "final_assembly_for_downstream": final_assembly_ref,
             "hic_read_refs": [asset.get("asset_id", "") for asset in hic_assets if asset.get("asset_id")],
             "hic_read_paths": [str(asset.get("path")) for asset in hic_assets if asset.get("path")],
             "hic_alignment_refs": [asset.get("asset_id", "") for asset in _hic_alignment_assets(state) if asset.get("asset_id")],
@@ -64,6 +70,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
             "hic_merged_nodups_refs": [asset.get("asset_id", "") for asset in _hic_merged_nodups_assets(state) if asset.get("asset_id")],
             "hic_merged_nodups_paths": [str(asset.get("path")) for asset in _hic_merged_nodups_assets(state) if asset.get("path")],
             "target_assembly_level": target_level,
+            "assembly_source": source,  # Track provenance
         },
     )
 
@@ -188,6 +195,7 @@ def write_hic_skip(state: TopLevelState) -> dict:
             "skip_reason": skip_reason,
             "pre_hic_assembly_ref": hic_out["pre_hic_assembly_ref"],
             "final_assembly_for_annotation": hic_out["pre_hic_assembly_ref"],
+            "final_assembly_for_downstream": hic_out["pre_hic_assembly_ref"],
             "skip_record_ref": str(skip_record_ref),
             "artifact_refs": [str(artifact.file_path)],
         },
@@ -402,6 +410,7 @@ def _commit_hic_resume_decision(
         "selected_method_name": request.method_name,
         "pre_hic_assembly_ref": pre_hic_assembly_ref,
         "final_assembly_for_annotation": final_assembly_for_annotation,
+        "final_assembly_for_downstream": final_assembly_for_annotation,
         "review_decision_artifact_ref": str(artifact.file_path),
         "notes": notes,
         "decided_by": request.decided_by,
@@ -527,26 +536,6 @@ def _local_method_enabled(hic_out: dict[str, Any]) -> bool:
     return hic_out.get("execution_mode") == "local" and method in set(HIC_CANDIDATE_METHODS)
 
 
-def _final_assembly_ref(state: TopLevelState) -> str | None:
-    review_out = (state.get("stage_outputs") or {}).get("assembly_review") or {}
-    for key in ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"]:
-        value = review_out.get(key)
-        if value:
-            return str(value)
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return None
-    registry_path = Path(str(registry_ref))
-    if not registry_path.exists():
-        return None
-    try:
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    for asset in registry.get("assets", []):
-        if asset.get("asset_type") == "assembly_fasta_registered" and asset.get("path"):
-            return str(asset["path"])
-    return None
 
 
 def _target_assembly_level(state: TopLevelState) -> str:

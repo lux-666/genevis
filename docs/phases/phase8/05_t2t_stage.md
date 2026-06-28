@@ -6,10 +6,19 @@ patched FASTA。
 
 ## Input and routing
 
-输入 assembly 依次取自 Hi-C 的 `final_assembly_for_t2t_or_annotation`、
-`final_assembly_for_annotation`，以及 assembly review 的 final refs。ONT reads
-优先使用 `clean_long_reads`，缺失时回退 `raw_long_reads`。没有 Hi-C 或 long
-reads 不会阻断 annotation：stage 写明 warning/skip reason 后交接原 assembly。
+输入 assembly 依次取自 Hi-C 的 `final_assembly_for_downstream`（统一 contract）、
+legacy fallback keys（`final_assembly_for_annotation`、
+`chromosome_scaffolded_assembly_candidate_ref`），以及 assembly review 的 
+`final_assembly_for_downstream`、legacy fallback keys（
+`final_assembly_for_scaffolding_or_annotation`、`final_assembly_ref`）。
+
+ONT reads 优先使用 `clean_long_reads`，缺失时回退 `raw_long_reads`。
+没有 Hi-C 或 long reads 不会阻断 annotation：stage 写明 warning/skip reason 后
+交接原 assembly。
+
+**Implementation note (2026-06-28)**: 统一 contract key `final_assembly_for_downstream` 
+已添加到所有 assembly-producing stages。T2T 的 `_assembly_ref()` 优先搜索统一 key，
+然后 fallback 到 legacy keys 以保持向后兼容。
 
 所有 assembly 都会路由到 `t2t`。只有 run config 或 CLI 将 `t2t` 放入
 `local_exec` 时才执行 minimap2 以及 auto-patch；否则是可追溯的 plan-only
@@ -37,3 +46,8 @@ reads、candidate 表、status summary、Markdown 报告；成功 patch 时还�
 和 annotation handoff。HPC `test_07_t2t.sh` 是不绑定永久项目数据的 smoke
 placeholder；后续可用现场构造的小数据或真实项目数据填充 `T2T_ASSEMBLY` 与
 `T2T_ONT_READS` 后做进一步验证。
+
+**Test status (HPC 2026-06-26)**:
+- 本地单元测试: 16 passed (test_t2t.py)
+- HPC 测试: PASS (smoke placeholder without real fixture data)
+- 所有测试涵盖 descriptor registry、run config、alignment、auto-patch、manual review gates

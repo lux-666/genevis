@@ -1,6 +1,6 @@
 # 08-06 Stage Wiring And Cleanup
 
-任务状态：待实施。此任务负责把 Phase 8 校正后的 stage 边界接进代码：`inventory` 保持现名并增强，`assembly` 内部清理 Flye-specific mainline，`hic_scaffolding` 保持独立，新增 top-level `t2t` stage。
+任务状态：核心已实施。`t2t` stage 已接入 STAGE_ORDER 和 parent graph，assembly_dedup 位置已确认。Knowledge packs 迁移和架构统一（如 review gate 风格统一）见 DESIGN_ISSUES_AND_TODO.md backlog。
 
 ## 目标
 
@@ -37,6 +37,7 @@ STAGE_ORDER = [
     "read_qc",
     "genome_survey",
     "assembly",
+    "assembly_dedup",
     "assembly_review",
     "hic_scaffolding",
     "t2t",
@@ -45,6 +46,9 @@ STAGE_ORDER = [
     "function_annotation",
 ]
 ```
+
+**Implementation note**: `assembly_dedup` 位于 `assembly` 和 `assembly_review` 之间，
+在 STAGE_ORDER 中已存在。文档更新以反映实际 stage 顺序。
 
 `inventory` 不重命名。所有用户可见文档也使用 `inventory`。
 

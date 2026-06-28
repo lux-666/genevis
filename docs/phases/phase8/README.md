@@ -7,6 +7,7 @@ inventory
 read_qc
 genome_survey
 assembly
+assembly_dedup
 assembly_review
 hic_scaffolding
 t2t
@@ -74,9 +75,11 @@ function_annotation
 - `[~] 01_schema_and_knowledge_packs.md`：校正 schema/pack 命名，补 inventory profile、assembly method provenance、T2T artifacts。
 - `[ ] 02_inventory.md`：既有 `inventory` stage 的增强。
 - `[~] 03_assembly_stage_methods.md`：`assembly` stage 多方法候选与 method-application package；Flye graph 和 NextDenovo graph 已接入。
-- `[~] 04_hic_scaffolding_stage.md`：既有 `hic_scaffolding` stage 的增强边界；Juicer + 3D-DNA 双输入执行路径已接入，T2T downstream contract 仍待后续任务完成。
-- `[ ] 05_t2t_stage.md`：新增 top-level `t2t` stage。
-- `[ ] 06_subgraph_wiring_and_cleanup.md`：更新 stage order、parent graph wiring、t2t stage 接入、旧 phase8 错误命名清理。
+- `[~] 04_hic_scaffolding_stage.md`：既有 `hic_scaffolding` stage 的增强边界；Juicer + 3D-DNA 双输入执行路径已接入。
+- `[x] 05_t2t_stage.md`：新增 top-level `t2t` stage（MVP 已实现：scan + conservative patch + manual review；增强功能见 DESIGN_ISSUES_AND_TODO.md）。
+- `[x] 06_subgraph_wiring_and_cleanup.md`：更新 stage order、parent graph wiring、t2t stage 接入（核心完成；knowledge packs 迁移等增强见 DESIGN_ISSUES_AND_TODO.md）。
+
+**Phase 8 核心功能状态**: ✅ 可用。T2T MVP 已实现并通过测试，assembly method refactor 和 hic_scaffolding 双模式已接入。增强功能和架构统一项见 `DESIGN_ISSUES_AND_TODO.md` backlog。
 
 ## 对外接口
 
@@ -92,10 +95,11 @@ inventory
        route/method planning
        method_application subgraph
        candidate refs
+  -> assembly_dedup
   -> assembly_review
        final_assembly_for_scaffolding_or_annotation
   -> hic_scaffolding     # optional by target/data
-       final_assembly_for_t2t_or_annotation
+       final_assembly_for_annotation
   -> t2t                 # optional by target/policy, new in Phase 8
        final_assembly_for_annotation
   -> repeat_annotation

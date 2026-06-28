@@ -77,7 +77,12 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
         fallback_reason = _explicit_unmasked_fallback_reason(state)
         if not fallback_reason:
             return _fail_update(state, "missing softmasked_genome for gene_annotation")
-        genome_ref = _final_assembly_for_annotation(state)
+        # Fallback to unmasked assembly
+        from app.stages.base import resolve_current_assembly
+        genome_ref, _ = resolve_current_assembly(
+            state,
+            prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]
+        )
         genome_source = "final_assembly_for_annotation"
         if not genome_ref:
             return _fail_update(state, "missing final_assembly_for_annotation for gene_annotation fallback")

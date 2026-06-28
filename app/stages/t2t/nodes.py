@@ -88,9 +88,15 @@ def enter_t2t(state: TopLevelState) -> dict:
 
 def resolve_t2t_inputs(state: TopLevelState) -> dict:
     """Resolve the current assembly and the preferred ONT evidence source."""
+    from app.stages.base import resolve_current_assembly
+
     existing = _output(state)
     config = _config(existing)
-    assembly_ref, source_stage = _assembly_ref(state, config.get("assembly_fasta_ref"))
+    assembly_ref, source_stage = resolve_current_assembly(
+        state,
+        override=config.get("assembly_fasta_ref"),
+        prefer_stages=["hic_scaffolding", "assembly_review"]
+    )
     if not assembly_ref:
         return _fail(state, "missing final assembly ref for t2t")
     assembly_path = Path(assembly_ref)
@@ -120,6 +126,7 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
             "out_dir": str(out_dir),
             "work_dir": str(work_dir),
             "final_assembly_for_annotation": str(assembly_path),
+            "final_assembly_for_downstream": str(assembly_path),
             "notes": [],
         },
     )
@@ -358,6 +365,7 @@ def apply_t2t_patches(state: TopLevelState) -> dict:
             "patched_assembly_ref": materialized["patched_assembly_ref"],
             "patch_records_ref": materialized["patch_records_ref"],
             "final_assembly_for_annotation": materialized["patched_assembly_ref"],
+            "final_assembly_for_downstream": materialized["patched_assembly_ref"],
         },
     )
 
@@ -414,26 +422,36 @@ def write_t2t_report(state: TopLevelState) -> dict:
     bundle_path.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
     bundle_artifact = ArtifactMeta.from_file(bundle_path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type="t2t.bundle")
     append_artifact_records(absolute_data_dir(state), state["session_id"], [bundle_artifact])
-    payload = {
-        "status": final_status,
-        "telomere_status_summary_ref": str(summary_path),
-        "t2t_finishing_report_ref": str(report_path),
-        "bundle_ref": str(bundle_path),
-        "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
-        "final_assembly_for_annotation": out.get("final_assembly_for_annotation") or out["input_assembly_ref"],
-    }
-    if final_status != "blocked_human":
-        return _update(state, payload)
-    request_update = _block_for_t2t_review(
+    final_assembly = out.get("final_assembly_for_annotation") or out["input_assembly_ref"]
+    return _update(
+        state,
+        {
+            "status": final_status,
+            "telomere_status_summary_ref": str(summary_path),
+            "t2t_finishing_report_ref": str(report_path),
+            "bundle_ref": str(bundle_path),
+            "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
+            "final_assembly_for_annotation": final_assembly,
+            "final_assembly_for_downstream": final_assembly,
+        },
+    )
+
+
+def gate_t2t_review(state: TopLevelState) -> dict:
+    """Block for human review when manual review mode has proposed candidates."""
+    out = _output(state)
+    if out.get("status") != "blocked_human":
+        return {}
+    report_path = Path(out["t2t_finishing_report_ref"])
+    summary_path = Path(out["telomere_status_summary_ref"])
+    bundle_path = Path(out["bundle_ref"])
+    return _block_for_t2t_review(
         state,
         out,
         report_path=report_path,
         summary_path=summary_path,
         bundle_path=bundle_path,
     )
-    outputs = dict(request_update.get("stage_outputs") or {})
-    outputs["t2t"] = {**dict(outputs.get("t2t") or {}), **payload}
-    return {**request_update, "stage_outputs": outputs}
 
 
 def commit_t2t(state: TopLevelState) -> dict:
@@ -569,19 +587,6 @@ def _config(out: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _assembly_ref(state: TopLevelState, override: str | None) -> tuple[str | None, str]:
-    if override:
-        return str(override), "run_config"
-    outputs = state.get("stage_outputs") or {}
-    hic = outputs.get("hic_scaffolding") or {}
-    for key in ("final_assembly_for_t2t_or_annotation", "final_assembly_for_annotation", "chromosome_scaffolded_assembly_candidate_ref"):
-        if hic.get(key):
-            return str(hic[key]), "hic_scaffolding"
-    review = outputs.get("assembly_review") or {}
-    for key in ("final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"):
-        if review.get(key):
-            return str(review[key]), "assembly_review"
-    return None, "missing"
 
 
 def _ont_reads_ref(state: TopLevelState, override: str | None) -> tuple[str | None, str]:
