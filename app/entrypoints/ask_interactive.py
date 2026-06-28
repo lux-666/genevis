@@ -87,6 +87,62 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
             break
 
         if clarification.kind == "confirm":
+            # Preflight validation before execution confirmation
+            # Note: Validation requires inventory to be completed first, which happens
+            # during execution. During TUI planning, we try to validate if possible,
+            # but skip if the asset registry doesn't exist yet.
+            if plan.selected_stages:
+                validation_attempted = _attempt_preflight_validation(plan)
+                if validation_attempted:
+                    # Validation found blocking issues
+                    choice = _prompt_validation_action()
+
+                    if choice == "modify_stages":
+                        print("\n--- Restarting from stage selection ---\n")
+                        plan = plan.model_copy(update={
+                            "selected_stages": None,
+                            "resolved_execution_order": None,
+                            "selected_methods": None,
+                            "shared_parameters": None,
+                            "method_parameters": None,
+                            "stage_parameters": None,
+                            "confirmed": False,
+                        })
+                        plan_ref = save_plan_to_default_path(plan)
+                        continue
+                    elif choice == "provide_data":
+                        print("\n📝 Please add the missing assets to your manifest.")
+                        print("After updating the manifest, press Enter to re-validate, or Ctrl+C to exit.")
+                        try:
+                            input()
+                        except (EOFError, KeyboardInterrupt):
+                            print("\nAborted.")
+                            return 1
+
+                        # Re-validate after user updates manifest
+                        print("\n--- Re-validating after manifest update ---\n")
+                        validation_attempted = _attempt_preflight_validation(plan)
+                        if validation_attempted:
+                            # Still has blocking issues
+                            print("\n⚠️  Validation still failed. Restarting from stage selection.\n")
+                        else:
+                            print("✓ Validation passed! Continuing...\n")
+
+                        # Reset to stage selection to allow user to reconfigure
+                        plan = plan.model_copy(update={
+                            "selected_stages": None,
+                            "resolved_execution_order": None,
+                            "selected_methods": None,
+                            "shared_parameters": None,
+                            "method_parameters": None,
+                            "stage_parameters": None,
+                            "confirmed": False,
+                        })
+                        plan_ref = save_plan_to_default_path(plan)
+                        continue
+                    elif choice == "proceed_anyway":
+                        print("\n⚠️  Warning: Ignoring validation errors, continuing execution...")
+
             _render_confirm(clarification)
             if not _prompt_confirm("Proceed?"):
                 print("\n--- Restarting from stage selection ---\n")
@@ -858,6 +914,102 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
     if update:
         return plan.model_copy(update=update)
     return plan
+
+
+def _attempt_preflight_validation(plan: AskPlanState) -> bool:
+    """
+    Attempt preflight validation before execution.
+
+    Returns True if validation failed and found blocking issues.
+    Returns False if validation passed or couldn't be performed.
+    """
+    try:
+        # Load manifest and run inventory to get asset registry
+        from pathlib import Path
+        from app.schemas.manifest import load_manifest
+        from app.stages.inventory.nodes import inventory_node
+        from app.schemas.state import initial_state
+        from app.stages.preflight import validate_execution_plan
+
+        manifest_path = Path(plan.manifest_ref)
+        if not manifest_path.exists():
+            # Manifest not found, skip validation
+            return False
+
+        manifest = load_manifest(plan.manifest_ref)
+
+        # Create initial state and run inventory to get asset_registry_ref
+        state = initial_state(
+            session_id=plan.session_id,
+            input_manifest_ref=plan.manifest_ref,
+            data_dir=plan.data_dir,
+        )
+
+        # Run inventory to populate asset_registry_ref
+        state = inventory_node(state)
+
+        # Now validate with the populated state
+        validation = validate_execution_plan(
+            state=state,
+            requested_stages=plan.selected_stages or [],
+        )
+
+        if not validation.valid:
+            _render_validation_errors(validation)
+            return True
+
+        return False
+
+    except Exception:
+        # If validation fails for any reason, just skip it
+        # (e.g., manifest issues will be caught during actual execution)
+        return False
+
+
+def _render_validation_errors(validation) -> None:
+    """Display friendly validation errors to the user."""
+    print(f"\n{validation.summary}\n")
+
+    # Display first blocker details
+    if validation.first_blocker:
+        blocker = validation.checks[validation.first_blocker]
+        print(f"Stage: {blocker.stage}")
+        print(f"Status: {'✓ can run' if blocker.can_run else '✗ cannot run'}\n")
+
+        if blocker.missing:
+            print("Missing resources:")
+            for res in blocker.missing:
+                print(f"  • {res.resource_name}: {res.message}")
+
+        if blocker.suggestions:
+            print("\n💡 Suggestions:")
+            for suggestion in blocker.suggestions:
+                print(f"  → {suggestion}")
+
+    # Display overall suggestions
+    if validation.suggestions:
+        print("\n📋 Next steps:")
+        for suggestion in validation.suggestions:
+            print(f"  • {suggestion}")
+
+
+def _prompt_validation_action() -> str:
+    """Prompt user for action when validation fails."""
+    print("\nWhat would you like to do?")
+    print("  1. Modify stage selection (remove blocked stages)")
+    print("  2. Provide missing data (add assets to manifest)")
+    print("  3. Proceed anyway (advanced)")
+
+    while True:
+        choice = input("\nYour choice [1/2/3]: ").strip()
+        if choice == "1":
+            return "modify_stages"
+        elif choice == "2":
+            return "provide_data"
+        elif choice == "3":
+            return "proceed_anyway"
+        else:
+            print("Invalid choice. Please enter 1, 2, or 3.")
 
 
 def _execute_confirmed_plan(plan: AskPlanState, args: argparse.Namespace) -> int:

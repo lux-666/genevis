@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from app.graph.routing import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.base import load_assets_from_registry
 from app.stages.read_qc.constants import (
     LENGTH_FILTER_DECISIONS,
     LENGTH_FILTER_METHOD_NAME,
@@ -68,14 +68,7 @@ def enter_read_qc(state: TopLevelState) -> dict:
 
 def resolve_raw_long_reads(state: TopLevelState) -> dict:
     """Resolve all raw-long-read assets into one ordered read set."""
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return _fail_update(state, "missing asset_registry_ref for read_qc")
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return _fail_update(state, f"asset registry not found: {registry_ref}")
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    assets = [asset for asset in registry.get("assets", []) if asset.get("asset_type") == "raw_long_reads"]
+    assets = load_assets_from_registry(state, ["raw_long_reads"])
     if not assets:
         return _fail_update(state, "raw_long_reads asset not found in registry")
     paths = [Path(asset["path"]) for asset in assets]

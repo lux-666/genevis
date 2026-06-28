@@ -137,7 +137,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("asset_registry_ref", result["last_error"])
+            self.assertIn("raw_long_reads", result["last_error"])
 
     def test_registry_without_raw_long_reads_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:

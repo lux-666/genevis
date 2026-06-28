@@ -69,6 +69,8 @@ def enter_genome_survey(state: TopLevelState) -> dict:
 
 def resolve_survey_inputs(state: TopLevelState) -> dict:
     """Resolve short-read and long-read survey inputs from the asset registry."""
+    from app.stages.base import load_assets_from_registry
+
     registry_ref = state.get("asset_registry_ref")
     if not registry_ref:
         return _fail_update(state, "missing asset_registry_ref for genome_survey")
@@ -77,17 +79,11 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
     if not registry_path.exists():
         return _fail_update(state, f"asset registry not found: {registry_ref}")
 
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    assets = registry.get("assets", [])
-    clean_short = _assets_of_type(assets, "clean_short_dna_reads")
-    raw_short = _assets_of_type(assets, "raw_short_dna_reads")
-    clean_long = _assets_of_type(assets, "clean_long_reads")
-    raw_long = _assets_of_type(assets, "raw_long_reads")
-    long_reads = [
-        asset
-        for asset in assets
-        if asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"}
-    ]
+    clean_short = load_assets_from_registry(state, ["clean_short_dna_reads"])
+    raw_short = load_assets_from_registry(state, ["raw_short_dna_reads"])
+    clean_long = load_assets_from_registry(state, ["clean_long_reads"])
+    raw_long = load_assets_from_registry(state, ["raw_long_reads"])
+    long_reads = load_assets_from_registry(state, ["raw_long_reads", "clean_long_reads"])
 
     return _update_genome_survey_output(
         state,
@@ -509,10 +505,6 @@ def _parse_genomescope_summary(path: Path) -> tuple[dict[str, Any], list[str]]:
     if not parsed:
         notes.append("genomescope2_estimates_unparsed")
     return estimates, notes
-
-
-def _assets_of_type(assets: list[dict[str, Any]], asset_type: str) -> list[dict[str, Any]]:
-    return [asset for asset in assets if asset.get("asset_type") == asset_type]
 
 
 def _asset_ids(assets: list[dict[str, Any]]) -> list[str]:

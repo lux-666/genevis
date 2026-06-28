@@ -1,9 +1,11 @@
-"""Shared path helpers for stage subgraphs."""
+"""Shared utilities for stage nodes."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from app.schemas.state import TopLevelState
 
@@ -20,119 +22,280 @@ def absolute_data_dir(state: TopLevelState) -> Path:
     return Path(state.get("data_dir", "data")).expanduser().resolve(strict=False)
 
 
+# ============================================================================
+# Universal Resource Resolution System
+# ============================================================================
+
+@dataclass
+class ResourceSpec:
+    """Specification for resolving a resource.
+
+    Defines what resource to find and where to look for it.
+    """
+
+    resource_type: str
+    """Type identifier: 'assembly', 'reads', 'clean_reads', 'masked_assembly', etc."""
+
+    prefer_stages: list[str] = field(default_factory=list)
+    """Stage names to check first, in priority order."""
+
+    output_keys: dict[str, list[str]] = field(default_factory=dict)
+    """Output keys to search in each stage: {stage_name: [key1, key2]}"""
+
+    asset_types: list[str] = field(default_factory=list)
+    """Asset types to search in asset registry as fallback."""
+
+    required: bool = True
+    """Whether this resource is required (fail if missing) or optional."""
+
+    allow_multiple: bool = False
+    """Whether to return all matches (True) or first match (False)."""
+
+
+@dataclass
+class ResourceResolution:
+    """Result of resource resolution."""
+
+    found: bool
+    """Whether the resource was found."""
+
+    paths: list[str]
+    """Resolved paths (multiple if allow_multiple=True)."""
+
+    source: str
+    """Source identifier: 'run_config', '<stage_name>', 'asset_registry', or 'missing'."""
+
+    source_type: str
+    """Source type: 'override', 'stage_output', 'asset', or 'missing'."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Additional metadata (platform, format, etc.)."""
+
+    @property
+    def path(self) -> str | None:
+        """Convenience property for single-path access."""
+        return self.paths[0] if self.paths else None
+
+
+def resolve_stage_resource(
+    state: TopLevelState,
+    *,
+    resource_spec: ResourceSpec,
+    override: str | None = None,
+) -> ResourceResolution:
+    """
+    Universal resource resolver for all stage inputs.
+
+    Resolution order:
+    1. RunConfig override (if provided)
+    2. Preferred stages outputs (check unified + legacy keys)
+    3. All stage outputs in reverse STAGE_ORDER (auto-fallback)
+    4. Asset registry (specified asset_types)
+
+    Args:
+        state: TopLevelState
+        resource_spec: What resource to find
+        override: Optional run_config override path
+
+    Returns:
+        ResourceResolution with paths, source, metadata
+
+    Examples:
+        # Resolve assembly
+        spec = ResourceSpec(
+            resource_type="assembly",
+            prefer_stages=["t2t", "hic_scaffolding", "assembly_review"],
+            output_keys={
+                "t2t": ["final_assembly_for_downstream"],
+                "hic_scaffolding": ["final_assembly_for_downstream"],
+            },
+            asset_types=["assembly_fasta_registered"],
+        )
+        resolution = resolve_stage_resource(state, resource_spec=spec)
+
+        # Resolve reads
+        spec = ResourceSpec(
+            resource_type="clean_reads",
+            prefer_stages=["read_qc"],
+            output_keys={"read_qc": ["filtered_long_reads_ref"]},
+            asset_types=["clean_long_reads"],
+        )
+        resolution = resolve_stage_resource(state, resource_spec=spec)
+    """
+    # 1. RunConfig override
+    if override:
+        return ResourceResolution(
+            found=True,
+            paths=[str(override)],
+            source="run_config",
+            source_type="override",
+        )
+
+    outputs = state.get("stage_outputs") or {}
+
+    # 2. Check preferred stages
+    if resource_spec.prefer_stages:
+        for stage in resource_spec.prefer_stages:
+            resolution = _check_stage_output(stage, outputs, resource_spec)
+            if resolution:
+                return resolution
+
+    # 3. Auto-fallback: check all stages in reverse STAGE_ORDER
+    from app.stages import STAGE_ORDER
+    for stage in reversed(STAGE_ORDER):
+        if stage in resource_spec.prefer_stages:
+            continue  # Already checked
+        resolution = _check_stage_output(stage, outputs, resource_spec)
+        if resolution:
+            return resolution
+
+    # 4. Fallback to asset registry
+    if resource_spec.asset_types:
+        resolution = _check_asset_registry(state, resource_spec)
+        if resolution:
+            return resolution
+
+    # Not found
+    return ResourceResolution(
+        found=False,
+        paths=[],
+        source="missing",
+        source_type="missing",
+    )
+
+
+def _check_stage_output(
+    stage: str,
+    outputs: dict[str, Any],
+    spec: ResourceSpec,
+) -> ResourceResolution | None:
+    """Check if a stage output contains the resource."""
+    stage_out = outputs.get(stage) or {}
+
+    # First check unified key (final_*_for_downstream)
+    unified_key = f"final_{spec.resource_type}_for_downstream"
+    if stage_out.get(unified_key):
+        return ResourceResolution(
+            found=True,
+            paths=[str(stage_out[unified_key])],
+            source=stage,
+            source_type="stage_output",
+        )
+
+    # Then check stage-specific keys
+    keys_to_check = spec.output_keys.get(stage, [])
+    for key in keys_to_check:
+        if stage_out.get(key):
+            value = stage_out[key]
+            # Handle both single value and list
+            if isinstance(value, list):
+                paths = [str(v) for v in value if v]
+            else:
+                paths = [str(value)]
+
+            if paths:
+                return ResourceResolution(
+                    found=True,
+                    paths=paths if spec.allow_multiple else paths[:1],
+                    source=stage,
+                    source_type="stage_output",
+                )
+
+    return None
+
+
+def _check_asset_registry(
+    state: TopLevelState,
+    spec: ResourceSpec,
+) -> ResourceResolution | None:
+    """Check if asset registry contains the resource."""
+    assets = load_assets_from_registry(state, spec.asset_types)
+    if not assets:
+        return None
+
+    paths = [str(asset["path"]) for asset in assets if asset.get("path")]
+    if not paths:
+        return None
+
+    # Extract metadata from first asset
+    first_asset = assets[0]
+    metadata = {
+        "platform": first_asset.get("platform"),
+        "format": first_asset.get("format"),
+        "asset_type": first_asset.get("asset_type"),
+    }
+
+    return ResourceResolution(
+        found=True,
+        paths=paths if spec.allow_multiple else paths[:1],
+        source="asset_registry",
+        source_type="asset",
+        metadata=metadata,
+    )
+
+
+def load_assets_from_registry(
+    state: TopLevelState,
+    asset_types: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Load assets from registry by type.
+
+    Helper for reducing asset registry query boilerplate.
+    Handles JSON parsing errors gracefully.
+
+    Args:
+        state: TopLevelState
+        asset_types: List of asset_type values to match
+
+    Returns:
+        List of matching assets, or empty list if not found/error
+    """
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return []
+
+    registry_path = Path(str(registry_ref))
+    if not registry_path.exists():
+        return []
+
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        assets = registry.get("assets", [])
+        return [
+            asset for asset in assets
+            if asset.get("asset_type") in asset_types
+        ]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+# ============================================================================
+# Backward Compatibility Wrappers
+# ============================================================================
+
 def resolve_current_assembly(
     state: TopLevelState,
     *,
     override: str | None = None,
     prefer_stages: list[str] | None = None,
 ) -> tuple[str | None, str]:
-    """Resolve the current best assembly from state.
-
-    This resolver supports the three-layer control architecture:
-    1. TUI/Plan layer: requested_stages controls which stages run
-    2. RunConfig layer: override parameter allows stage-specific config
-    3. Stage internal: each stage can specify prefer_stages for its needs
-
-    Resolution order:
-    1. RunConfig override (if provided) - Layer 2 control
-    2. Preferred stages outputs (if specified, in order) - Layer 3 control
-    3. All stage outputs in reverse STAGE_ORDER (automatic fallback)
-    4. Asset registry (assembly_fasta_registered) - supports Layer 1 skips
-
-    Args:
-        state: TopLevelState
-        override: Optional path override from run_config (Layer 2)
-        prefer_stages: Optional list of stage names to check first, in order (Layer 3)
-
-    Returns:
-        (assembly_path, source)
-        source: "run_config" | "<stage_name>" | "asset_registry" | "missing"
-
-    Examples:
-        # hic_scaffolding: prefer assembly_review (Layer 3 preference)
-        assembly_ref, source = resolve_current_assembly(state, prefer_stages=["assembly_review"])
-
-        # t2t: with run_config override (Layer 2) + Layer 3 preference
-        assembly_ref, source = resolve_current_assembly(
-            state,
-            override=config.get("assembly_fasta_ref"),
-            prefer_stages=["hic_scaffolding", "assembly_review"]
-        )
-
-        # When assembly/hic skipped via requested_stages (Layer 1), falls back to asset_registry
-        assembly_ref, source = resolve_current_assembly(
-            state,
-            prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]
-        )
     """
-    # Layer 2: Run config override (highest priority)
-    if override:
-        return str(override), "run_config"
+    Resolve assembly (backward compatibility wrapper).
 
-    outputs = state.get("stage_outputs") or {}
-
-    # Layer 3: Check preferred stages (in order)
-    if prefer_stages:
-        for stage in prefer_stages:
-            stage_out = outputs.get(stage) or {}
-            # Unified contract key (preferred)
-            if stage_out.get("final_assembly_for_downstream"):
-                return str(stage_out["final_assembly_for_downstream"]), stage
-            # Legacy fallback (for backward compatibility)
-            legacy_keys = _get_legacy_assembly_keys(stage)
-            for key in legacy_keys:
-                if stage_out.get(key):
-                    return str(stage_out[key]), stage
-
-    # Auto-fallback: check all stages in reverse STAGE_ORDER
-    from app.stages import STAGE_ORDER
-
-    for stage in reversed(STAGE_ORDER):
-        if prefer_stages and stage in prefer_stages:
-            continue  # Already checked above
-        stage_out = outputs.get(stage) or {}
-        if stage_out.get("final_assembly_for_downstream"):
-            return str(stage_out["final_assembly_for_downstream"]), stage
-
-    # Layer 1 support: Fallback to asset registry (user-provided assembly)
-    # This handles scenarios where assembly stages were skipped via requested_stages
-    assembly_ref = _load_assembly_from_registry(state)
-    if assembly_ref:
-        return assembly_ref, "asset_registry"
-
-    return None, "missing"
-
-
-def _get_legacy_assembly_keys(stage: str) -> list[str]:
-    """Return legacy output keys for a stage, in priority order."""
-    legacy_map = {
-        "assembly_review": ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"],
-        "hic_scaffolding": ["final_assembly_for_annotation", "chromosome_scaffolded_assembly_candidate_ref"],
-        "t2t": ["final_assembly_for_annotation"],
-    }
-    return legacy_map.get(stage, [])
-
-
-def _load_assembly_from_registry(state: TopLevelState) -> str | None:
-    """Load assembly_fasta_registered from asset registry.
-
-    This supports Layer 1 (TUI/Plan) control: when assembly stages are skipped
-    via requested_stages, downstream stages can still find user-provided assemblies.
+    This function maintains the original API for existing code.
+    New code should use resolve_stage_resource() directly.
     """
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return None
+    spec = ResourceSpec(
+        resource_type="assembly",
+        prefer_stages=prefer_stages or [],
+        output_keys={
+            "t2t": ["final_assembly_for_annotation"],
+            "hic_scaffolding": ["final_assembly_for_annotation", "chromosome_scaffolded_assembly_candidate_ref"],
+            "assembly_review": ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"],
+        },
+        asset_types=["assembly_fasta_registered"],
+    )
 
-    registry_path = Path(str(registry_ref))
-    if not registry_path.exists():
-        return None
-
-    try:
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        for asset in registry.get("assets", []):
-            if asset.get("asset_type") == "assembly_fasta_registered" and asset.get("path"):
-                return str(asset["path"])
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    return None
+    resolution = resolve_stage_resource(state, resource_spec=spec, override=override)
+    return (resolution.path, resolution.source)
