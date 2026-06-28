@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from typing import Any
@@ -34,6 +35,9 @@ try:
     _HAS_QUESTIONARY = True
 except ImportError:
     _HAS_QUESTIONARY = False
+
+
+logger = logging.getLogger(__name__)
 
 
 class _UserAbort(Exception):
@@ -123,23 +127,22 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                         print("\n--- Re-validating after manifest update ---\n")
                         validation_attempted = _attempt_preflight_validation(plan)
                         if validation_attempted:
-                            # Still has blocking issues
+                            # Still has blocking issues - reset to stage selection
                             print("\n⚠️  Validation still failed. Restarting from stage selection.\n")
+                            plan = plan.model_copy(update={
+                                "selected_stages": None,
+                                "resolved_execution_order": None,
+                                "selected_methods": None,
+                                "shared_parameters": None,
+                                "method_parameters": None,
+                                "stage_parameters": None,
+                                "confirmed": False,
+                            })
+                            plan_ref = save_plan_to_default_path(plan)
+                            continue
                         else:
+                            # Validation passed - continue to confirmation
                             print("✓ Validation passed! Continuing...\n")
-
-                        # Reset to stage selection to allow user to reconfigure
-                        plan = plan.model_copy(update={
-                            "selected_stages": None,
-                            "resolved_execution_order": None,
-                            "selected_methods": None,
-                            "shared_parameters": None,
-                            "method_parameters": None,
-                            "stage_parameters": None,
-                            "confirmed": False,
-                        })
-                        plan_ref = save_plan_to_default_path(plan)
-                        continue
                     elif choice == "proceed_anyway":
                         print("\n⚠️  Warning: Ignoring validation errors, continuing execution...")
 
@@ -961,6 +964,7 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
         return False
 
     except Exception:
+        logger.debug("Skipping preflight validation after unexpected error.", exc_info=True)
         # If validation fails for any reason, just skip it
         # (e.g., manifest issues will be caught during actual execution)
         return False

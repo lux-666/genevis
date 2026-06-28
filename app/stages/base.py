@@ -115,14 +115,14 @@ def resolve_stage_resource(
         >>> print(resolution.source)  # "hic_scaffolding" (if it ran)
 
         # Example 2: Auto-fallback to non-preferred stage
-        >>> # Assume only assembly_dedup ran (not in prefer_stages)
+        >>> # Assume only assembly ran (not in prefer_stages)
         >>> state.stage_outputs = {
-        ...     "assembly_dedup": {
-        ...         "deduplicated_assembly_ref": "data/dedup.fa"
+        ...     "assembly": {
+        ...         "draft_assembly_ref": "data/draft.fa"
         ...     }
         ... }
         >>> resolution = resolve_stage_resource(state, resource_spec=spec)
-        >>> print(resolution.source)  # "assembly_dedup" (auto-fallback)
+        >>> print(resolution.source)  # "assembly" (auto-fallback)
         >>> print(resolution.source_type)  # "stage_output"
 
         # Example 3: Fallback to asset registry

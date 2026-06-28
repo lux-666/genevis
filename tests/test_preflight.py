@@ -111,6 +111,69 @@ class PreflightCheckTests(unittest.TestCase):
             self.assertTrue(check.can_run)
             self.assertEqual(len(check.missing), 0)
 
+    def test_gene_annotation_requires_softmask_without_fallback_reason(self):
+        """Gene annotation should not pass with only an unmasked registered assembly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=tmpdir,
+            )
+            state["asset_registry_ref"] = str(registry)
+            state["stage_outputs"] = {}
+
+            check = check_stage_prerequisites(state, "gene_annotation")
+
+            self.assertFalse(check.can_run)
+            self.assertEqual([res.resource_name for res in check.missing], ["masked assembly"])
+            self.assertIn("repeat_annotation", check.suggestions[0])
+
+    def test_gene_annotation_allows_explicit_unmasked_fallback_reason(self):
+        """Gene annotation may use unmasked assembly only with an explicit fallback reason."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=tmpdir,
+            )
+            state["asset_registry_ref"] = str(registry)
+            state["stage_outputs"] = {}
+            state["skip_reasons"] = {"repeat_annotation": "repeat_annotation_skipped_by_user"}
+
+            check = check_stage_prerequisites(state, "gene_annotation")
+
+            self.assertTrue(check.can_run)
+            self.assertEqual(len(check.missing), 0)
+            self.assertIn("Optional masked assembly not found", check.warnings[0])
+
 
 class PreflightValidationTests(unittest.TestCase):
     """Tests for validate_execution_plan()."""
@@ -252,6 +315,95 @@ class PreflightValidationTests(unittest.TestCase):
             self.assertFalse(validation.checks["read_qc"].can_run)
             # hic_scaffolding would pass but plan is invalid due to earlier blocker
             self.assertTrue(validation.checks["hic_scaffolding"].can_run)
+
+    def test_validate_execution_plan_repeat_satisfies_gene_softmask(self):
+        """repeat_annotation in the same plan should satisfy gene_annotation's softmask requirement."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=tmpdir,
+            )
+            state["asset_registry_ref"] = str(registry)
+            state["stage_outputs"] = {}
+
+            validation = validate_execution_plan(
+                state,
+                requested_stages=["repeat_annotation", "gene_annotation"],
+            )
+
+            self.assertTrue(validation.valid)
+            self.assertTrue(validation.checks["repeat_annotation"].can_run)
+            self.assertTrue(validation.checks["gene_annotation"].can_run)
+
+    def test_validate_execution_plan_function_annotation_requires_gene_proteins(self):
+        """function_annotation alone should fail before runtime when proteins are missing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = self._write_registry(tmpdir, assets=[])
+
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=tmpdir,
+            )
+            state["asset_registry_ref"] = str(registry)
+            state["stage_outputs"] = {}
+
+            validation = validate_execution_plan(
+                state,
+                requested_stages=["function_annotation"],
+            )
+
+            self.assertFalse(validation.valid)
+            self.assertEqual(validation.first_blocker, "function_annotation")
+            self.assertEqual(validation.checks["function_annotation"].missing[0].resource_name, "predicted proteins")
+
+    def test_validate_execution_plan_gene_satisfies_function_proteins(self):
+        """gene_annotation in the same plan should satisfy function_annotation's protein input."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly_path = Path(tmpdir) / "assembly.fa"
+            assembly_path.write_text(">contig1\nACGT\n", encoding="utf-8")
+
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:assembly:1",
+                        "asset_type": "assembly_fasta_registered",
+                        "path": str(assembly_path),
+                    }
+                ],
+            )
+
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
+                data_dir=tmpdir,
+            )
+            state["asset_registry_ref"] = str(registry)
+            state["stage_outputs"] = {}
+
+            validation = validate_execution_plan(
+                state,
+                requested_stages=["repeat_annotation", "gene_annotation", "function_annotation"],
+            )
+
+            self.assertTrue(validation.valid)
+            self.assertTrue(validation.checks["function_annotation"].can_run)
 
 
 if __name__ == "__main__":

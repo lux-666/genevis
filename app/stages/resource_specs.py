@@ -35,6 +35,35 @@ MASKED_ASSEMBLY_SPEC = ResourceSpec(
     required=False,
 )
 
+PREDICTED_PROTEINS_SPEC = ResourceSpec(
+    resource_type="predicted_proteins",
+    prefer_stages=["gene_annotation"],
+    output_keys={
+        "gene_annotation": ["proteins_fasta_ref", "predicted_proteins_ref", "predicted_proteins"],
+    },
+    asset_types=[],  # Function annotation only consumes gene_annotation outputs
+    required=True,
+)
+
+# ============================================================================
+# Stage Output Registry
+# ============================================================================
+
+STAGE_OUTPUTS = {
+    "read_qc": ["assembly_input_ref", "filtered_long_reads_ref"],
+    "assembly": ["draft_assembly_ref", "selected_candidate_refs"],
+    "assembly_dedup": [
+        "purged_assembly_ref",
+        "purged_candidate_ref",
+        "final_assembly_for_scaffolding_or_annotation",
+    ],
+    "assembly_review": ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"],
+    "hic_scaffolding": ["final_assembly_for_annotation", "chromosome_scaffolded_assembly_candidate_ref"],
+    "t2t": ["final_assembly_for_annotation"],
+    "repeat_annotation": ["softmasked_genome_ref"],
+    "gene_annotation": ["proteins_fasta_ref", "predicted_proteins_ref", "predicted_proteins"],
+}
+
 # ============================================================================
 # Reads Resources
 # ============================================================================
@@ -142,6 +171,12 @@ STAGE_REQUIREMENTS = {
         {
             "name": "masked assembly",
             "spec": MASKED_ASSEMBLY_SPEC,
+        },
+    ],
+    "function_annotation": [
+        {
+            "name": "predicted proteins",
+            "spec": PREDICTED_PROTEINS_SPEC,
         },
     ],
 }

@@ -187,7 +187,7 @@ class InteractiveLoopTests(unittest.TestCase):
             # "y" accept draft (nothing left to clarify), "y" confirm.
             inputs = iter(["y", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-                 patch("builtins.input", side_effect=lambda _: next(inputs)), \
+                 patch("builtins.input", side_effect=lambda *args: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
@@ -438,7 +438,7 @@ class InteractiveLoopTests(unittest.TestCase):
                 "", "", "", "", "", "y",
             ])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-                 patch("builtins.input", side_effect=lambda _: next(inputs)), \
+                 patch("builtins.input", side_effect=lambda *args: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
@@ -464,6 +464,32 @@ class InteractiveLoopTests(unittest.TestCase):
         restarted = mock_save.call_args_list[1].args[0]
         self.assertIsNone(restarted.shared_parameters)
         self.assertIsNone(restarted.method_parameters)
+
+    def test_provide_data_revalidation_pass_continues_to_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                selected_stages=["assembly"],
+                resolved_execution_order=["assembly"],
+                selected_methods={"assembly": "assembly.candidate.flye"},
+                shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 500_000_000},
+                method_parameters={"assembly.candidate.flye": {"threads": 4}},
+            )
+            args = _ask_ns()
+            inputs = iter(["", "y"])
+            with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", side_effect=[True, False]) as mock_preflight, \
+                 patch("app.entrypoints.ask_interactive._prompt_validation_action", return_value="provide_data"), \
+                 patch("builtins.input", side_effect=lambda *args: next(inputs)), \
+                 patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
+                code = run_interactive_loop(plan, args)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(mock_preflight.call_count, 2)
+            mock_exec.assert_called_once()
 
     def test_parameter_prompt_then_confirm(self):
         with tempfile.TemporaryDirectory() as tmp:

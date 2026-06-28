@@ -62,9 +62,15 @@ def enter_repeat_annotation(state: TopLevelState) -> dict:
 
 def resolve_repeat_inputs(state: TopLevelState) -> dict:
     """Resolve assembly and optional provided repeat library inputs."""
-    final_assembly_ref = _final_assembly_for_annotation(state)
-    if not final_assembly_ref:
+    # Use resolve_stage_resource to match preflight behavior
+    from app.stages.base import resolve_stage_resource
+    from app.stages.resource_specs import ASSEMBLY_SPEC
+
+    resolution = resolve_stage_resource(state, resource_spec=ASSEMBLY_SPEC)
+    if not resolution.found:
         return _fail_update(state, "missing final_assembly_for_annotation for repeat_annotation")
+
+    final_assembly_ref = resolution.path
 
     repeat_libraries = _repeat_library_assets(state)
     confidence, low_confidence_reasons = _repeat_confidence(state)
@@ -748,26 +754,6 @@ def _unique_refs(refs: list[str]) -> list[str]:
         if ref and ref not in unique:
             unique.append(ref)
     return unique
-
-
-def _final_assembly_for_annotation(state: TopLevelState) -> str | None:
-    outputs = state.get("stage_outputs") or {}
-    t2t_out = outputs.get("t2t") or {}
-    value = t2t_out.get("final_assembly_for_annotation")
-    if value:
-        return str(value)
-
-    hic_out = outputs.get("hic_scaffolding") or {}
-    value = hic_out.get("final_assembly_for_annotation")
-    if value:
-        return str(value)
-
-    review_out = outputs.get("assembly_review") or {}
-    for key in ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"]:
-        value = review_out.get(key)
-        if value:
-            return str(value)
-    return None
 
 
 def _parse_tbl_repeat_percentage(tbl_path: Path) -> float | None:

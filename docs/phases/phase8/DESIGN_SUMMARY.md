@@ -1,6 +1,6 @@
 # Phase 8 设计总结
 
-**状态**: ✅ Phase 8 完成，Phase 8.5 核心架构完成  
+**状态**: ✅ Phase 8 完成，Phase 8.5 完成
 **日期**: 2026-06-28
 
 ---
@@ -15,7 +15,7 @@
 5. ✅ 修复 3 个 scenario 4 bug
 6. ✅ 79/79 测试通过
 
-### Phase 8.5: Universal Resource Resolver（核心架构完成）
+### Phase 8.5: Universal Resource Resolver（完成）
 1. ✅ 通用 Resource Resolver API
 2. ✅ Preflight Check API（供 TUI 使用）
 3. ✅ Resource Specs Registry
@@ -230,24 +230,28 @@ def _get_stage_requirements(stage: str) -> list[dict]:
 
 ---
 
-## 剩余工作（Phase 8.5）
+## Phase 8.5 完成范围
 
-### 1. TUI Integration（2h）
-- 修改 `app/entrypoints/ask_interactive.py`
-- 集成 `validate_execution_plan()` 调用
-- 显示友好错误和建议
+### 1. TUI Integration
+- `app/entrypoints/ask_interactive.py` 已集成 `validate_execution_plan()`
+- 验证失败时显示缺失资源和建议
+- 支持修改 stage、补充数据后重试、以及 proceed anyway
+- `provide_data` revalidation 成功后会继续进入确认流程
 
-### 2. 全面重构 Stages（3-4h）
-- read_qc - 使用 `load_assets_from_registry()`
-- genome_survey - 使用 `load_assets_from_registry()`
-- assembly - 使用 `resolve_stage_resource()`（复杂，需单独规划）
+### 2. Stage Runtime Alignment
+- `repeat_annotation` runtime 改用 `resolve_stage_resource(ASSEMBLY_SPEC)`
+- `gene_annotation` softmask preflight 规则与 runtime 对齐
+- `function_annotation` 增加 predicted proteins requirement
 
-### 3. 测试和文档（2h）
-- Preflight API 单元测试
-- TUI validation 集成测试
-- 更新用户文档
+### 3. 测试和文档
+- Preflight API 增加回归测试
+- TUI provide-data recovery 增加回归测试
+- Phase 8.5 过程文档已合并为设计文档和完成报告
 
-**总工作量**: 7-8 小时
+### 后续可选演进
+- strict validation 模式
+- LLM/知识库生成 stage requirements
+- 更完整的 stage IO contract，供 runtime、preflight、docs 共享
 
 ---
 
@@ -328,7 +332,8 @@ def _get_stage_requirements(stage: str) -> list[dict]:
 
 ### 实施文档
 - [README.md](README.md) - Phase 8 主索引
-- [PHASE_8.5_PROGRESS.md](PHASE_8.5_PROGRESS.md) - 当前进度
+- [PHASE_8.5_DESIGN.md](PHASE_8.5_DESIGN.md) - Phase 8.5 当前设计
+- [PHASE_8.5_COMPLETE.md](PHASE_8.5_COMPLETE.md) - Phase 8.5 完成和修复记录
 
 ### 归档讨论
 - [archive/ASSEMBLY_RESOLUTION_REFACTOR.md](archive/ASSEMBLY_RESOLUTION_REFACTOR.md) - 重构讨论过程

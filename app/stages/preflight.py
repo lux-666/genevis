@@ -76,6 +76,8 @@ class PlanValidation:
 def check_stage_prerequisites(
     state: TopLevelState,
     stage: str,
+    planned_resources: dict[str, list[str]] | None = None,
+    stages_processed: set[str] | None = None,
 ) -> StageCheck:
     """
     Check if a stage can run given current state.
@@ -86,6 +88,9 @@ def check_stage_prerequisites(
     Args:
         state: Current state (with asset_registry_ref, stage_outputs)
         stage: Stage name to check
+        planned_resources: Resources that will be produced by upstream stages
+                          in this plan: {stage_name: [output_key, ...]}
+        stages_processed: Set of stages already processed (to avoid circular deps)
 
     Returns:
         StageCheck with can_run, missing resources, suggestions
@@ -102,15 +107,25 @@ def check_stage_prerequisites(
 
     missing_resources: list[ResourceCheck] = []
     warnings: list[str] = []
+    planned_resources = planned_resources or {}
+    stages_processed = stages_processed or set()
 
     for req in requirements:
         spec = req["spec"]
         override = req.get("override")
 
+        # First check if any upstream stage in this plan will produce this resource
+        found_in_plan = _check_planned_resource(spec, planned_resources, stages_processed, stage)
+
+        if found_in_plan:
+            # This resource will be produced by an upstream stage in the plan
+            continue
+
+        # Otherwise check current state
         resolution = resolve_stage_resource(state, resource_spec=spec, override=override)
 
         if not resolution.found:
-            if spec.required:
+            if spec.required or _is_contextually_required(state, stage, spec):
                 missing_resources.append(ResourceCheck(
                     resource_name=req["name"],
                     spec=spec,
@@ -144,7 +159,7 @@ def validate_execution_plan(
     Validate if requested stages can run.
 
     Checks stage prerequisites in dependency order (STAGE_ORDER).
-    Stops at first blocking issue.
+    Simulates resource production from upstream stages in the plan.
 
     Args:
         state: Initial state (inventory completed)
@@ -154,6 +169,12 @@ def validate_execution_plan(
         PlanValidation with overall status, per-stage checks, suggestions
     """
     from app.stages import STAGE_ORDER
+    import copy
+
+    # Build a simulated state that accumulates resources from planned stages
+    simulated_state = copy.deepcopy(state)
+    produced_resources = _collect_planned_resources(requested_stages)
+    stages_processed: set[str] = set()
 
     # Check stages in dependency order
     checks: dict[str, StageCheck] = {}
@@ -163,11 +184,16 @@ def validate_execution_plan(
         if stage not in requested_stages:
             continue
 
-        check = check_stage_prerequisites(state, stage)
+        check = check_stage_prerequisites(simulated_state, stage, produced_resources, stages_processed)
         checks[stage] = check
 
         if not check.can_run and first_blocker is None:
             first_blocker = stage
+
+        # Simulate this stage's outputs being added to state
+        if check.can_run:
+            _simulate_stage_outputs(simulated_state, stage)
+            stages_processed.add(stage)
 
     valid = first_blocker is None
     summary = _build_summary(valid, first_blocker, checks)
@@ -217,8 +243,36 @@ def _generate_suggestions(stage: str, missing: list[ResourceCheck]) -> list[str]
                 "Provide 'clean_long_reads' asset in manifest, "
                 "or add 'read_qc' stage to generate clean reads"
             )
+        elif res.resource_name == "masked assembly":
+            suggestions.append(
+                "Add upstream stage 'repeat_annotation' to produce a softmasked genome, "
+                "or provide an explicit repeat_annotation skip/fallback reason."
+            )
+        elif res.resource_name == "predicted proteins":
+            suggestions.append(
+                "Add upstream stage 'gene_annotation' to produce predicted proteins before function_annotation."
+            )
 
     return suggestions
+
+
+def _is_contextually_required(state: TopLevelState, stage: str, spec: ResourceSpec) -> bool:
+    """Return whether an optional resource is required by this stage context."""
+    if stage == "gene_annotation" and spec.resource_type == "masked_assembly":
+        return not _has_unmasked_fallback_reason(state)
+    return False
+
+
+def _has_unmasked_fallback_reason(state: TopLevelState) -> bool:
+    """Mirror gene_annotation runtime's explicit unmasked fallback gate."""
+    outputs = state.get("stage_outputs") or {}
+    gene_out = outputs.get("gene_annotation") or {}
+    if gene_out.get("unmasked_fallback_reason"):
+        return True
+    repeat_out = outputs.get("repeat_annotation") or {}
+    if repeat_out.get("unmasked_fallback_reason"):
+        return True
+    return bool((state.get("skip_reasons") or {}).get("repeat_annotation"))
 
 
 def _build_summary(valid: bool, first_blocker: str | None, checks: dict[str, StageCheck]) -> str:
@@ -244,3 +298,76 @@ def _build_overall_suggestions(checks: dict[str, StageCheck], first_blocker: str
         return blocker_check.suggestions
 
     return ["Review your manifest and ensure all required assets are provided."]
+
+
+def _collect_planned_resources(requested_stages: list[str]) -> dict[str, list[str]]:
+    """
+    Collect what resources each stage in the plan will produce.
+
+    Returns:
+        {stage_name: [output_key, ...]}
+    """
+    from app.stages.resource_specs import STAGE_OUTPUTS
+
+    return {
+        stage: outputs
+        for stage in requested_stages
+        if (outputs := STAGE_OUTPUTS.get(stage))
+    }
+
+
+def _check_planned_resource(
+    spec: ResourceSpec,
+    planned_resources: dict[str, list[str]],
+    stages_processed: set[str],
+    current_stage: str,
+) -> bool:
+    """
+    Check if a ResourceSpec will be satisfied by upstream stages in the plan.
+
+    Args:
+        spec: The resource specification to check
+        planned_resources: {stage_name: [output_key, ...]} from _collect_planned_resources
+        stages_processed: Set of stages already checked/processed (upstream of current)
+        current_stage: The stage we're currently checking (to avoid circular deps)
+
+    Returns:
+        True if an upstream stage in the plan will produce this resource
+    """
+    # Check if any preferred stage in the spec will run and produce a matching output key
+    # BUT only consider stages that have already been processed (are upstream)
+    for stage in spec.prefer_stages:
+        if stage == current_stage:
+            # A stage can't satisfy its own requirements
+            continue
+        if stage in planned_resources and stage in stages_processed:
+            planned_outputs = planned_resources[stage]
+            expected_outputs = spec.output_keys.get(stage, [])
+
+            # If this stage will produce any of the expected output keys, resource will be available
+            if any(out in planned_outputs for out in expected_outputs):
+                return True
+
+    return False
+
+
+def _simulate_stage_outputs(state: TopLevelState, stage: str) -> None:
+    """
+    Simulate a stage having run by adding placeholder outputs to state.
+
+    This mutates the state to help downstream stages in the same plan
+    see that their inputs will be available.
+
+    Args:
+        state: State to mutate
+        stage: Stage that just "ran"
+    """
+    # Add placeholder stage outputs
+    if "stage_outputs" not in state:
+        state["stage_outputs"] = {}
+
+    from app.stages.resource_specs import STAGE_OUTPUTS
+
+    outputs = {key: "placeholder" for key in STAGE_OUTPUTS.get(stage, [])}
+    if outputs:
+        state["stage_outputs"][stage] = outputs

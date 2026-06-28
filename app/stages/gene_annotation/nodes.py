@@ -2003,20 +2003,6 @@ def _explicit_unmasked_fallback_reason(state: TopLevelState) -> str | None:
     return str(skip_reason) if skip_reason else None
 
 
-def _final_assembly_for_annotation(state: TopLevelState) -> str | None:
-    outputs = state.get("stage_outputs") or {}
-    hic_out = outputs.get("hic_scaffolding") or {}
-    value = hic_out.get("final_assembly_for_annotation")
-    if value:
-        return str(value)
-    review_out = outputs.get("assembly_review") or {}
-    for key in ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"]:
-        value = review_out.get(key)
-        if value:
-            return str(value)
-    return None
-
-
 def _registry_assets(state: TopLevelState, asset_types: set[str]) -> list[dict[str, Any]]:
     registry_ref = state.get("asset_registry_ref")
     if not registry_ref:
