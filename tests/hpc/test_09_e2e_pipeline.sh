@@ -89,7 +89,10 @@ cat > "$RC" <<EORC
   "read_qc": {
     "length_filter": {
       "method": "read_qc.length_filter.seqkit_seq",
-      "approved": true
+      "approved": true,
+      "thresholds": {
+        "min_len": 1000
+      }
     }
   },
   "assembly": {
