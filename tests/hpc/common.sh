@@ -203,6 +203,28 @@ latest_test04_assembly() {
     return 1
 }
 
+latest_hpc_assembly() {
+    # Prefer a materialized assembly from the newest smoke/E2E-style session.
+    # This lets quick smoke runs reuse a known assembly instead of re-running
+    # the slow assembly stage every time.
+    local -a runs
+    local run candidate i
+    runs=("${TEST_DATA_ROOT}"/runs/hpc-test04-* "${TEST_DATA_ROOT}"/runs/hpc-test09-*)
+    for (( i=${#runs[@]} - 1; i >= 0; i-- )); do
+        run="${runs[$i]}"
+        [[ -d "$run" ]] || continue
+        for candidate in "$run"/artifacts/assembly_dedup/*/purged_assembly.fasta \
+                         "$run"/artifacts/assembly/*/flye/draft_assembly.fasta \
+                         "$run"/artifacts/assembly/*/draft_assembly.fasta; do
+            if [[ -s "$candidate" ]] && grep -q '^>' "$candidate" 2>/dev/null; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 # -------------------------------------------------------------------
 #  FASTA / FASTQ helpers
 # -------------------------------------------------------------------

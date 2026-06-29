@@ -52,7 +52,8 @@ PLATFORM="ont"
 SAMPLE_ID="hpc_test_sample"
 SPECIES="白海豚"
 
-REVIEW_ASSEMBLY=""
+REVIEW_ASSEMBLY="${REVIEW_ASSEMBLY:-}"
+TEST09_REUSE_ASSEMBLY="${TEST09_REUSE_ASSEMBLY:-true}"
 NCBI_REFERENCE_SOURCE_DIR="/data/input/Files/genevis/Metazoa.ncbi"
 
 ASSEMBLY_METHOD="flye"
@@ -108,6 +109,27 @@ check_config() {
         ((missing++))
     else
         ok "Long reads: $LONG_READS"
+    fi
+
+    if [[ -n "${REVIEW_ASSEMBLY:-}" ]]; then
+        if [[ -f "$REVIEW_ASSEMBLY" ]]; then
+            ok "Review assembly: $REVIEW_ASSEMBLY"
+        else
+            error "REVIEW_ASSEMBLY file not found: $REVIEW_ASSEMBLY"
+            ((missing++))
+        fi
+    elif [[ "${TEST09_REUSE_ASSEMBLY:-true}" == "true" ]]; then
+        local cached_assembly=""
+        cached_assembly=$(find "${TEST_DATA_ROOT:-${PROJECT_ROOT}/data_hpc_test}/runs" \
+            -path "*/artifacts/assembly/*/draft_assembly.fasta" -size +0 2>/dev/null | sort | tail -1 || true)
+        if [[ -n "$cached_assembly" ]]; then
+            ok "Review assembly: auto-reuse cached assembly"
+            ok "  $cached_assembly"
+        else
+            info "Review assembly: no cached assembly found; first run will assemble from reads"
+        fi
+    else
+        info "Review assembly reuse disabled; will assemble from reads"
     fi
 
     if [[ -z "${GENOME_SIZE_ESTIMATE:-}" ]]; then

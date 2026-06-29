@@ -82,9 +82,10 @@ def _render_assembly_review(requirements: dict, summary: dict) -> None:
         print("\ncandidates:")
         for cid in candidate_ids:
             ref = candidate_refs.get(cid, "<unknown>")
-            exists = Path(ref).exists() if ref != "<unknown>" else False
-            marker = "exists" if exists else "MISSING"
+            exists = _looks_like_existing_fasta(ref) if ref != "<unknown>" else False
+            marker = "FASTA ok" if exists else "MISSING/invalid FASTA"
             print(f"  [{cid}] {ref}  ({marker})")
+            _print_candidate_core_reports(requirements, cid, indent="    ")
 
     report_refs = requirements.get("report_refs") or {}
     if report_refs:
@@ -183,12 +184,30 @@ def prompt_assembly_review_decision(
     metadata: dict[str, Any] = {}
 
     if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence", "rerun"):
-        if len(candidate_ids) == 1:
-            candidate_id = candidate_ids[0]
+        selectable_candidates = list(candidate_ids)
+        if decision in {"accept", "pass", "continue_low_confidence"}:
+            selectable_candidates = _materialized_assembly_candidates(candidate_ids, candidate_refs)
+            if len(selectable_candidates) != len(candidate_ids):
+                skipped = [cid for cid in candidate_ids if cid not in selectable_candidates]
+                print("\nunavailable_candidates:")
+                for cid in skipped:
+                    ref = candidate_refs.get(cid, "")
+                    print(f"  - {cid}: FASTA missing or invalid ({ref})")
+            if not selectable_candidates:
+                print("error: no materialized assembly FASTA is available for accept", file=sys.stderr)
+                return None
+            _render_candidate_selection_evidence(requirements, selectable_candidates, candidate_refs)
+
+        if len(selectable_candidates) == 1:
+            candidate_id = selectable_candidates[0]
             final_assembly_ref = candidate_refs.get(candidate_id)
             print(f"  auto-selected candidate: {candidate_id}")
-        elif candidate_ids:
-            candidate_id = _prompt_choice("candidate", candidate_ids)
+        elif selectable_candidates:
+            candidate_id = _prompt_choice(
+                "candidate",
+                selectable_candidates,
+                _candidate_choice_descriptions(selectable_candidates, candidate_refs),
+            )
             if candidate_id is None:
                 return None
             final_assembly_ref = candidate_refs.get(candidate_id)
@@ -238,6 +257,99 @@ def prompt_assembly_review_decision(
     if metadata:
         result["metadata"] = metadata
     return result
+
+
+def _materialized_assembly_candidates(candidate_ids: list[str], candidate_refs: dict[str, Any]) -> list[str]:
+    return [
+        cid
+        for cid in candidate_ids
+        if _looks_like_existing_fasta(candidate_refs.get(cid))
+    ]
+
+
+def _looks_like_existing_fasta(path: Any) -> bool:
+    if not path:
+        return False
+    ref = Path(str(path))
+    if not ref.is_file():
+        return False
+    try:
+        with ref.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped:
+                    return stripped.startswith(">")
+    except OSError:
+        return False
+    return False
+
+
+def _render_candidate_selection_evidence(
+    requirements: dict[str, Any],
+    candidate_ids: list[str],
+    candidate_refs: dict[str, Any],
+) -> None:
+    if not candidate_ids:
+        return
+    print("\ncandidate_evidence:")
+    for cid in candidate_ids:
+        ref = candidate_refs.get(cid, "")
+        marker = "FASTA ok" if _looks_like_existing_fasta(ref) else "MISSING/invalid FASTA"
+        print(f"  [{cid}] {marker}")
+        if ref:
+            print(f"    assembly: {ref}")
+        _print_candidate_core_reports(requirements, cid, indent="    ")
+
+
+def _candidate_choice_descriptions(candidate_ids: list[str], candidate_refs: dict[str, Any]) -> dict[str, str]:
+    descriptions: dict[str, str] = {}
+    for cid in candidate_ids:
+        ref = candidate_refs.get(cid, "")
+        marker = "FASTA ok" if _looks_like_existing_fasta(ref) else "MISSING/invalid FASTA"
+        descriptions[cid] = f"{marker}; {ref}"
+    return descriptions
+
+
+def _print_candidate_core_reports(requirements: dict[str, Any], candidate_id: str, *, indent: str = "") -> None:
+    refs = _candidate_core_report_refs(requirements, candidate_id)
+    if not refs:
+        return
+    print(f"{indent}core_reports:")
+    for label, ref in refs:
+        print(f"{indent}  {label}: {ref}")
+
+
+def _candidate_core_report_refs(requirements: dict[str, Any], candidate_id: str) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    candidate_reports = requirements.get("candidate_report_refs") or {}
+    if isinstance(candidate_reports, dict):
+        for ref in candidate_reports.get(candidate_id) or []:
+            refs.append(("candidate_metric", str(ref)))
+
+    report_refs = requirements.get("report_refs") or {}
+    if isinstance(report_refs, dict):
+        for key in (
+            "assembly_candidate_comparison_report",
+            "assembly_review_report",
+            "candidate_comparison",
+            "assembly_review_report_data",
+        ):
+            if report_refs.get(key):
+                refs.append((key, str(report_refs[key])))
+
+    comparison = requirements.get("candidate_comparison_context") or {}
+    if isinstance(comparison, dict):
+        for key in ("assembly_candidate_comparison_report_ref", "candidate_comparison_ref"):
+            if comparison.get(key):
+                refs.append((key, str(comparison[key])))
+
+    deduped: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in refs:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
 
 
 def _print_selected_assembly_review_decision_effect(decision: str) -> None:
@@ -579,6 +691,10 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
                 print(f"    ref: {c['ref']}")
             if c.get("method"):
                 print(f"    method: {c['method']}")
+            if c.get("reports"):
+                print("    core_reports:")
+                for label, ref in c["reports"]:
+                    print(f"      {label}: {ref}")
 
     evidence = brief.get("evidence") or {}
     if evidence.get("metrics"):
@@ -636,7 +752,10 @@ def _brief_assembly_candidates(
         if pc.get("status"):
             entry["status"] = pc["status"]
         ref_path = Path(entry["ref"]) if entry.get("ref") else None
-        entry["exists"] = ref_path.exists() if ref_path else False
+        entry["exists"] = _looks_like_existing_fasta(ref_path) if ref_path else False
+        reports = _candidate_core_report_refs(requirements, cid)
+        if reports:
+            entry["reports"] = reports
         result.append(entry)
     return result
 

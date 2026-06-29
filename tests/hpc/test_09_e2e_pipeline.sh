@@ -21,9 +21,28 @@ section "Test 09: End-to-End Pipeline"
 
 # ---- Input verification ----
 info "Checking input data"
-for f in $LONG_READS; do
-    assert_file_nonempty "$f" "input long reads: $(basename "$f")"
-done
+USE_EXISTING_ASSEMBLY=false
+PREV_ASM="${REVIEW_ASSEMBLY:-}"
+if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
+    fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
+fi
+if [[ -z "$PREV_ASM" && "${TEST09_REUSE_ASSEMBLY:-true}" == "true" ]]; then
+    PREV_ASM=$(latest_hpc_assembly || true)
+fi
+if [[ -n "$PREV_ASM" ]]; then
+    assert_file_nonempty "$PREV_ASM" "input existing assembly: $(basename "$PREV_ASM")"
+    if grep -q '^>' "$PREV_ASM" 2>/dev/null; then
+        USE_EXISTING_ASSEMBLY=true
+        info "Using existing assembly shortcut: ${PREV_ASM}"
+        info "  read_qc/genome_survey/assembly will be skipped for this smoke run"
+    else
+        fail "REVIEW_ASSEMBLY is not a FASTA file: ${PREV_ASM}"
+    fi
+else
+    for f in $LONG_READS; do
+        assert_file_nonempty "$f" "input long reads: $(basename "$f")"
+    done
+fi
 
 # ---- Check Hi-C data availability ----
 HIC_AVAILABLE=false
@@ -46,16 +65,24 @@ SID="hpc-test09-e2e-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test09_manifest.yaml"
 mkdir -p "${TEST_DATA_ROOT}"
 
-# Build asset paths string (comma-separated)
-LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
-
 # Conditionally add Hi-C reads to manifest
-if [[ "$HIC_AVAILABLE" == true ]]; then
-    write_manifest "$MANIFEST" "$SID" \
-        "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
-        "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
+if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    if [[ "$HIC_AVAILABLE" == true ]]; then
+        write_manifest "$MANIFEST" "$SID" \
+            "assembly_fasta_registered:${PREV_ASM}:unknown:unknown" \
+            "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
+    else
+        write_manifest "$MANIFEST" "$SID" "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
+    fi
 else
-    write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LR_PATHS}:${PLATFORM}:single"
+    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
+    if [[ "$HIC_AVAILABLE" == true ]]; then
+        write_manifest "$MANIFEST" "$SID" \
+            "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
+            "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
+    else
+        write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LR_PATHS}:${PLATFORM}:single"
+    fi
 fi
 
 cd "${PROJECT_ROOT}"
@@ -73,9 +100,17 @@ cd "${SCRIPT_DIR}"
 # ---- Write run-config with all stages, auto policy for assembly routing ----
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
-LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
+if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    LOCAL_EXEC_STAGES=("assembly_review" "t2t")
+else
+    LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
+fi
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
+    if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+        LOCAL_EXEC_STAGES=("assembly_review" "hic_scaffolding" "t2t")
+    else
+        LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
+    fi
     if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
         info "HIC_CHROM_SIZES is empty; Juicer run-config will use chrom_sizes_ref=auto"
     fi
@@ -86,17 +121,18 @@ READ_QC_LENGTH_FILTER_APPROVED="True"
 write_run_config_stages "$RC" "${LOCAL_EXEC_STAGES[@]}"
 unset READ_QC_LENGTH_FILTER_METHOD READ_QC_LENGTH_FILTER_APPROVED
 
-python3 - "$RC" "$HIC_AVAILABLE" <<'PY'
+python3 - "$RC" "$HIC_AVAILABLE" "$USE_EXISTING_ASSEMBLY" <<'PY'
 import json
 import sys
 
-path, hic_available = sys.argv[1], sys.argv[2] == "true"
+path, hic_available, use_existing = sys.argv[1], sys.argv[2] == "true", sys.argv[3] == "true"
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 
-requested = ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
+requested = ["assembly_review", "t2t"] if use_existing else ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
 if hic_available:
-    requested.insert(4, "hic_scaffolding")
+    insert_at = 1 if use_existing else 4
+    requested.insert(insert_at, "hic_scaffolding")
 config["requested_stages"] = requested
 config["review_policy"] = {"mode": "auto"}
 config["t2t"] = {"mode": "auto_patch"}
@@ -118,7 +154,11 @@ PY
 # ============================================================
 # Phase 1: Run through read_qc and genome_survey (no blocking)
 # ============================================================
-info "Phase 1: Read QC + Genome Survey (non-blocking stages)"
+if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    info "Phase 1: Existing assembly shortcut + downstream stages"
+else
+    info "Phase 1: Read QC + Genome Survey (non-blocking stages)"
+fi
 
 RUN_EXITCODE=0
 if GA run \
@@ -146,6 +186,8 @@ READQC_SUMMARY="${ARTIFACT_DIR}/read_qc/${SID}/read_qc_summary.json"
 if [[ -f "$READQC_SUMMARY" ]]; then
     pass "read_qc_summary.json produced"
     assert_file_contains "$READQC_SUMMARY" "method_name" "summary has method_name"
+elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    info "read_qc skipped because assembly_fasta_registered was provided"
 else
     warn "read_qc_summary.json not found (may have stopped earlier)"
 fi
@@ -154,6 +196,8 @@ fi
 SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/survey_result.json"
 if [[ -f "$SURVEY_RESULT" ]]; then
     pass "survey_result.json produced"
+elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    info "genome_survey skipped because assembly_fasta_registered was provided"
 else
     info "genome_survey skipped or not yet reached"
 fi
@@ -301,17 +345,18 @@ section "Phase 3: Stage Transition Validation"
 if [[ -f "$INSPECT_JSON" ]]; then
     info "Analyzing route trace"
     cd "${PROJECT_ROOT}"
-    python3 - "$INSPECT_JSON" <<'PY'
+    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" <<'PY'
 import json
 import sys
 
 summary = json.load(open(sys.argv[1], encoding="utf-8"))
 trace = summary.get("route_trace") or []
 stages = [str(item).removesuffix("_stage") for item in trace]
+use_existing = sys.argv[2] == "true"
 
 print(f"Stage sequence: {' → '.join(stages)}")
 
-expected_start = ['inventory', 'read_qc', 'genome_survey', 'assembly']
+expected_start = ['inventory', 'assembly_review'] if use_existing else ['inventory', 'read_qc', 'genome_survey', 'assembly']
 actual_start = stages[:len(expected_start)]
 if actual_start == expected_start:
     print("✓ Stage order correct")
@@ -348,11 +393,19 @@ print(f"Asset types: {set(types)}")
 
 # Inventory registry records declared input assets. Derived outputs are checked
 # through stage artifact directories below.
-raw_reads = [a for a in assets if a.get('asset_type') == 'raw_long_reads']
-if raw_reads:
-    print(f"✓ raw_long_reads input asset registered: {len(raw_reads)} entries")
+use_existing = "${USE_EXISTING_ASSEMBLY}" == "true"
+if use_existing:
+    assemblies = [a for a in assets if a.get('asset_type') == 'assembly_fasta_registered']
+    if assemblies:
+        print(f"✓ assembly_fasta_registered input asset registered: {len(assemblies)} entries")
+    else:
+        print("✗ No assembly_fasta_registered asset found")
 else:
-    print("✗ No raw_long_reads asset found")
+    raw_reads = [a for a in assets if a.get('asset_type') == 'raw_long_reads']
+    if raw_reads:
+        print(f"✓ raw_long_reads input asset registered: {len(raw_reads)} entries")
+    else:
+        print("✗ No raw_long_reads asset found")
 
 hic_reads = [a for a in assets if a.get('asset_type') == 'hic_reads_registered']
 if hic_reads:
@@ -394,34 +447,38 @@ section "Phase 6: Tool Execution Verification"
 
 info "Checking tool execution artifacts"
 
-# Check seqkit execution
-SEQKIT_WORK="${RUN_DIR}/work/read_qc/${SID}/seqkit_stats"
-if [[ -d "$SEQKIT_WORK" ]]; then
-    assert_file_exists "${SEQKIT_WORK}/run_seqkit_stats.sh" "seqkit script generated"
-    if [[ -f "${SEQKIT_WORK}/seqkit_stats.tsv" ]]; then
-        pass "seqkit stats executed successfully"
+if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    info "Read QC, genome survey, and assembly execution skipped by existing assembly shortcut"
+else
+    # Check seqkit execution
+    SEQKIT_WORK="${RUN_DIR}/work/read_qc/${SID}/seqkit_stats"
+    if [[ -d "$SEQKIT_WORK" ]]; then
+        assert_file_exists "${SEQKIT_WORK}/run_seqkit_stats.sh" "seqkit script generated"
+        if [[ -f "${SEQKIT_WORK}/seqkit_stats.tsv" ]]; then
+            pass "seqkit stats executed successfully"
+        fi
     fi
-fi
 
-# Check jellyfish execution (if genome_survey ran)
-JELLYFISH_WORK="${RUN_DIR}/work/genome_survey/${SID}/jellyfish"
-if [[ -d "$JELLYFISH_WORK" ]]; then
-    if [[ -f "${JELLYFISH_WORK}/run_jellyfish.sh" ]]; then
-        pass "jellyfish script generated"
+    # Check jellyfish execution (if genome_survey ran)
+    JELLYFISH_WORK="${RUN_DIR}/work/genome_survey/${SID}/jellyfish"
+    if [[ -d "$JELLYFISH_WORK" ]]; then
+        if [[ -f "${JELLYFISH_WORK}/run_jellyfish.sh" ]]; then
+            pass "jellyfish script generated"
+        fi
+        if ls "${JELLYFISH_WORK}"/*.jf >/dev/null 2>&1; then
+            pass "jellyfish k-mer database produced"
+        fi
     fi
-    if ls "${JELLYFISH_WORK}"/*.jf >/dev/null 2>&1; then
-        pass "jellyfish k-mer database produced"
-    fi
-fi
 
-# Check assembly execution (if reached)
-ASSEMBLY_WORK="${RUN_DIR}/work/assembly"
-if [[ -d "$ASSEMBLY_WORK" ]]; then
-    # Look for flye or nextdenovo artifacts
-    if find "$ASSEMBLY_WORK" -name "assembly.fasta" -o -name "*.contigs.fa" 2>/dev/null | grep -q .; then
-        pass "Assembly artifacts produced"
-    else
-        info "Assembly work directory exists but may not have completed"
+    # Check assembly execution (if reached)
+    ASSEMBLY_WORK="${RUN_DIR}/work/assembly"
+    if [[ -d "$ASSEMBLY_WORK" ]]; then
+        # Look for flye or nextdenovo artifacts
+        if find "$ASSEMBLY_WORK" -name "assembly.fasta" -o -name "*.contigs.fa" 2>/dev/null | grep -q .; then
+            pass "Assembly artifacts produced"
+        else
+            info "Assembly work directory exists but may not have completed"
+        fi
     fi
 fi
 
@@ -612,9 +669,18 @@ summary "Test 09: End-to-End Pipeline"
 
 info ""
 info "Key findings:"
-info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    info "  - Pipeline stages flow: inventory → assembly_review → ..."
+    info "  - Existing assembly shortcut: read_qc/genome_survey/assembly skipped"
+else
+    info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+fi
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    info "    → assembly_review → hic_scaffolding → t2t"
+    if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+        info "    → hic_scaffolding → t2t"
+    else
+        info "    → assembly_review → hic_scaffolding → t2t"
+    fi
 fi
 info "  - Non-blocking stages: read_qc, genome_survey (execute and commit)"
 info "  - Blocking stages: assembly (route selection), assembly_review (human gate), hic/t2t (conditional)"

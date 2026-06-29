@@ -268,6 +268,7 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
                 "decisions_allowed": decisions_allowed or [],
                 "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
                 "candidate_final_assembly_refs": _candidate_final_assembly_refs(active_interrupt.get("candidates", [])),
+                "candidate_report_refs": _candidate_report_refs(active_interrupt.get("signals", [])),
                 "report_refs": dict(active_interrupt.get("report_refs") or {}),
                 "candidate_comparison_context": dict(active_interrupt.get("candidate_comparison_context") or {}),
                 "requires_structured_resume": True,
@@ -314,6 +315,26 @@ def _candidate_final_assembly_refs(candidates: Any) -> dict[str, str]:
         final_ref = candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
         if candidate_id and final_ref:
             refs[str(candidate_id)] = str(final_ref)
+    return refs
+
+
+def _candidate_report_refs(signals: Any) -> dict[str, list[str]]:
+    if not isinstance(signals, list):
+        return {}
+    refs: dict[str, list[str]] = {}
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        candidate_id = signal.get("candidate_id")
+        if not candidate_id:
+            continue
+        metric_refs = signal.get("metric_refs") or []
+        if not isinstance(metric_refs, list):
+            continue
+        bucket = refs.setdefault(str(candidate_id), [])
+        for ref in metric_refs:
+            if ref and str(ref) not in bucket:
+                bucket.append(str(ref))
     return refs
 
 
@@ -915,6 +936,9 @@ def _decision_requirements_from_artifact(
             if isinstance(c, dict) and c.get("candidate_id") is not None
         ]
         requirements["candidate_final_assembly_refs"] = _candidate_final_assembly_refs(candidates)
+    candidate_report_refs = _candidate_report_refs(payload.get("signals"))
+    if candidate_report_refs:
+        requirements["candidate_report_refs"] = candidate_report_refs
     candidate_methods = _candidate_methods(payload)
     if candidate_methods:
         requirements["candidate_methods"] = candidate_methods

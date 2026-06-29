@@ -24,6 +24,12 @@ from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
 
 
+def _write_fasta(tmp: str, name: str = "draft.fasta") -> str:
+    path = Path(tmp) / name
+    path.write_text(">ctg1\nACGT\n", encoding="utf-8")
+    return str(path)
+
+
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
     """Create a minimal blocked assembly_review session. Returns (session_id, data_dir)."""
     data_dir = Path(tmp) / "data"
@@ -108,33 +114,37 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
 
 class PromptAssemblyReviewTests(unittest.TestCase):
     def test_accept_single_candidate_auto_selects(self):
-        requirements = {
-            "stage": "assembly_review",
-            "decisions_allowed": ["accept", "pass"],
-            "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/to/draft.fasta"},
-        }
-        inputs = iter(["1", ""])
-        with patch("builtins.input", side_effect=lambda _: next(inputs)):
-            result = prompt_assembly_review_decision(requirements)
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = _write_fasta(tmp)
+            requirements = {
+                "stage": "assembly_review",
+                "decisions_allowed": ["accept", "pass"],
+                "candidate_ids": ["flye"],
+                "candidate_final_assembly_refs": {"flye": draft},
+            }
+            inputs = iter(["1", ""])
+            with patch("builtins.input", side_effect=lambda _: next(inputs)):
+                result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(result["candidate_id"], "flye")
-        self.assertEqual(result["final_assembly_ref"], "/path/to/draft.fasta")
+        self.assertEqual(result["final_assembly_ref"], draft)
 
     def test_decision_prompt_describes_hic_t2t_downstream(self):
-        requirements = {
-            "stage": "assembly_review",
-            "decisions_allowed": ["accept", "rerun", "stop_human_review"],
-            "candidate_ids": ["flye"],
-            "candidate_final_assembly_refs": {"flye": "/path/to/draft.fasta"},
-        }
-        inputs = iter(["1", ""])
-        out = io.StringIO()
-        with patch("builtins.input", side_effect=lambda _: next(inputs)), \
-                patch("sys.stdout", out):
-            result = prompt_assembly_review_decision(requirements)
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = _write_fasta(tmp)
+            requirements = {
+                "stage": "assembly_review",
+                "decisions_allowed": ["accept", "rerun", "stop_human_review"],
+                "candidate_ids": ["flye"],
+                "candidate_final_assembly_refs": {"flye": draft},
+            }
+            inputs = iter(["1", ""])
+            out = io.StringIO()
+            with patch("builtins.input", side_effect=lambda _: next(inputs)), \
+                    patch("sys.stdout", out):
+                result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         rendered = out.getvalue()
@@ -142,23 +152,57 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIn("downstream_flow: assembly_review -> hic_scaffolding -> t2t", rendered)
 
     def test_accept_multiple_candidates_prompts_choice(self):
-        requirements = {
-            "stage": "assembly_review",
-            "decisions_allowed": ["accept"],
-            "candidate_ids": ["flye", "canu"],
-            "candidate_final_assembly_refs": {
-                "flye": "/path/flye.fasta",
-                "canu": "/path/canu.fasta",
-            },
-        }
-        inputs = iter(["1", "2", ""])
-        with patch("builtins.input", side_effect=lambda _: next(inputs)):
-            result = prompt_assembly_review_decision(requirements)
+        with tempfile.TemporaryDirectory() as tmp:
+            flye = _write_fasta(tmp, "flye.fasta")
+            canu = _write_fasta(tmp, "canu.fasta")
+            requirements = {
+                "stage": "assembly_review",
+                "decisions_allowed": ["accept"],
+                "candidate_ids": ["flye", "canu"],
+                "candidate_final_assembly_refs": {
+                    "flye": flye,
+                    "canu": canu,
+                },
+            }
+            inputs = iter(["1", "2", ""])
+            with patch("builtins.input", side_effect=lambda _: next(inputs)):
+                result = prompt_assembly_review_decision(requirements)
 
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(result["candidate_id"], "canu")
         self.assertEqual(result["rejected_candidates"], ["flye"])
+
+    def test_accept_filters_missing_candidates_and_shows_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flye = _write_fasta(tmp, "flye.fasta")
+            report = str(Path(tmp) / "assembly_candidate_comparison_report.md")
+            metric = str(Path(tmp) / "quast_summary.json")
+            requirements = {
+                "stage": "assembly_review",
+                "decisions_allowed": ["accept"],
+                "candidate_ids": ["flye", "nextdenovo"],
+                "candidate_final_assembly_refs": {
+                    "flye": flye,
+                    "nextdenovo": str(Path(tmp) / "missing.fasta"),
+                },
+                "candidate_report_refs": {"flye": [metric]},
+                "report_refs": {"assembly_candidate_comparison_report": report},
+            }
+            inputs = iter(["1", ""])
+            out = io.StringIO()
+            with patch("builtins.input", side_effect=lambda _: next(inputs)), \
+                    patch("sys.stdout", out):
+                result = prompt_assembly_review_decision(requirements)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["candidate_id"], "flye")
+        rendered = out.getvalue()
+        self.assertIn("unavailable_candidates", rendered)
+        self.assertIn("nextdenovo", rendered)
+        self.assertIn("candidate_evidence", rendered)
+        self.assertIn(metric, rendered)
+        self.assertIn(report, rendered)
 
     def test_cancel_on_eof_returns_none(self):
         requirements = {
