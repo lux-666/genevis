@@ -149,7 +149,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertIsNotNone(result)
         rendered = out.getvalue()
         self.assertIn("continue to Hi-C scaffolding, then T2T", rendered)
-        self.assertIn("downstream_flow: assembly_review -> hic_scaffolding -> t2t", rendered)
+        self.assertIn("next: assembly_review -> hic_scaffolding -> t2t", rendered)
 
     def test_accept_multiple_candidates_prompts_choice(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,6 +318,31 @@ class PromptAssemblyReviewTests(unittest.TestCase):
 
 
 class PromptHicScaffoldingTests(unittest.TestCase):
+    def test_accept_candidate_prompt_uses_operator_labels(self):
+        requirements = {
+            "stage": "hic_scaffolding",
+            "decisions_allowed": ["accept_candidate", "skip", "stop_human_review"],
+            "executed_candidate_methods": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"],
+        }
+        inputs = iter(["1", ""])
+        out = io.StringIO()
+
+        def input_with_prompt(prompt):
+            out.write(prompt)
+            return next(inputs)
+
+        with patch("builtins.input", side_effect=input_with_prompt), \
+                patch("sys.stdout", out):
+            result = prompt_hic_scaffolding_decision(requirements)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["decision"], "accept_candidate")
+        rendered = out.getvalue()
+        self.assertIn("action:", rendered)
+        self.assertIn("select action [1-3]", rendered)
+        self.assertIn("accept scaffold result [accept_candidate]", rendered)
+        self.assertIn("operator note (optional, audit only)", rendered)
+
     def test_select_method_single_auto_selects(self):
         requirements = {
             "stage": "hic_scaffolding",
@@ -550,7 +575,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
             render_blocked_summary(summary)
 
         rendered = out.getvalue()
-        self.assertIn("next_after_assembly_review", rendered)
+        self.assertIn("after_accepting_assembly", rendered)
         self.assertIn("assembly_review -> hic_scaffolding -> t2t", rendered)
         self.assertIn("continues to hic_scaffolding, then t2t", rendered)
 

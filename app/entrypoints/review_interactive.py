@@ -45,6 +45,51 @@ ASSEMBLY_REVIEW_DECISION_HELP = {
     "stop_human_review": "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted.",
 }
 
+DECISION_LABELS = {
+    "accept": "accept assembly",
+    "pass": "accept assembly unchanged",
+    "continue_low_confidence": "continue with weak evidence",
+    "purge": "use purged assembly",
+    "polish": "use polished assembly",
+    "rerun": "rerun assembly",
+    "select_cyclone": "use CycloneSEQ route",
+    "select_ont": "use ONT route",
+    "select_hifi": "use HiFi route",
+    "accept_candidate": "accept scaffold result",
+    "select_method": "choose result/method",
+    "skip": "skip this stage",
+    "stop_human_review": "stop workflow",
+    "accept_selected_candidates": "accept T2T patch",
+    "continue_without_patch": "continue without T2T patch",
+    "stop_pipeline": "stop workflow",
+    "defer_annotation": "defer annotation",
+    "proceed_merge": "merge gene candidates",
+    "merge_with_evm": "merge with EVM",
+    "request_rerun": "request rerun",
+    "stop": "stop workflow",
+    "continue": "continue",
+}
+
+DECISION_HELP = {
+    **ASSEMBLY_REVIEW_DECISION_HELP,
+    "select_cyclone": "use the CycloneSEQ assembly route.",
+    "select_ont": "use the ONT assembly route.",
+    "select_hifi": "use the HiFi assembly route.",
+    "accept_candidate": "use the reviewed scaffold result and continue to T2T/annotation.",
+    "select_method": "choose one available method/result for this gate.",
+    "skip": "do not use this stage's result; continue with the previous assembly.",
+    "stop_human_review": "stop the workflow here.",
+    "accept_selected_candidates": "use the selected T2T patch candidates.",
+    "continue_without_patch": "continue without applying T2T patches.",
+    "stop_pipeline": "stop the workflow here.",
+    "defer_annotation": "pause before annotation.",
+    "proceed_merge": "merge the selected gene annotation candidates.",
+    "merge_with_evm": "merge candidates through EVM.",
+    "request_rerun": "ask for another run before continuing.",
+    "stop": "stop the workflow here.",
+    "continue": "continue past this gate.",
+}
+
 
 def render_blocked_summary(summary: dict[str, Any]) -> None:
     """Print a human-readable summary of a blocked session gate."""
@@ -73,7 +118,7 @@ def render_blocked_summary(summary: dict[str, Any]) -> None:
 
 def _render_assembly_review(requirements: dict, summary: dict) -> None:
     decisions = requirements.get("decisions_allowed", [])
-    print(f"decisions_allowed: {decisions}")
+    _render_choices(decisions)
     _render_assembly_review_downstream_context(decisions)
 
     candidate_ids = requirements.get("candidate_ids") or []
@@ -101,23 +146,20 @@ def _render_assembly_review(requirements: dict, summary: dict) -> None:
 
 
 def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
-    print("\nnext_after_assembly_review:")
+    print("\nafter_accepting_assembly:")
     print(f"  flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
     print(
         "  note: accepting an assembly continues to hic_scaffolding, then t2t, "
         "before annotation."
     )
     if decisions:
-        print("\ndecision_meanings:")
-        for decision in decisions:
-            help_text = ASSEMBLY_REVIEW_DECISION_HELP.get(decision)
-            if help_text:
-                print(f"  {decision}: {help_text}")
+        _render_decision_meanings(decisions)
 
 
 def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
     decisions = requirements.get("decisions_allowed", [])
-    print(f"decisions_allowed: {decisions}")
+    _render_choices(decisions)
+    _render_decision_meanings(decisions)
 
     methods = requirements.get("candidate_methods") or []
     if methods:
@@ -143,9 +185,29 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
             print(f"{key}: {val}")
 
 
+def _render_choices(decisions: list[str]) -> None:
+    if not decisions:
+        print("choices: <none>")
+        return
+    print("choices:")
+    for decision in decisions:
+        print(f"  - {_choice_display(decision)}")
+
+
+def _render_decision_meanings(decisions: list[str]) -> None:
+    meanings = [(decision, DECISION_HELP.get(decision)) for decision in decisions]
+    meanings = [(decision, help_text) for decision, help_text in meanings if help_text]
+    if not meanings:
+        return
+    print("\nchoice_help:")
+    for decision, help_text in meanings:
+        print(f"  {_choice_display(decision)}: {help_text}")
+
+
 def _render_generic_gate(requirements: dict) -> None:
     decisions = requirements.get("decisions_allowed", [])
-    print(f"decisions_allowed: {decisions}")
+    _render_choices(decisions)
+    _render_decision_meanings(decisions)
     candidate_ids = requirements.get("candidate_ids") or []
     if candidate_ids:
         print("\ncandidates:")
@@ -172,7 +234,7 @@ def prompt_assembly_review_decision(
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
 
-    decision = _prompt_choice("decision", decisions, ASSEMBLY_REVIEW_DECISION_HELP)
+    decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
         return None
 
@@ -201,7 +263,7 @@ def prompt_assembly_review_decision(
         if len(selectable_candidates) == 1:
             candidate_id = selectable_candidates[0]
             final_assembly_ref = candidate_refs.get(candidate_id)
-            print(f"  auto-selected candidate: {candidate_id}")
+            print(f"  using candidate: {candidate_id}")
         elif selectable_candidates:
             candidate_id = _prompt_choice(
                 "candidate",
@@ -240,10 +302,7 @@ def prompt_assembly_review_decision(
         if metadata is None:
             return None
 
-    try:
-        notes_raw = input("notes (optional): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        notes_raw = ""
+    notes_raw = _prompt_notes()
 
     result: dict[str, Any] = {
         "stage": "assembly_review",
@@ -353,12 +412,12 @@ def _candidate_core_report_refs(requirements: dict[str, Any], candidate_id: str)
 
 
 def _print_selected_assembly_review_decision_effect(decision: str) -> None:
-    help_text = ASSEMBLY_REVIEW_DECISION_HELP.get(decision)
+    help_text = DECISION_HELP.get(decision)
     if not help_text:
         return
-    print(f"\nselected_effect: {help_text}")
+    print(f"\neffect: {help_text}")
     if decision in {"accept", "pass", "continue_low_confidence", "purge", "polish"}:
-        print(f"downstream_flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
+        print(f"next: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
 
 
 def prompt_hic_scaffolding_decision(
@@ -369,7 +428,7 @@ def prompt_hic_scaffolding_decision(
     methods = requirements.get("candidate_methods") or []
     executed = requirements.get("executed_candidate_methods") or []
 
-    decision = _prompt_choice("decision", decisions)
+    decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
         return None
 
@@ -378,7 +437,7 @@ def prompt_hic_scaffolding_decision(
         choices = executed if decision == "accept_candidate" else methods
         if len(choices) == 1:
             method_name = choices[0]
-            print(f"  auto-selected method: {method_name}")
+            print(f"  using method: {method_name}")
         elif choices:
             method_name = _prompt_choice("method", choices)
             if method_name is None:
@@ -391,10 +450,7 @@ def prompt_hic_scaffolding_decision(
             if not method_name:
                 return None
 
-    try:
-        notes_raw = input("notes (optional): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        notes_raw = ""
+    notes_raw = _prompt_notes()
 
     return {
         "stage": "hic_scaffolding",
@@ -414,7 +470,7 @@ def prompt_generic_gate_decision(
     candidate_ids = requirements.get("candidate_ids") or []
     methods = requirements.get("candidate_methods") or []
 
-    decision = _prompt_choice("decision", decisions)
+    decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
         return None
 
@@ -423,7 +479,7 @@ def prompt_generic_gate_decision(
     if candidate_ids and decision not in {"skip", "stop_human_review"}:
         if len(candidate_ids) == 1:
             candidate_id = candidate_ids[0]
-            print(f"  auto-selected candidate: {candidate_id}")
+            print(f"  using candidate: {candidate_id}")
         else:
             candidate_id = _prompt_choice("candidate", candidate_ids)
             if candidate_id is None:
@@ -431,16 +487,13 @@ def prompt_generic_gate_decision(
     if methods and decision == "select_method":
         if len(methods) == 1:
             method_name = methods[0]
-            print(f"  auto-selected method: {method_name}")
+            print(f"  using method: {method_name}")
         else:
             method_name = _prompt_choice("method", methods)
             if method_name is None:
                 return None
 
-    try:
-        notes_raw = input("notes (optional): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        notes_raw = ""
+    notes_raw = _prompt_notes()
 
     result: dict[str, Any] = {
         "stage": stage,
@@ -464,7 +517,7 @@ def prompt_t2t_review_decision(
     decisions = requirements.get("decisions_allowed", [])
     candidate_ids = requirements.get("candidate_ids") or []
 
-    decision = _prompt_choice("decision", decisions)
+    decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
         return None
 
@@ -487,10 +540,7 @@ def prompt_t2t_review_decision(
             print(f"invalid candidate selection: {raw!r}", file=sys.stderr)
             return None
 
-    try:
-        notes_raw = input("notes (optional): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        notes_raw = ""
+    notes_raw = _prompt_notes()
 
     result: dict[str, Any] = {
         "stage": "t2t",
@@ -507,12 +557,13 @@ def prompt_t2t_review_decision(
 def _prompt_choice(label: str, options: list[str], descriptions: dict[str, str] | None = None) -> str | None:
     if not options:
         return None
-    print(f"\n{label}:")
+    display_label = "action" if label == "decision" else label
+    print(f"\n{display_label}:")
     for i, opt in enumerate(options, 1):
         suffix = f" - {descriptions[opt]}" if descriptions and descriptions.get(opt) else ""
-        print(f"  {i}. {opt}{suffix}")
+        print(f"  {i}. {_choice_display(opt)}{suffix}")
     try:
-        raw = input(f"select {label} [1-{len(options)}]: ").strip()
+        raw = input(f"select {display_label} [1-{len(options)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return None
     if not raw:
@@ -526,6 +577,20 @@ def _prompt_choice(label: str, options: list[str], descriptions: dict[str, str] 
             return raw
     print(f"invalid selection: {raw!r}", file=sys.stderr)
     return None
+
+
+def _choice_display(option: str) -> str:
+    label = DECISION_LABELS.get(option)
+    if label and label != option:
+        return f"{label} [{option}]"
+    return option
+
+
+def _prompt_notes() -> str:
+    try:
+        return input("operator note (optional, audit only): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 def _parse_multi_choice(raw: str, options: list[str]) -> list[str]:
@@ -673,7 +738,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     print(f"\nSession:  {brief.get('session_id')}")
     print(f"Stage:    {brief.get('stage')}")
     print(f"State:    {brief.get('supervision_state')}")
-    print(f"Allowed:  {', '.join(brief.get('decisions_allowed', []))}")
+    print(f"Choices:  {', '.join(_choice_display(decision) for decision in brief.get('decisions_allowed', []))}")
 
     if brief.get("review_request_ref"):
         print(f"Request:  {brief['review_request_ref']}")
