@@ -120,6 +120,7 @@ PY
 # ============================================================
 info "Phase 1: Read QC + Genome Survey (non-blocking stages)"
 
+RUN_EXITCODE=0
 if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
@@ -127,21 +128,16 @@ if GA run \
     --run-config "$RC" \
     --checkpointer "$CHECKPOINTER" \
     2>&1; then
-    pass "Pipeline Phase 1 completed"
+    pass "Pipeline invocation exited cleanly"
 else
-    EXITCODE=$?
-    # Check if we blocked at assembly route selection (expected if auto policy didn't apply)
-    SUPERVISION=$(GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('supervision_state',''))" 2>/dev/null || echo "")
-    if [[ "$SUPERVISION" == "blocked_human" ]]; then
-        warn "Pipeline blocked at human gate (expected if confidence too low)"
-    else
-        fail "Pipeline Phase 1 failed with exit code ${EXITCODE}"
-    fi
+    RUN_EXITCODE=$?
+    warn "Pipeline invocation returned exit code ${RUN_EXITCODE}; inspecting durable state"
 fi
 
 # ---- Verify read_qc artifacts ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
 ARTIFACT_DIR="${RUN_DIR}/artifacts"
+INSPECT_JSON="${TEST_DATA_ROOT}/_test09_inspect.json"
 
 assert_dir_exists "$RUN_DIR" "run directory exists"
 assert_dir_exists "$ARTIFACT_DIR" "artifacts directory exists"
@@ -165,11 +161,35 @@ fi
 # ---- Check current stage and supervision state ----
 cd "${PROJECT_ROOT}"
 info "Inspecting session state after Phase 1"
-CURRENT_STAGE=$(GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('current_stage','unknown'))" 2>/dev/null || echo "unknown")
-SUPERVISION_STATE=$(GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('supervision_state','unknown'))" 2>/dev/null || echo "unknown")
+if python3 -m app.entrypoints.run inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json > "$INSPECT_JSON" 2>/dev/null; then
+    CURRENT_STAGE=$(python3 - "$INSPECT_JSON" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("current_stage", "unknown"))
+PY
+)
+    SUPERVISION_STATE=$(python3 - "$INSPECT_JSON" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("supervision_state", "unknown"))
+PY
+)
+    ASSET_REGISTRY_REF=$(python3 - "$INSPECT_JSON" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8")).get("asset_registry_ref", ""))
+PY
+)
+else
+    CURRENT_STAGE="unknown"
+    SUPERVISION_STATE="unknown"
+    ASSET_REGISTRY_REF=""
+    warn "Could not inspect durable session state"
+fi
 
 info "  current_stage: ${CURRENT_STAGE}"
 info "  supervision_state: ${SUPERVISION_STATE}"
+
+if (( RUN_EXITCODE != 0 )) && [[ "$SUPERVISION_STATE" != "blocked_human" ]]; then
+    fail "Pipeline failed with exit code ${RUN_EXITCODE}"
+fi
 
 # ============================================================
 # Phase 2: Check blocking behavior
@@ -180,11 +200,26 @@ if [[ "$SUPERVISION_STATE" == "blocked_human" ]]; then
     pass "Pipeline correctly blocked at human gate"
 
     # Check active_interrupt structure
-    GATE_ID=$(GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('active_interrupt',{}).get('gate_id',''))" 2>/dev/null || echo "")
+    GATE_ID=$(python3 - "$INSPECT_JSON" <<'PY'
+import json, sys
+interrupt = json.load(open(sys.argv[1], encoding="utf-8")).get("active_interrupt") or {}
+print(interrupt.get("gate_id") or "")
+PY
+)
     if [[ -n "$GATE_ID" ]]; then
         pass "active_interrupt.gate_id present: ${GATE_ID}"
     else
-        warn "active_interrupt.gate_id missing"
+        INTERRUPT_STAGE=$(python3 - "$INSPECT_JSON" <<'PY'
+import json, sys
+interrupt = json.load(open(sys.argv[1], encoding="utf-8")).get("active_interrupt") or {}
+print(interrupt.get("stage") or "")
+PY
+)
+        if [[ -n "$INTERRUPT_STAGE" ]]; then
+            pass "active_interrupt present for stage: ${INTERRUPT_STAGE}"
+        else
+            warn "active_interrupt missing"
+        fi
     fi
 
     # Verify the session exited cleanly (didn't crash)
@@ -240,41 +275,29 @@ fi
 # ============================================================
 section "Phase 3: Stage Transition Validation"
 
-# Check ledger for stage transitions
-EVENTS="${RUN_DIR}/ledger/events.jsonl"
-if [[ -f "$EVENTS" ]]; then
-    info "Analyzing ledger events"
-
-    # Count stage_entered events
-    STAGE_COUNT=$(grep -c '"event_type":\s*"stage_entered"' "$EVENTS" 2>/dev/null || echo 0)
-    info "  Stages entered: ${STAGE_COUNT}"
-
-    # Verify stage order
+if [[ -f "$INSPECT_JSON" ]]; then
+    info "Analyzing route trace"
     cd "${PROJECT_ROOT}"
-    python3 <<EOPYTHON
+    python3 - "$INSPECT_JSON" <<'PY'
 import json
-from pathlib import Path
+import sys
 
-events = Path("${EVENTS}").read_text().strip().split('\n')
-stages = []
-for line in events:
-    evt = json.loads(line)
-    if evt.get('event_type') == 'stage_entered':
-        stages.append(evt.get('stage_name', 'unknown'))
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+trace = summary.get("route_trace") or []
+stages = [str(item).removesuffix("_stage") for item in trace]
 
 print(f"Stage sequence: {' → '.join(stages)}")
 
-# Verify expected order
 expected_start = ['inventory', 'read_qc', 'genome_survey', 'assembly']
 actual_start = stages[:len(expected_start)]
 if actual_start == expected_start:
     print("✓ Stage order correct")
 else:
     print(f"✗ Stage order mismatch: expected {expected_start}, got {actual_start}")
-EOPYTHON
+PY
     pass "Stage transition analysis complete"
 else
-    warn "Ledger events not found"
+    warn "Inspect summary not found"
 fi
 
 # ============================================================
@@ -282,7 +305,7 @@ fi
 # ============================================================
 section "Phase 4: Asset Registry Propagation"
 
-REGISTRY="${RUN_DIR}/asset_registry.json"
+REGISTRY="${ASSET_REGISTRY_REF:-${ARTIFACT_DIR}/asset_registry/${SID}/registry.json}"
 if [[ -f "$REGISTRY" ]]; then
     cd "${PROJECT_ROOT}"
     python3 <<EOPYTHON
@@ -392,6 +415,7 @@ fi
 # ============================================================
 # Phase 8: Hi-C Scaffolding Verification
 # ============================================================
+HIC_RAN=false
 if [[ "$HIC_AVAILABLE" == true ]]; then
     section "Phase 8: Hi-C Scaffolding Verification"
 
@@ -399,6 +423,7 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
 
     HIC_WORK="${RUN_DIR}/work/hic_scaffolding"
     if [[ -d "$HIC_WORK" ]]; then
+        HIC_RAN=true
         pass "Hi-C work directory created"
 
         # Check for juicer artifacts
@@ -427,6 +452,7 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
     # Check Hi-C artifacts in artifact directory
     HIC_ARTIFACT="${ARTIFACT_DIR}/hic_scaffolding"
     if [[ -d "$HIC_ARTIFACT" ]]; then
+        HIC_RAN=true
         # Look for scaffolding result
         if find "$HIC_ARTIFACT" -name "scaffolded_assembly.fasta" -o -name "hic_result.json" 2>/dev/null | grep -q .; then
             pass "Hi-C scaffolding artifacts registered"
@@ -464,6 +490,7 @@ fi
 # ============================================================
 # Phase 9: T2T Polishing Verification
 # ============================================================
+T2T_RAN=false
 if [[ "$HIC_AVAILABLE" == true ]]; then
     section "Phase 9: T2T Polishing Verification"
 
@@ -471,6 +498,7 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
 
     T2T_WORK="${RUN_DIR}/work/t2t"
     if [[ -d "$T2T_WORK" ]]; then
+        T2T_RAN=true
         pass "T2T work directory created"
 
         # Check for polishing tool artifacts (e.g., racon, medaka, nextpolish)
@@ -494,6 +522,7 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
     # Check T2T artifacts in artifact directory
     T2T_ARTIFACT="${ARTIFACT_DIR}/t2t"
     if [[ -d "$T2T_ARTIFACT" ]]; then
+        T2T_RAN=true
         # Look for final polished assembly
         if find "$T2T_ARTIFACT" -name "t2t_assembly.fasta" -o -name "t2t_result.json" 2>/dev/null | grep -q .; then
             pass "T2T polishing artifacts registered"
@@ -545,9 +574,19 @@ info "  - TUI coupling: blocked_human → active_interrupt → END → TUI displ
 info "  - Resume: TUI calls review_interactive with decision → stage continues"
 info "  - Asset registry: propagates clean_long_reads, survey results, assemblies across stages"
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    info "  - Hi-C scaffolding: executed with juicer+3D-DNA pipeline"
-    info "  - T2T polishing: executed with auto_patch mode"
-    info "  - Biological software: juicer, 3D-DNA, and polishing tools executed successfully"
+    if [[ "$HIC_RAN" == true ]]; then
+        info "  - Hi-C scaffolding: executed or produced local work/artifacts"
+    else
+        info "  - Hi-C scaffolding: not reached before current blocking gate"
+    fi
+    if [[ "$T2T_RAN" == true ]]; then
+        info "  - T2T polishing: executed or produced local work/artifacts"
+    else
+        info "  - T2T polishing: not reached before current blocking gate"
+    fi
+fi
+if [[ "$SUPERVISION_STATE" == "blocked_human" ]]; then
+    info "  - Current run is waiting at ${CURRENT_STAGE}; resume with an explicit review decision to continue downstream stages"
 fi
 info ""
 info "Session ID: ${SID}"
