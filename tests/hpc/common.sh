@@ -388,10 +388,14 @@ PY
 #  gene-agent runner
 # -------------------------------------------------------------------
 GA() {
-    # HPC tests must never consume the terminal at a human-review gate.
-    # A blocked gate is reported and asserted by the owning script instead.
     info "gene-agent $*"
-    python3 -m app.entrypoints.run "$@" </dev/null
+    if [[ "${GENE_AGENT_HPC_INTERACTIVE:-false}" == "true" && -t 0 ]]; then
+        python3 -m app.entrypoints.run "$@"
+    else
+        # Batch HPC tests must never consume the terminal at a human-review
+        # gate. A blocked gate is reported and asserted by the owning script.
+        python3 -m app.entrypoints.run "$@" </dev/null
+    fi
 }
 
 # -------------------------------------------------------------------

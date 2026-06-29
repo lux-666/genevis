@@ -247,7 +247,8 @@ HELP
                 exit 0
             fi
 
-            # Run the test
+            # Run the test with the interactive human-gate loop enabled.
+            export GENE_AGENT_HPC_INTERACTIVE=true
             exec "${SCRIPT_DIR}/test_09_e2e_pipeline.sh"
             ;;
         *)
