@@ -51,10 +51,24 @@ LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
 
 # Conditionally add Hi-C reads to manifest
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" "hic_reads:${HIC_R1},${HIC_R2}:paired"
+    write_manifest "$MANIFEST" "$SID" \
+        "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
+        "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
 else
     write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LR_PATHS}:${PLATFORM}:single"
 fi
+
+cd "${PROJECT_ROOT}"
+python3 - "$MANIFEST" <<'PY'
+import sys
+import yaml
+from app.schemas.manifest import InputManifest
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    InputManifest.model_validate(yaml.safe_load(handle))
+print("manifest schema validation OK")
+PY
+cd "${SCRIPT_DIR}"
 
 # ---- Write run-config with all stages, auto policy for assembly routing ----
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
