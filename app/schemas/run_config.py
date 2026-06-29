@@ -70,7 +70,7 @@ class T2TThresholdProfile(BaseModel):
     min_mapq: int = Field(default=20, ge=0)
     max_target_terminal_distance_bp: int = Field(default=1_000, ge=0)
     min_overlap_bp: int = Field(default=500, gt=0)
-    min_supporting_reads: int = Field(default=2, ge=2)
+    min_supporting_reads: int = Field(default=1, ge=1)
 
 
 class T2TRunConfig(BaseModel):

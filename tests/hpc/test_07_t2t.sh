@@ -21,7 +21,7 @@ python3 -c "
 from app.schemas.run_config import RunConfig
 cfg = RunConfig.model_validate({'local_exec': ['t2t'], 't2t': {}})
 assert cfg.t2t.mode == 'auto_patch'
-assert cfg.t2t.thresholds.min_supporting_reads == 2
+assert cfg.t2t.thresholds.min_supporting_reads == 1
 print('T2T RunConfig validation: PASS')
 " 2>&1 && pass "T2T RunConfig schema validation" || fail "T2T RunConfig schema validation"
 

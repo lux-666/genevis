@@ -15,7 +15,7 @@ expected_outputs:
     description: "Primary ONT-to-assembly alignments in PAF format."
 review_rules:
   - "Patch only assembly ends lacking a telomere signal."
-  - "Require two independent, compatible telomeric reads before auto-patching."
+  - "Require the configured number of compatible telomeric reads before auto-patching; the default is one."
 human_review_triggers:
   - "Read-tail conflicts, chimeric evidence, or insufficient support leave candidates unpatched."
 resource_hints:

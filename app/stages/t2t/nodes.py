@@ -45,7 +45,7 @@ DEFAULT_THRESHOLDS = {
     "min_mapq": 20,
     "max_target_terminal_distance_bp": 1_000,
     "min_overlap_bp": 500,
-    "min_supporting_reads": 2,
+    "min_supporting_reads": 1,
 }
 
 

@@ -32,7 +32,8 @@ Python 负责 FASTA/FASTQ 流式扫描、motif 端粒信号、PAF 解析、候�
 
 默认 motif 为 `TTAGGG`，默认 `auto_patch`。自动 patch 要求：terminal-window
 10 kb 内至少四个 motif copies、MAPQ ≥20、目标末端距离 ≤1 kb、有效 overlap
-≥500 bp，以及至少两条彼此相容的 ONT reads。选择 MAPQ/overlap 最优 read 的
+≥500 bp，以及至少一条支持 ONT read；如需更保守可把 `min_supporting_reads`
+调回 2 或更高。选择 MAPQ/overlap 最优 read 的
 未对齐 tail；tail 冲突、嵌合嫌疑和不足支持只输出候选，不修改 FASTA。
 
 所有输出位于 `artifacts/t2t/<session>/t2t_finishing/`：端粒扫描、telomeric

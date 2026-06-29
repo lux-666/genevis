@@ -30,7 +30,7 @@ class T2TDescriptorTests(unittest.TestCase):
     def test_run_config_accepts_default_auto_patch(self):
         config = RunConfig.model_validate({"local_exec": ["t2t"], "t2t": {}})
         self.assertEqual(config.t2t.mode, "auto_patch")
-        self.assertEqual(config.t2t.thresholds.min_supporting_reads, 2)
+        self.assertEqual(config.t2t.thresholds.min_supporting_reads, 1)
 
 
 class T2TStageTests(unittest.TestCase):
@@ -130,12 +130,29 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("valid FASTA", result["last_error"])
 
-    def test_single_read_evidence_does_not_patch(self):
+    def test_single_read_evidence_patches_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
+                "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
+            }
+            result = build_stage().invoke(state)
+
+            t2t = result["stage_outputs"]["t2t"]
+            self.assertEqual(t2t["status"], "completed")
+            self.assertTrue(Path(t2t["patched_assembly_ref"]).exists())
+            candidate_rows = Path(t2t["telomere_extension_candidates_ref"]).read_text(encoding="utf-8")
+            self.assertIn("auto_patch", candidate_rows)
+
+    def test_configured_two_read_threshold_still_blocks_single_read_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads = self._write_inputs(tmpdir)
+            state = self._state(tmpdir, assembly, reads)
+            state["stage_outputs"]["t2t"] = {
+                "execution_mode": "local",
+                "thresholds": {"min_supporting_reads": 2},
                 "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
             }
             result = build_stage().invoke(state)
@@ -202,6 +219,7 @@ class T2TStageTests(unittest.TestCase):
             state["stage_outputs"]["t2t"] = {
                 "execution_mode": "local",
                 "mode": "manual_review",
+                "thresholds": {"min_supporting_reads": 2},
                 "env": {"PATH": str(self._fake_minimap2(tmpdir, support_count=1)) + os.pathsep + os.environ["PATH"]},
             }
 

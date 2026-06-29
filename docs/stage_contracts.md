@@ -322,8 +322,8 @@ Planning rules:
 - All assembly paths enter this stage. Real scan/alignment/patch execution is
   opt-in through `local_exec: [t2t]`; disabled execution passes the original
   assembly forward with a report.
-- Use the configured motif (default `TTAGGG`) and require conservative
-  terminal, overlap, MAPQ, and multi-read support before auto-patching.
+- Use the configured motif (default `TTAGGG`) and require terminal, overlap,
+  MAPQ, and supporting-read evidence before auto-patching.
 - Preserve the input FASTA. Ambiguous, chimeric, or conflicting evidence is
   reported as `needs_manual_review` and never patched automatically.
 
