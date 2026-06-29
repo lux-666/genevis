@@ -101,13 +101,13 @@ cd "${SCRIPT_DIR}"
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
-    LOCAL_EXEC_STAGES=("assembly_review" "t2t")
+    LOCAL_EXEC_STAGES=("t2t")
 else
     LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 fi
 if [[ "$HIC_AVAILABLE" == true ]]; then
     if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
-        LOCAL_EXEC_STAGES=("assembly_review" "hic_scaffolding" "t2t")
+        LOCAL_EXEC_STAGES=("hic_scaffolding" "t2t")
     else
         LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
     fi
@@ -129,9 +129,9 @@ path, hic_available, use_existing = sys.argv[1], sys.argv[2] == "true", sys.argv
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 
-requested = ["assembly_review", "t2t"] if use_existing else ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
+requested = ["t2t"] if use_existing else ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
 if hic_available:
-    insert_at = 1 if use_existing else 4
+    insert_at = 0 if use_existing else 4
     requested.insert(insert_at, "hic_scaffolding")
 config["requested_stages"] = requested
 config["review_policy"] = {"mode": "auto"}
@@ -345,7 +345,7 @@ section "Phase 3: Stage Transition Validation"
 if [[ -f "$INSPECT_JSON" ]]; then
     info "Analyzing route trace"
     cd "${PROJECT_ROOT}"
-    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" <<'PY'
+    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" "$HIC_AVAILABLE" <<'PY'
 import json
 import sys
 
@@ -353,10 +353,14 @@ summary = json.load(open(sys.argv[1], encoding="utf-8"))
 trace = summary.get("route_trace") or []
 stages = [str(item).removesuffix("_stage") for item in trace]
 use_existing = sys.argv[2] == "true"
+hic_available = sys.argv[3] == "true"
 
 print(f"Stage sequence: {' → '.join(stages)}")
 
-expected_start = ['inventory', 'assembly_review'] if use_existing else ['inventory', 'read_qc', 'genome_survey', 'assembly']
+if use_existing:
+    expected_start = ['inventory', 'hic_scaffolding'] if hic_available else ['inventory', 't2t']
+else:
+    expected_start = ['inventory', 'read_qc', 'genome_survey', 'assembly']
 actual_start = stages[:len(expected_start)]
 if actual_start == expected_start:
     print("✓ Stage order correct")
@@ -670,17 +674,17 @@ summary "Test 09: End-to-End Pipeline"
 info ""
 info "Key findings:"
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
-    info "  - Pipeline stages flow: inventory → assembly_review → ..."
-    info "  - Existing assembly shortcut: read_qc/genome_survey/assembly skipped"
+    if [[ "$HIC_AVAILABLE" == true ]]; then
+        info "  - Pipeline stages flow: inventory → hic_scaffolding → t2t"
+    else
+        info "  - Pipeline stages flow: inventory → t2t"
+    fi
+    info "  - Existing assembly shortcut: read_qc/genome_survey/assembly/assembly_review skipped"
 else
     info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
 fi
-if [[ "$HIC_AVAILABLE" == true ]]; then
-    if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
-        info "    → hic_scaffolding → t2t"
-    else
+if [[ "$HIC_AVAILABLE" == true && "$USE_EXISTING_ASSEMBLY" != true ]]; then
         info "    → assembly_review → hic_scaffolding → t2t"
-    fi
 fi
 info "  - Non-blocking stages: read_qc, genome_survey (execute and commit)"
 info "  - Blocking stages: assembly (route selection), assembly_review (human gate), hic/t2t (conditional)"

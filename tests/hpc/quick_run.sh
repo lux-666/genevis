@@ -52,7 +52,7 @@ PLATFORM="ont"
 SAMPLE_ID="hpc_test_sample"
 SPECIES="白海豚"
 
-REVIEW_ASSEMBLY="${REVIEW_ASSEMBLY:-}"
+REVIEW_ASSEMBLY="${REVIEW_ASSEMBLY:-/data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta}"
 TEST09_REUSE_ASSEMBLY="${TEST09_REUSE_ASSEMBLY:-true}"
 NCBI_REFERENCE_SOURCE_DIR="/data/input/Files/genevis/Metazoa.ncbi"
 
