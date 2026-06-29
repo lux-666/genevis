@@ -59,61 +59,54 @@ fi
 # ---- Write run-config with all stages, auto policy for assembly routing ----
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
-# Build Hi-C and T2T config conditionally
+LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    HIC_CONFIG='{
-    "method": "hic_scaffolding.juicer_3ddna",
-    "approved": true,
-    "juicer_params": {
-      "restriction_site": "GATC",
-      "mapq_threshold": 1
-    },
-    "ddna_params": {
-      "rounds": 2,
-      "edit_rounds": 3
-    }
-  }'
-    T2T_CONFIG='{
-    "mode": "auto_patch",
-    "polishing_rounds": 2,
-    "review_policy": {"mode": "auto"}
-  }'
-else
-    HIC_CONFIG='{"mode": "skip"}'
-    T2T_CONFIG='{"mode": "skip"}'
+    if [[ -n "${HIC_CHROM_SIZES:-}" && -f "$HIC_CHROM_SIZES" ]]; then
+        LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
+    else
+        warn "HIC_CHROM_SIZES is empty or missing; omitting local Hi-C execution from run-config"
+        warn "Hi-C reads remain in the manifest, so the pipeline can still reach the Hi-C planning/skip path"
+    fi
 fi
 
-cat > "$RC" <<EORC
-{
-  "local_exec": ["read_qc", "genome_survey", "assembly", "assembly_review", "hic_scaffolding", "t2t"],
-  "read_qc": {
-    "length_filter": {
-      "method": "read_qc.length_filter.seqkit_seq",
-      "approved": true,
-      "thresholds": {
-        "min_len": 1000
-      }
-    }
-  },
-  "assembly": {
-    "route": "auto",
-    "review_policy": {"mode": "auto"}
-  },
-  "assembly_review": {
-    "review_policy": {"mode": "auto"}
-  },
-  "hic_scaffolding": ${HIC_CONFIG},
-  "t2t": ${T2T_CONFIG}
-}
-EORC
+READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
+READ_QC_LENGTH_FILTER_APPROVED="True"
+write_run_config_stages "$RC" "${LOCAL_EXEC_STAGES[@]}"
+unset READ_QC_LENGTH_FILTER_METHOD READ_QC_LENGTH_FILTER_APPROVED
+
+python3 - "$RC" "$HIC_AVAILABLE" <<'PY'
+import json
+import sys
+
+path, hic_available = sys.argv[1], sys.argv[2] == "true"
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+
+requested = ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
+if hic_available:
+    requested.insert(4, "hic_scaffolding")
+config["requested_stages"] = requested
+config["review_policy"] = {"mode": "auto"}
+config["t2t"] = {"mode": "auto_patch"}
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
 
 info "Run config written: ${RC}"
+cd "${PROJECT_ROOT}"
+python3 - "$RC" <<'PY'
+import sys
+from app.schemas.run_config import load_run_config
+
+load_run_config(sys.argv[1])
+print("run-config schema validation OK")
+PY
 
 # ============================================================
 # Phase 1: Run through read_qc and genome_survey (no blocking)
 # ============================================================
 info "Phase 1: Read QC + Genome Survey (non-blocking stages)"
-cd "${PROJECT_ROOT}"
 
 if GA run \
     --manifest "$MANIFEST" \
