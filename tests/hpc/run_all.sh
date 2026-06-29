@@ -97,6 +97,7 @@ TESTS=(
     "5:test_05_assembly_review.sh:Assembly Review"
     "6:test_06_hic.sh:Hi-C Scaffolding"
     "7:test_07_t2t.sh:T2T Telomere Finishing"
+    "9:test_09_e2e_pipeline.sh:End-to-End Pipeline Integration"
 )
 
 MASTER_PASS=0
