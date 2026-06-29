@@ -357,11 +357,8 @@ if 'hic_scaffolding' in stages:
     juicer_scripts_dir = '${HIC_JUICER_SCRIPTS_DIR:-}'
     if juicer_scripts_dir:
         rc['hic_scaffolding']['juicer_3ddna_parameters']['juicer_scripts_dir'] = juicer_scripts_dir
-    # chrom_sizes_ref is required for execution; if not set, leave it out
-    # (the pipeline will plan but may not execute)
     chrom_sizes = '${HIC_CHROM_SIZES:-}'
-    if chrom_sizes:
-        rc['hic_scaffolding']['juicer_3ddna_parameters']['chrom_sizes_ref'] = chrom_sizes
+    rc['hic_scaffolding']['juicer_3ddna_parameters']['chrom_sizes_ref'] = chrom_sizes or 'auto'
 
 json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 " "$out"

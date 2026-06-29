@@ -660,6 +660,27 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.hic_scaffolding.method, "juicer_3ddna_juicebox")
         self.assertEqual(config.hic_scaffolding.chromosome_count, 22)
 
+    def test_hic_3ddna_raw_reads_allows_auto_chrom_sizes(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["hic_scaffolding"],
+                "hic_scaffolding": {
+                    "method": "juicer_3ddna_juicebox",
+                    "input_mode": "raw_reads",
+                    "chromosome_count": 22,
+                    "juicer_3ddna_parameters": {
+                        "restriction_enzyme": "DpnII",
+                        "chrom_sizes_ref": "auto",
+                        "threads": 4,
+                    },
+                },
+            }
+        )
+
+        assert config.hic_scaffolding is not None
+        assert config.hic_scaffolding.juicer_3ddna_parameters is not None
+        self.assertEqual(config.hic_scaffolding.juicer_3ddna_parameters.chrom_sizes_ref, "auto")
+
     def test_hic_plan_candidate_allows_missing_execution_inputs(self):
         candidate = HiCScaffoldingPlanCandidate(
             method="juicer_3ddna_juicebox",

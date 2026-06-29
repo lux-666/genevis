@@ -709,6 +709,52 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
             self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
 
+    def test_local_3ddna_raw_reads_auto_generates_chrom_sizes_from_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly = Path(tmpdir) / "final.fa"
+            read1 = Path(tmpdir) / "hic_R1.fq.gz"
+            read2 = Path(tmpdir) / "hic_R2.fq.gz"
+            assembly.write_text(">ctg1 description\nACGT\nAC\n>ctg2\nNNNN\n", encoding="utf-8")
+            read1.write_text("r1\n", encoding="utf-8")
+            read2.write_text("r2\n", encoding="utf-8")
+            bin_dir, juicer_root, _three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
+                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "inventory": {"target_assembly_level": "chromosome"},
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+                "hic_scaffolding": {
+                    "execution_mode": "local",
+                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                    "juicer_3ddna_parameters": {
+                        "input_mode": "raw_reads",
+                        "chromosome_count": 22,
+                        "restriction_enzyme": "MboI",
+                        "chrom_sizes_ref": "auto",
+                        "threads": 2,
+                    },
+                },
+            }
+
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
+            chrom_sizes = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "chrom.sizes"
+            self.assertEqual(chrom_sizes.read_text(encoding="utf-8"), "ctg1\t6\nctg2\t4\n")
+            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn(f"-p {chrom_sizes.resolve()}", script_text)
+            self.assertIn(f"juicer_scripts_dir={juicer_root}", script_text)
+
     def test_local_3ddna_raw_reads_blocks_before_execution_without_site_generator(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly = Path(tmpdir) / "final.fa"

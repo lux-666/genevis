@@ -142,7 +142,7 @@ check_config() {
             ok "  Expected chromosomes: $HIC_CHROMOSOME_COUNT"
         fi
         if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-            warn "  HIC_CHROM_SIZES is empty; test_09 will not enable local Hi-C execution in run-config"
+            ok "  chrom.sizes: auto-generate from assembly"
         elif [[ ! -f "$HIC_CHROM_SIZES" ]]; then
             warn "  HIC_CHROM_SIZES file not found: $HIC_CHROM_SIZES"
         else

@@ -208,12 +208,12 @@ def _parameters(state: TopLevelState, output: dict[str, Any]) -> tuple[dict[str,
     if missing_paths:
         return {}, _parameter_block("hic_read_paths", missing_paths, "registered Hi-C read paths do not exist")
     enzyme = str(raw.get("restriction_enzyme") or "").strip()
-    chrom_sizes = Path(str(raw.get("chrom_sizes_ref") or ""))
+    chrom_sizes, error = _chrom_sizes_path(state, output, raw)
+    if error:
+        return {}, error
     threads = _positive_int(raw.get("threads"), "juicer_3ddna_parameters.threads")
     if not enzyme:
         return {}, _missing_block("juicer_3ddna_parameters.restriction_enzyme")
-    if not chrom_sizes.exists():
-        return {}, _missing_block("juicer_3ddna_parameters.chrom_sizes_ref")
     if threads is None:
         return {}, _missing_block("juicer_3ddna_parameters.threads")
     juicer_extra_args, error = _string_list(raw.get("juicer_extra_args", []), "juicer_3ddna_parameters.juicer_extra_args")
@@ -234,6 +234,58 @@ def _parameters(state: TopLevelState, output: dict[str, Any]) -> tuple[dict[str,
             "extra_args": juicer_extra_args,
         },
     }, None
+
+
+def _chrom_sizes_path(
+    state: TopLevelState,
+    output: dict[str, Any],
+    raw: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    value = str(raw.get("chrom_sizes_ref") or "").strip()
+    if value and value != "auto":
+        chrom_sizes = Path(value)
+        if not chrom_sizes.exists():
+            return None, _missing_block("juicer_3ddna_parameters.chrom_sizes_ref")
+        return chrom_sizes, None
+
+    assembly = Path(str(output.get("pre_hic_assembly_ref") or ""))
+    if not assembly.exists():
+        return None, _missing_block("pre_hic_assembly_ref for auto chrom.sizes")
+
+    data_dir = absolute_data_dir(state)
+    chrom_sizes = data_dir / "work" / "hic_scaffolding" / state["session_id"] / "juicer_3ddna" / "chrom.sizes"
+    try:
+        _write_chrom_sizes_from_fasta(assembly, chrom_sizes)
+    except ValueError as exc:
+        return None, _parameter_block("pre_hic_assembly_ref", str(assembly), str(exc))
+    except OSError as exc:
+        return None, _parameter_block("juicer_3ddna_parameters.chrom_sizes_ref", str(chrom_sizes), str(exc))
+    return chrom_sizes, None
+
+
+def _write_chrom_sizes_from_fasta(assembly: Path, chrom_sizes: Path) -> None:
+    chrom_sizes.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[tuple[str, int]] = []
+    current_name: str | None = None
+    current_length = 0
+    with assembly.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current_name is not None:
+                    rows.append((current_name, current_length))
+                current_name = line[1:].split()[0]
+                current_length = 0
+            else:
+                current_length += len(line)
+    if current_name is not None:
+        rows.append((current_name, current_length))
+    rows = [(name, length) for name, length in rows if name and length > 0]
+    if not rows:
+        raise ValueError("assembly FASTA has no non-empty sequences for auto chrom.sizes")
+    chrom_sizes.write_text("".join(f"{name}\t{length}\n" for name, length in rows), encoding="utf-8")
 
 
 def _script(

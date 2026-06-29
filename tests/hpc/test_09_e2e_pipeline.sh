@@ -61,11 +61,9 @@ RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
 LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    if [[ -n "${HIC_CHROM_SIZES:-}" && -f "$HIC_CHROM_SIZES" ]]; then
-        LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
-    else
-        warn "HIC_CHROM_SIZES is empty or missing; omitting local Hi-C execution from run-config"
-        warn "Hi-C reads remain in the manifest, so the pipeline can still reach the Hi-C planning/skip path"
+    LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
+    if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
+        info "HIC_CHROM_SIZES is empty; Juicer run-config will use chrom_sizes_ref=auto"
     fi
 fi
 
