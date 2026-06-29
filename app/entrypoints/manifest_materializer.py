@@ -106,10 +106,24 @@ def _build_asset_specs(source_paths: list[Path], request: EntryRequest) -> list[
 
 
 def _infer_asset_type(path: Path) -> str:
+    """
+    Infer asset type from file path when LLM doesn't provide asset_type_hint.
+
+    Conservative strategy: when ambiguous (e.g., .fa can be reads or assembly),
+    prefer raw_long_reads to avoid skipping QC stages. Users can clarify later.
+    """
     suffix = _compound_suffix(path)
     name = path.name.lower()
+
+    # .fa/.fasta can be either reads (PacBio/Nanopore) or assembly
+    # Heuristic: check filename for assembly indicators
     if suffix in {".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz"}:
-        return "assembly_fasta_registered"
+        # Strong assembly indicators in filename
+        if any(kw in name for kw in ["assembly", "genome", "contig", "scaffold", "chromosome"]):
+            return "assembly_fasta_registered"
+        # Otherwise, conservatively treat as raw reads (safe default for workflows starting from assembly)
+        return "raw_long_reads"
+
     if suffix in {".bam", ".cram"} and ("hic" in name or "hi-c" in name):
         return "hic_alignment_bam"
     if suffix in {".fq", ".fastq", ".fq.gz", ".fastq.gz", ".bam", ".cram"}:

@@ -32,8 +32,10 @@ Rules:
 - If no workflow goal is explicit, omit requested_stages or set it to null.
 - Use asset_type_hint "hic_alignment_bam" when the user explicitly says a BAM or CRAM is a Hi-C alignment.
 - If the user explicitly mentions CycloneSEQ, cyclone sequencing, or cyclone文件, use platform "cycloneseq".
-- If a `.fa`, `.fasta`, or `.fna` path is described as raw sequencing reads, Nanopore, CycloneSEQ, cyclone, or a sequencing file to run, use asset_type_hint "raw_long_reads".
-- If a `.fa`, `.fasta`, or `.fna` path is described as an existing genome assembly or assembled genome, use or allow asset_type_hint "assembly_fasta_registered".
+- If a file path is described as clean/filtered/QC'd sequencing data, use asset_type_hint "clean_long_reads".
+- If a file path is described as raw sequencing reads, Nanopore, PacBio, CycloneSEQ, or a sequencing file to run, use asset_type_hint "raw_long_reads".
+- If a file path is described as an existing genome assembly or assembled genome, use asset_type_hint "assembly_fasta_registered".
+- When the user's description is ambiguous or only mentions the workflow goal without describing the file type, omit asset_type_hint to allow downstream inference.
 - Only include genome_size_estimate when the user explicitly provides it.
 - Use platform "unknown" when the platform is not explicit.
 - Do not invent asset types, paths, genome sizes, database versions, method choices, thresholds, or review decisions.
