@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -121,6 +122,24 @@ class PromptAssemblyReviewTests(unittest.TestCase):
         self.assertEqual(result["decision"], "accept")
         self.assertEqual(result["candidate_id"], "flye")
         self.assertEqual(result["final_assembly_ref"], "/path/to/draft.fasta")
+
+    def test_decision_prompt_describes_hic_t2t_downstream(self):
+        requirements = {
+            "stage": "assembly_review",
+            "decisions_allowed": ["accept", "pass", "rerun"],
+            "candidate_ids": ["flye"],
+            "candidate_final_assembly_refs": {"flye": "/path/to/draft.fasta"},
+        }
+        inputs = iter(["1", ""])
+        out = io.StringIO()
+        with patch("builtins.input", side_effect=lambda _: next(inputs)), \
+                patch("sys.stdout", out):
+            result = prompt_assembly_review_decision(requirements)
+
+        self.assertIsNotNone(result)
+        rendered = out.getvalue()
+        self.assertIn("continue to Hi-C scaffolding, then T2T", rendered)
+        self.assertIn("downstream_flow: assembly_review -> hic_scaffolding -> t2t", rendered)
 
     def test_accept_multiple_candidates_prompts_choice(self):
         requirements = {
@@ -468,6 +487,28 @@ class RenderBlockedSummaryTests(unittest.TestCase):
             "next_action": {"relevant_refs": ["/tmp/ref"]},
         }
         render_blocked_summary(summary)
+
+    def test_renders_assembly_review_downstream_flow(self):
+        summary = {
+            "session_id": "s1",
+            "supervision_state": "blocked_human",
+            "decision_requirements": {
+                "stage": "assembly_review",
+                "decisions_allowed": ["accept", "pass", "rerun"],
+                "candidate_ids": ["flye"],
+                "candidate_final_assembly_refs": {"flye": "/tmp/nonexistent.fasta"},
+            },
+            "latest_review_request_artifact": None,
+            "next_action": {},
+        }
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            render_blocked_summary(summary)
+
+        rendered = out.getvalue()
+        self.assertIn("next_after_assembly_review", rendered)
+        self.assertIn("assembly_review -> hic_scaffolding -> t2t", rendered)
+        self.assertIn("does not jump straight to annotation", rendered)
 
     def test_renders_hic_scaffolding_without_error(self):
         summary = {

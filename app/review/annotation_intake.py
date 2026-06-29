@@ -36,6 +36,8 @@ CONTINUE_DOWNSTREAM_DECISIONS = frozenset({"accept", "pass", "continue_low_confi
 ASSEMBLY_OPERATION_DECISIONS = frozenset({"purge", "polish", "rerun"})
 TERMINATE_DECISIONS = frozenset({"stop_human_review"})
 DOWNSTREAM_STAGES = tuple(STAGE_ORDER[STAGE_ORDER.index(ASSEMBLY_REVIEW_STAGE) + 1 :])
+DOWNSTREAM_PLAN_TITLE = "Downstream Plan After Assembly Review"
+DOWNSTREAM_FLOW = " -> ".join(DOWNSTREAM_STAGES)
 
 
 @dataclass(frozen=True)
@@ -153,17 +155,20 @@ def build_recommended_annotation_plan(state: TopLevelState) -> AskPlanState:
 def prompt_annotation_intake_plan(plan: AskPlanState) -> AskPlanState:
     """Render, accept, or edit a downstream annotation intake plan."""
     try:
-        _render_plan_summary(build_run_plan_summary(plan), title="Annotation Intake Plan", preview=True)
-        if _prompt_confirm("Accept this annotation intake plan?"):
+        _render_plan_summary(build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True)
+        print(f"\nDownstream order: {DOWNSTREAM_FLOW}")
+        print("Assembly review resumes into Hi-C/T2T first when those stages are selected; annotation comes after that.")
+        if _prompt_confirm("Accept this downstream plan?"):
             return plan.model_copy(update={"confirmed": True})
 
-        print("\n--- Annotation Intake Replan ---")
+        print("\n--- Downstream Replan ---")
         print("Only stages after assembly_review can be changed here.")
+        print(f"Fixed order: {DOWNSTREAM_FLOW}")
         plan = _collect_downstream_stage_selection(plan)
         plan = _collect_downstream_method_selection(plan)
         plan = _collect_downstream_parameters(plan)
-        _render_plan_summary(build_run_plan_summary(plan), title="Annotation Intake Plan", preview=True)
-        if _prompt_confirm("Proceed with this annotation intake plan?"):
+        _render_plan_summary(build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True)
+        if _prompt_confirm("Proceed with this downstream plan?"):
             return plan.model_copy(update={"confirmed": True})
     except (_UserAbort, EOFError, KeyboardInterrupt) as exc:
         raise RuntimeError("annotation intake cancelled") from exc
@@ -314,11 +319,15 @@ def _collect_downstream_stage_selection(plan: AskPlanState) -> AskPlanState:
         session_id=plan.session_id,
         ask_plan_ref="annotation_intake",
         manifest_ref=plan.manifest_ref,
-        question="Which downstream annotation stages should run?",
+        question=(
+            "Which downstream stages should run after assembly_review? "
+            "Fixed order: hic_scaffolding -> t2t -> repeat_annotation -> "
+            "gene_annotation -> function_annotation."
+        ),
         choices={"available_stages": list(DOWNSTREAM_STAGES), "suggested_stages": plan.selected_stages or []},
         required_fields=["selected_stages"],
         response_schema={"kind": "stage_selection", "selected_stages": plan.selected_stages or []},
-        next_action={"kind": "interactive_annotation_intake"},
+        next_action={"kind": "interactive_downstream_plan"},
     )
     response = _prompt_for_answer(req, plan)
     selected = _ordered_downstream(response.selected_stages or [])

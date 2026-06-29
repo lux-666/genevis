@@ -21,6 +21,30 @@ from app.storage.paths import locate_session_data_dir
 # Rendering
 # ---------------------------------------------------------------------------
 
+ASSEMBLY_REVIEW_DOWNSTREAM_FLOW = (
+    "assembly_review -> hic_scaffolding -> t2t -> "
+    "repeat_annotation -> gene_annotation -> function_annotation"
+)
+
+ASSEMBLY_REVIEW_DECISION_HELP = {
+    "accept": (
+        "Use the selected assembly unchanged and continue to Hi-C scaffolding, "
+        "then T2T, then annotation stages."
+    ),
+    "pass": (
+        "Same as accept: pass the selected assembly downstream to Hi-C scaffolding, "
+        "then T2T, then annotation stages."
+    ),
+    "continue_low_confidence": (
+        "Continue downstream despite weak or incomplete evidence; "
+        "the next stage is still Hi-C scaffolding."
+    ),
+    "purge": "Use an already generated purged assembly as the downstream input; provide its output path and evidence.",
+    "polish": "Use an already generated polished assembly as the downstream input; provide its output path and evidence.",
+    "rerun": "Do not continue downstream yet; launch/record another assembly attempt and return to assembly review.",
+    "stop_human_review": "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted.",
+}
+
 
 def render_blocked_summary(summary: dict[str, Any]) -> None:
     """Print a human-readable summary of a blocked session gate."""
@@ -50,6 +74,7 @@ def render_blocked_summary(summary: dict[str, Any]) -> None:
 def _render_assembly_review(requirements: dict, summary: dict) -> None:
     decisions = requirements.get("decisions_allowed", [])
     print(f"decisions_allowed: {decisions}")
+    _render_assembly_review_downstream_context(decisions)
 
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
@@ -72,6 +97,21 @@ def _render_assembly_review(requirements: dict, summary: dict) -> None:
         print("\ncandidate_comparison:")
         for key, val in comparison.items():
             print(f"  {key}: {val}")
+
+
+def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
+    print("\nnext_after_assembly_review:")
+    print(f"  flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
+    print(
+        "  note: accepting or passing an assembly does not jump straight to annotation; "
+        "it resumes at hic_scaffolding."
+    )
+    if decisions:
+        print("\ndecision_meanings:")
+        for decision in decisions:
+            help_text = ASSEMBLY_REVIEW_DECISION_HELP.get(decision)
+            if help_text:
+                print(f"  {decision}: {help_text}")
 
 
 def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
@@ -131,9 +171,11 @@ def prompt_assembly_review_decision(
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
 
-    decision = _prompt_choice("decision", decisions)
+    decision = _prompt_choice("decision", decisions, ASSEMBLY_REVIEW_DECISION_HELP)
     if decision is None:
         return None
+
+    _print_selected_assembly_review_decision_effect(decision)
 
     candidate_id = None
     final_assembly_ref = None
@@ -196,6 +238,15 @@ def prompt_assembly_review_decision(
     if metadata:
         result["metadata"] = metadata
     return result
+
+
+def _print_selected_assembly_review_decision_effect(decision: str) -> None:
+    help_text = ASSEMBLY_REVIEW_DECISION_HELP.get(decision)
+    if not help_text:
+        return
+    print(f"\nselected_effect: {help_text}")
+    if decision in {"accept", "pass", "continue_low_confidence", "purge", "polish"}:
+        print(f"downstream_flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
 
 
 def prompt_hic_scaffolding_decision(
@@ -341,12 +392,13 @@ def prompt_t2t_review_decision(
     return result
 
 
-def _prompt_choice(label: str, options: list[str]) -> str | None:
+def _prompt_choice(label: str, options: list[str], descriptions: dict[str, str] | None = None) -> str | None:
     if not options:
         return None
     print(f"\n{label}:")
     for i, opt in enumerate(options, 1):
-        print(f"  {i}. {opt}")
+        suffix = f" - {descriptions[opt]}" if descriptions and descriptions.get(opt) else ""
+        print(f"  {i}. {opt}{suffix}")
     try:
         raw = input(f"select {label} [1-{len(options)}]: ").strip()
     except (EOFError, KeyboardInterrupt):
