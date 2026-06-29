@@ -38,7 +38,7 @@ def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
             {"candidate_id": "flye", "method_name": "assembly.candidate.flye", "final_assembly_ref": str(review_dir / "draft.fasta")},
         ],
         "signals": [],
-        "decisions_allowed": ["accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"],
+        "decisions_allowed": ["accept", "rerun", "stop_human_review"],
         "notes": [],
         "report_refs": {},
         "candidate_comparison_context": {},
@@ -126,7 +126,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
     def test_decision_prompt_describes_hic_t2t_downstream(self):
         requirements = {
             "stage": "assembly_review",
-            "decisions_allowed": ["accept", "pass", "rerun"],
+            "decisions_allowed": ["accept", "rerun", "stop_human_review"],
             "candidate_ids": ["flye"],
             "candidate_final_assembly_refs": {"flye": "/path/to/draft.fasta"},
         }
@@ -477,7 +477,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
             "supervision_state": "blocked_human",
             "decision_requirements": {
                 "stage": "assembly_review",
-                "decisions_allowed": ["accept", "pass"],
+                "decisions_allowed": ["accept", "rerun", "stop_human_review"],
                 "candidate_ids": ["flye"],
                 "candidate_final_assembly_refs": {"flye": "/tmp/nonexistent.fasta"},
                 "report_refs": {"report": "/tmp/report.json"},
@@ -494,7 +494,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
             "supervision_state": "blocked_human",
             "decision_requirements": {
                 "stage": "assembly_review",
-                "decisions_allowed": ["accept", "pass", "rerun"],
+                "decisions_allowed": ["accept", "rerun", "stop_human_review"],
                 "candidate_ids": ["flye"],
                 "candidate_final_assembly_refs": {"flye": "/tmp/nonexistent.fasta"},
             },
@@ -508,7 +508,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
         rendered = out.getvalue()
         self.assertIn("next_after_assembly_review", rendered)
         self.assertIn("assembly_review -> hic_scaffolding -> t2t", rendered)
-        self.assertIn("does not jump straight to annotation", rendered)
+        self.assertIn("continues to hic_scaffolding, then t2t", rendered)
 
     def test_renders_hic_scaffolding_without_error(self):
         summary = {
@@ -555,7 +555,7 @@ class DecisionBriefTests(unittest.TestCase):
             "supervision_state": "blocked_human",
             "decision_requirements": {
                 "stage": "assembly_review",
-                "decisions_allowed": ["accept", "pass", "rerun"],
+                "decisions_allowed": ["accept", "rerun", "stop_human_review"],
                 "candidate_ids": ["flye"],
                 "candidate_final_assembly_refs": {"flye": "/tmp/draft.fasta"},
                 "report_refs": {"quast": "/tmp/quast_report.json"},
@@ -569,7 +569,7 @@ class DecisionBriefTests(unittest.TestCase):
         self.assertEqual(brief["session_id"], "s1")
         self.assertEqual(brief["stage"], "assembly_review")
         self.assertEqual(brief["supervision_state"], "blocked_human")
-        self.assertEqual(brief["decisions_allowed"], ["accept", "pass", "rerun"])
+        self.assertEqual(brief["decisions_allowed"], ["accept", "rerun", "stop_human_review"])
         self.assertEqual(brief["review_request_ref"], "/tmp/request.json")
         self.assertEqual(len(brief["candidates"]), 1)
         self.assertEqual(brief["candidates"][0]["id"], "flye")

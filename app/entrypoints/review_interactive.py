@@ -28,7 +28,7 @@ ASSEMBLY_REVIEW_DOWNSTREAM_FLOW = (
 
 ASSEMBLY_REVIEW_DECISION_HELP = {
     "accept": (
-        "Use the selected assembly unchanged and continue to Hi-C scaffolding, "
+        "Approve the selected assembly and continue to Hi-C scaffolding, "
         "then T2T, then annotation stages."
     ),
     "pass": (
@@ -41,7 +41,7 @@ ASSEMBLY_REVIEW_DECISION_HELP = {
     ),
     "purge": "Use an already generated purged assembly as the downstream input; provide its output path and evidence.",
     "polish": "Use an already generated polished assembly as the downstream input; provide its output path and evidence.",
-    "rerun": "Do not continue downstream yet; launch/record another assembly attempt and return to assembly review.",
+    "rerun": "Retry assembly with adjusted parameters; do not continue to Hi-C/T2T yet.",
     "stop_human_review": "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted.",
 }
 
@@ -103,8 +103,8 @@ def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
     print("\nnext_after_assembly_review:")
     print(f"  flow: {ASSEMBLY_REVIEW_DOWNSTREAM_FLOW}")
     print(
-        "  note: accepting or passing an assembly does not jump straight to annotation; "
-        "it resumes at hic_scaffolding."
+        "  note: accepting an assembly continues to hic_scaffolding, then t2t, "
+        "before annotation."
     )
     if decisions:
         print("\ndecision_meanings:")

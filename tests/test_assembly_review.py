@@ -239,7 +239,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
             self.assertIn("accept", result["active_interrupt"]["decisions_allowed"])
-            self.assertIn("pass", result["active_interrupt"]["decisions_allowed"])
+            self.assertIn("rerun", result["active_interrupt"]["decisions_allowed"])
+            self.assertIn("stop_human_review", result["active_interrupt"]["decisions_allowed"])
+            self.assertNotIn("pass", result["active_interrupt"]["decisions_allowed"])
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertEqual(ar_out["status"], "blocked_human")
             self.assertEqual(ar_out["candidates"][0]["candidate_id"], "existing_assembly")
@@ -283,9 +285,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
             self.assertIn("blocked_at", result["active_interrupt"])
-            self.assertIn("pass", result["active_interrupt"]["decisions_allowed"])
-            self.assertIn("polish", result["active_interrupt"]["decisions_allowed"])
-            self.assertIn("purge", result["active_interrupt"]["decisions_allowed"])
+            self.assertEqual(
+                result["active_interrupt"]["decisions_allowed"],
+                ["accept", "rerun", "stop_human_review"],
+            )
             # current_stage stays at assembly_review while blocked
             self.assertEqual(result["current_stage"], "assembly_review")
             ar_out = result["stage_outputs"]["assembly_review"]
@@ -1289,7 +1292,7 @@ class AssemblyRerunTests(unittest.TestCase):
         state["active_interrupt"] = {
             "stage": "assembly_review",
             "reason": "assembly_review_human_decision_required",
-            "decisions_allowed": ["pass", "accept", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"],
+            "decisions_allowed": ["accept", "rerun", "stop_human_review"],
             "candidates": state["stage_outputs"]["assembly_review"]["candidates"],
         }
         return state
