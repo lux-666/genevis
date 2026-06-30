@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from app.entrypoints.ask_interactive import (
     is_interactive,
-    parse_set_params,
+    _parse_set_params,
     run_interactive_loop,
     _apply_set_params,
     _draft_continue_blockers,
@@ -569,12 +569,12 @@ class ResumeTests(unittest.TestCase):
 
 class SetParamsTests(unittest.TestCase):
     def test_parse_set_params_basic(self):
-        result = parse_set_params(["genome_size=500m", "threads=8"])
+        result = _parse_set_params(["genome_size=500m", "threads=8"])
         self.assertEqual(result, {"genome_size": "500m", "threads": "8"})
 
     def test_parse_set_params_invalid(self):
         with self.assertRaises(ValueError):
-            parse_set_params(["invalid"])
+            _parse_set_params(["invalid"])
 
     def test_apply_set_params_merges_genome_size(self):
         plan = _base_plan(

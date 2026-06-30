@@ -161,20 +161,6 @@ def _extract_source_paths(request_text: str) -> list[str]:
     return paths
 
 
-def _infer_requested_stages_from_text(request_text: str) -> list[str] | None:
-    lower = request_text.lower()
-    only = any(token in lower for token in ("只做", "仅做", "只跑", "仅执行", "only", "just", "stage only"))
-    if any(token in lower for token in ("t2t", "near-t2t", "telomere-to-telomere", "telomere rescue")):
-        return ["t2t"] if only else ["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review", "hic_scaffolding", "t2t"]
-    if "hic" in lower or "hi-c" in lower or "chromosome" in lower or "染色体" in request_text:
-        return ["hic_scaffolding"] if only else ["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review", "hic_scaffolding"]
-    if "assembly" in lower or "assemble" in lower or "组装" in request_text:
-        return ["assembly"] if only else ["read_qc", "genome_survey", "assembly"]
-    if "质控" in request_text or "read qc" in lower:
-        return ["read_qc"]
-    return None
-
-
 _TARGET_SPECIES_PATTERNS = [
     re.compile(r"以(?P<species>[^，,。；;\s]{1,80}?)为目标物种"),
     re.compile(r"目标物种(?:是|为|[:：])(?P<species>[^，,。；;\s]{1,80})"),

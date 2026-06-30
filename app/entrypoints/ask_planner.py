@@ -27,11 +27,6 @@ FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
 FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
 
 
-def _warning(message: str, stage: str, category: str = "general") -> PlanWarning:
-    """Create a structured warning with stage metadata."""
-    return PlanWarning(message=message, stage=stage, category=category)
-
-
 _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
     "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
@@ -402,10 +397,6 @@ def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
             if m["method_name"] == method_name:
                 return m
     return None
-
-
-def _all_known_methods() -> set[str]:
-    return {m["method_name"] for methods in _STAGE_METHODS.values() for m in methods}
 
 
 def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:

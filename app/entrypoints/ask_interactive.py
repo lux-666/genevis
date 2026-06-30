@@ -177,7 +177,8 @@ def apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
     return _apply_set_params(plan, set_params)
 
 
-def parse_set_params(raw: list[str]) -> dict[str, str]:
+def _parse_set_params(raw: list[str]) -> dict[str, str]:
+    """Parse --set KEY=VALUE arguments into a dictionary (internal helper)."""
     result: dict[str, str] = {}
     for item in raw:
         if "=" not in item:
@@ -1548,7 +1549,7 @@ def _parse_genome_size(raw: str) -> int | str:
 def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState:
     if not set_params:
         return plan
-    parsed = parse_set_params(set_params)
+    parsed = _parse_set_params(set_params)
     # Assembly/Flye MVP only. Generalize via method descriptors when more
     # executable methods are supported.
     _PARAM_ALIASES = {
