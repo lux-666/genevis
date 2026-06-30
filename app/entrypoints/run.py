@@ -708,7 +708,9 @@ def _run_ask(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    request = EntryRequest.model_validate(plan.entry_request)
+    entry_request = dict(plan.entry_request or {})
+    entry_request.pop("intent_parse_source", None)
+    request = EntryRequest.model_validate(entry_request)
     if not request.manifest:
         request = request.model_copy(update={"manifest": plan.manifest_ref})
     argv = request.to_cli_argv()
@@ -730,13 +732,19 @@ def _create_ask_plan(args: argparse.Namespace) -> "AskPlanState":
         "data_dir": data_dir,
     }
     request = parse_request_with_llm(args.request_text, defaults=defaults)
+    intent_parse_source = getattr(request, "_intent_parse_source", None)
     request = materialize_entry_manifest(request)
+    if intent_parse_source:
+        request._intent_parse_source = intent_parse_source
     stored_request = request.model_copy(update={"source_paths": []}) if request.manifest else request
+    entry_request = stored_request.model_dump(mode="json")
+    if intent_parse_source:
+        entry_request["intent_parse_source"] = intent_parse_source
     return AskPlanState(
         session_id=str(request.session_id),
         data_dir=request.data_dir,
         request_text=args.request_text,
-        entry_request=stored_request.model_dump(mode="json"),
+        entry_request=entry_request,
         manifest_ref=str(request.manifest),
     )
 

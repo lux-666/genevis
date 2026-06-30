@@ -19,6 +19,7 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
+from app.entrypoints.tui import _tui_main
 from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
@@ -237,6 +238,16 @@ class EntrypointTests(unittest.TestCase):
                 ]
             )
         self.assertIn("unrecognized arguments", stderr.getvalue())
+
+    def test_tui_prompt_example_mentions_target_species(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), patch("builtins.input", return_value=""):
+            code = _tui_main("data")
+
+        self.assertEqual(code, 1)
+        self.assertIn("目标物种", stdout.getvalue())
+        self.assertIn("卵鳎", stdout.getvalue())
 
     def test_ask_args_parse_minimal_defaults(self):
         args = _parse_args(["ask", "use inputs/manifest.yaml to start s1", "--session-id", "s1", "--data-dir", "out"])
@@ -712,7 +723,12 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             assembly = root / "assembly.fa"
             assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            request = EntryRequest(session_id="s1", source_paths=[str(assembly)], data_dir=str(root / "data"))
+            request = EntryRequest(
+                session_id="s1",
+                source_paths=[str(assembly)],
+                data_dir=str(root / "data"),
+                target_species="卵鳎",
+            )
 
             with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
                 "app.entrypoints.run.build_graph"
@@ -729,6 +745,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertTrue(manifest.exists())
             text = manifest.read_text(encoding="utf-8")
             self.assertIn("assembly_fasta_registered", text)
+            self.assertIn("target_species: 卵鳎", text)
             build_graph.assert_not_called()
 
     def test_ask_resume_falls_back_to_legacy_plan_location(self):

@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
@@ -197,6 +198,33 @@ class AskPlannerStageSelectionTests(unittest.TestCase):
             self.assertEqual(summary["input_assets"][0]["format"], "fastq")
             self.assertEqual(summary["input_assets"][0]["paths"], [str(reads)])
 
+    def test_stage_plan_details_reuses_passed_manifest(self):
+        import app.entrypoints.ask_planner as planner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest_path = Path(tmp) / "manifest.yaml"
+            manifest_path.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest_path),
+                entry_request={"command": "run", "manifest": str(manifest_path)},
+                resolved_execution_order=["assembly"],
+                selected_methods={"assembly": "assembly.candidate.flye"},
+            )
+            manifest = planner._load_manifest(str(manifest_path))
+            with patch.object(planner, "_load_manifest") as load_spy:
+                planner._stage_plan_details(
+                    plan,
+                    parameter_defaults={},
+                    missing_fields=[],
+                    manifest=manifest,
+                )
+            load_spy.assert_not_called()
+
 
 class BuildInitialPlanDraftTests(unittest.TestCase):
     def test_no_requested_stages_returns_none(self):
@@ -234,6 +262,42 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             draft = build_initial_plan_draft(plan)
             self.assertEqual(draft.selected_stages, ["assembly", "gene_annotation"])
             self.assertEqual(draft.resolved_execution_order, ["assembly", "gene_annotation"])
+
+    def test_pipeline_draft_prefills_recommended_methods_and_default_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 2000000\nassets:\n"
+                f"  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                entry_request={"requested_stages": ["read_qc", "genome_survey", "assembly", "assembly_review"]},
+            )
+
+            draft = build_initial_plan_draft(plan)
+
+            self.assertEqual(draft.selected_methods["read_qc"], _read_qc_default_methods())
+            self.assertEqual(
+                draft.selected_methods["genome_survey"],
+                ["genome_survey.kmer_count.jellyfish", "genome_survey.model.genomescope2"],
+            )
+            self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
+            self.assertEqual(
+                draft.selected_methods["assembly_review"],
+                ["assembly_review.eval.quast"],
+            )
+            self.assertEqual(draft.shared_parameters.platform, "ont")
+            self.assertEqual(draft.shared_parameters.read_type, "ont_raw")
+            self.assertEqual(draft.shared_parameters.estimated_genome_size, 2_000_000)
+            self.assertEqual(draft.method_parameters["genome_survey.kmer_count.jellyfish"]["kmer_size"], 21)
+            self.assertEqual(draft.method_parameters["genome_survey.kmer_count.jellyfish"]["hash_size"], "1G")
+            self.assertEqual(draft.method_parameters["genome_survey.model.genomescope2"]["kmer_size"], 21)
+            self.assertEqual(draft.method_parameters["assembly.candidate.flye"]["threads"], 4)
+            self.assertEqual(draft.method_parameters["assembly_review.eval.quast"]["threads"], 4)
 
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
@@ -1239,6 +1303,85 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertEqual(candidates[0]["status"], "needs_clarification")
         self.assertIn("chromosome_count", candidates[0]["missing_fields"])
         self.assertEqual(candidates[1]["missing_fields"], ["hic_alignment_ref"])
+        juicer_defaults = summary["parameter_defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
+        self.assertEqual(juicer_defaults["input_mode"], "merged_nodups")
+        self.assertIn(
+            "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
+            summary["missing_parameter_fields"],
+        )
+        self.assertIn(
+            "hic_scaffolding.candidate.juicer_3ddna_juicebox.merged_nodups_ref",
+            summary["missing_parameter_fields"],
+        )
+
+    def test_hic_chromosome_count_default_uses_related_species_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\n"
+                "user_metadata:\n"
+                "  target_species: 卵鳎\n"
+                "assets: []\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["hic_scaffolding"],
+                resolved_execution_order=["hic_scaffolding"],
+                selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
+            )
+            evidence_pack = {
+                "status": "available",
+                "computed_summary": {"chromosome_count": {"mode": 25}},
+            }
+
+            with patch("app.entrypoints.ask_planner.build_related_species_evidence_pack", return_value=evidence_pack):
+                result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+                summary = build_run_plan_summary(plan)
+
+        defaults = result.choices["defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
+        self.assertEqual(defaults["chromosome_count"], 25)
+        self.assertEqual(
+            summary["parameter_defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["chromosome_count"],
+            25,
+        )
+        self.assertEqual(
+            summary["parameter_default_sources"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["chromosome_count"],
+            "evidence: local NCBI related-species evidence for 卵鳎",
+        )
+        self.assertTrue(any("NCBI related-species evidence" in warning for warning in result.choices["warnings"]))
+
+    def test_hic_chromosome_count_pending_explains_unavailable_species_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\n"
+                "user_metadata:\n"
+                "  target_species: 卵鳎\n"
+                "assets: []\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                selected_stages=["hic_scaffolding"],
+                resolved_execution_order=["hic_scaffolding"],
+                selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
+            )
+            evidence_pack = {
+                "status": "unavailable",
+                "computed_summary": {"selected_record_count": 0},
+                "notes": ["reference_version_mismatch:Metazoa.ncbi.tsv,Metazoa.ncbi.lineage"],
+            }
+
+            with patch("app.entrypoints.ask_planner.build_related_species_evidence_pack", return_value=evidence_pack):
+                result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+
+        self.assertIn(
+            "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
+            result.required_fields,
+        )
+        self.assertTrue(any("chromosome_count evidence unavailable for 卵鳎" in warning for warning in result.choices["warnings"]))
+        self.assertTrue(any("reference_version_mismatch" in warning for warning in result.choices["warnings"]))
 
     def test_repeat_annotation_method_selection(self):
         plan = _base_plan(

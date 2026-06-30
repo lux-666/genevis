@@ -14,8 +14,11 @@ from app.entrypoints.ask_interactive import (
     parse_set_params,
     run_interactive_loop,
     _apply_set_params,
+    _draft_continue_blockers,
+    _group_missing_fields_by_scope,
     _parse_genome_size,
     _prompt_parameter_values,
+    _render_draft_review,
     _render_confirm,
     _render_plan_summary,
     _update_derived_defaults,
@@ -284,6 +287,40 @@ class InteractiveLoopTests(unittest.TestCase):
             "/data/hic.bam",
         )
 
+    def test_parameter_prompt_recommends_auto_chrom_sizes_for_juicer_raw_reads(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"defaults": {}},
+            required_fields=[
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.input_mode",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chrom_sizes_ref",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.threads",
+            ],
+            response_schema={},
+            next_action={},
+        )
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
+        )
+        inputs = iter(["raw_reads", "24", "MboI", "", ""])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            response = _prompt_parameter_values(req, plan)
+
+        assert response.method_parameters is not None
+        params = response.method_parameters["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
+        self.assertEqual(params["chrom_sizes_ref"], "auto")
+        self.assertEqual(params["threads"], 8)
+
     def test_parameter_prompt_accepts_function_database_provenance_fields(self):
         req = AskClarificationRequest(
             status="clarification_required",
@@ -508,9 +545,10 @@ class InteractiveLoopTests(unittest.TestCase):
                                  "requested_stages": ["assembly"],
                              })
             args = _ask_ns()
-            # "y" accept draft; manifest has no genome size so params are asked:
-            # "" platform [ont], "500m" genome_size, "" threads [4], "y" confirm
-            inputs = iter(["y", "", "500m", "", "y"])
+            # First continue is blocked at the plan menu because genome size is missing.
+            # Then edit assembly parameters, fill genome size, return to the plan,
+            # continue, and confirm the final run plan.
+            inputs = iter(["y", "1p", "500m", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -620,6 +658,101 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Parameters: pending", rendered)
         self.assertIn("Advisory preview.", rendered)
 
+    def test_preview_shows_parser_source_recommended_defaults_and_pending_fields(self):
+        summary = {
+            "session_id": "s1",
+            "data_dir": "data",
+            "manifest_ref": "test.yaml",
+            "intent_parse_source": "deterministic_fallback",
+            "resolved_execution_order": ["genome_survey", "hic_scaffolding"],
+            "stage_roles": {"genome_survey": "executable", "hic_scaffolding": "executable"},
+            "selected_methods": {
+                "genome_survey": [
+                    "genome_survey.kmer_count.jellyfish",
+                    "genome_survey.model.genomescope2",
+                ],
+                "hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"],
+            },
+            "method_execution_status": {
+                "genome_survey.kmer_count.jellyfish": "executable",
+                "genome_survey.model.genomescope2": "executable",
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox": "executable",
+            },
+            "shared_parameter_defaults": {"platform": "ont", "read_type": "ont_raw"},
+            "parameter_defaults": {
+                "genome_survey.kmer_count.jellyfish": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
+                "genome_survey.model.genomescope2": {"kmer_size": 21},
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {
+                    "input_mode": "raw_reads",
+                    "chromosome_count": 25,
+                    "chrom_sizes_ref": "auto",
+                    "threads": 8,
+                },
+            },
+            "parameter_default_sources": {
+                "genome_survey.kmer_count.jellyfish": {"kmer_size": "default", "hash_size": "default", "threads": "default"},
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {
+                    "chromosome_count": "evidence: local NCBI related-species evidence for 卵鳎",
+                    "chrom_sizes_ref": "auto: derive chrom.sizes from the pre-HiC FASTA",
+                    "threads": "default",
+                },
+            },
+            "missing_parameter_fields": [
+                "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme",
+            ],
+            "stage_plan_details": [
+                {
+                    "stage": "genome_survey",
+                    "role": "executable",
+                    "status": "configured",
+                    "inputs": [],
+                    "methods": [
+                        {
+                            "method": "genome_survey.kmer_count.jellyfish",
+                            "execution_support": "executable",
+                            "parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
+                            "missing_parameters": [],
+                        }
+                    ],
+                },
+                {
+                    "stage": "hic_scaffolding",
+                    "role": "executable",
+                    "status": "configured",
+                    "inputs": ["missing Hi-C reads/alignment/merged_nodups in manifest"],
+                    "methods": [
+                        {
+                            "method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
+                            "execution_support": "executable",
+                            "parameters": {"input_mode": "raw_reads", "chromosome_count": 25},
+                            "missing_parameters": ["restriction_enzyme"],
+                        }
+                    ],
+                },
+                {
+                    "stage": "t2t",
+                    "role": "executable",
+                    "status": "no registered method yet",
+                    "inputs": ["T2T finishing usually needs Hi-C/contact-map or telomere evidence; none registered in manifest"],
+                    "methods": [],
+                },
+            ],
+        }
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Plan Preview", preview=True)
+        rendered = stdout.getvalue()
+        self.assertIn("Intent parser: local deterministic fallback", rendered)
+        self.assertIn("platform: ont", rendered)
+        self.assertIn("[jellyfish] kmer_size: 21  (default)", rendered)
+        self.assertIn("[juicer_3ddna_juicebox] input_mode: raw_reads  (recommended)", rendered)
+        self.assertIn("[juicer_3ddna_juicebox] chromosome_count: 25  (evidence: local NCBI related-species evidence for 卵鳎)", rendered)
+        self.assertIn("[juicer_3ddna_juicebox] chrom_sizes_ref: auto  (auto: derive chrom.sizes from the pre-HiC FASTA)", rendered)
+        self.assertIn("[juicer_3ddna_juicebox] restriction_enzyme: pending", rendered)
+        self.assertIn("Stage details:", rendered)
+        self.assertIn("hic_scaffolding: [run] configured", rendered)
+        self.assertIn("input: missing Hi-C reads/alignment/merged_nodups in manifest", rendered)
+        self.assertIn("t2t: [run] no registered method yet", rendered)
+
     def test_preview_renders_input_assets(self):
         summary = {
             "session_id": "s1",
@@ -703,17 +836,20 @@ class PlanPreviewRenderTests(unittest.TestCase):
                                  "manifest": str(manifest),
                                  "data_dir": tmp,
                                  "requested_stages": ["assembly"],
-                             })
+            })
             draft = build_initial_plan_draft(plan)
             with patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                _render_plan_summary(
-                    build_run_plan_summary(draft), title="Plan Draft", preview=True, draft=draft
-                )
+                _render_draft_review(draft, build_run_plan_summary(draft))
             rendered = stdout.getvalue()
             self.assertIn("Plan Draft", rendered)
             self.assertIn(f"raw_long_reads [ont/fastq]: {reads}", rendered)
-            self.assertIn("assembly: assembly.candidate.flye [local]  (recommended)", rendered)
-            self.assertIn("Advisory preview.", rendered)
+            self.assertIn("This draft becomes the working plan.", rendered)
+            self.assertIn("Execution will NOT start yet.", rendered)
+            self.assertIn("assembly.candidate.flye [local]", rendered)
+            # After Finding 6 fix: draft review uses _render_plan_summary which shows "pending" not "missing"
+            self.assertIn("estimated_genome_size: pending", rendered)
+            self.assertIn("[flye] threads: 4  (default)", rendered)
+            self.assertIn("Needs attention:", rendered)
 
     def test_plan_draft_multi_stage_goal_marks_requested_targets_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -737,22 +873,74 @@ class PlanPreviewRenderTests(unittest.TestCase):
             )
             draft = build_initial_plan_draft(plan)
             with patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                _render_plan_summary(
-                    build_run_plan_summary(draft), title="Plan Draft", preview=True, draft=draft
-                )
+                _render_draft_review(draft, build_run_plan_summary(draft))
             rendered = stdout.getvalue()
             self.assertIn("Plan Draft", rendered)
             self.assertIn(f"raw_long_reads [ont/fasta]: {reads}", rendered)
+            # After Finding 6 fix: draft review now uses _render_plan_summary format
             self.assertIn("[      run] assembly", rendered)
             self.assertIn("[      run] gene_annotation", rendered)
-            self.assertNotIn("[      dep] read_qc", rendered)
-            self.assertNotIn("[      dep] repeat_annotation", rendered)
+            # Actions menu still shows numbers
+            self.assertIn("1          edit assembly", rendered)
+            self.assertIn("2          edit gene_annotation", rendered)
+            self.assertNotIn("read_qc", rendered)
+            self.assertNotIn("repeat_annotation", rendered)
             self.assertNotIn("assembly_review: pending", rendered)
-            self.assertIn("Advisory preview.", rendered)
+            self.assertIn("Actions:", rendered)
+
+    def test_plan_draft_continue_blocks_missing_fields_in_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                entry_request={
+                    "command": "run",
+                    "manifest": str(manifest),
+                    "data_dir": tmp,
+                    "requested_stages": ["assembly"],
+                },
+            )
+            draft = build_initial_plan_draft(plan)
+            blockers = _draft_continue_blockers(draft, build_run_plan_summary(draft))
+            self.assertIn(("assembly", "estimated_genome_size is missing"), blockers)
 
     def test_build_initial_plan_draft_skips_when_no_goal_was_parsed(self):
         plan = _base_plan(entry_request={"command": "run", "manifest": "test.yaml", "data_dir": "data"})
         self.assertIsNone(build_initial_plan_draft(plan))
+
+
+class GroupMissingFieldsByScopeTests(unittest.TestCase):
+    def test_shared_stage_and_method_fields_are_grouped(self):
+        grouped = _group_missing_fields_by_scope(
+            ["shared_parameters.platform", "assembly.eval", "assembly.candidate.flye.threads"],
+            methods={"assembly.candidate.flye"},
+        )
+        self.assertEqual(grouped["shared"], ["platform"])
+        self.assertEqual(grouped["stage"], {"assembly": ["eval"]})
+        self.assertEqual(grouped["method"], {"assembly.candidate.flye": ["threads"]})
+
+    def test_single_part_field_is_dropped_and_logged(self):
+        with self.assertLogs("app.entrypoints.ask_interactive", level="DEBUG") as logs:
+            grouped = _group_missing_fields_by_scope(["platform"])
+        self.assertEqual(grouped, {"shared": [], "stage": {}, "method": {}})
+        self.assertTrue(any("platform" in line for line in logs.output))
+
+    def test_unmatched_multipart_field_is_dropped_and_logged(self):
+        with self.assertLogs("app.entrypoints.ask_interactive", level="DEBUG") as logs:
+            grouped = _group_missing_fields_by_scope(
+                ["assembly.candidate.flye.threads"],
+                methods={"other.method"},
+            )
+        self.assertEqual(grouped["method"], {})
+        self.assertEqual(grouped["stage"], {})
+        self.assertTrue(any("assembly.candidate.flye.threads" in line for line in logs.output))
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ def _tui_main(data_dir: str) -> int:
     from app.entrypoints.run import _create_ask_plan
 
     print("\n=== gene-agent interactive ===\n")
-    print("Describe what you want to do (e.g. '对 /path/reads.fa 进行基因组组装'):")
+    print("Describe what you want to do (e.g. '对 /path/reads.fa 以卵鳎为目标物种进行 T2T 级别基因组组装'):")
 
     try:
         request_text = input("> ").strip()

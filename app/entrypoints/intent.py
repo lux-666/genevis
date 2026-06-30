@@ -76,11 +76,129 @@ def parse_request_with_llm(
             "defaults": dict(defaults or {}),
         },
     )
-    chat_model = model or build_chat_model()
-    chat_model = _bind_intent_response_format(chat_model)
-    response = chat_model.invoke(messages)
+    try:
+        chat_model = model or build_chat_model()
+        chat_model = _bind_intent_response_format(chat_model)
+        response = chat_model.invoke(messages)
+    except Exception as exc:
+        fallback = _parse_request_deterministically(request_text, defaults=defaults)
+        if fallback is not None:
+            return fallback
+        raise RuntimeError(f"Intent LLM call failed: {type(exc).__name__}: {exc}") from exc
     response_text = _response_to_text(response)
-    return parse_intent_response(response_text, defaults=defaults)
+    request = parse_intent_response(response_text, defaults=defaults)
+    request = _fill_target_species_from_text(request, request_text)
+    request._intent_parse_source = "llm"
+    return request
+
+
+_SOURCE_PATH_SUFFIXES = (
+    ".fastq.gz",
+    ".fasta.gz",
+    ".fna.gz",
+    ".fa.gz",
+    ".fq.gz",
+    ".fastq",
+    ".fasta",
+    ".fna",
+    ".fa",
+    ".fq",
+    ".bam",
+    ".cram",
+    ".hic",
+    ".yaml",
+    ".yml",
+    ".json",
+)
+
+
+def _parse_request_deterministically(
+    request_text: str,
+    *,
+    defaults: Mapping[str, Any] | None = None,
+) -> EntryRequest | None:
+    """Best-effort local parser for path-shaped start requests when LLM is unavailable."""
+
+    source_paths = _extract_source_paths(request_text)
+    if not source_paths:
+        return None
+
+    payload: dict[str, Any] = {"command": "run", "source_paths": source_paths}
+    if any(path.lower().endswith((".yaml", ".yml", ".json")) for path in source_paths):
+        if len(source_paths) != 1:
+            return None
+        payload.pop("source_paths")
+        payload["manifest"] = source_paths[0]
+
+    lower = request_text.lower()
+    if any(token in lower for token in ("nanopore", "ont")):
+        payload["platform"] = "ont"
+        payload["asset_type_hint"] = "raw_long_reads"
+    elif any(token in lower for token in ("cycloneseq", "cyclone sequencing", "cyclone文件")):
+        payload["platform"] = "cycloneseq"
+        payload["asset_type_hint"] = "raw_long_reads"
+
+    target_species = _infer_target_species_from_text(request_text)
+    if target_species:
+        payload["target_species"] = target_species
+
+    request = parse_intent_response(json.dumps(payload, ensure_ascii=False), defaults=defaults)
+    request._intent_parse_source = "deterministic_fallback"
+    return request
+
+
+def _extract_source_paths(request_text: str) -> list[str]:
+    suffix_re = "|".join(re.escape(suffix) for suffix in _SOURCE_PATH_SUFFIXES)
+    pattern = re.compile(
+        rf"(?P<path>(?:~|/|\.{{1,2}}/)[^\s，,；;：:。]+?(?:{suffix_re}))",
+        flags=re.IGNORECASE,
+    )
+    paths: list[str] = []
+    for match in pattern.finditer(request_text):
+        path = match.group("path")
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _infer_requested_stages_from_text(request_text: str) -> list[str] | None:
+    lower = request_text.lower()
+    only = any(token in lower for token in ("只做", "仅做", "只跑", "仅执行", "only", "just", "stage only"))
+    if any(token in lower for token in ("t2t", "near-t2t", "telomere-to-telomere", "telomere rescue")):
+        return ["t2t"] if only else ["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review", "hic_scaffolding", "t2t"]
+    if "hic" in lower or "hi-c" in lower or "chromosome" in lower or "染色体" in request_text:
+        return ["hic_scaffolding"] if only else ["read_qc", "genome_survey", "assembly", "assembly_dedup", "assembly_review", "hic_scaffolding"]
+    if "assembly" in lower or "assemble" in lower or "组装" in request_text:
+        return ["assembly"] if only else ["read_qc", "genome_survey", "assembly"]
+    if "质控" in request_text or "read qc" in lower:
+        return ["read_qc"]
+    return None
+
+
+_TARGET_SPECIES_PATTERNS = [
+    re.compile(r"以(?P<species>[^，,。；;\s]{1,80}?)为目标物种"),
+    re.compile(r"目标物种(?:是|为|[:：])(?P<species>[^，,。；;\s]{1,80})"),
+]
+
+
+def _fill_target_species_from_text(request: EntryRequest, request_text: str) -> EntryRequest:
+    if request.target_species:
+        return request
+    target_species = _infer_target_species_from_text(request_text)
+    if not target_species:
+        return request
+    return request.model_copy(update={"target_species": target_species})
+
+
+def _infer_target_species_from_text(request_text: str) -> str | None:
+    for pattern in _TARGET_SPECIES_PATTERNS:
+        match = pattern.search(request_text)
+        if not match:
+            continue
+        value = match.group("species").strip().strip("'\"“”‘’")
+        if value:
+            return value
+    return None
 
 
 def _parse_single_json_object(response_text: str) -> dict[str, Any]:

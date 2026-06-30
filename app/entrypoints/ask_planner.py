@@ -10,6 +10,7 @@ import yaml
 
 from pydantic import ValidationError
 
+from app.reference.ncbi_metazoa import build_related_species_evidence_pack, species_name_from_metadata
 from app.schemas.ask_plan import (
     AskClarificationRequest,
     AskClarificationResponse,
@@ -19,10 +20,17 @@ from app.schemas.ask_plan import (
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
+from app.schemas.warnings import PlanWarning
 from app.stages import STAGE_ORDER
 
 FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
 FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
+
+
+def _warning(message: str, stage: str, category: str = "general") -> PlanWarning:
+    """Create a structured warning with stage metadata."""
+    return PlanWarning(message=message, stage=stage, category=category)
+
 
 _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
     "assembly.candidate.flye",
@@ -216,6 +224,16 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
             "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
             "execution_support": "executable",
             "required_parameters": ["input_mode", "chromosome_count"],
+            "conditional_required_parameters": [
+                {
+                    "condition": {"input_mode": "merged_nodups"},
+                    "required": ["merged_nodups_ref"],
+                },
+                {
+                    "condition": {"input_mode": "raw_reads"},
+                    "required": ["restriction_enzyme", "chrom_sizes_ref"],
+                },
+            ],
             "parameter_defaults": {"input_mode": "raw_reads"},
         },
         {
@@ -472,18 +490,49 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
 def _fill_draft_default_methods(plan: AskPlanState) -> AskPlanState:
     """Prefill conventional default methods for the draft preview.
 
-    Stages with a clear default are filled; genuinely multi-candidate stages
-    (e.g. genome_survey, assembly_review) are left for method selection.
+    The draft should show the operator what the plan will become if they keep
+    accepting recommended choices. Prefer executable local defaults where the
+    interactive flow would do the same.
     """
     filled = _fill_missing_method_defaults(plan, dict(plan.selected_methods or {}))
-    if "assembly" in (plan.resolved_execution_order or []) and "assembly" not in filled:
-        manifest = _load_manifest(plan.manifest_ref)
-        asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
-        if asset_types == {"raw_long_reads"}:
-            filled["assembly"] = "assembly.candidate.flye"
+    for stage in plan.resolved_execution_order or []:
+        if stage in filled or stage not in _STAGES_NEEDING_METHOD_SELECTION:
+            continue
+        default = _draft_default_methods_for_stage(plan, stage)
+        if default:
+            filled[stage] = default
     if filled == (plan.selected_methods or {}):
         return plan
-    return plan.model_copy(update={"selected_methods": filled or None})
+    return plan.model_copy(update={"selected_methods": _normalize_selected_methods(filled) or None})
+
+
+def _draft_default_methods_for_stage(plan: AskPlanState, stage: str) -> str | list[str] | None:
+    default = _default_methods_for_stage(stage)
+    if default:
+        return default
+    if stage == "genome_survey":
+        return ["genome_survey.kmer_count.jellyfish", "genome_survey.model.genomescope2"]
+    if stage == "assembly":
+        return _draft_assembly_method(plan)
+    if stage == "assembly_review":
+        return ["assembly_review.eval.quast"]
+    executable = [method["method_name"] for method in _executable_methods_for_stage(stage)]
+    return executable[0] if len(executable) == 1 else executable or None
+
+
+def _draft_assembly_method(plan: AskPlanState) -> str | None:
+    manifest = _load_manifest(plan.manifest_ref)
+    if not manifest:
+        return None
+    asset_types = {asset.asset_type for asset in manifest.assets}
+    if "raw_long_reads" not in asset_types:
+        return None
+    if "assembly_fasta_registered" in asset_types:
+        return None
+    platforms = _raw_long_read_platforms(manifest, include_unknown=True)
+    if platforms == {"pacbio_hifi"}:
+        return "assembly.candidate.hifiasm"
+    return "assembly.candidate.flye"
 
 
 def next_clarification(plan: AskPlanState, *, ask_plan_ref: str | Path) -> AskClarificationRequest | None:
@@ -863,6 +912,8 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         "stage_roles": _classify_stage_roles(plan),
     }
     entry = plan.entry_request or {}
+    if entry.get("intent_parse_source"):
+        summary["intent_parse_source"] = entry["intent_parse_source"]
     if entry.get("source_paths"):
         summary["source_paths"] = entry["source_paths"]
     input_assets = _input_assets_from_manifest(plan.manifest_ref)
@@ -876,6 +927,32 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["method_parameters"] = plan.method_parameters
     if plan.stage_parameters:
         summary["stage_parameters"] = plan.stage_parameters
+    # Load manifest once and pass it through to all parameter inference functions
+    manifest = _load_manifest(plan.manifest_ref)
+    missing_fields, parameter_defaults, shared_parameter_defaults, stage_parameter_defaults, param_warnings = (
+        _missing_parameters_and_defaults(plan, manifest=manifest)
+    )
+    if parameter_defaults:
+        summary["parameter_defaults"] = parameter_defaults
+        summary["parameter_default_sources"] = _method_parameter_default_sources(plan, parameter_defaults, manifest=manifest)
+    if shared_parameter_defaults:
+        summary["shared_parameter_defaults"] = shared_parameter_defaults
+        summary["shared_parameter_default_sources"] = _shared_parameter_default_sources(plan, shared_parameter_defaults, manifest=manifest)
+    if stage_parameter_defaults:
+        summary["stage_parameter_defaults"] = stage_parameter_defaults
+    if missing_fields:
+        summary["missing_parameter_fields"] = missing_fields
+    deferred_shared = _deferred_shared_parameter_summary(plan, shared_parameter_defaults)
+    if deferred_shared:
+        summary["deferred_shared_parameters"] = deferred_shared
+    stage_details = _stage_plan_details(
+        plan,
+        parameter_defaults=parameter_defaults,
+        missing_fields=missing_fields,
+        manifest=manifest,
+    )
+    if stage_details:
+        summary["stage_plan_details"] = stage_details
     hic_candidates = _hic_scaffolding_plan_candidates(plan)
     if hic_candidates:
         summary["hic_scaffolding_plan_candidates"] = [candidate.model_dump(mode="json") for candidate in hic_candidates]
@@ -885,7 +962,6 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         method_status[method] = cap["execution_support"] if cap else "unknown"
     if method_status:
         summary["method_execution_status"] = method_status
-    _, _, _, _, param_warnings = _missing_parameters_and_defaults(plan)
     warnings = [*param_warnings, *_plan_validation_warnings(plan)]
     if warnings:
         summary["warnings"] = warnings
@@ -902,6 +978,145 @@ def _next_action(ask_plan_ref: str) -> dict[str, Any]:
         "kind": "provide_clarification_response",
         "command": f"gene-agent ask --ask-plan {ask_plan_ref} --clarification-response <answers.json>",
     }
+
+
+def _method_parameter_default_sources(
+    plan: AskPlanState,
+    defaults: dict[str, dict[str, Any]],
+    *,
+    manifest: InputManifest | None = None,
+) -> dict[str, dict[str, str]]:
+    """Generate parameter default source labels. Pass manifest to avoid repeated disk loading."""
+    sources: dict[str, dict[str, str]] = {}
+    species_name = _target_species_from_plan(plan, manifest=manifest)
+    for method, values in defaults.items():
+        method_sources: dict[str, str] = {}
+        for key, value in values.items():
+            source = "default"
+            if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
+                if key == "chromosome_count" and species_name:
+                    source = f"evidence: local NCBI related-species evidence for {species_name}"
+                elif key == "chrom_sizes_ref" and value == "auto":
+                    source = "auto: derive chrom.sizes from the pre-Hi-C FASTA"
+            method_sources[key] = source
+        if method_sources:
+            sources[method] = method_sources
+    return sources
+
+
+def _shared_parameter_default_sources(
+    plan: AskPlanState,
+    defaults: dict[str, Any],
+    *,
+    manifest: InputManifest | None = None,
+) -> dict[str, str]:
+    """Generate shared parameter default source labels. Pass manifest to avoid repeated disk loading."""
+    sources: dict[str, str] = {}
+    entry = plan.entry_request or {}
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
+    for key in defaults:
+        source = "default"
+        if key == "platform":
+            source = "from request" if entry.get("platform") and entry.get("platform") != "unknown" else "from manifest"
+        elif key == "read_type":
+            source = "auto: derived from sequencing platform"
+        elif key == "estimated_genome_size":
+            source = "from request" if entry.get("genome_size_estimate") else "from manifest"
+            if manifest and manifest.genome_size_estimate and not entry.get("genome_size_estimate"):
+                source = "from manifest"
+        sources[key] = source
+    return sources
+
+
+def _deferred_shared_parameter_summary(plan: AskPlanState, shared_defaults: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not _can_defer_genome_size_to_survey(plan):
+        return {}
+    value = shared_defaults.get("estimated_genome_size")
+    if value is not None:
+        return {}
+    return {
+        "estimated_genome_size": {
+            "value": "auto",
+            "source": "auto: await genome_survey result",
+            "status": "awaiting_genome_survey",
+        }
+    }
+
+
+def _target_species_from_plan(plan: AskPlanState, *, manifest: InputManifest | None = None) -> str | None:
+    """Extract species name from plan's manifest. Pass manifest to avoid repeated disk loading."""
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
+    if not manifest:
+        return None
+    return species_name_from_metadata(dict(manifest.user_metadata or {}))
+
+
+def _stage_plan_details(
+    plan: AskPlanState,
+    *,
+    parameter_defaults: dict[str, dict[str, Any]],
+    missing_fields: list[str],
+    manifest: InputManifest | None = None,
+) -> list[dict[str, Any]]:
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
+    asset_types = {asset.asset_type for asset in manifest.assets} if manifest else set()
+    roles = _classify_stage_roles(plan)
+    details: list[dict[str, Any]] = []
+    for stage in plan.resolved_execution_order or []:
+        selected = (plan.selected_methods or {}).get(stage)
+        selected_methods = selected if isinstance(selected, list) else [selected] if selected else []
+        stage_methods: list[dict[str, Any]] = []
+        for method in selected_methods:
+            cap = _get_method_descriptor(method) or {}
+            method_missing = [
+                field[len(method) + 1:]
+                for field in missing_fields
+                if field.startswith(f"{method}.")
+            ]
+            stage_methods.append(
+                {
+                    "method": method,
+                    "execution_support": cap.get("execution_support", "unknown"),
+                    "parameters": dict(parameter_defaults.get(method) or {}),
+                    "missing_parameters": method_missing,
+                }
+            )
+        status = "configured" if stage_methods else _stage_without_method_status(stage)
+        detail: dict[str, Any] = {
+            "stage": stage,
+            "role": roles.get(stage),
+            "status": status,
+            "methods": stage_methods,
+            "inputs": _stage_input_status(stage, asset_types),
+        }
+        stage_missing = [
+            field.split(".", 1)[1]
+            for field in missing_fields
+            if field.startswith(f"{stage}.") and not any(field.startswith(f"{method}.") for method in selected_methods)
+        ]
+        if stage_missing:
+            detail["missing_parameters"] = stage_missing
+        details.append(detail)
+    return details
+
+
+def _stage_without_method_status(stage: str) -> str:
+    if stage in _STAGES_NEEDING_METHOD_SELECTION:
+        return "method pending"
+    if stage in _STAGE_METHODS:
+        return "pipeline/internal"
+    return "no registered method yet"
+
+
+def _stage_input_status(stage: str, asset_types: set[str]) -> list[str]:
+    if stage == "hic_scaffolding" and not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
+        return ["missing Hi-C reads/alignment/merged_nodups in manifest"]
+    if stage == "t2t" and not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
+        return ["T2T finishing usually needs Hi-C/contact-map or telomere evidence; none registered in manifest"]
+    return []
 
 
 def _all_selectable_stages() -> list[str]:
@@ -969,6 +1184,26 @@ def _input_assets_from_manifest(manifest_ref: str) -> list[dict[str, Any]]:
 def _resolve_execution_order(selected: list[str]) -> list[str]:
     selected_set = set(selected)
     return [stage for stage in STAGE_ORDER if stage in selected_set]
+
+
+def _check_conditional_requirements(
+    method: str,
+    cap: dict[str, Any],
+    merged_params: dict[str, Any],
+) -> list[str]:
+    """Check conditional required parameters based on current parameter values."""
+    missing = []
+    conditional_reqs = cap.get("conditional_required_parameters", [])
+
+    for rule in conditional_reqs:
+        condition = rule.get("condition", {})
+        # Check if all condition key-value pairs match
+        if all(merged_params.get(k) == v for k, v in condition.items()):
+            for param in rule.get("required", []):
+                if param not in merged_params:
+                    missing.append(f"{method}.{param}")
+
+    return missing
 
 
 def _needs_method_selection(plan: AskPlanState) -> bool:
@@ -1145,12 +1380,17 @@ def _auto_fill_inferred_defaults(plan: AskPlanState) -> AskPlanState:
 
 def _missing_parameters_and_defaults(
     plan: AskPlanState,
+    *,
+    manifest: InputManifest | None = None,
 ) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, Any], dict[str, dict[str, Any]], list[str]]:
+    """Compute missing parameters and defaults. Pass manifest to avoid repeated disk loading."""
     missing_fields: list[str] = []
     defaults: dict[str, dict[str, Any]] = {}
     stage_defaults: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
-    shared_defaults, shared_warnings = _infer_shared_parameter_defaults(plan)
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
+    shared_defaults, shared_warnings = _infer_shared_parameter_defaults(plan, manifest=manifest)
     warnings.extend(shared_warnings)
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
     shared_defaults = _derive_shared_read_type_from_platform(
@@ -1165,13 +1405,15 @@ def _missing_parameters_and_defaults(
         if not cap or cap["execution_support"] != "executable":
             continue
         provided = (plan.method_parameters or {}).get(method, {})
-        inferred, method_warnings = _infer_parameter_defaults(plan, method, cap)
+        inferred, method_warnings = _infer_parameter_defaults(plan, method, cap, manifest=manifest)
         warnings.extend(method_warnings)
         merged = {**inferred, **provided}
         defaults[method] = merged
         for param in cap["required_parameters"]:
             if param not in merged:
                 missing_fields.append(f"{method}.{param}")
+        # Check conditional requirements declared in method descriptor
+        missing_fields.extend(_check_conditional_requirements(method, cap, merged))
     function_params = dict((plan.stage_parameters or {}).get("function_annotation") or {})
     if function_params:
         stage_defaults["function_annotation"] = function_params
@@ -1189,9 +1431,38 @@ def _function_annotation_needs_database_provenance(plan: AskPlanState) -> bool:
     return not provenance
 
 
-def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _infer_parameter_defaults(
+    plan: AskPlanState,
+    method: str,
+    cap: dict[str, Any],
+    *,
+    manifest: InputManifest | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Infer parameter defaults for a method. Pass manifest to avoid repeated disk loading."""
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
+    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
+        # Infer chromosome_count from related species evidence
+        if "chromosome_count" not in inferred:
+            chromosome_count, species_name, evidence_notes = _infer_chromosome_count_from_related_species(plan, manifest=manifest)
+            if chromosome_count is not None:
+                inferred["chromosome_count"] = chromosome_count
+                warnings.append(
+                    "hic_scaffolding.candidate.juicer_3ddna_juicebox: "
+                    f"chromosome_count default {chromosome_count} inferred from local NCBI related-species evidence"
+                    f"{f' for {species_name}' if species_name else ''}; confirm before running"
+                )
+            elif species_name:
+                note = f"; notes: {', '.join(evidence_notes)}" if evidence_notes else ""
+                warnings.append(
+                    "hic_scaffolding.candidate.juicer_3ddna_juicebox: "
+                    f"chromosome_count evidence unavailable for {species_name}{note}"
+                )
+        # Set mode-dependent defaults
+        mode = str(((plan.method_parameters or {}).get(method) or {}).get("input_mode") or inferred.get("input_mode") or "raw_reads")
+        if mode != "merged_nodups":
+            inferred.setdefault("chrom_sizes_ref", "auto")
+            inferred.setdefault("threads", 8)
     if method == "assembly_review.eval.busco":
         provided = (plan.method_parameters or {}).get(method, {})
         lineage_path = provided.get("lineage_path") or inferred.get("lineage_path")
@@ -1213,16 +1484,43 @@ def _infer_parameter_defaults(plan: AskPlanState, method: str, cap: dict[str, An
     return inferred, warnings
 
 
+def _infer_chromosome_count_from_related_species(
+    plan: AskPlanState,
+    *,
+    manifest: InputManifest | None = None,
+) -> tuple[int | None, str | None, list[str]]:
+    """Infer chromosome count from related species evidence. Pass manifest to avoid repeated disk loading."""
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
+    if not manifest:
+        return None, None, []
+    species_name = species_name_from_metadata(dict(manifest.user_metadata or {}))
+    if not species_name:
+        return None, None, []
+    pack = build_related_species_evidence_pack(species_name)
+    summary = pack.get("computed_summary") or {}
+    chromosome_count = summary.get("chromosome_count") or {}
+    mode = chromosome_count.get("mode") if isinstance(chromosome_count, dict) else None
+    notes = [str(note) for note in pack.get("notes") or []]
+    return (mode, species_name, notes) if isinstance(mode, int) and mode > 0 else (None, species_name, notes)
+
+
 def _extract_busco_version(lineage_name: str) -> str:
     import re
     m = re.search(r"(odb\d+)", lineage_name)
     return m.group(1) if m else ""
 
 
-def _infer_shared_parameter_defaults(plan: AskPlanState) -> tuple[dict[str, Any], list[str]]:
+def _infer_shared_parameter_defaults(
+    plan: AskPlanState,
+    *,
+    manifest: InputManifest | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Infer shared parameter defaults. Pass manifest to avoid repeated disk loading."""
     inferred: dict[str, Any] = {}
     warnings: list[str] = []
-    manifest = _load_manifest(plan.manifest_ref)
+    if manifest is None:
+        manifest = _load_manifest(plan.manifest_ref)
     if manifest:
         platforms = _raw_long_read_platforms(manifest, include_unknown=False)
         all_platforms = _raw_long_read_platforms(manifest, include_unknown=True)

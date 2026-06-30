@@ -62,6 +62,16 @@ class _FakeModel:
         return _FakeResponse(self.content)
 
 
+class _FailingModel:
+    def bind(self, **kwargs):
+        self.bound_formats = kwargs
+        return self
+
+    def invoke(self, messages):
+        self.messages = messages
+        raise OSError("network down")
+
+
 class IntentParsingTests(IsolatedEnvTestCase):
     def test_entry_request_converts_to_run_argv(self):
         request = EntryRequest(session_id="s1", manifest="inputs/manifest.yaml")
@@ -100,6 +110,13 @@ class IntentParsingTests(IsolatedEnvTestCase):
         self.assertEqual(request.session_id, "s1")
         self.assertEqual(request.manifest, "inputs/manifest.yaml")
         self.assertEqual(request.data_dir, "out")
+
+    def test_target_species_hint_parses_entry_request(self):
+        request = parse_intent_response(
+            '{"command":"run","session_id":"s1","source_paths":["reads.fastq"],"target_species":"卵鳎"}'
+        )
+
+        self.assertEqual(request.target_species, "卵鳎")
 
     def test_fenced_json_parses_entry_request(self):
         request = parse_intent_response(
@@ -159,7 +176,21 @@ class IntentParsingTests(IsolatedEnvTestCase):
         for stage in get_args(RequestableStage):
             with self.subTest(stage=stage):
                 self.assertIn(stage, system_prompt)
-        for phrase in ("组装/assemble", "质控/read QC", "功能注释/functional annotation", "全流程"):
+        for phrase in (
+            "Important requested_stages semantics",
+            "assembly goal ->",
+            "T2T-level assembly",
+            "Input-aware adjustment",
+            "只做",
+            "target_species",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, system_prompt)
+
+    def test_intent_prompt_requires_exact_path_copying(self):
+        system_prompt = load_prompt_bundle("intent.parse").system
+
+        for phrase in ("Copy paths exactly", "的t2t", "Never rewrite"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, system_prompt)
 
@@ -238,6 +269,7 @@ class IntentParsingTests(IsolatedEnvTestCase):
         request = parse_request_with_llm("use inputs/manifest.yaml for s1", model=model)
 
         self.assertEqual(request.session_id, "s1")
+        self.assertEqual(request._intent_parse_source, "llm")
         self.assertTrue(model.bound_formats)
         self.assertEqual(model.messages[0]["role"], "system")
         self.assertEqual(model.messages[1]["role"], "user")
@@ -273,6 +305,46 @@ class IntentParsingTests(IsolatedEnvTestCase):
         request = parse_request_with_llm("/data/input/reads.fastq.gz 用 Flye", model=model)
 
         self.assertIsNone(request.requested_stages)
+
+    def test_parse_request_fills_adjacent_chinese_target_species_hint(self):
+        model = _FakeModel(
+            json.dumps(
+                {
+                    "command": "run",
+                    "source_paths": ["/Users/a1/data/bht.Nanopore.pass.first500.fa"],
+                    "platform": "ont",
+                    "asset_type_hint": "raw_long_reads",
+                    "requested_stages": ["read_qc", "genome_survey", "assembly", "assembly_review", "hic_scaffolding", "t2t"],
+                }
+            )
+        )
+
+        request = parse_request_with_llm(
+            "/Users/a1/data/bht.Nanopore.pass.first500.fa的t2t的assembly以卵鳎为目标物种",
+            model=model,
+        )
+
+        self.assertEqual(request.target_species, "卵鳎")
+
+    def test_parse_request_falls_back_for_path_shaped_t2t_request_when_llm_fails(self):
+        model = _FailingModel()
+
+        request = parse_request_with_llm(
+            "/Users/a1/data/bht.Nanopore.pass.first500.fa的t2t的assembly以卵鳎为目标物种",
+            defaults={"session_id": "s1", "data_dir": "data"},
+            model=model,
+        )
+
+        self.assertEqual(request.source_paths, ["/Users/a1/data/bht.Nanopore.pass.first500.fa"])
+        self.assertEqual(request.platform, "ont")
+        self.assertEqual(request.asset_type_hint, "raw_long_reads")
+        self.assertEqual(request.target_species, "卵鳎")
+        self.assertEqual(request._intent_parse_source, "deterministic_fallback")
+        self.assertIsNone(request.requested_stages)
+
+    def test_parse_request_wraps_llm_failure_when_no_deterministic_fallback_exists(self):
+        with self.assertRaisesRegex(RuntimeError, "Intent LLM call failed: OSError"):
+            parse_request_with_llm("帮我做一下", model=_FailingModel())
 
     def test_strict_response_schema_recursively_forbids_extra_properties(self):
         schema = _make_schema_strict(

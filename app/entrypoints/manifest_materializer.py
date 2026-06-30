@@ -51,9 +51,11 @@ def materialize_entry_manifest(request: EntryRequest) -> EntryRequest:
     }
     if request.sample_id:
         payload["sample_id"] = request.sample_id
+    if request.target_species:
+        payload["user_metadata"] = {"target_species": request.target_species}
     if request.genome_size_estimate is not None:
         payload["genome_size_estimate"] = request.genome_size_estimate
-    manifest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    manifest_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return request.model_copy(update={"manifest": str(manifest_path)})
 
 

@@ -11,10 +11,17 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.entrypoints.ask_planner import (
+    FUNCTION_DATABASE_PROVENANCE_FIELD,
     READ_QC_FILTER_METHODS,
     READ_QC_FILTER_SKIP,
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
+    _STAGE_METHODS,
+    _STAGES_NEEDING_METHOD_SELECTION,
+    _all_selectable_stages,
+    _auto_fill_inferred_defaults,
+    _default_methods_for_stage,
+    _fill_draft_default_methods,
     build_initial_plan_draft,
     build_run_plan_summary,
     merge_clarification_response,
@@ -67,17 +74,12 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
         draft = build_initial_plan_draft(plan)
         if draft is not None:
             draft = _apply_set_params(draft, set_params)
-            _render_plan_summary(
-                build_run_plan_summary(draft),
-                title="Plan Draft",
-                preview=True,
-                draft=draft,
-            )
-            if _prompt_confirm("Accept this plan?"):
-                plan = draft
-            else:
+            reviewed = _review_plan_draft(draft)
+            if reviewed is None:
                 print("\n--- Editing plan manually ---\n")
                 plan = _apply_set_params(plan, set_params)
+            else:
+                plan = reviewed
         else:
             plan = _apply_set_params(plan, set_params)
     else:
@@ -211,6 +213,8 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
     "hic_scaffolding.candidate.yahs.hic_alignment_ref": "materialized Hi-C alignment BAM for YaHS",
     "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count": "haploid chromosome count, e.g. 22 for 2n=44",
+    "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme": "Hi-C restriction enzyme, e.g. MboI or DpnII",
+    "hic_scaffolding.candidate.juicer_3ddna_juicebox.chrom_sizes_ref": "chrom.sizes path; use auto to derive from the pre-Hi-C FASTA",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
 }
@@ -236,22 +240,67 @@ def _render_confirm(req: AskClarificationRequest) -> None:
     _render_plan_summary(req.summary or {}, title="Run Plan")
 
 
-def _render_plan_summary(
-    summary: dict[str, Any],
-    *,
-    title: str,
-    preview: bool = False,
-    draft: AskPlanState | None = None,
-) -> None:
-    explicit_shared = _explicit_shared_params(draft) if draft is not None else set()
-    print()
-    print("=" * 50)
-    print(title)
-    print("=" * 50)
+def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
+    """Review and edit an inferred draft until the operator locks it or restarts."""
+    plan = draft
+    while True:
+        summary = build_run_plan_summary(plan)
+        _render_draft_review(plan, summary)
+        action = _prompt_draft_action(plan)
+        if action == "continue":
+            blockers = _draft_continue_blockers(plan, summary)
+            if blockers:
+                _render_draft_blockers(blockers)
+                continue
+            print("\nDraft locked. A final run plan will be shown before execution starts.")
+            return plan
+        if action == "restart":
+            return None
+        if action == "stages":
+            plan = _edit_draft_stages(plan)
+            continue
+        if action.startswith("stage:"):
+            _, stage = action.split(":", 1)
+            plan = _edit_draft_stage(plan, stage)
+            continue
+        if action.startswith("method:"):
+            _, stage = action.split(":", 1)
+            plan = _edit_stage_methods(plan, stage)
+            continue
+        if action.startswith("params:"):
+            _, stage = action.split(":", 1)
+            plan = _edit_stage_parameters(plan, stage)
+            continue
+        print("Unknown action. Press Enter to continue, a stage number to edit, s for stages, or r to restart.")
 
-    print(f"\nSession:  {summary.get('session_id', '?')}")
-    print(f"Data dir: {summary.get('data_dir', '?')}")
-    print(f"Manifest: {summary.get('manifest_ref', '?')}")
+
+def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
+    _render_plan_summary(summary, title="Plan Draft", preview=True, draft=plan)
+
+    print("\nIf you continue:")
+    print("  - This draft becomes the working plan.")
+    print("  - Execution will NOT start yet.")
+    print("  - A final run plan will be shown before execution.")
+
+    blockers = _draft_continue_blockers(plan, summary)
+    order = summary.get("resolved_execution_order") or []
+    stages_needing_attention = [stage for stage in order if _draft_stage_attention(stage, plan, summary, blockers)]
+    if stages_needing_attention:
+        print("\nNeeds attention:")
+        for stage in stages_needing_attention:
+            print(f"  - {stage}")
+
+    print("\nActions:")
+    print("  Enter / c   continue")
+    for idx, stage in enumerate(order, start=1):
+        print(f"  {idx:<10} edit {stage}")
+    print("  s           edit stage list")
+    print("  r           restart manually")
+    print("=" * 64)
+
+
+def _render_summary_inputs(summary: dict[str, Any]) -> None:
+    """Render input assets. Shared by draft review and final plan summary."""
     input_assets = summary.get("input_assets") or []
     source_paths = summary.get("source_paths")
     if input_assets:
@@ -273,6 +322,420 @@ def _render_plan_summary(
                     print(f"    - {path}")
     elif source_paths:
         print(f"Input:    {', '.join(source_paths)}")
+
+
+def _render_draft_stage_summary(
+    idx: int,
+    stage: str,
+    plan: AskPlanState,
+    summary: dict[str, Any],
+    attention: list[str],
+) -> None:
+    print(f"\n{idx}. {stage}")
+    print(f"   status: {_draft_stage_status(stage, plan, summary)}")
+    method_lines = _draft_stage_method_lines(stage, plan, summary)
+    if method_lines:
+        print("   methods:")
+        for line in method_lines:
+            print(f"     {line}")
+    parameter_lines = _draft_stage_parameter_lines(stage, plan, summary)
+    if parameter_lines:
+        print("   parameters:")
+        for line in parameter_lines:
+            print(f"     {line}")
+    if attention:
+        print("   attention:")
+        for item in attention:
+            print(f"     - {item}")
+    print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
+
+
+def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> str:
+    roles = summary.get("stage_roles") or {}
+    role = roles.get(stage)
+    selected = _selected_methods_for_stage(plan, stage)
+    statuses = summary.get("method_execution_status") or {}
+    if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
+        return "method needed before locking"
+    if selected and all(statuses.get(method) == "executable" for method in selected):
+        return "will run locally"
+    if selected and any(statuses.get(method) == "executable" for method in selected):
+        return "partly local; some selected methods are not locally executable"
+    if selected:
+        return "included, but not locally executable in this run"
+    if role == "dependency":
+        return "included as a dependency"
+    if role == "planned_only":
+        return "included for planning"
+    return "included"
+
+
+def _draft_stage_method_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
+    selected = _selected_methods_for_stage(plan, stage)
+    statuses = summary.get("method_execution_status") or {}
+    if not selected and stage in _STAGES_NEEDING_METHOD_SELECTION:
+        return ["missing"]
+    return [f"{method}{_method_tag(statuses.get(method, ''))}" for method in selected]
+
+
+def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    missing = set(summary.get("missing_parameter_fields") or [])
+    shared_stage = _shared_parameter_stage(plan)
+    if stage == shared_stage:
+        shared_values = {}
+        shared_values.update(summary.get("shared_parameter_defaults") or {})
+        shared_values.update(summary.get("shared_parameters") or {})
+        shared_sources = summary.get("shared_parameter_default_sources") or {}
+        for key, value in shared_values.items():
+            field = f"shared_parameters.{key}"
+            seen.add(field)
+            note = _source_note(shared_sources.get(key), fallback="recommended")
+            lines.append(f"{key}: {value}{note}")
+        for field in sorted(item for item in missing if item.startswith("shared_parameters.")):
+            seen.add(field)
+            lines.append(f"{field.rsplit('.', 1)[-1]}: missing")
+
+    defaults = summary.get("parameter_defaults") or {}
+    sources = summary.get("parameter_default_sources") or {}
+    params = summary.get("method_parameters") or {}
+    for method in _selected_methods_for_stage(plan, stage):
+        values = dict(defaults.get(method) or {})
+        values.update(params.get(method) or {})
+        method_sources = sources.get(method) or {}
+        short = method.rsplit(".", 1)[-1]
+        for key, value in values.items():
+            field = f"{method}.{key}"
+            seen.add(field)
+            note = _source_note(method_sources.get(key), fallback="recommended") if key in (defaults.get(method) or {}) else ""
+            lines.append(f"[{short}] {key}: {value}{note}")
+        for field in sorted(item for item in missing if item.startswith(f"{method}.")):
+            if field not in seen:
+                seen.add(field)
+                lines.append(f"[{short}] {field.rsplit('.', 1)[-1]}: missing")
+
+    stage_values = {}
+    stage_values.update((summary.get("stage_parameter_defaults") or {}).get(stage) or {})
+    stage_values.update((summary.get("stage_parameters") or {}).get(stage) or {})
+    for key, value in stage_values.items():
+        field = f"{stage}.{key}"
+        seen.add(field)
+        if isinstance(value, list):
+            lines.append(f"{key}: {len(value)} record(s)")
+        else:
+            lines.append(f"{key}: {value}")
+    for field in sorted(item for item in missing if _stage_for_field(item, plan) == stage):
+        if field not in seen:
+            lines.append(f"{field.rsplit('.', 1)[-1]}: missing")
+    return lines
+
+
+def _draft_stage_attention(
+    stage: str,
+    plan: AskPlanState,
+    summary: dict[str, Any],
+    blockers: list[tuple[str, str]],
+) -> list[str]:
+    """Collect attention items for a specific stage. Filters inline instead of pre-aggregating."""
+    attention: list[str] = []
+    # Add blockers for this stage
+    for blocker_stage, message in blockers:
+        if blocker_stage == stage:
+            attention.append(message)
+    # Add stage plan details
+    for detail in summary.get("stage_plan_details") or []:
+        if str(detail.get("stage") or "") == stage:
+            for note in detail.get("inputs") or []:
+                attention.append(str(note))
+    # Add warnings for this stage
+    for warning in summary.get("warnings") or []:
+        warning_stage = _stage_for_warning(str(warning), plan)
+        if warning_stage == stage:
+            attention.append(str(warning))
+    return attention
+
+
+def _draft_continue_blockers(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+    blockers: list[tuple[str, str]] = []
+    for stage in plan.resolved_execution_order or []:
+        if stage in _STAGES_NEEDING_METHOD_SELECTION and not _selected_methods_for_stage(plan, stage):
+            blockers.append((stage, "method is missing"))
+    for field in summary.get("missing_parameter_fields") or []:
+        stage = _stage_for_field(str(field), plan)
+        blockers.append((stage, f"{_field_label(str(field))} is missing"))
+    if summary.get("run_config_preview_error"):
+        stage = (plan.resolved_execution_order or ["plan"])[0]
+        blockers.append((stage, f"run config is not ready: {summary['run_config_preview_error']}"))
+    return blockers
+
+
+def _render_draft_blockers(blockers: list[tuple[str, str]]) -> None:
+    print("\nCannot continue yet. Fix these items in the plan first:")
+    for stage, message in blockers:
+        print(f"  - {stage}: {message}")
+
+
+def _prompt_draft_action(plan: AskPlanState) -> str:
+    stages = list(plan.resolved_execution_order or [])
+    if _HAS_QUESTIONARY:
+        choices = [
+            questionary.Choice("continue", value="continue"),
+            *[questionary.Choice(f"edit {idx}. {stage}", value=f"stage:{stage}") for idx, stage in enumerate(stages, 1)],
+            questionary.Choice("edit stage list", value="stages"),
+            questionary.Choice("restart manually", value="restart"),
+        ]
+        return _safe_ask(questionary.select("Plan action:", choices=choices, default="continue"))
+
+    raw = input("plan> ").strip().lower()
+    if raw in ("", "c", "continue", "y", "yes"):
+        return "continue"
+    if raw in ("s", "stage", "stages"):
+        return "stages"
+    if raw in ("r", "restart", "n", "no"):
+        return "restart"
+    if len(raw) > 1 and raw[:-1].isdigit() and raw[-1] in {"m", "p"}:
+        idx = int(raw[:-1]) - 1
+        if 0 <= idx < len(stages):
+            return ("method:" if raw[-1] == "m" else "params:") + stages[idx]
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(stages):
+            return f"stage:{stages[idx]}"
+    return raw
+
+
+def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
+    current = plan
+    while True:
+        summary = build_run_plan_summary(current)
+        print()
+        print("-" * 64)
+        print(stage)
+        print("-" * 64)
+        blockers = _draft_continue_blockers(current, summary)
+        attention = _draft_stage_attention(stage, current, summary, blockers)
+        _render_draft_stage_summary(1, stage, current, summary, attention)
+        print("\nActions:")
+        print("  m      change method")
+        print("  p      edit parameters")
+        print("  b      back to plan")
+        raw = input(f"{stage}> ").strip().lower()
+        if raw in ("", "b", "back"):
+            return current
+        if raw in ("m", "method", "methods"):
+            current = _edit_stage_methods(current, stage)
+            continue
+        if raw in ("p", "param", "params", "parameters"):
+            current = _edit_stage_parameters(current, stage)
+            continue
+        print("Unknown action. Use m, p, or b.")
+
+
+def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
+    req = AskClarificationRequest(
+        status="clarification_required",
+        kind="stage_selection",
+        session_id=plan.session_id,
+        ask_plan_ref="<draft>",
+        manifest_ref=plan.manifest_ref,
+        question="Which workflow stages should run?",
+        choices={"available_stages": _all_selectable_stages(), "suggested_stages": plan.selected_stages or []},
+        required_fields=["selected_stages"],
+        response_schema={"kind": "stage_selection", "selected_stages": plan.selected_stages or []},
+        next_action={},
+    )
+    response = _prompt_stage_selection(req)
+    return _refresh_draft_defaults(merge_clarification_response(plan, response))
+
+
+def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
+    methods = _STAGE_METHODS.get(stage, [])
+    if not methods:
+        print(f"\nNo method choices are registered for {stage}.")
+        return plan
+    current = (plan.selected_methods or {}).get(stage)
+    default = current if current else _default_methods_for_stage(stage)
+    req = AskClarificationRequest(
+        status="clarification_required",
+        kind="method_selection",
+        session_id=plan.session_id,
+        ask_plan_ref="<draft>",
+        manifest_ref=plan.manifest_ref,
+        question=f"Which methods should run for {stage}?",
+        choices={
+            "methods_by_stage": {
+                stage: [
+                    {
+                        "method_name": m["method_name"],
+                        "execution_support": m["execution_support"],
+                        "selection_role": m.get("selection_role"),
+                        "display_name": m.get("display_name"),
+                    }
+                    for m in methods
+                ]
+            },
+            "defaults": {stage: default} if default else {},
+        },
+        required_fields=["selected_methods"],
+        response_schema={"kind": "method_selection", "selected_methods": {stage: default}},
+        next_action={},
+    )
+    response = _prompt_method_selection(req)
+    return _refresh_draft_defaults(merge_clarification_response(plan, response))
+
+
+def _edit_stage_parameters(plan: AskPlanState, stage: str) -> AskPlanState:
+    summary = build_run_plan_summary(plan)
+    fields = _editable_parameter_fields_for_stage(plan, stage, summary)
+    if not fields:
+        print(f"\nNo editable parameters are known for {stage}.")
+        return plan
+    req = AskClarificationRequest(
+        status="clarification_required",
+        kind="parameter_values",
+        session_id=plan.session_id,
+        ask_plan_ref="<draft>",
+        manifest_ref=plan.manifest_ref,
+        question=f"Edit parameters for {stage}.",
+        choices={
+            "defaults": _filter_method_map_for_stage(summary.get("parameter_defaults") or {}, plan, stage),
+            "shared_defaults": summary.get("shared_parameter_defaults") or {},
+            "stage_defaults": {stage: (summary.get("stage_parameter_defaults") or {}).get(stage) or {}},
+        },
+        required_fields=fields,
+        response_schema={"kind": "parameter_values"},
+        next_action={},
+    )
+    response = _prompt_parameter_values(req, plan)
+    return _refresh_draft_defaults(merge_clarification_response(plan, response))
+
+
+def _editable_parameter_fields_for_stage(
+    plan: AskPlanState,
+    stage: str,
+    summary: dict[str, Any],
+) -> list[str]:
+    fields: list[str] = []
+    if stage == _shared_parameter_stage(plan):
+        shared_keys = set((summary.get("shared_parameter_defaults") or {}).keys())
+        shared_keys.update((summary.get("shared_parameters") or {}).keys())
+        for field in summary.get("missing_parameter_fields") or []:
+            if str(field).startswith("shared_parameters."):
+                shared_keys.add(str(field).rsplit(".", 1)[-1])
+        fields.extend(f"shared_parameters.{key}" for key in sorted(shared_keys))
+
+    defaults = summary.get("parameter_defaults") or {}
+    params = summary.get("method_parameters") or {}
+    for method in _selected_methods_for_stage(plan, stage):
+        keys = set((defaults.get(method) or {}).keys())
+        keys.update((params.get(method) or {}).keys())
+        for field in summary.get("missing_parameter_fields") or []:
+            if str(field).startswith(f"{method}."):
+                keys.add(str(field).rsplit(".", 1)[-1])
+        fields.extend(f"{method}.{key}" for key in sorted(keys))
+
+    stage_keys = set(((summary.get("stage_parameter_defaults") or {}).get(stage) or {}).keys())
+    stage_keys.update(((summary.get("stage_parameters") or {}).get(stage) or {}).keys())
+    for field in summary.get("missing_parameter_fields") or []:
+        field_text = str(field)
+        method_scoped = any(field_text.startswith(f"{method}.") for method in _selected_methods_for_stage(plan, stage))
+        if (
+            _stage_for_field(field_text, plan) == stage
+            and field_text.startswith(f"{stage}.")
+            and not method_scoped
+        ):
+            stage_keys.add(field_text.rsplit(".", 1)[-1])
+    fields.extend(f"{stage}.{key}" for key in sorted(stage_keys))
+    return list(dict.fromkeys(fields))
+
+
+def _filter_method_map_for_stage(
+    values: dict[str, dict[str, Any]],
+    plan: AskPlanState,
+    stage: str,
+) -> dict[str, dict[str, Any]]:
+    methods = set(_selected_methods_for_stage(plan, stage))
+    return {method: params for method, params in values.items() if method in methods}
+
+
+def _refresh_draft_defaults(plan: AskPlanState) -> AskPlanState:
+    return _auto_fill_inferred_defaults(_fill_draft_default_methods(plan))
+
+
+def _selected_methods_for_stage(plan: AskPlanState, stage: str) -> list[str]:
+    selected = (plan.selected_methods or {}).get(stage)
+    if not selected:
+        return []
+    return selected if isinstance(selected, list) else [selected]
+
+
+def _shared_parameter_stage(plan: AskPlanState) -> str | None:
+    order = list(plan.resolved_execution_order or [])
+    for preferred in ("assembly", "genome_survey", "read_qc"):
+        if preferred in order:
+            return preferred
+    return order[0] if order else None
+
+
+def _stage_for_field(field: str, plan: AskPlanState) -> str:
+    """Determine which stage a parameter field belongs to.
+
+    TODO(refactor): Replace hardcoded prefix checks with structured field metadata.
+    See code review finding #8.
+    """
+    if field.startswith("shared_parameters."):
+        return _shared_parameter_stage(plan) or "plan"
+    if field == FUNCTION_DATABASE_PROVENANCE_FIELD:
+        return "function_annotation"
+    for stage, methods in (plan.selected_methods or {}).items():
+        method_list = methods if isinstance(methods, list) else [methods]
+        for method in method_list:
+            if field.startswith(f"{method}."):
+                return stage
+    stage, _, _ = field.partition(".")
+    return stage or "plan"
+
+
+def _stage_for_warning(warning: str, plan: AskPlanState) -> str:
+    for stage in plan.resolved_execution_order or []:
+        if warning.startswith(f"{stage}:") or f"{stage}." in warning:
+            return stage
+    return _shared_parameter_stage(plan) or "plan"
+
+
+def _field_label(field: str) -> str:
+    if field.startswith("shared_parameters."):
+        return field.rsplit(".", 1)[-1]
+    if field == FUNCTION_DATABASE_PROVENANCE_FIELD:
+        return "database_provenance"
+    return field.rsplit(".", 1)[-1]
+
+
+def _render_plan_summary(
+    summary: dict[str, Any],
+    *,
+    title: str,
+    preview: bool = False,
+    draft: AskPlanState | None = None,
+) -> None:
+    explicit_shared = _explicit_shared_params(draft) if draft is not None else set()
+    print()
+    print("=" * 50)
+    print(title)
+    print("=" * 50)
+
+    print(f"\nSession:  {summary.get('session_id', '?')}")
+    print(f"Data dir: {summary.get('data_dir', '?')}")
+    print(f"Manifest: {summary.get('manifest_ref', '?')}")
+    parse_source = summary.get("intent_parse_source")
+    if parse_source:
+        parse_label = {
+            "llm": "LLM",
+            "deterministic_fallback": "local deterministic fallback",
+        }.get(str(parse_source), str(parse_source))
+        print(f"Intent parser: {parse_label}")
+    _render_summary_inputs(summary)
 
     roles = summary.get("stage_roles", {})
     order = summary.get("resolved_execution_order", [])
@@ -303,29 +766,49 @@ def _render_plan_summary(
             for m in method_list:
                 print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}")
 
-    shared = summary.get("shared_parameters", {})
-    if shared:
+    missing_fields = list(summary.get("missing_parameter_fields") or [])
+    shared_defaults = summary.get("shared_parameter_defaults", {}) if preview else {}
+    pending_shared = _pending_shared_parameter_names(missing_fields)
+    deferred_shared = summary.get("deferred_shared_parameters", {}) if preview else {}
+    shared_sources = summary.get("shared_parameter_default_sources", {}) if preview else {}
+    shared = {**shared_defaults, **(summary.get("shared_parameters", {}) or {})}
+    if shared or deferred_shared or (preview and pending_shared):
         print("\nShared parameters:")
         for k, v in shared.items():
             note = ""
             if draft is not None:
-                note = "  (from request)" if k in explicit_shared else "  (recommended)"
+                note = "  (from request)" if k in explicit_shared else _source_note(shared_sources.get(k), fallback="recommended")
+            elif preview and k in shared_sources:
+                note = _source_note(shared_sources.get(k), fallback="recommended")
             print(f"  {k}: {v}{note}")
+        if preview:
+            for k, item in deferred_shared.items():
+                if k in shared:
+                    continue
+                value = item.get("value", "auto") if isinstance(item, dict) else "auto"
+                source = item.get("source") if isinstance(item, dict) else "auto"
+                print(f"  {k}: {value}{_source_note(source, fallback='auto')}")
+        if preview:
+            for k in pending_shared:
+                if k not in shared and k not in deferred_shared:
+                    print(f"  {k}: pending")
     elif preview:
         print("\nShared parameters: pending")
 
     params = summary.get("method_parameters", {})
-    if params:
+    if preview:
+        _render_preview_parameters(summary, params, recommended_params=draft is not None)
+    elif params:
         print("\nParameters:")
         for method, pdict in params.items():
             short = method.rsplit(".", 1)[-1]
             for k, v in pdict.items():
                 print(f"  [{short}] {k}: {v}")
-    elif preview:
-        print("\nParameters: pending")
 
-    stage_params = summary.get("stage_parameters", {})
-    if stage_params:
+    stage_defaults = summary.get("stage_parameter_defaults", {}) if preview else {}
+    pending_stage = _pending_stage_parameter_names(missing_fields)
+    stage_params = {**stage_defaults, **(summary.get("stage_parameters", {}) or {})}
+    if stage_params or (preview and pending_stage):
         print("\nStage parameters:")
         for stage, pdict in stage_params.items():
             for k, v in pdict.items():
@@ -333,6 +816,15 @@ def _render_plan_summary(
                     print(f"  [{stage}] {k}: {len(v)} record(s)")
                 else:
                     print(f"  [{stage}] {k}: {v}")
+        if preview:
+            for stage, fields in pending_stage.items():
+                existing = stage_params.get(stage, {})
+                for field in fields:
+                    if field not in existing:
+                        print(f"  [{stage}] {field}: pending")
+
+    if preview and summary.get("stage_plan_details"):
+        _render_stage_plan_details(summary["stage_plan_details"])
 
     warnings = summary.get("warnings", [])
     for w in warnings:
@@ -343,7 +835,7 @@ def _render_plan_summary(
         print(f"\nRun-config error: {preview_error}")
 
     print("=" * 50)
-    if preview:
+    if preview and draft is None:
         print("Advisory preview. Remaining choices and a final confirmation follow.")
 
 
@@ -353,6 +845,177 @@ def _method_tag(status: str) -> str:
     if status == "planned_only":
         return " [deferred]"
     return ""
+
+
+def _render_preview_parameters(
+    summary: dict[str, Any],
+    params: dict[str, dict[str, Any]],
+    *,
+    recommended_params: bool = False,
+) -> None:
+    defaults = summary.get("parameter_defaults", {}) or {}
+    sources = summary.get("parameter_default_sources", {}) or {}
+    missing_fields = list(summary.get("missing_parameter_fields") or [])
+    method_order = _ordered_summary_methods(summary)
+    pending_by_method = _pending_method_parameter_names(missing_fields, set(method_order) | set(defaults) | set(params))
+    combined: dict[str, dict[str, Any]] = {}
+    for method, values in defaults.items():
+        combined[method] = dict(values or {})
+    for method, values in params.items():
+        merged = dict(combined.get(method) or {})
+        merged.update(values or {})
+        combined[method] = merged
+    render_order = method_order + [m for m in combined if m not in method_order]
+    render_order += [m for m in pending_by_method if m not in render_order]
+
+    lines: list[str] = []
+    for method in render_order:
+        values = combined.get(method, {})
+        pending = pending_by_method.get(method, [])
+        if not values and not pending:
+            continue
+        short = method.rsplit(".", 1)[-1]
+        default_values = defaults.get(method, {}) or {}
+        default_sources = sources.get(method, {}) or {}
+        explicit_values = params.get(method, {}) or {}
+        for key, value in values.items():
+            note = ""
+            if key in explicit_values and not recommended_params:
+                note = ""
+            elif key in default_values:
+                note = _source_note(default_sources.get(key), fallback="recommended")
+            lines.append(f"  [{short}] {key}: {value}{note}")
+        for key in pending:
+            if key not in values:
+                lines.append(f"  [{short}] {key}: pending")
+
+    if lines:
+        print("\nParameters:")
+        for line in lines:
+            print(line)
+    else:
+        print("\nParameters: pending")
+
+
+def _ordered_summary_methods(summary: dict[str, Any]) -> list[str]:
+    methods = summary.get("selected_methods", {}) or {}
+    order = summary.get("resolved_execution_order", []) or list(methods)
+    ordered: list[str] = []
+    for stage in order:
+        value = methods.get(stage)
+        if not value:
+            continue
+        method_list = value if isinstance(value, list) else [value]
+        for method in method_list:
+            if method not in ordered:
+                ordered.append(method)
+    return ordered
+
+
+def _group_missing_fields_by_scope(missing_fields: list[str], methods: set[str] | None = None) -> dict[str, Any]:
+    """Parse missing_fields and group by scope: shared, stage, or method.
+
+    Returns dict with keys:
+        - shared: list[str] of shared parameter names (without 'shared_parameters.' prefix)
+        - stage: dict[str, list[str]] mapping stage name to parameter names
+        - method: dict[str, list[str]] mapping method name to parameter names
+
+    Fields that match no scope (no 'shared_parameters.' prefix, no known method when
+    ``methods`` is given, and not exactly ``stage.param`` shaped) are dropped and logged
+    at debug level rather than silently discarded.
+    """
+    shared: list[str] = []
+    stage: dict[str, list[str]] = {}
+    method: dict[str, list[str]] = {}
+
+    for field in missing_fields:
+        if field.startswith("shared_parameters."):
+            shared.append(field[len("shared_parameters."):])
+        elif methods:
+            # Try to match against known methods
+            matched = False
+            for m in methods:
+                prefix = f"{m}."
+                if field.startswith(prefix):
+                    method.setdefault(m, []).append(field[len(prefix):])
+                    matched = True
+                    break
+            if not matched:
+                # Fall back to stage-scoped
+                parts = field.split(".")
+                if len(parts) == 2:
+                    stage.setdefault(parts[0], []).append(parts[1])
+                else:
+                    logger.debug("Dropping unclassifiable missing field %r (no matching method, not stage-scoped)", field)
+        else:
+            # No methods provided, assume stage-scoped
+            parts = field.split(".")
+            if len(parts) == 2:
+                stage.setdefault(parts[0], []).append(parts[1])
+            else:
+                logger.debug("Dropping unclassifiable missing field %r (not stage-scoped)", field)
+
+    return {"shared": shared, "stage": stage, "method": method}
+
+
+def _pending_shared_parameter_names(missing_fields: list[str]) -> list[str]:
+    """Extract shared parameter names from missing_fields."""
+    return _group_missing_fields_by_scope(missing_fields)["shared"]
+
+
+def _pending_stage_parameter_names(missing_fields: list[str]) -> dict[str, list[str]]:
+    """Extract stage-scoped parameter names from missing_fields."""
+    return _group_missing_fields_by_scope(missing_fields)["stage"]
+
+
+def _pending_method_parameter_names(missing_fields: list[str], methods: set[str]) -> dict[str, list[str]]:
+    """Extract method-scoped parameter names from missing_fields."""
+    return _group_missing_fields_by_scope(missing_fields, methods=methods)["method"]
+
+
+def _source_note(source: str | None, *, fallback: str) -> str:
+    if not source:
+        return f"  ({fallback})"
+    if source.startswith("auto:"):
+        return f"  ({source})"
+    if source.startswith("evidence:"):
+        return f"  ({source})"
+    if source == "default":
+        return "  (default)"
+    if source == "from request":
+        return "  (from request)"
+    if source == "from manifest":
+        return "  (from manifest)"
+    return f"  ({source})"
+
+
+def _render_stage_plan_details(details: list[dict[str, Any]]) -> None:
+    print("\nStage details:")
+    for item in details:
+        stage = item.get("stage", "?")
+        status = item.get("status") or "pending"
+        role = _ROLE_LABELS.get(str(item.get("role") or ""), item.get("role") or "")
+        suffix = f" [{role}]" if role else ""
+        print(f"  {stage}:{suffix} {status}")
+        for input_note in item.get("inputs") or []:
+            print(f"    input: {input_note}")
+        methods = item.get("methods") or []
+        if methods:
+            for method in methods:
+                method_name = method.get("method", "?")
+                execution = _method_tag(str(method.get("execution_support") or ""))
+                print(f"    method: {method_name}{execution}")
+                params = method.get("parameters") or {}
+                missing = method.get("missing_parameters") or []
+                if params:
+                    short = method_name.rsplit(".", 1)[-1]
+                    rendered = ", ".join(f"{key}={value}" for key, value in params.items())
+                    print(f"      params [{short}]: {rendered}")
+                if missing:
+                    print(f"      pending: {', '.join(str(name) for name in missing)}")
+        missing_stage = item.get("missing_parameters") or []
+        if missing_stage:
+            print(f"    pending: {', '.join(str(name) for name in missing_stage)}")
 
 
 # ---------------------------------------------------------------------------
@@ -453,10 +1116,18 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
             selected[stage] = _prompt_read_qc_filter_choice(methods, req.choices.get("defaults", {}).get(stage))
             continue
         executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
+        requested_default = req.choices.get("defaults", {}).get(stage)
+        if isinstance(requested_default, list):
+            default_checked = [m for m in requested_default if m in method_names]
+        elif requested_default:
+            default_checked = [requested_default] if requested_default in method_names else []
+        else:
+            default_checked = []
         # The assembly graph executes one primary candidate at a time. Keep
         # its interactive choice singular even though other stages may run
         # several methods in one pass.
-        default_checked = executable[:1] if stage == "assembly" else (executable or method_names[:1])
+        if not default_checked:
+            default_checked = executable[:1] if stage == "assembly" else (executable or method_names[:1])
 
         if _HAS_QUESTIONARY:
             choices = []
@@ -605,7 +1276,8 @@ def _prompt_juicer_3ddna_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "input_mode": mode,
         "chromosome_count": _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] chromosome_count", defaults.get("chromosome_count")
+            "[hic_scaffolding / juicer_3ddna_juicebox] chromosome_count  (haploid chromosome count, e.g. 22 for 2n=44)",
+            defaults.get("chromosome_count"),
         ),
     }
     if mode == "merged_nodups":
@@ -614,10 +1286,12 @@ def _prompt_juicer_3ddna_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         result["restriction_enzyme"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] restriction_enzyme", defaults.get("restriction_enzyme")
+            "[hic_scaffolding / juicer_3ddna_juicebox] restriction_enzyme  (Hi-C restriction enzyme, e.g. MboI or DpnII)",
+            defaults.get("restriction_enzyme"),
         )
         result["chrom_sizes_ref"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] chrom_sizes_ref", defaults.get("chrom_sizes_ref")
+            "[hic_scaffolding / juicer_3ddna_juicebox] chrom_sizes_ref  (chrom.sizes path; Enter = auto from pre-Hi-C FASTA)",
+            defaults.get("chrom_sizes_ref", "auto"),
         )
         result["threads"] = _prompt_text_value(
             "[hic_scaffolding / juicer_3ddna_juicebox] threads", defaults.get("threads", 8)

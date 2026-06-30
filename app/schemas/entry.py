@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.schemas.manifest import Platform
 from app.storage.paths import default_data_root
@@ -27,6 +27,7 @@ class EntryRequest(BaseModel):
     """Structured request produced before entering the graph."""
 
     model_config = ConfigDict(extra="forbid")
+    _intent_parse_source: str | None = PrivateAttr(default=None)
 
     command: Literal["run"] = "run"
     session_id: str | None = Field(default=None, min_length=1)
@@ -34,6 +35,7 @@ class EntryRequest(BaseModel):
     source_paths: list[str] = Field(default_factory=list)
     data_dir: str = Field(default_factory=default_data_root, min_length=1)
     sample_id: str | None = Field(default=None, min_length=1)
+    target_species: str | None = Field(default=None, min_length=1)
     platform: Platform = "unknown"
     asset_type_hint: EntryAssetTypeHint | None = None
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
