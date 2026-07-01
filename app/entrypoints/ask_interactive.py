@@ -218,6 +218,14 @@ _PARAM_HINTS: dict[str, str] = {
     "hic_scaffolding.candidate.juicer_3ddna_juicebox.chrom_sizes_ref": "chrom.sizes path; use auto to derive from the pre-Hi-C FASTA",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
+    "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
+    "t2t.alignment.minimap2.telomere_motif": "terminal repeat motif, e.g. TTAGGG",
+    "t2t.alignment.minimap2.threshold_min_motif_copies": "minimum motif copies at a read/contig end",
+    "t2t.alignment.minimap2.threshold_terminal_window_bp": "terminal window scanned for telomere signal",
+    "t2t.alignment.minimap2.threshold_min_mapq": "minimum minimap2 mapping quality for candidate reads",
+    "t2t.alignment.minimap2.threshold_max_target_terminal_distance_bp": "maximum distance from contig end",
+    "t2t.alignment.minimap2.threshold_min_overlap_bp": "minimum read-to-assembly overlap",
+    "t2t.alignment.minimap2.threshold_min_supporting_reads": "compatible telomeric reads required before patching",
 }
 
 _GENOME_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmg]?)$", re.IGNORECASE)
@@ -249,11 +257,11 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
         _render_draft_review(plan, summary)
         action = _prompt_draft_action(plan)
         if action == "continue":
-            blockers = _draft_continue_blockers(plan, summary)
-            if blockers:
-                _render_draft_blockers(blockers)
+            blocking_items = _draft_blocking_items(plan, summary)
+            if blocking_items:
+                _render_draft_blockers(blocking_items)
                 continue
-            print("\nDraft locked. A final run plan will be shown before execution starts.")
+            print("\nDraft locked. Next, review the final run plan before execution starts.")
             return plan
         if action == "restart":
             return None
@@ -276,16 +284,38 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
 
 
 def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
-    _render_plan_summary(summary, title="Plan Draft", preview=True, draft=plan)
+    print()
+    print("=" * 64)
+    print("Plan Draft")
+    print("=" * 64)
+    print(f"\nSession:  {summary.get('session_id', '?')}")
+    print(f"Data dir: {summary.get('data_dir', '?')}")
+    print(f"Manifest: {summary.get('manifest_ref', '?')}")
+    _render_summary_inputs(summary)
 
     print("\nIf you continue:")
     print("  - This draft becomes the working plan.")
     print("  - Execution will NOT start yet.")
+    print("  - Missing fields shown below must be fixed here first.")
     print("  - A final run plan will be shown before execution.")
+    print("  - You can edit a stage here first, then return to this plan.")
 
-    blockers = _draft_continue_blockers(plan, summary)
+    attention_items = _draft_attention_items(plan, summary)
     order = summary.get("resolved_execution_order") or []
-    stages_needing_attention = [stage for stage in order if _draft_stage_attention(stage, plan, summary, blockers)]
+    if order:
+        print("\nStages:")
+        for idx, stage in enumerate(order, start=1):
+            _render_draft_stage_summary(
+                idx,
+                stage,
+                plan,
+                summary,
+                _draft_stage_attention(stage, plan, summary, attention_items),
+            )
+    else:
+        print("\nStages: none selected")
+
+    stages_needing_attention = [stage for stage in order if _draft_stage_attention(stage, plan, summary, attention_items)]
     if stages_needing_attention:
         print("\nNeeds attention:")
         for stage in stages_needing_attention:
@@ -331,6 +361,8 @@ def _render_draft_stage_summary(
     plan: AskPlanState,
     summary: dict[str, Any],
     attention: list[str],
+    *,
+    nested: bool = False,
 ) -> None:
     print(f"\n{idx}. {stage}")
     print(f"   status: {_draft_stage_status(stage, plan, summary)}")
@@ -348,7 +380,10 @@ def _render_draft_stage_summary(
         print("   attention:")
         for item in attention:
             print(f"     - {item}")
-    print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
+    if nested:
+        print("   edit: m method / p parameters / b back")
+    else:
+        print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
 
 
 def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> str:
@@ -436,13 +471,12 @@ def _draft_stage_attention(
     stage: str,
     plan: AskPlanState,
     summary: dict[str, Any],
-    blockers: list[tuple[str, str]],
+    attention_items: list[tuple[str, str]],
 ) -> list[str]:
     """Collect attention items for a specific stage. Filters inline instead of pre-aggregating."""
     attention: list[str] = []
-    # Add blockers for this stage
-    for blocker_stage, message in blockers:
-        if blocker_stage == stage:
+    for item_stage, message in attention_items:
+        if item_stage == stage:
             attention.append(message)
     # Add stage plan details
     for detail in summary.get("stage_plan_details") or []:
@@ -457,23 +491,43 @@ def _draft_stage_attention(
     return attention
 
 
-def _draft_continue_blockers(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
-    blockers: list[tuple[str, str]] = []
+def _draft_attention_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+    items = list(_draft_blocking_items(plan, summary))
+    return list(dict.fromkeys(items))
+
+
+def _draft_blocking_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
     for stage in plan.resolved_execution_order or []:
         if stage in _STAGES_NEEDING_METHOD_SELECTION and not _selected_methods_for_stage(plan, stage):
-            blockers.append((stage, "method is missing"))
+            items.append((stage, "method is missing"))
     for field in summary.get("missing_parameter_fields") or []:
         stage = _stage_for_field(str(field), plan)
-        blockers.append((stage, f"{_field_label(str(field))} is missing"))
+        items.append((stage, f"{_field_label(str(field))} is missing"))
     if summary.get("run_config_preview_error"):
         stage = (plan.resolved_execution_order or ["plan"])[0]
-        blockers.append((stage, f"run config is not ready: {summary['run_config_preview_error']}"))
-    return blockers
+        items.append((stage, f"run config is not ready: {summary['run_config_preview_error']}"))
+    items.extend(_next_clarification_blocking_items(plan, summary))
+    return list(dict.fromkeys(items))
 
 
-def _render_draft_blockers(blockers: list[tuple[str, str]]) -> None:
+def _next_clarification_blocking_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+    clarification = next_clarification(plan, ask_plan_ref="<draft>")
+    if clarification is None or clarification.kind == "confirm":
+        return []
+    if clarification.kind == "stage_selection":
+        return [("plan", "stage list is not selected")]
+    if clarification.kind == "method_selection":
+        stages = sorted((clarification.choices.get("methods_by_stage") or {}).keys())
+        return [(stage, "method is missing") for stage in stages]
+    if clarification.kind == "parameter_values":
+        return []
+    return [("plan", f"{clarification.kind} is still required")]
+
+
+def _render_draft_blockers(blocking_items: list[tuple[str, str]]) -> None:
     print("\nCannot continue yet. Fix these items in the plan first:")
-    for stage, message in blockers:
+    for stage, message in blocking_items:
         print(f"  - {stage}: {message}")
 
 
@@ -514,9 +568,9 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
         print("-" * 64)
         print(stage)
         print("-" * 64)
-        blockers = _draft_continue_blockers(current, summary)
-        attention = _draft_stage_attention(stage, current, summary, blockers)
-        _render_draft_stage_summary(1, stage, current, summary, attention)
+        attention_items = _draft_attention_items(current, summary)
+        attention = _draft_stage_attention(stage, current, summary, attention_items)
+        _render_draft_stage_summary(1, stage, current, summary, attention, nested=True)
         print("\nActions:")
         print("  m      change method")
         print("  p      edit parameters")

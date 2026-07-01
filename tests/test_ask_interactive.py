@@ -14,7 +14,7 @@ from app.entrypoints.ask_interactive import (
     _parse_set_params,
     run_interactive_loop,
     _apply_set_params,
-    _draft_continue_blockers,
+    _draft_attention_items,
     _group_missing_fields_by_scope,
     _parse_genome_size,
     _prompt_parameter_values,
@@ -194,6 +194,38 @@ class InteractiveLoopTests(unittest.TestCase):
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
+            mock_exec.assert_called_once()
+
+    def test_draft_continue_with_missing_fields_blocks_until_stage_edit_completes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                entry_request={
+                    "command": "run",
+                    "manifest": str(manifest),
+                    "data_dir": tmp,
+                    "requested_stages": ["assembly"],
+                },
+            )
+            args = _ask_ns()
+            inputs = iter(["", "1p", "500m", "", "", "", "y"])
+            with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("builtins.input", side_effect=lambda *args: next(inputs)), \
+                 patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                 patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
+                code = run_interactive_loop(plan, args)
+
+            self.assertEqual(code, 0)
+            self.assertIn("Cannot continue yet.", stdout.getvalue())
+            self.assertIn("assembly: estimated_genome_size is missing", stdout.getvalue())
             mock_exec.assert_called_once()
 
     def test_confirm_render_includes_shared_parameters(self):
@@ -545,10 +577,9 @@ class InteractiveLoopTests(unittest.TestCase):
                                  "requested_stages": ["assembly"],
                              })
             args = _ask_ns()
-            # First continue is blocked at the plan menu because genome size is missing.
-            # Then edit assembly parameters, fill genome size, return to the plan,
-            # continue, and confirm the final run plan.
-            inputs = iter(["y", "1p", "500m", "", "", "", "y"])
+            # Edit assembly parameters from the draft, fill genome size, return
+            # to the plan, continue, and confirm the final run plan.
+            inputs = iter(["1p", "500m", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -846,8 +877,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn("This draft becomes the working plan.", rendered)
             self.assertIn("Execution will NOT start yet.", rendered)
             self.assertIn("assembly.candidate.flye [local]", rendered)
-            # After Finding 6 fix: draft review uses _render_plan_summary which shows "pending" not "missing"
-            self.assertIn("estimated_genome_size: pending", rendered)
+            self.assertIn("estimated_genome_size: missing", rendered)
             self.assertIn("[flye] threads: 4  (default)", rendered)
             self.assertIn("Needs attention:", rendered)
 
@@ -877,10 +907,8 @@ class PlanPreviewRenderTests(unittest.TestCase):
             rendered = stdout.getvalue()
             self.assertIn("Plan Draft", rendered)
             self.assertIn(f"raw_long_reads [ont/fasta]: {reads}", rendered)
-            # After Finding 6 fix: draft review now uses _render_plan_summary format
-            self.assertIn("[      run] assembly", rendered)
-            self.assertIn("[      run] gene_annotation", rendered)
-            # Actions menu still shows numbers
+            self.assertIn("1. assembly", rendered)
+            self.assertIn("2. gene_annotation", rendered)
             self.assertIn("1          edit assembly", rendered)
             self.assertIn("2          edit gene_annotation", rendered)
             self.assertNotIn("read_qc", rendered)
@@ -888,7 +916,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertNotIn("assembly_review: pending", rendered)
             self.assertIn("Actions:", rendered)
 
-    def test_plan_draft_continue_blocks_missing_fields_in_stage(self):
+    def test_plan_draft_attention_places_missing_fields_in_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
             reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -908,8 +936,10 @@ class PlanPreviewRenderTests(unittest.TestCase):
                 },
             )
             draft = build_initial_plan_draft(plan)
-            blockers = _draft_continue_blockers(draft, build_run_plan_summary(draft))
-            self.assertIn(("assembly", "estimated_genome_size is missing"), blockers)
+            attention = _draft_attention_items(draft, build_run_plan_summary(draft))
+            self.assertIn(("assembly", "estimated_genome_size is missing"), attention)
+            self.assertNotIn(("assembly", "platform must be confirmed"), attention)
+            self.assertNotIn(("assembly", "threads must be confirmed"), attention)
 
     def test_build_initial_plan_draft_skips_when_no_goal_was_parsed(self):
         plan = _base_plan(entry_request={"command": "run", "manifest": "test.yaml", "data_dir": "data"})

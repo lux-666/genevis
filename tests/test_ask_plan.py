@@ -299,6 +299,28 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             self.assertEqual(draft.method_parameters["assembly.candidate.flye"]["threads"], 4)
             self.assertEqual(draft.method_parameters["assembly_review.eval.quast"]["threads"], 4)
 
+    def test_t2t_draft_prefills_visible_minimap2_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                entry_request={"requested_stages": ["t2t"]},
+            )
+
+            draft = build_initial_plan_draft(plan)
+
+            self.assertEqual(draft.selected_methods["t2t"], "t2t.alignment.minimap2")
+            params = draft.method_parameters["t2t.alignment.minimap2"]
+            self.assertEqual(params["mode"], "auto_patch")
+            self.assertEqual(params["telomere_motif"], "TTAGGG")
+            self.assertEqual(params["threshold_min_supporting_reads"], 1)
+
 
 class AskPlannerMethodSelectionTests(unittest.TestCase):
     def test_stage_methods_match_descriptor_registry(self):
@@ -858,6 +880,34 @@ class AskPlannerRunConfigTests(unittest.TestCase):
         self.assertNotIn("read_qc", payload["requested_stages"])
         self.assertNotIn("assembly_review", payload["requested_stages"])
         self.assertNotIn("repeat_annotation", payload["requested_stages"])
+
+    def test_build_run_config_includes_t2t_parameters(self):
+        plan = _base_plan(
+            selected_stages=["t2t"],
+            resolved_execution_order=["t2t"],
+            selected_methods={"t2t": "t2t.alignment.minimap2"},
+            method_parameters={
+                "t2t.alignment.minimap2": {
+                    "mode": "manual_review",
+                    "telomere_motif": "TTAGGG",
+                    "threshold_min_motif_copies": 5,
+                    "threshold_terminal_window_bp": 12000,
+                    "threshold_min_mapq": 30,
+                    "threshold_max_target_terminal_distance_bp": 800,
+                    "threshold_min_overlap_bp": 700,
+                    "threshold_min_supporting_reads": 2,
+                }
+            },
+            confirmed=True,
+        )
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["local_exec"], ["t2t"])
+        self.assertEqual(payload["t2t"]["mode"], "manual_review")
+        self.assertEqual(payload["t2t"]["telomere_motif"], "TTAGGG")
+        self.assertEqual(payload["t2t"]["thresholds"]["min_supporting_reads"], 2)
+        self.assertEqual(payload["t2t"]["thresholds"]["min_mapq"], 30)
 
     def test_build_run_config_uses_selected_read_qc_filter(self):
         plan = _base_plan(

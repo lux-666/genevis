@@ -53,6 +53,7 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "assembly": "choose_many",
     "assembly_review": "choose_many",
     "hic_scaffolding": "choose_many",
+    "t2t": "choose_many",
     "repeat_annotation": "choose_many",
     "gene_annotation": "choose_many",
     "function_annotation": "choose_many",
@@ -238,6 +239,32 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
             "parameter_defaults": {},
         },
     ],
+    "t2t": [
+        {
+            "method_name": "t2t.alignment.minimap2",
+            "execution_support": "executable",
+            "required_parameters": [
+                "mode",
+                "telomere_motif",
+                "threshold_min_motif_copies",
+                "threshold_terminal_window_bp",
+                "threshold_min_mapq",
+                "threshold_max_target_terminal_distance_bp",
+                "threshold_min_overlap_bp",
+                "threshold_min_supporting_reads",
+            ],
+            "parameter_defaults": {
+                "mode": "auto_patch",
+                "telomere_motif": "TTAGGG",
+                "threshold_min_motif_copies": 4,
+                "threshold_terminal_window_bp": 10_000,
+                "threshold_min_mapq": 20,
+                "threshold_max_target_terminal_distance_bp": 1_000,
+                "threshold_min_overlap_bp": 500,
+                "threshold_min_supporting_reads": 1,
+            },
+        },
+    ],
     "repeat_annotation": [
         {
             "method_name": "repeat_annotation.masking.repeatmasker",
@@ -399,6 +426,10 @@ def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _all_known_methods() -> set[str]:
+    return {m["method_name"] for methods in _STAGE_METHODS.values() for m in methods}
+
+
 def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
     return [m for m in _STAGE_METHODS.get(stage, []) if m["execution_support"] == "executable"]
 
@@ -507,6 +538,8 @@ def _draft_default_methods_for_stage(plan: AskPlanState, stage: str) -> str | li
         return _draft_assembly_method(plan)
     if stage == "assembly_review":
         return ["assembly_review.eval.quast"]
+    if stage == "t2t":
+        return "t2t.alignment.minimap2"
     executable = [method["method_name"] for method in _executable_methods_for_stage(stage)]
     return executable[0] if len(executable) == 1 else executable or None
 
@@ -619,6 +652,8 @@ def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
             payload["hic_scaffolding"] = hic_config
         else:
             payload["local_exec"].remove("hic_scaffolding")
+    if "t2t" in local_stages:
+        payload["t2t"] = _build_t2t_config(plan)
     if "function_annotation" in local_stages:
         fn_config = _build_function_annotation_config(plan)
         if fn_config:
@@ -1306,6 +1341,31 @@ def _build_function_annotation_config(plan: AskPlanState) -> dict[str, Any] | No
     if not provenance:
         return None
     return {"database_provenance": provenance}
+
+
+def _build_t2t_config(plan: AskPlanState) -> dict[str, Any]:
+    params = dict((plan.method_parameters or {}).get("t2t.alignment.minimap2") or {})
+    threshold_map = {
+        "threshold_min_motif_copies": "min_motif_copies",
+        "threshold_terminal_window_bp": "terminal_window_bp",
+        "threshold_min_mapq": "min_mapq",
+        "threshold_max_target_terminal_distance_bp": "max_target_terminal_distance_bp",
+        "threshold_min_overlap_bp": "min_overlap_bp",
+        "threshold_min_supporting_reads": "min_supporting_reads",
+    }
+    payload: dict[str, Any] = {}
+    for key in ("mode", "telomere_motif", "chromosome_list_ref", "assembly_fasta_ref", "ont_reads_ref"):
+        value = params.get(key)
+        if value not in (None, ""):
+            payload[key] = value
+    thresholds = {
+        out_key: params[in_key]
+        for in_key, out_key in threshold_map.items()
+        if params.get(in_key) not in (None, "")
+    }
+    if thresholds:
+        payload["thresholds"] = thresholds
+    return payload
 
 
 def _coerce_positive_int(value: Any) -> int | None:
