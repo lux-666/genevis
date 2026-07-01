@@ -20,7 +20,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 
 @dataclass(frozen=True)
@@ -63,13 +63,11 @@ def build_method_graph(
 
 
 def hic_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("hic_scaffolding", {}))
+    return stage_output(state, "hic_scaffolding")
 
 
 def update_hic_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["hic_scaffolding"] = {**hic_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "hic_scaffolding", payload)
 
 
 def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> dict:

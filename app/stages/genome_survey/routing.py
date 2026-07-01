@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
-
-
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool"}
+from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -14,13 +12,13 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving survey inputs."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "select"
+    return "fail" if is_fail_status(_output(state).get("status")) else "select"
 
 
 def route_after_select(state: TopLevelState) -> str:
     """Route to the selected survey contract writer."""
     survey_out = _output(state)
-    if survey_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(survey_out.get("status")):
         return "fail"
     mode = survey_out.get("selected_mode")
     if mode == "full":
@@ -31,7 +29,7 @@ def route_after_select(state: TopLevelState) -> str:
 def route_after_full_plan(state: TopLevelState) -> str:
     """Route after planning full survey."""
     status = _output(state).get("status")
-    if status in FAIL_STATUSES:
+    if is_fail_status(status):
         return "fail"
     if status == "local_execution_planned":
         return "jellyfish"
@@ -50,4 +48,4 @@ def route_after_genomescope2(state: TopLevelState) -> str:
 
 def route_after_plan(state: TopLevelState) -> str:
     """Route after writing a survey result or skip record."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "commit"
+    return "fail" if is_fail_status(_output(state).get("status")) else "commit"

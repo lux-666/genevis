@@ -21,6 +21,5 @@ FLYE_READ_TYPE_FLAGS = {
     "pacbio-raw": "--pacbio-raw",
     "pacbio-hifi": "--pacbio-hifi",
 }
-FLYE_REQUIRED_PARAMS = ("read_type", "estimated_genome_size", "threads")
 
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool", "blocked_param"}
+EXTRA_FAIL_STATUSES = frozenset({"blocked_param"})

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
-
-
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool"}
+from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -14,13 +12,13 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving Hi-C inputs."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "select"
+    return "fail" if is_fail_status(_output(state).get("status")) else "select"
 
 
 def route_after_select(state: TopLevelState) -> str:
     """Route to scaffold planning or skip writing."""
     hic_out = _output(state)
-    if hic_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(hic_out.get("status")):
         return "fail"
     return "scaffold" if hic_out.get("mode") == "scaffold" else "skip"
 
@@ -28,7 +26,7 @@ def route_after_select(state: TopLevelState) -> str:
 def route_after_scaffold_plan(state: TopLevelState) -> str:
     """Route after scaffold planning."""
     hic_out = _output(state)
-    if hic_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(hic_out.get("status")):
         return "fail"
     return _next_method(hic_out)
 
@@ -49,11 +47,11 @@ def _next_method(hic_out: dict) -> str:
 def route_after_method_subgraph(state: TopLevelState) -> str:
     """Route after a method-specific Hi-C lifecycle subgraph."""
     output = _output(state)
-    if output.get("status") in FAIL_STATUSES:
+    if is_fail_status(output.get("status")):
         return "fail"
     return _next_method(output)
 
 
 def route_after_skip(state: TopLevelState) -> str:
     """Route after skip artifact creation."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "commit"
+    return "fail" if is_fail_status(_output(state).get("status")) else "commit"

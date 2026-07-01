@@ -29,8 +29,7 @@ from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.reference.ncbi_metazoa import build_related_species_evidence_pack as _build_related_species_evidence_pack
 from app.reference.ncbi_metazoa import species_name_from_metadata
-from app.stages.base import absolute_data_dir
-from app.stages.assembly_review.routing import FAIL_STATUSES
+from app.stages.base import absolute_data_dir, is_fail_status
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
@@ -247,7 +246,7 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
     """Build non-blocking local NCBI evidence for the review report and LLM."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = dict(stage_outputs.get("assembly_review") or {})
-    if ar_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(ar_out.get("status")):
         return {}
 
     species_name = _target_species_name(state)

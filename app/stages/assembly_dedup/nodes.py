@@ -15,19 +15,17 @@ from app.graph.routing import next_stage_name
 from app.schemas.artifacts import ASSEMBLY_CANDIDATE_BUNDLE, ASSEMBLY_DRAFT_ASSEMBLY, ArtifactMeta, AssemblyCandidateBundle
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
 
 
 def _output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("assembly_dedup", {}))
+    return stage_output(state, "assembly_dedup")
 
 
 def _update_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["assembly_dedup"] = {**_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "assembly_dedup", payload)
 
 
 def _fail(state: TopLevelState, reason: str) -> dict:

@@ -20,7 +20,7 @@ from app.stages.assembly.constants import (
     NEXTDENOVO_METHOD,
 )
 from app.stages.assembly.knowledge import load_skill_context
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
     ASSEMBLY_ROUTE_DECISION,
@@ -45,13 +45,11 @@ ROUTE_VALUES = {"cyclone", "ont", "hifi"}
 
 
 def _assembly_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("assembly", {}))
+    return stage_output(state, "assembly")
 
 
 def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["assembly"] = {**_assembly_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "assembly", payload)
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:

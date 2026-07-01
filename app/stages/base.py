@@ -23,6 +23,41 @@ def absolute_data_dir(state: TopLevelState) -> Path:
 
 
 # ============================================================================
+# Stage output read/write helpers
+# ============================================================================
+
+def stage_output(state: TopLevelState, stage_name: str) -> dict[str, Any]:
+    """Return a mutable copy of a stage's slot in stage_outputs."""
+    return dict((state.get("stage_outputs") or {}).get(stage_name, {}))
+
+
+def update_stage_output(
+    state: TopLevelState, stage_name: str, payload: dict[str, Any]
+) -> dict:
+    """Merge payload into a stage's output slot and return the state delta."""
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs[stage_name] = {**stage_output(state, stage_name), **payload}
+    return {"stage_outputs": outputs}
+
+
+# ============================================================================
+# Stage routing failure protocol
+# ============================================================================
+
+BASE_FAIL_STATUSES = frozenset({"failed", "blocked_env", "missing_tool"})
+"""Statuses that route every stage to its terminal `fail` node."""
+
+
+def is_fail_status(status: Any, extra: frozenset[str] = frozenset()) -> bool:
+    """Return True when a stage status is terminal-failing.
+
+    `extra` carries stage-specific failure statuses beyond the shared base set
+    (e.g. assembly's `blocked_param`, read_qc's `blocked_input`).
+    """
+    return status in BASE_FAIL_STATUSES or status in extra
+
+
+# ============================================================================
 # Universal Resource Resolution System
 # ============================================================================
 

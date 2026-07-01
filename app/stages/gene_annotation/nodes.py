@@ -26,7 +26,7 @@ from app.review.policy import evaluate
 from app.schemas.artifacts import ArtifactMeta, CandidateBundle, GeneAnnotationBundle, GeneAnnotationPlan
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 GENE_CANDIDATE_METHODS = [
     "gene_annotation.candidate.braker3",
@@ -44,13 +44,11 @@ GENE_CONTRACT_METHOD = "gene_annotation.contract"
 
 
 def _gene_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("gene_annotation", {}))
+    return stage_output(state, "gene_annotation")
 
 
 def _update_gene_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["gene_annotation"] = {**_gene_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "gene_annotation", payload)
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:

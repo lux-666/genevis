@@ -8,7 +8,7 @@ from typing import Any
 from app.graph.routing import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import load_assets_from_registry
+from app.stages.base import load_assets_from_registry, stage_output, update_stage_output
 from app.stages.read_qc.constants import (
     LENGTH_FILTER_DECISIONS,
     LENGTH_FILTER_METHOD_NAME,
@@ -18,13 +18,11 @@ from app.stages.read_qc.constants import (
 
 
 def _read_qc_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("read_qc", {}))
+    return stage_output(state, "read_qc")
 
 
 def _update_read_qc_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["read_qc"] = {**_read_qc_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "read_qc", payload)
 
 
 def _length_filter_status_update(

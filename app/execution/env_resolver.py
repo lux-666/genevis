@@ -244,10 +244,6 @@ class EnvResolver:
             source=source,
         )
 
-    def package(self, name: str) -> PackageSpec | None:
-        """Return a declared package spec by name, or None when undeclared."""
-        return self.packages.get(name)
-
     def packages_for_spec(self, spec: EnvSpec) -> list[PackageSpec]:
         """Return the PackageSpecs referenced by a resolved method spec's package_tools."""
         return [self.packages[name] for name in spec.package_tools if name in self.packages]

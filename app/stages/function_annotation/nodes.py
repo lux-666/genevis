@@ -24,6 +24,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
+from app.stages.base import stage_output, update_stage_output
 
 FUNCTION_CANDIDATE_METHODS = [
     "function_annotation.candidate.interproscan",
@@ -41,13 +42,11 @@ FUNCTION_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 
 
 def _function_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("function_annotation", {}))
+    return stage_output(state, "function_annotation")
 
 
 def _update_function_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["function_annotation"] = {**_function_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "function_annotation", payload)
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:

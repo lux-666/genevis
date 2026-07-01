@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
-
-
-FAIL_STATUSES = {"failed", "blocked_env", "missing_tool"}
+from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -14,23 +12,23 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving repeat annotation inputs."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "select"
+    return "fail" if is_fail_status(_output(state).get("status")) else "select"
 
 
 def route_after_select(state: TopLevelState) -> str:
     """Route after selecting repeat annotation strategy."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "library"
+    return "fail" if is_fail_status(_output(state).get("status")) else "library"
 
 
 def route_after_library_plan(state: TopLevelState) -> str:
     """Route after planning repeat library handling."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "masking"
+    return "fail" if is_fail_status(_output(state).get("status")) else "masking"
 
 
 def route_after_masking_plan(state: TopLevelState) -> str:
     """Route after planning repeat masking."""
     repeat_out = _output(state)
-    if repeat_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(repeat_out.get("status")):
         return "fail"
     if repeat_out.get("execution_enabled"):
         return "freeze_repeatmasker"
@@ -40,16 +38,16 @@ def route_after_masking_plan(state: TopLevelState) -> str:
 def route_after_repeatmasker_freeze(state: TopLevelState) -> str:
     """Route after freezing RepeatMasker execution."""
     status = _output(state).get("status")
-    if status in FAIL_STATUSES:
+    if is_fail_status(status):
         return "fail"
     return "run_repeatmasker" if status == "repeatmasker_frozen" else "fail"
 
 
 def route_after_repeatmasker_run(state: TopLevelState) -> str:
     """Route after running RepeatMasker."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "collect_repeatmasker"
+    return "fail" if is_fail_status(_output(state).get("status")) else "collect_repeatmasker"
 
 
 def route_after_repeatmasker_collect(state: TopLevelState) -> str:
     """Route after collecting RepeatMasker artifacts."""
-    return "fail" if _output(state).get("status") in FAIL_STATUSES else "block"
+    return "fail" if is_fail_status(_output(state).get("status")) else "block"

@@ -16,6 +16,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.base import stage_output, update_stage_output
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -32,13 +33,11 @@ GENOME_SIZE_UNAVAILABLE = "GENOME_SIZE_UNAVAILABLE"
 
 
 def _genome_survey_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("genome_survey", {}))
+    return stage_output(state, "genome_survey")
 
 
 def _update_genome_survey_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["genome_survey"] = {**_genome_survey_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "genome_survey", payload)
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:

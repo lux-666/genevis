@@ -18,7 +18,7 @@ from app.storage.publish import shell_publish_file
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.policy import evaluate
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
     REPEAT_ANNOTATION_GFF3,
@@ -42,13 +42,11 @@ REPEAT_CONTRACT_METHOD = "repeat_annotation.contract"
 
 
 def _repeat_output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("repeat_annotation", {}))
+    return stage_output(state, "repeat_annotation")
 
 
 def _update_repeat_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["repeat_annotation"] = {**_repeat_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "repeat_annotation", payload)
 
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:

@@ -91,15 +91,15 @@ def inspect_session(
     decisions_by_origin = counts_by_origin(review_decisions)
     latest_review_lifecycle_event = _latest_review_lifecycle_event(events)
     latest_unresolved_review_request = latest_review_lifecycle_event if latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_requested" else None
-    latest_request_artifact = _latest_artifact_by_suffix(artifacts, ".request")
-    latest_decision_artifact = _latest_artifact_by_suffix(artifacts, ".decision")
-    latest_failed_report = _latest_artifact_by_type(artifacts, "operator_report.failed_terminal")
-    latest_blocked_report = _latest_artifact_by_type(artifacts, "operator_report.blocked_human")
-    latest_final_report = _latest_artifact_by_type(artifacts, "final_report.review_decisions")
-    latest_function_bundle = _latest_artifact_by_type(artifacts, "function_annotation.bundle")
-    latest_operator_report = _latest_artifact_by_types(
+    latest_request_artifact = _latest_artifact(artifacts, lambda a: str(a.get("artifact_type", "")).endswith(".request"))
+    latest_decision_artifact = _latest_artifact(artifacts, lambda a: str(a.get("artifact_type", "")).endswith(".decision"))
+    latest_failed_report = _latest_artifact(artifacts, lambda a: a.get("artifact_type") == "operator_report.failed_terminal")
+    latest_blocked_report = _latest_artifact(artifacts, lambda a: a.get("artifact_type") == "operator_report.blocked_human")
+    latest_final_report = _latest_artifact(artifacts, lambda a: a.get("artifact_type") == "final_report.review_decisions")
+    latest_function_bundle = _latest_artifact(artifacts, lambda a: a.get("artifact_type") == "function_annotation.bundle")
+    latest_operator_report = _latest_artifact(
         artifacts,
-        {"operator_report.failed_terminal", "operator_report.blocked_human"},
+        lambda a: a.get("artifact_type") in {"operator_report.failed_terminal", "operator_report.blocked_human"},
     )
     latest_operator_report_payload = _read_json_artifact(latest_operator_report)
 
@@ -427,24 +427,9 @@ def _latest_event(events: list[dict[str, Any]], event_type: str) -> dict[str, An
     return None
 
 
-def _latest_artifact_by_suffix(artifacts: list[dict[str, Any]], suffix: str) -> dict[str, Any] | None:
+def _latest_artifact(artifacts: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
     for artifact in reversed(artifacts):
-        artifact_type = str(artifact.get("artifact_type", ""))
-        if artifact_type.endswith(suffix):
-            return artifact
-    return None
-
-
-def _latest_artifact_by_type(artifacts: list[dict[str, Any]], artifact_type: str) -> dict[str, Any] | None:
-    for artifact in reversed(artifacts):
-        if artifact.get("artifact_type") == artifact_type:
-            return artifact
-    return None
-
-
-def _latest_artifact_by_types(artifacts: list[dict[str, Any]], artifact_types: set[str]) -> dict[str, Any] | None:
-    for artifact in reversed(artifacts):
-        if artifact.get("artifact_type") in artifact_types:
+        if predicate(artifact):
             return artifact
     return None
 
@@ -955,11 +940,3 @@ def _decision_requirements_from_artifact(
     if isinstance(policy, dict) and policy.get("mode"):
         requirements["review_policy.mode"] = policy.get("mode")
     return requirements
-
-
-def _review_decisions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return decision_records(events)
-
-
-def _decisions_by_origin(decisions: list[dict[str, Any]]) -> dict[str, int]:
-    return counts_by_origin(decisions)

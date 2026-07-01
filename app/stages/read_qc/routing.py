@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.base import is_fail_status
 
 
-FAIL_STATUSES = {"failed", "blocked_input", "blocked_env", "missing_tool"}
+EXTRA_FAIL_STATUSES = frozenset({"blocked_input"})
 
 
 def _status(state: TopLevelState) -> str | None:
@@ -14,13 +15,13 @@ def _status(state: TopLevelState) -> str | None:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving raw long reads."""
-    return "fail" if _status(state) in FAIL_STATUSES else "plan"
+    return "fail" if is_fail_status(_status(state), EXTRA_FAIL_STATUSES) else "plan"
 
 
 def route_after_plan(state: TopLevelState) -> str:
     """Route after planning SeqKit stats."""
     read_qc_out = ((state.get("stage_outputs") or {}).get("read_qc") or {})
-    if read_qc_out.get("status") in FAIL_STATUSES:
+    if is_fail_status(read_qc_out.get("status"), EXTRA_FAIL_STATUSES):
         return "fail"
     if read_qc_out.get("skip_reason") == "local_execution_not_enabled":
         return "filter"
@@ -29,14 +30,14 @@ def route_after_plan(state: TopLevelState) -> str:
 
 def route_after_stats(state: TopLevelState) -> str:
     """Route after the SeqKit stats method subgraph returns."""
-    return "fail" if _status(state) in FAIL_STATUSES else "filter"
+    return "fail" if is_fail_status(_status(state), EXTRA_FAIL_STATUSES) else "filter"
 
 
 def route_after_length_filter(state: TopLevelState) -> str:
     """Route after optional length filtering."""
-    return "fail" if _status(state) in FAIL_STATUSES else "fofn"
+    return "fail" if is_fail_status(_status(state), EXTRA_FAIL_STATUSES) else "fofn"
 
 
 def route_after_make_fofn(state: TopLevelState) -> str:
     """Route after FOFN creation."""
-    return "fail" if _status(state) in FAIL_STATUSES else "commit"
+    return "fail" if is_fail_status(_status(state), EXTRA_FAIL_STATUSES) else "commit"

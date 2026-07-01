@@ -35,7 +35,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -68,13 +68,11 @@ class PafRecord:
 
 
 def _output(state: TopLevelState) -> dict[str, Any]:
-    return dict((state.get("stage_outputs") or {}).get("t2t") or {})
+    return stage_output(state, "t2t")
 
 
 def _update(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["t2t"] = {**_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_stage_output(state, "t2t", payload)
 
 
 def _fail(state: TopLevelState, reason: str) -> dict:
