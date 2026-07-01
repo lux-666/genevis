@@ -35,7 +35,7 @@ _ALTERNATE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _ALTERNATE_METADATA_RE = re.compile(
-    r"(?:alternate|maternal|paternal|hap(?:lotype)?[._ -]?[12])",
+    r"\b(?:alternate|maternal|paternal|hap[._ -]?[12])\b",
     re.IGNORECASE,
 )
 _SPECIES_KEYS = ("target_species", "species_name", "scientific_name", "organism", "species", "chinese_name")
@@ -459,6 +459,13 @@ def _busco(row: dict[str, str]) -> dict[str, Any] | None:
 
 
 def _alternate_haplotype_reason(row: dict[str, str], assembly_name: str) -> str | None:
+    """Return exclusion reason if this record represents an alternate haplotype assembly."""
+
+    # Check assembly name first (more reliable for alternates)
+    if _ALTERNATE_NAME_RE.search(assembly_name or ""):
+        return "assembly_name"
+
+    # Check Assembly Type and Diploid Role fields with refined pattern
     metadata = _value(
         row,
         "Assembly Type",
@@ -468,8 +475,7 @@ def _alternate_haplotype_reason(row: dict[str, str], assembly_name: str) -> str 
     )
     if _ALTERNATE_METADATA_RE.search(metadata):
         return "assembly_metadata"
-    if _ALTERNATE_NAME_RE.search(assembly_name or ""):
-        return "assembly_name"
+
     return None
 
 
@@ -699,8 +705,13 @@ def _statistics_target_position(
         result[percentile_key] = _percentile_rank(values, target_value)
         any_available = True
 
-    n50_values = [record["contig_n50_bp"] for record in analysis_records if record.get("contig_n50_bp") is not None]
-    _resolve("contig_n50_bp", "n50_percentile", "n50_bp", n50_values)
+    # Use best available N50 (scaffold preferred, contig fallback) for fair comparison
+    n50_values = []
+    for record in analysis_records:
+        n50 = record["scaffold_n50_bp"] if record.get("scaffold_n50_bp") is not None else record.get("contig_n50_bp")
+        if n50 is not None:
+            n50_values.append(n50)
+    _resolve("n50_bp", "n50_percentile", "n50_bp", n50_values)
 
     size_values = [record["total_sequence_length_bp"] for record in analysis_records if record.get("total_sequence_length_bp") is not None]
     _resolve("total_sequence_length_bp", "assembly_size_percentile", "assembly_size_bp", size_values)

@@ -10,7 +10,10 @@ from pathlib import Path
 import nbformat
 
 from app.schemas.state import initial_state
-from app.stages.assembly_review.nodes import build_related_species_statistics_and_notebook
+from app.stages.assembly_review.nodes import (
+    _extract_target_metrics_from_signals,
+    build_related_species_statistics_and_notebook,
+)
 
 
 class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
@@ -115,6 +118,60 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
         # node wiring handles the empty case. A full end-to-end test with a populated cohort
         # would require setting up a synthetic TSV/lineage/manifest in the reference dir.
         pass
+
+    def test_extract_target_metrics_returns_none_for_multiple_candidates(self):
+        """_extract_target_metrics_from_signals returns None when multiple candidates exist."""
+        ar_out_multi = {
+            "candidates": [
+                {"candidate_id": "c1", "method_name": "flye"},
+                {"candidate_id": "c2", "method_name": "hifiasm"},
+            ],
+            "signals": [
+                {
+                    "candidate_id": "c1",
+                    "signal_name": "quast",
+                    "status": "available",
+                    "metadata": {"metrics": {"n50": 100000, "total_length": 400000000}},
+                },
+                {
+                    "candidate_id": "c2",
+                    "signal_name": "quast",
+                    "status": "available",
+                    "metadata": {"metrics": {"n50": 150000, "total_length": 420000000}},
+                },
+            ],
+        }
+
+        result = _extract_target_metrics_from_signals(ar_out_multi)
+        self.assertIsNone(result)
+
+    def test_extract_target_metrics_works_for_single_candidate(self):
+        """_extract_target_metrics_from_signals returns metrics when exactly one candidate exists."""
+        ar_out_single = {
+            "candidates": [{"candidate_id": "c1", "method_name": "flye"}],
+            "signals": [
+                {
+                    "candidate_id": "c1",
+                    "signal_name": "quast",
+                    "status": "available",
+                    "metadata": {"metrics": {"n50": 123456, "total_length": 500000000, "gc_percent": 42.5}},
+                },
+                {
+                    "candidate_id": "c1",
+                    "signal_name": "busco",
+                    "status": "available",
+                    "metadata": {"metrics": {"complete_percent": 95.2, "duplicated_percent": 1.3}},
+                },
+            ],
+        }
+
+        result = _extract_target_metrics_from_signals(ar_out_single)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["n50_bp"], 123456.0)
+        self.assertEqual(result["assembly_size_bp"], 500000000.0)
+        self.assertEqual(result["gc_percent"], 42.5)
+        self.assertEqual(result["busco_complete_percent"], 95.2)
+        self.assertEqual(result["busco_duplicated_percent"], 1.3)
 
 
 if __name__ == "__main__":

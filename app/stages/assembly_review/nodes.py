@@ -10,6 +10,7 @@ It collects or references evaluation signals and routes to:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
@@ -276,8 +279,32 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
 
 
 def _related_species_reference_dir(ar_out: dict[str, Any]) -> str | Path | None:
+    """Return validated NCBI reference directory path from stage output or environment.
+
+    Returns None if no valid path is configured, triggering default reference directory.
+    """
     value = ar_out.get("related_species_reference_dir") or os.environ.get("GENE_AGENT_NCBI_METAZOA_REFERENCE_DIR")
-    return value if value else None
+    if not value:
+        return None
+
+    ref_path = Path(value)
+    manifest_path = ref_path / "reference_manifest.json"
+
+    if not ref_path.exists():
+        logger.warning(
+            f"Configured NCBI reference directory does not exist: {ref_path}. "
+            "Falling back to default reference directory."
+        )
+        return None
+
+    if not manifest_path.exists():
+        logger.warning(
+            f"NCBI reference directory missing manifest file: {manifest_path}. "
+            "Falling back to default reference directory."
+        )
+        return None
+
+    return ref_path
 
 
 def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
@@ -405,18 +432,20 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
 
 
 def _extract_target_metrics_from_signals(ar_out: dict[str, Any]) -> dict[str, float] | None:
-    """Extract target assembly metrics from available signals for percentile computation."""
+    """Extract target assembly metrics from available signals for percentile computation.
+
+    Returns None when multiple candidates exist (no single target to position).
+    """
     candidates = ar_out.get("candidates", [])
-    if not candidates:
+    if len(candidates) != 1:
         return None
 
-    # Use the first candidate's metrics (typically there's only one at review time, or they're comparable)
-    first_candidate_id = candidates[0].get("candidate_id")
-    if not first_candidate_id:
+    candidate_id = candidates[0].get("candidate_id")
+    if not candidate_id:
         return None
 
     signals = ar_out.get("signals", [])
-    candidate_metrics = _candidate_metrics(first_candidate_id, signals)
+    candidate_metrics = _candidate_metrics(candidate_id, signals)
 
     target_metrics: dict[str, float] = {}
 

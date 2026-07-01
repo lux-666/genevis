@@ -233,10 +233,10 @@ class RelatedSpeciesStatisticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._reference_dir(tmpdir)
             rows = [
-                self._row("GCA_000000001.1", "Targetus absentus", "1", contig_n50="10"),
-                self._row("GCA_000000002.1", "Targetus absentus2", "2", contig_n50="20"),
-                self._row("GCA_000000003.1", "Targetus absentus3", "3", contig_n50="30"),
-                self._row("GCA_000000004.1", "Targetus absentus4", "4", contig_n50="40"),
+                self._row("GCA_000000001.1", "Targetus absentus", "1", scaffold_n50="10", contig_n50="10"),
+                self._row("GCA_000000002.1", "Targetus absentus2", "2", scaffold_n50="20", contig_n50="20"),
+                self._row("GCA_000000003.1", "Targetus absentus3", "3", scaffold_n50="30", contig_n50="30"),
+                self._row("GCA_000000004.1", "Targetus absentus4", "4", scaffold_n50="40", contig_n50="40"),
             ]
             lineage = {str(i): "Metazoa;Targetiformes;Targetidae;Targetus;Targetus absentusX" for i in range(1, 5)}
             self._write_records(root, rows, lineage)
