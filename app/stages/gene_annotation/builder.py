@@ -23,11 +23,11 @@ from app.stages.gene_annotation.nodes import (
     freeze_miniprot_attempt,
     plan_evidence_merge_or_review,
     plan_gene_methods,
+    prepare_gene_method_execution,
     resolve_gene_annotation_inputs,
     run_augustus_attempt,
     run_evm_attempt,
     run_gene_busco_attempt,
-    run_gene_methods_planning_only,
     run_miniprot_attempt,
     select_evidence_profile,
 )
@@ -57,8 +57,8 @@ from app.stages.gene_annotation.routing import (
 def build_stage():
     """Build the gene annotation subgraph with its review chain.
 
-    Each gate decision, the planning-only stub, method execution nodes,
-    and merge prep are individual graph nodes so LangGraph can checkpoint
+    Each gate decision, method preparation/execution nodes, and merge prep
+    are individual graph nodes so LangGraph can checkpoint
     between them.  Method execution dispatch is data-driven via
     ``GENE_EXECUTABLE_METHODS`` — adding a new executable method only
     requires the three freeze / run / collect nodes plus an entry in that
@@ -71,7 +71,7 @@ def build_stage():
     graph.add_node("select_evidence_profile", select_evidence_profile)
     graph.add_node("plan_gene_methods", plan_gene_methods)
     graph.add_node("block_gene_method_planning_review", block_gene_method_planning_review)
-    graph.add_node("run_gene_methods_planning_only", run_gene_methods_planning_only)
+    graph.add_node("prepare_gene_method_execution", prepare_gene_method_execution)
     # method execution — miniprot
     graph.add_node("freeze_miniprot_attempt", freeze_miniprot_attempt)
     graph.add_node("run_miniprot_attempt", run_miniprot_attempt)
@@ -116,7 +116,7 @@ def build_stage():
         route_after_method_plan,
         {
             "block_method": "block_gene_method_planning_review",
-            "run_methods": "run_gene_methods_planning_only",
+            "run_methods": "prepare_gene_method_execution",
             "block_candidates": "block_candidate_evidence_review",
             "merge_prep": "plan_evidence_merge_or_review",
             "block_merge": "block_merge_review",
@@ -134,10 +134,10 @@ def build_stage():
     graph.add_conditional_edges(
         "block_gene_method_planning_review",
         route_after_method_planning_gate,
-        {"run_methods": "run_gene_methods_planning_only", "end": END, "fail": "fail"},
+        {"run_methods": "prepare_gene_method_execution", "end": END, "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "run_gene_methods_planning_only",
+        "prepare_gene_method_execution",
         route_after_run_methods,
         {
             "block_candidates": "block_candidate_evidence_review",
@@ -164,7 +164,7 @@ def build_stage():
     graph.add_conditional_edges(
         "collect_miniprot_artifacts",
         route_after_method_collect,
-        {"block_candidates": "block_candidate_evidence_review", "run_methods": "run_gene_methods_planning_only", "fail": "fail"},
+        {"block_candidates": "block_candidate_evidence_review", "run_methods": "prepare_gene_method_execution", "fail": "fail"},
     )
     # --- augustus edges ---
     graph.add_conditional_edges(
@@ -180,7 +180,7 @@ def build_stage():
     graph.add_conditional_edges(
         "collect_augustus_artifacts",
         route_after_method_collect,
-        {"block_candidates": "block_candidate_evidence_review", "run_methods": "run_gene_methods_planning_only", "fail": "fail"},
+        {"block_candidates": "block_candidate_evidence_review", "run_methods": "prepare_gene_method_execution", "fail": "fail"},
     )
     # --- EVM / BUSCO edges ---
     graph.add_conditional_edges(
@@ -217,7 +217,7 @@ def build_stage():
     graph.add_conditional_edges(
         "block_candidate_evidence_review",
         route_after_candidate_gate,
-        {"merge_prep": "plan_evidence_merge_or_review", "run_methods": "run_gene_methods_planning_only", "end": END, "fail": "fail"},
+        {"merge_prep": "plan_evidence_merge_or_review", "run_methods": "prepare_gene_method_execution", "end": END, "fail": "fail"},
     )
     graph.add_conditional_edges(
         "plan_evidence_merge_or_review",

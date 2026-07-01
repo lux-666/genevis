@@ -1,7 +1,7 @@
 method_name: assembly.candidate.hifiasm
 stage: assembly
 package_ref: hifiasm
-goal: "Plan a hifiasm compatibility candidate for explicit HiFi/non-ONT assembly routes without executing hifiasm."
+goal: "Plan and optionally execute a hifiasm assembly candidate for explicit HiFi/non-ONT assembly routes."
 required_inputs:
   - name: long_reads
     type: clean_long_reads
@@ -9,7 +9,7 @@ required_inputs:
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
-    description: "Planned draft assembly FASTA path for the hifiasm candidate."
+    description: "Draft assembly FASTA path for the hifiasm candidate when local execution is enabled."
 review_rules:
   - candidate_bundle_exists
   - compatibility_route_explicitly_requested

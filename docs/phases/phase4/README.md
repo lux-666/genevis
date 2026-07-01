@@ -74,8 +74,8 @@ and is deferred to Phase 5:
 - `repeat_annotation` real execution beyond the RepeatMasker opt-in slice
   for provided libraries (no EDTA, RepeatModeler, TRF, or de novo library
   generation)
-- `gene_annotation` real execution (planning-only contract)
-- `function_annotation` real execution (planning-only contract; no database
+- `gene_annotation` real execution (candidate-only contract)
+- `function_annotation` real execution (candidate-only contract; no database
   downloads)
 - BUSCO
 - Merqury

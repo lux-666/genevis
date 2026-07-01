@@ -52,7 +52,7 @@ match the materialized proteins FASTA consumed by `function_annotation`:
   "function_annotation": {
     "database_provenance": [
       {
-        "method_name": "function_annotation.candidate.interproscan",
+        "method_name": "function_annotation.candidate.diamond",
         "database_name": "InterPro",
         "database_version": "99.0",
         "snapshot_date": "2026-05-25",

@@ -56,7 +56,7 @@ Candidate methods/roles:
 - Local YaHS execution requires both `stage_outputs.hic_scaffolding.execution_mode == "local"` and an explicit `primary_method`/`selected_method_name` of `hic_scaffolding.candidate.yahs`; it validates the descriptor, writes deterministic `yahs -o <prefix> <assembly> <hic_alignment>` attempts, runs them through `LocalRunner`, and records ledger attempt events.
 - YaHS success registers a chromosome scaffold candidate FASTA, optional AGP, a review bundle, and command stdout/stderr artifacts, then still blocks human review. The scaffold is not promoted automatically.
 - YaHS failure registers command stdout/stderr artifacts, records `attempt_failed`, preserves the pre-Hi-C fallback, and blocks for human decision instead of silently advancing a failed scaffold.
-- If local YaHS is explicitly requested with raw Hi-C reads but no materialized alignment input, the stage writes the scaffold plan and blocks with `alignment_required_before_yahs`; no local attempt is started. If `execution_mode == "local"` is set without an explicit YaHS method, behavior remains planning-only.
+- If local YaHS is explicitly requested with raw Hi-C reads but no materialized alignment input, the stage writes the scaffold plan and blocks with `alignment_required_before_yahs`; no local attempt is started. If `execution_mode == "local"` is set without an explicit YaHS method, behavior remains candidate-only.
 - `descriptors/methods/hic_scaffolding/yahs_candidate.yaml` and `descriptors/packages/yahs.yaml` describe the current alignment-input YaHS execution path. Raw alignment generation remains a later `hic_align_to_assembly` realization.
 
 改动要点：
@@ -64,7 +64,7 @@ Candidate methods/roles:
 - `app/stages/hic_scaffolding/builder.py` and `routing.py` insert the optional YaHS freeze/run/collect branch before the existing human block.
 - `app/schemas/artifacts.py` defines artifact constants for Hi-C scaffold plan, scaffold candidate FASTA, AGP, review bundle, and QC report.
 - The human interrupt includes scaffold candidate and review bundle refs when YaHS has produced them.
-- `tests/test_hic_scaffolding.py` covers default planning, fake-YaHS success, fake-YaHS failure, missing alignment behavior, and Juicer planning-only behavior.
+- `tests/test_hic_scaffolding.py` covers default planning, fake-YaHS success, fake-YaHS failure, missing alignment behavior, and Juicer candidate-only behavior.
 
 ## Acceptance
 

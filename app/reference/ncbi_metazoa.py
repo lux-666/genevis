@@ -8,13 +8,24 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
-from statistics import median
+from statistics import median, quantiles
 from typing import Any
 
 
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference" / "ncbi_metazoa"
 REFERENCE_MANIFEST_FILENAME = "reference_manifest.json"
 MAX_SELECTED_RECORDS = 5
+DISPLAY_COHORT_SIZE = 25
+ANALYSIS_COHORT_SIZE = 150
+
+_STATISTICS_TIER_RANK = {"exact": 0, "same_genus": 1, "same_family": 2, "same_order": 3}
+_STATISTICS_BASIS = {
+    "n50": "contig_n50_bp",
+    "assembly_size": "total_sequence_length_bp",
+    "gc": "gc_percent",
+    "busco_complete": "busco_complete_percent",
+    "busco_duplicated": "busco_duplicated_percent",
+}
 
 _ACCESSION_RE = re.compile(r"^(GC[AF])_(\d+)(?:\.\d+)?$", re.IGNORECASE)
 _ALTERNATE_NAME_RE = re.compile(
@@ -106,6 +117,129 @@ def build_related_species_evidence_pack(
 
     base["notes"].append("no_useful_related_species_assemblies_found")
     return base
+
+
+def build_related_species_statistics_pack(
+    species_name: str | None,
+    *,
+    reference_dir: Path | str = REFERENCE_DIR,
+    target_metrics: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Collect cross-tier related-species evidence for comparative statistics.
+
+    Unlike ``build_related_species_evidence_pack``, this collects candidates
+    across all four tiers (exact/same_genus/same_family/same_order) instead of
+    stopping at the first tier with a hit, so callers can build cohort-level
+    statistics and plots. Never raises; failure paths return a valid
+    "unavailable" pack.
+    """
+    reference_dir = Path(reference_dir)
+    sources = {
+        "tsv": str(reference_dir / "Metazoa.ncbi.tsv"),
+        "lineage": str(reference_dir / "Metazoa.ncbi.lineage"),
+        "alias": str(reference_dir / "species_alias.tsv"),
+    }
+    base = _empty_statistics_pack(species_name, sources, target_metrics)
+    if not species_name or not str(species_name).strip():
+        base["notes"].append("target_species_not_provided")
+        return base
+    provenance, provenance_error = _reference_provenance(reference_dir, sources)
+    base["source"] = provenance
+    if provenance_error:
+        base["notes"].append(provenance_error)
+        return base
+
+    try:
+        aliases = _load_aliases(Path(sources["alias"]))
+        rows = _load_tsv(Path(sources["tsv"]))
+        lineage_by_taxid = _load_lineage(Path(sources["lineage"]))
+    except OSError as exc:
+        base["notes"].append(f"reference_source_unavailable:{exc.filename or exc}")
+        return base
+    except (csv.Error, UnicodeDecodeError, ValueError) as exc:
+        base["notes"].append(f"reference_source_unreadable:{type(exc).__name__}")
+        return base
+
+    target = _resolve_target(str(species_name), aliases)
+    base["target"] = target
+    canonical = target["canonical_scientific_name"]
+    if not canonical:
+        base["notes"].append("target_species_unresolved")
+        return base
+
+    seen_taxids: set[str] = set()
+    tier_rows: dict[str, list[dict[str, str]]] = {}
+
+    exact_candidates = [row for row in rows if _normalise(row.get("Organism Name")) == _normalise(canonical)]
+    tier_rows["exact"] = _unseen_rows(exact_candidates, seen_taxids)
+    _remember_taxids(tier_rows["exact"], seen_taxids)
+
+    genus = target["taxonomic_hints"].get("genus") or canonical.split()[0]
+    genus_candidates = [row for row in rows if _organism_genus(row) == _normalise(genus)]
+    tier_rows["same_genus"] = _unseen_rows(genus_candidates, seen_taxids)
+    _remember_taxids(tier_rows["same_genus"], seen_taxids)
+
+    family = target["taxonomic_hints"].get("family")
+    if family:
+        family_candidates = _rows_with_lineage_term(rows, lineage_by_taxid, family)
+        tier_rows["same_family"] = _unseen_rows(family_candidates, seen_taxids)
+        _remember_taxids(tier_rows["same_family"], seen_taxids)
+    else:
+        tier_rows["same_family"] = []
+        base["notes"].append("same_family_unavailable_without_taxonomic_hint")
+
+    order = target["taxonomic_hints"].get("order")
+    if order:
+        order_candidates = _rows_with_lineage_term(rows, lineage_by_taxid, order)
+        tier_rows["same_order"] = _unseen_rows(order_candidates, seen_taxids)
+        _remember_taxids(tier_rows["same_order"], seen_taxids)
+    else:
+        tier_rows["same_order"] = []
+        base["notes"].append("same_order_unavailable_without_taxonomic_hint")
+
+    tier_counts = {tier: len(tier_rows[tier]) for tier in ("exact", "same_genus", "same_family", "same_order")}
+
+    condensed: list[dict[str, Any]] = []
+    for tier in ("exact", "same_genus", "same_family", "same_order"):
+        for row in tier_rows[tier]:
+            record = _condense_record(row)
+            record["assembly_level"] = _value(row, "Assembly Level", "Assembly Info Assembly Level") or None
+            record["tier"] = tier
+            condensed.append(record)
+
+    primary = _deduplicate_by_key([r for r in condensed if not r["is_alternate_haplotype"]], _statistics_sort_key)
+    alternates = _deduplicate_by_key([r for r in condensed if r["is_alternate_haplotype"]], _statistics_sort_key)
+
+    analysis_records = primary[:ANALYSIS_COHORT_SIZE]
+
+    notes = list(base["notes"])
+    if not primary:
+        notes.append("no_related_species_assemblies_found_across_any_tier")
+    notes.extend([
+        "related_species_statistics_is_comparative_only",
+        "not_an_automatic_threshold",
+        "not_an_assembly_prior",
+        "chromosome_count_is_ncbi_assembly_metadata_not_true_karyotype",
+    ])
+
+    return {
+        **base,
+        "status": "available",
+        "tier_counts": tier_counts,
+        "display_cohort": {
+            "size_limit": DISPLAY_COHORT_SIZE,
+            "records": primary[:DISPLAY_COHORT_SIZE],
+            "excluded_alternate_haplotype_records": alternates[:DISPLAY_COHORT_SIZE],
+        },
+        "analysis_cohort": {
+            "size_limit": ANALYSIS_COHORT_SIZE,
+            "records": analysis_records,
+            "excluded_alternate_haplotype_records": alternates[:ANALYSIS_COHORT_SIZE],
+        },
+        "computed_summary": _statistics_computed_summary(analysis_records),
+        "target_position": _statistics_target_position(analysis_records, target_metrics),
+        "notes": notes,
+    }
 
 
 def species_name_from_metadata(metadata: dict[str, Any]) -> str | None:
@@ -360,6 +494,236 @@ def _computed_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     if busco_lineages:
         summary["busco_lineages"] = busco_lineages
     return summary
+
+
+def _empty_statistics_pack(
+    species_name: str | None,
+    sources: dict[str, str],
+    target_metrics: dict[str, float] | None,
+) -> dict[str, Any]:
+    empty_cohort = {"size_limit": DISPLAY_COHORT_SIZE, "records": [], "excluded_alternate_haplotype_records": []}
+    analysis_cohort = {"size_limit": ANALYSIS_COHORT_SIZE, "records": [], "excluded_alternate_haplotype_records": []}
+    return {
+        "schema_version": 1,
+        "status": "unavailable",
+        "target": {
+            "input_name": species_name,
+            "canonical_scientific_name": None,
+            "resolution": "unresolved",
+            "taxonomic_hints": {},
+        },
+        "source": sources,
+        "tier_counts": {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0},
+        "display_cohort": empty_cohort,
+        "analysis_cohort": analysis_cohort,
+        "computed_summary": {"cohort": "analysis_cohort", "record_count": 0, "metrics": {}},
+        "target_position": _statistics_target_position([], target_metrics),
+        "notes": [],
+    }
+
+
+def _unseen_rows(rows: list[dict[str, str]], seen_taxids: set[str]) -> list[dict[str, str]]:
+    return [
+        row for row in rows
+        if str(row.get("Organism Taxonomic ID") or "").strip() not in seen_taxids
+    ]
+
+
+def _remember_taxids(rows: list[dict[str, str]], seen_taxids: set[str]) -> None:
+    for row in rows:
+        taxid = str(row.get("Organism Taxonomic ID") or "").strip()
+        if taxid:
+            seen_taxids.add(taxid)
+
+
+def _deduplicate_by_key(
+    records: list[dict[str, Any]],
+    sort_key: Any,
+) -> list[dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for record in sorted(records, key=sort_key):
+        selected.setdefault(_accession_numeric_core(record["accession"]), record)
+    return sorted(selected.values(), key=sort_key)
+
+
+def _assembly_level_rank(value: str | None) -> int:
+    text = (value or "").casefold()
+    if "complete genome" in text or "chromosome" in text:
+        return 0
+    if "scaffold" in text:
+        return 1
+    if "contig" in text:
+        return 2
+    return 3
+
+
+def _metrics_completeness_score(record: dict[str, Any]) -> int:
+    score = 0
+    if record.get("scaffold_n50_bp") is not None or record.get("contig_n50_bp") is not None:
+        score += 1
+    if record.get("gc_percent") is not None:
+        score += 1
+    if record.get("busco") is not None:
+        score += 1
+    if record.get("chromosome_count") is not None:
+        score += 1
+    return score
+
+
+def _statistics_sort_key(record: dict[str, Any]) -> tuple[Any, ...]:
+    n50 = record["scaffold_n50_bp"] if record["scaffold_n50_bp"] is not None else record["contig_n50_bp"]
+    return (
+        _STATISTICS_TIER_RANK[record["tier"]],
+        0 if record["accession"].upper().startswith("GCF_") else 1,
+        _assembly_level_rank(record.get("assembly_level")),
+        -_metrics_completeness_score(record),
+        -(n50 if n50 is not None else -1),
+        record["accession"],
+    )
+
+
+def _quartile_summary(values: list[float | int]) -> dict[str, float] | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        value = values[0]
+        return {"min": value, "q1": value, "median": value, "q3": value, "max": value}
+    all_ints = all(isinstance(value, int) for value in values)
+    ordered = sorted(values)
+    q1, median_value, q3 = quantiles(ordered, n=4, method="inclusive")
+    result = {"min": min(values), "q1": q1, "median": median_value, "q3": q3, "max": max(values)}
+    if all_ints:
+        return {key: value if key in ("min", "max") else round(value, 2) for key, value in result.items()}
+    return {key: round(float(value), 2) for key, value in result.items()}
+
+
+def _statistics_computed_summary(analysis_records: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for field in ("total_sequence_length_bp", "contig_n50_bp", "scaffold_n50_bp", "gc_percent"):
+        values = [record[field] for record in analysis_records if record.get(field) is not None]
+        summary = _quartile_summary(values)
+        if summary is not None:
+            metrics[field] = summary
+    busco_complete = [
+        record["busco"]["complete"]
+        for record in analysis_records
+        if record.get("busco") is not None and record["busco"].get("complete") is not None
+    ]
+    summary = _quartile_summary(busco_complete)
+    if summary is not None:
+        metrics["busco_complete_percent"] = summary
+    busco_duplicated = [
+        record["busco"]["duplicated"]
+        for record in analysis_records
+        if record.get("busco") is not None and record["busco"].get("duplicated") is not None
+    ]
+    summary = _quartile_summary(busco_duplicated)
+    if summary is not None:
+        metrics["busco_duplicated_percent"] = summary
+
+    chromosome_values = [record["chromosome_count"] for record in analysis_records if record.get("chromosome_count") is not None]
+    chromosome_count_mode = None
+    if chromosome_values:
+        counts = Counter(chromosome_values)
+        chromosome_count_mode = min(value for value, count in counts.items() if count == max(counts.values()))
+
+    busco_lineages = sorted({
+        record["busco"]["lineage"]
+        for record in analysis_records
+        if record.get("busco") and record["busco"].get("lineage")
+    })
+
+    by_tier = {"exact": 0, "same_genus": 0, "same_family": 0, "same_order": 0}
+    by_accession_type = {"GCF": 0, "GCA": 0}
+    by_assembly_level = {"chromosome": 0, "scaffold": 0, "contig": 0, "unknown": 0}
+    level_bucket_by_rank = {0: "chromosome", 1: "scaffold", 2: "contig", 3: "unknown"}
+    for record in analysis_records:
+        by_tier[record["tier"]] += 1
+        if record["accession"].upper().startswith("GCF_"):
+            by_accession_type["GCF"] += 1
+        elif record["accession"].upper().startswith("GCA_"):
+            by_accession_type["GCA"] += 1
+        by_assembly_level[level_bucket_by_rank[_assembly_level_rank(record.get("assembly_level"))]] += 1
+
+    return {
+        "cohort": "analysis_cohort",
+        "record_count": len(analysis_records),
+        "metrics": metrics,
+        "chromosome_count_mode": chromosome_count_mode,
+        "busco_lineages": busco_lineages,
+        "cohort_composition": {
+            "by_tier": by_tier,
+            "by_accession_type": by_accession_type,
+            "by_assembly_level": by_assembly_level,
+        },
+    }
+
+
+def _percentile_rank(values: list[float], target: float) -> float | None:
+    if not values:
+        return None
+    less = sum(1 for value in values if value < target)
+    equal = sum(1 for value in values if value == target)
+    return round((less + 0.5 * equal) / len(values) * 100, 1)
+
+
+def _statistics_target_position(
+    analysis_records: list[dict[str, Any]],
+    target_metrics: dict[str, float] | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "available": False,
+        "n50_percentile": None,
+        "assembly_size_percentile": None,
+        "gc_percentile": None,
+        "busco_complete_percentile": None,
+        "busco_duplicated_percentile": None,
+        "basis": dict(_STATISTICS_BASIS),
+        "notes": [],
+    }
+    if target_metrics is None:
+        result["notes"].append("target_metrics_not_provided")
+        return result
+
+    any_available = False
+
+    def _resolve(field_key: str, percentile_key: str, target_key: str, values: list[float]) -> None:
+        nonlocal any_available
+        target_value = target_metrics.get(target_key)
+        if target_value is None:
+            result["notes"].append(f"{percentile_key}_unavailable:no_target_{target_key}")
+            return
+        if not values:
+            result["notes"].append(f"{percentile_key}_unavailable:no_cohort_{field_key}_data")
+            return
+        result[percentile_key] = _percentile_rank(values, target_value)
+        any_available = True
+
+    n50_values = [record["contig_n50_bp"] for record in analysis_records if record.get("contig_n50_bp") is not None]
+    _resolve("contig_n50_bp", "n50_percentile", "n50_bp", n50_values)
+
+    size_values = [record["total_sequence_length_bp"] for record in analysis_records if record.get("total_sequence_length_bp") is not None]
+    _resolve("total_sequence_length_bp", "assembly_size_percentile", "assembly_size_bp", size_values)
+
+    gc_values = [record["gc_percent"] for record in analysis_records if record.get("gc_percent") is not None]
+    _resolve("gc_percent", "gc_percentile", "gc_percent", gc_values)
+
+    busco_complete_values = [
+        record["busco"]["complete"]
+        for record in analysis_records
+        if record.get("busco") is not None and record["busco"].get("complete") is not None
+    ]
+    _resolve("busco_complete_percent", "busco_complete_percentile", "busco_complete_percent", busco_complete_values)
+
+    busco_duplicated_values = [
+        record["busco"]["duplicated"]
+        for record in analysis_records
+        if record.get("busco") is not None and record["busco"].get("duplicated") is not None
+    ]
+    _resolve("busco_duplicated_percent", "busco_duplicated_percentile", "busco_duplicated_percent", busco_duplicated_values)
+
+    result["available"] = any_available
+    return result
 
 
 def _rows_with_lineage_term(rows: list[dict[str, str]], lineage_by_taxid: dict[str, set[str]], term: str) -> list[dict[str, str]]:

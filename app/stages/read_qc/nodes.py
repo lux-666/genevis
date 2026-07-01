@@ -134,10 +134,8 @@ def plan_length_filter(state: TopLevelState) -> dict:
     method_name = request.get("method_name") or request.get("method") or LENGTH_FILTER_SKIP
     if not request or method_name == LENGTH_FILTER_SKIP:
         return _length_filter_status_update(state, {"status": "skipped", "method_name": LENGTH_FILTER_SKIP, "skip_reason": "no_filtering_requested"}, "length_filter_skipped", method_name=LENGTH_FILTER_SKIP)
-    if method_name not in LENGTH_FILTER_DECISIONS:
-        return _length_filter_status_update(state, {"status": "skipped", "method_name": method_name, "skip_reason": "unknown_filter_method", "thresholds": thresholds}, "length_filter_skipped", method_name=method_name)
     if method_name != LENGTH_FILTER_METHOD_NAME:
-        return _length_filter_status_update(state, {"status": "skipped", "method_name": method_name, "skip_reason": "filter_method_not_executable", "thresholds": thresholds}, "length_filter_skipped", method_name=method_name)
+        return _length_filter_status_update(state, {"status": "skipped", "method_name": method_name, "skip_reason": "unknown_filter_method", "thresholds": thresholds}, "length_filter_skipped", method_name=method_name)
     min_len = thresholds.get("min_len")
     if not approved or not isinstance(min_len, int) or min_len <= 0:
         return _length_filter_status_update(state, {"status": "skipped", "method_name": method_name, "skip_reason": "threshold_decision_missing", "thresholds": thresholds}, "length_filter_skipped", method_name=method_name)

@@ -1,30 +1,13 @@
 packages:
   augustus: augustus.yaml
-  annevo: annevo.yaml
-  braker3: braker3.yaml
   busco: busco.yaml
-  canu: canu.yaml
-  chopper: chopper.yaml
   diamond: diamond.yaml
-  edta: edta.yaml
-  eggnog_mapper: eggnog_mapper.yaml
-  gemoma: gemoma.yaml
-  genewise: genewise.yaml
   gffread: gffread.yaml
   3ddna: 3ddna.yaml
-  fastplong: fastplong.yaml
-  filtlong: filtlong.yaml
   flye: flye.yaml
   genomescope2: genomescope2.yaml
   hifiasm: hifiasm.yaml
-  hisat2: hisat2.yaml
-  interproscan: interproscan.yaml
-  isoquant: isoquant.yaml
   jellyfish: jellyfish.yaml
-  kofamscan: kofamscan.yaml
-  maker: maker.yaml
-  meryl: meryl.yaml
-  merqury: merqury.yaml
   miniprot: miniprot.yaml
   minimap2: minimap2.yaml
   nextdenovo: nextdenovo.yaml
@@ -34,106 +17,54 @@ packages:
   juicer: juicer.yaml
   juicebox: juicebox.yaml
   repeatmasker: repeatmasker.yaml
-  repeatmodeler: repeatmodeler.yaml
   seqkit: seqkit.yaml
-  smudgeplot: smudgeplot.yaml
-  stringtie: stringtie.yaml
-  trf: trf.yaml
   yahs: yahs.yaml
 methods:
-  assembly.candidate.canu: assembly/canu_candidate.yaml
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
   assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
   assembly_dedup.purge_dups: assembly_dedup/purge_dups.yaml
   assembly_review.eval.quast: assembly_review/quast_eval.yaml
   assembly_review.eval.busco: assembly_review/busco_eval.yaml
-  assembly_review.eval.merqury: assembly_review/merqury_eval.yaml
-  assembly_review.eval.mapping_coverage: assembly_review/mapping_coverage_eval.yaml
-  assembly_review.check.purge_dups: assembly_review/purge_dups_check.yaml
-  assembly_review.check.contamination: assembly_review/contamination_check.yaml
   genome_survey.kmer_count.jellyfish: genome_survey/jellyfish_kmer_count.yaml
-  genome_survey.kmer_count.meryl: genome_survey/meryl_kmer_count.yaml
   genome_survey.model.genomescope2: genome_survey/genomescope2_model.yaml
   gene_annotation.candidate.augustus: gene_annotation/augustus_candidate.yaml
-  gene_annotation.candidate.annevo: gene_annotation/annevo_candidate.yaml
-  gene_annotation.candidate.braker3: gene_annotation/braker3_candidate.yaml
-  gene_annotation.candidate.maker: gene_annotation/maker_candidate.yaml
   gene_annotation.candidate.miniprot: gene_annotation/miniprot_candidate.yaml
-  gene_annotation.candidate.genewise: gene_annotation/genewise_candidate.yaml
-  gene_annotation.candidate.gemoma: gene_annotation/gemoma_candidate.yaml
-  gene_annotation.helper.hisat2: gene_annotation/hisat2_helper.yaml
-  gene_annotation.helper.isoquant: gene_annotation/isoquant_helper.yaml
-  gene_annotation.helper.stringtie: gene_annotation/stringtie_helper.yaml
   function_annotation.candidate.diamond: function_annotation/diamond_candidate.yaml
-  function_annotation.candidate.eggnog_mapper: function_annotation/eggnog_mapper_candidate.yaml
-  function_annotation.candidate.interproscan: function_annotation/interproscan_candidate.yaml
-  function_annotation.candidate.kofamscan: function_annotation/kofamscan_candidate.yaml
-  genome_survey.model.smudgeplot: genome_survey/smudgeplot_model.yaml
   hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
   hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
   t2t.alignment.minimap2: t2t/minimap2_telomere_alignment.yaml
-  read_qc.length_filter.chopper: read_qc/chopper_length_filter.yaml
-  repeat_annotation.helper.trf: repeat_annotation/trf_helper.yaml
-  repeat_annotation.library.edta: repeat_annotation/edta_library.yaml
-  repeat_annotation.library.repeatmodeler: repeat_annotation/repeatmodeler_library.yaml
-  repeat_annotation.masking.repeatmasker: repeat_annotation/repeatmasker_masking.yaml
-  read_qc.length_filter.fastplong: read_qc/fastplong_length_filter.yaml
-  read_qc.length_filter.filtlong: read_qc/filtlong_length_filter.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.make_fofn.local: read_qc/make_fofn_handoff.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
+  repeat_annotation.masking.repeatmasker: repeat_annotation/repeatmasker_masking.yaml
 by_stage:
   inventory: []
   read_qc:
     - read_qc.long_read_stats.seqkit_stats
-    - read_qc.length_filter.chopper
-    - read_qc.length_filter.fastplong
-    - read_qc.length_filter.filtlong
     - read_qc.length_filter.seqkit_seq
     - read_qc.make_fofn.local
   genome_survey:
     - genome_survey.kmer_count.jellyfish
-    - genome_survey.kmer_count.meryl
     - genome_survey.model.genomescope2
-    - genome_survey.model.smudgeplot
   assembly:
     - assembly.candidate.flye
     - assembly.candidate.hifiasm
     - assembly.candidate.nextdenovo
-    - assembly.candidate.canu
   assembly_dedup:
     - assembly_dedup.purge_dups
   assembly_review:
     - assembly_review.eval.quast
     - assembly_review.eval.busco
-    - assembly_review.eval.merqury
-    - assembly_review.eval.mapping_coverage
-    - assembly_review.check.purge_dups
-    - assembly_review.check.contamination
   hic_scaffolding:
     - hic_scaffolding.candidate.yahs
     - hic_scaffolding.candidate.juicer_3ddna_juicebox
   t2t:
     - t2t.alignment.minimap2
   repeat_annotation:
-    - repeat_annotation.library.edta
-    - repeat_annotation.library.repeatmodeler
     - repeat_annotation.masking.repeatmasker
-    - repeat_annotation.helper.trf
   gene_annotation:
     - gene_annotation.candidate.augustus
-    - gene_annotation.candidate.annevo
     - gene_annotation.candidate.miniprot
-    - gene_annotation.candidate.genewise
-    - gene_annotation.candidate.gemoma
-    - gene_annotation.candidate.braker3
-    - gene_annotation.candidate.maker
-    - gene_annotation.helper.hisat2
-    - gene_annotation.helper.stringtie
-    - gene_annotation.helper.isoquant
   function_annotation:
-    - function_annotation.candidate.interproscan
-    - function_annotation.candidate.eggnog_mapper
     - function_annotation.candidate.diamond
-    - function_annotation.candidate.kofamscan

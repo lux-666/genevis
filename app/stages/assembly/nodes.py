@@ -17,6 +17,7 @@ from app.stages.assembly.constants import (
     FLYE_METHOD,
     FLYE_READ_TYPE_FLAGS,
     GENOME_SIZE_REQUIRED,
+    HIFIASM_METHOD,
     NEXTDENOVO_METHOD,
 )
 from app.stages.assembly.knowledge import load_skill_context
@@ -66,10 +67,15 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     assembly_out = _assembly_output(state)
     read_qc_ref = _read_qc_assembly_input_ref(state)
     asset_long_ref = _asset_input_ref(state)
-    ont_reads_ref = read_qc_ref or asset_long_ref
-    hifi_reads_ref = assembly_out.get("hifi_reads_ref") or _asset_ref_by_type(
-        state,
-        {"pacbio_hifi", "clean_hifi_reads", "hifi_reads"},
+    long_read_platform = _long_read_platform(state)
+    hifi_reads_ref = assembly_out.get("hifi_reads_ref") or _hifi_asset_input_ref(state)
+    has_explicit_hifi_ref = bool(assembly_out.get("hifi_reads_ref"))
+    if not hifi_reads_ref and long_read_platform == "pacbio_hifi":
+        hifi_reads_ref = read_qc_ref or asset_long_ref
+    ont_reads_ref = (
+        None
+        if hifi_reads_ref and (has_explicit_hifi_ref or long_read_platform == "pacbio_hifi")
+        else read_qc_ref or asset_long_ref
     )
     hic_reads_ref = assembly_out.get("hic_reads_ref") or _asset_ref_by_type(
         state,
@@ -80,7 +86,7 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     if not primary_long_reads_ref:
         return _fail_update(state, "assembly requires long reads (clean_long_reads or long_reads.fofn)")
 
-    primary_platform = "pacbio_hifi" if hifi_reads_ref else _long_read_platform(state)
+    primary_platform = "pacbio_hifi" if hifi_reads_ref else long_read_platform
     input_source = "read_qc" if read_qc_ref else "asset_registry"
     if hifi_reads_ref and not ont_reads_ref:
         input_source = "run_config" if assembly_out.get("hifi_reads_ref") else "asset_registry"
@@ -411,6 +417,10 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         assembly_out.get("execution_mode") == "local"
         and assembly_out.get("primary_method") == NEXTDENOVO_METHOD
     )
+    local_hifiasm = (
+        assembly_out.get("execution_mode") == "local"
+        and assembly_out.get("primary_method") == HIFIASM_METHOD
+    )
     candidate_refs: list[str] = []
     artifacts: list[ArtifactMeta] = []
     selected_plans = []
@@ -419,12 +429,15 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         fasta_path = data_dir / "artifacts" / "assembly" / session_id / short_name / "draft_assembly.fasta"
         if method_name == NEXTDENOVO_METHOD:
             log_path = data_dir / "work" / "assembly" / session_id / "nextdenovo" / "run.cfg"
+        elif method_name == HIFIASM_METHOD:
+            log_path = data_dir / "work" / "assembly" / session_id / "hifiasm" / "run_hifiasm.sh"
         else:
             log_path = data_dir / "work" / "assembly" / session_id / short_name / "flye_out" / "flye.log"
         bundle_path = candidate_dir / f"{short_name}_candidate.json"
         execution_enabled = (
             (local_flye and method_name == FLYE_METHOD)
             or (local_nextdenovo and method_name == NEXTDENOVO_METHOD)
+            or (local_hifiasm and method_name == HIFIASM_METHOD)
         )
         method_graph_requested = execution_enabled
         bundle = AssemblyCandidateBundle(
@@ -475,6 +488,8 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         status = "flye_execution_planned"
     elif local_nextdenovo:
         status = "nextdenovo_execution_planned"
+    elif local_hifiasm:
+        status = "hifiasm_execution_planned"
     else:
         status = "planned"
     return _update_assembly_output(
@@ -497,6 +512,12 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
                     "status": "planned" if local_nextdenovo else "skipped",
                     "method_name": NEXTDENOVO_METHOD,
                     "skip_reason": None if local_nextdenovo else "local_execution_not_enabled",
+                },
+                "hifiasm_assembly": {
+                    "name": "hifiasm_assembly",
+                    "status": "planned" if local_hifiasm else "skipped",
+                    "method_name": HIFIASM_METHOD,
+                    "skip_reason": None if local_hifiasm else "local_execution_not_enabled",
                 },
             },
         },
@@ -611,7 +632,7 @@ def _available_routes(assembly_out: dict[str, Any]) -> list[str]:
     routes = []
     if assembly_out.get("ont_reads_ref"):
         routes.extend(["cyclone", "ont"])
-    if assembly_out.get("hifi_reads_ref"):
+    if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
         routes.append("hifi")
     return _unique_refs(routes)
 
@@ -858,6 +879,30 @@ def _long_read_platform(state: TopLevelState) -> str | None:
     for asset in registry.get("assets", []):
         if asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"} and asset.get("platform"):
             return str(asset["platform"])
+    return None
+
+
+def _hifi_asset_input_ref(state: TopLevelState) -> str | None:
+    ref = _asset_ref_by_type(
+        state,
+        {"pacbio_hifi", "clean_hifi_reads", "hifi_reads"},
+    )
+    if ref:
+        return ref
+    registry_ref = state.get("asset_registry_ref")
+    if not registry_ref:
+        return None
+    registry_path = Path(registry_ref)
+    if not registry_path.exists():
+        return None
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    for asset in registry.get("assets", []):
+        if (
+            asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"}
+            and asset.get("platform") == "pacbio_hifi"
+            and asset.get("path")
+        ):
+            return str(asset["path"])
     return None
 
 

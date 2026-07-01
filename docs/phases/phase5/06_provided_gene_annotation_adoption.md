@@ -5,7 +5,7 @@ Task status: implemented. Server/HPC smoke pending.
 ## Goal
 
 Let users enter the downstream backbone with real gene annotation outputs they
-already have, instead of forcing `gene_annotation` to remain planning-only.
+already have, instead of forcing `gene_annotation` to remain candidate-only.
 
 The first useful slice is adoption, not execution:
 
@@ -25,7 +25,7 @@ softmasked genome or final assembly
 - Add a `gene_annotation` adoption path that validates and registers provided
   files without running BRAKER3, MAKER, AUGUSTUS, Miniprot, HISAT2, StringTie,
   IsoQuant, or GeMoMa.
-- Preserve the existing planning-only behavior when no provided annotation
+- Preserve the existing candidate-only behavior when no provided annotation
   assets exist.
 - Pass the adopted `predicted_proteins` ref to `function_annotation`.
 - Keep any evidence conflicts as review/report material, not automatic merge
@@ -58,7 +58,7 @@ softmasked genome or final assembly
 - [x] Add or update examples for existing assembly + provided annotation entry.
 - [x] Implement a `gene_annotation` adoption branch that writes a compact bundle
   and artifact refs.
-- [x] Keep planning-only behavior unchanged when provided annotation assets are
+- [x] Keep candidate-only behavior unchanged when provided annotation assets are
   absent.
 - [x] Pass adopted proteins to `function_annotation`.
 - [x] Add tests for successful adoption, missing protein ref, invalid/missing

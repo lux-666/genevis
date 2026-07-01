@@ -21,7 +21,7 @@ ONT reads 优先使用 `clean_long_reads`，缺失时回退 `raw_long_reads`。
 然后 fallback 到 legacy keys 以保持向后兼容。
 
 所有 assembly 都会路由到 `t2t`。只有 run config 或 CLI 将 `t2t` 放入
-`local_exec` 时才执行 minimap2 以及 auto-patch；否则是可追溯的 plan-only
+`local_exec` 时才执行 minimap2 以及 auto-patch；否则是可追溯的 candidate-only
 handoff。
 
 ## Execution contract

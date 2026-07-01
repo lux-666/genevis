@@ -1081,7 +1081,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                         "local_exec": ["read_qc", "assembly", "assembly_review"],
                         "read_qc": {
                             "length_filter": {
-                                "method": "read_qc.length_filter.filtlong",
+                                "method": "read_qc.length_filter.seqkit_seq",
                                 "approved": False,
                                 "thresholds": {},
                             }
@@ -1100,7 +1100,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                                 "threads": 4,
                             }
                         },
-                        "assembly_review": {"quast": {"threads": 2}},
+                        "assembly_review": {
+                            "quast": {"threads": 2},
+                            "related_species_reference_dir": "/ref/ncbi_metazoa",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -1133,7 +1136,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 stage_outputs["read_qc"]["length_filter_request"],
                 {
-                    "method": "read_qc.length_filter.filtlong",
+                    "method": "read_qc.length_filter.seqkit_seq",
                     "approved": False,
                     "thresholds": {},
                 },
@@ -1151,6 +1154,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
+            self.assertEqual(
+                stage_outputs["assembly_review"]["related_species_reference_dir"],
+                "/ref/ncbi_metazoa",
+            )
 
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1938,12 +1945,12 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             run_config_payload["function_annotation"] = {
                 "database_provenance": [
                     {
-                        "method_name": "function_annotation.candidate.interproscan",
-                        "database_name": "InterPro",
-                        "database_version": "99.0",
+                        "method_name": "function_annotation.candidate.diamond",
+                        "database_name": "UniProt",
+                        "database_version": "2026_02",
                         "snapshot_date": "2026-05-25",
-                        "database_source_ref": "/db/interpro/99.0",
-                        "descriptor_version": "interproscan.yaml",
+                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "descriptor_version": "diamond.yaml",
                         "input_proteins_ref": str(proteins),
                     }
                 ]
@@ -2094,7 +2101,7 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
             self.assertEqual(bundle["proteins_fasta_ref"], str(proteins_file))
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
-            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/interpro/99.0")
+            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/uniprot/2026_02.dmnd")
 
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("function_annotation.plan", artifact_types)

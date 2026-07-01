@@ -108,7 +108,7 @@ Status vocabulary should distinguish:
 - QUAST output is registered and summarized.
 - The workflow stops at `blocked_human`.
 - No final assembly is promoted without a human review decision.
-- Non-mainline review methods remain planning-only or blocked-reason records.
+- Non-mainline review methods remain candidate-only or blocked-reason records.
 
 ## Verification
 

@@ -18,11 +18,10 @@ asset_types:
       assembly:
         - flye
         - nextdenovo
-        - canu
+        - hifiasm
       assembly_review:
-        - minimap2_depth_stats
-        - nextpolish_lgs
-        - purge_dups
+        - quast
+        - busco
     produces:
       - draft_assembly
 
@@ -35,8 +34,8 @@ asset_types:
         - jellyfish
         - genomescope
       assembly_review:
-        - merqury
-        - nextpolish_sgs
+        - quast
+        - busco
 
   hic_reads_registered:
     allowed_stages:
@@ -74,7 +73,6 @@ planner_policies:
     primary_input: clean_long_reads
     require_genome_size_for:
       - nextdenovo
-      - canu
     optional_genome_size_for:
       - flye
 
@@ -87,4 +85,3 @@ planner_policies:
       required_after:
         - quast
         - busco
-        - merqury_or_depth_if_available

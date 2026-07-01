@@ -674,7 +674,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
             "resolved_execution_order": ["read_qc", "assembly"],
             "stage_roles": {"read_qc": "dependency", "assembly": "executable"},
             "selected_methods": {"assembly": "assembly.candidate.flye"},
-            "method_execution_status": {"assembly.candidate.flye": "executable"},
         }
         with patch("sys.stdout", new_callable=io.StringIO) as stdout:
             _render_plan_summary(summary, title="Plan Preview", preview=True)
@@ -682,7 +681,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Plan Preview", rendered)
         self.assertIn("Input:    /in/reads.fastq", rendered)
         self.assertIn("read_qc", rendered)
-        self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
+        self.assertIn("assembly: assembly.candidate.flye", rendered)
         # read_qc has no selected method yet -> pending
         self.assertIn("read_qc: pending", rendered)
         self.assertIn("Shared parameters: pending", rendered)
@@ -703,11 +702,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "genome_survey.model.genomescope2",
                 ],
                 "hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"],
-            },
-            "method_execution_status": {
-                "genome_survey.kmer_count.jellyfish": "executable",
-                "genome_survey.model.genomescope2": "executable",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox": "executable",
             },
             "shared_parameter_defaults": {"platform": "ont", "read_type": "ont_raw"},
             "parameter_defaults": {
@@ -740,7 +734,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "methods": [
                         {
                             "method": "genome_survey.kmer_count.jellyfish",
-                            "execution_support": "executable",
                             "parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
                             "missing_parameters": [],
                         }
@@ -754,7 +747,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "methods": [
                         {
                             "method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                            "execution_support": "executable",
                             "parameters": {"input_mode": "raw_reads", "chromosome_count": 25},
                             "missing_parameters": ["restriction_enzyme"],
                         }
@@ -804,30 +796,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Inputs:", rendered)
         self.assertIn("raw_long_reads [ont/fastq]: /in/reads.fastq.gz", rendered)
 
-    def test_preview_shows_deferred_warnings_and_preview_error(self):
-        summary = {
-            "session_id": "s1",
-            "data_dir": "data",
-            "manifest_ref": "test.yaml",
-            "resolved_execution_order": ["gene_annotation"],
-            "stage_roles": {"gene_annotation": "planned_only"},
-            "selected_methods": {"gene_annotation": ["gene_annotation.candidate.braker3"]},
-            "method_execution_status": {"gene_annotation.candidate.braker3": "planned_only"},
-            "shared_parameters": {"read_type": "ont_raw"},
-            "method_parameters": {"gene_annotation.candidate.braker3": {"threads": 8}},
-            "warnings": ["gene_annotation: all selected methods are planned_only"],
-            "run_config_preview_error": "no local_exec stages",
-        }
-        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
-            _render_plan_summary(summary, title="Plan Preview", preview=True)
-        rendered = stdout.getvalue()
-        self.assertIn("[plan-only] gene_annotation", rendered)
-        self.assertIn("gene_annotation.candidate.braker3 [deferred]", rendered)
-        self.assertIn("read_type: ont_raw", rendered)
-        self.assertIn("[braker3] threads: 8", rendered)
-        self.assertIn("warning: gene_annotation: all selected methods are planned_only", rendered)
-        self.assertIn("Run-config error: no local_exec stages", rendered)
-
     def test_confirm_render_output_unchanged_for_final_plan(self):
         """Final Run Plan output keeps its exact shape (no pending lines)."""
         summary = {
@@ -837,7 +805,6 @@ class PlanPreviewRenderTests(unittest.TestCase):
             "resolved_execution_order": ["assembly"],
             "stage_roles": {"assembly": "executable"},
             "selected_methods": {"assembly": "assembly.candidate.flye"},
-            "method_execution_status": {"assembly.candidate.flye": "executable"},
         }
         req = AskClarificationRequest(
             status="confirm_required", kind="confirm", session_id="s1",
@@ -848,7 +815,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             _render_confirm(req)
         rendered = stdout.getvalue()
         self.assertIn("Run Plan", rendered)
-        self.assertIn("assembly: assembly.candidate.flye [local]", rendered)
+        self.assertIn("assembly: assembly.candidate.flye", rendered)
         self.assertNotIn("pending", rendered)
         self.assertNotIn("Advisory preview.", rendered)
 
@@ -876,7 +843,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn(f"raw_long_reads [ont/fastq]: {reads}", rendered)
             self.assertIn("This draft becomes the working plan.", rendered)
             self.assertIn("Execution will NOT start yet.", rendered)
-            self.assertIn("assembly.candidate.flye [local]", rendered)
+            self.assertIn("assembly.candidate.flye", rendered)
             self.assertIn("estimated_genome_size: missing", rendered)
             self.assertIn("[flye] threads: 4  (default)", rendered)
             self.assertIn("Needs attention:", rendered)

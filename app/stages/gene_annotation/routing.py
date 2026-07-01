@@ -73,7 +73,7 @@ def route_after_method_plan(state: TopLevelState) -> str:
         return "block_method"
     if status == "methods_confirmed":
         return "run_methods"
-    # All intermediate execution statuses re-enter via the planning stub.
+    # All intermediate execution statuses re-enter via the execution preparer.
     if status in _INTERMEDIATE_STATUSES:
         return "run_methods"
     if status == "candidates_ready":
@@ -102,14 +102,14 @@ def route_after_method_plan(state: TopLevelState) -> str:
 # --- after-gate routing (one per gate block node) -------------------------------
 
 def route_after_method_planning_gate(state: TopLevelState) -> str:
-    """After method-planning gate: continue to planning-only stub or stop."""
+    """After method-planning gate: continue to executable method preparation or stop."""
     if _supervision(state) in TERMINAL_STATES:
         return "end" if _supervision(state) == "blocked_human" else "fail"
     return "run_methods"
 
 
 def route_after_run_methods(state: TopLevelState) -> str:
-    """After planning-only stub: dispatch to next executable method or review."""
+    """After method preparation: dispatch to next executable method or review."""
     status = _output(state).get("status")
     if status == "failed":
         return "fail"

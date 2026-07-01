@@ -10,6 +10,7 @@ It collects or references evaluation signals and routes to:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from datetime import datetime, timezone
@@ -28,17 +29,25 @@ from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.reference.ncbi_metazoa import build_related_species_evidence_pack as _build_related_species_evidence_pack
+from app.reference.ncbi_metazoa import build_related_species_statistics_pack as _build_related_species_statistics_pack
 from app.reference.ncbi_metazoa import species_name_from_metadata
+from app.stages.assembly_review.notebook import (
+    build_assembly_review_notebook,
+    render_statistics_figures,
+    write_notebook,
+)
 from app.stages.base import absolute_data_dir, is_fail_status
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
     ASSEMBLY_REVIEW_ACTION,
+    ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
+    ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
     ASSEMBLY_REVIEW_REPORT,
     ASSEMBLY_REVIEW_REPORT_DATA,
-    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     ArtifactMeta,
     AssemblyCandidateBundle,
     AssemblyEvalBundle,
@@ -155,24 +164,16 @@ def plan_review_metrics(state: TopLevelState) -> dict:
         return {}
 
     # Determine available inputs from asset registry or prior stages
-    has_short_reads, has_long_reads, available_inputs, missing_inputs = _available_review_inputs(state)
+    _has_short_reads, _has_long_reads, available_inputs, missing_inputs = _available_review_inputs(state)
 
     read_qc_out = stage_outputs.get("read_qc", {})
     if read_qc_out:
         if read_qc_out.get("clean_long_reads") is not None:
-            has_long_reads = True
             available_inputs.add("clean_long_reads")
         if read_qc_out.get("clean_short_dna_reads") is not None:
-            has_short_reads = True
             available_inputs.add("clean_short_dna_reads")
 
     planned_signals: list[str] = ["quast", "busco"]
-    if has_short_reads:
-        planned_signals.append("merqury")
-    if has_long_reads:
-        planned_signals.append("mapping_coverage")
-        planned_signals.append("purge_dups_check")
-    planned_signals.append("contamination_check")
 
     review_plan_data = ar_out.get("review_plan", {})
     review_plan_data["planned_signals"] = planned_signals
@@ -250,7 +251,11 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
         return {}
 
     species_name = _target_species_name(state)
-    evidence_pack = _build_related_species_evidence_pack(species_name)
+    reference_dir = _related_species_reference_dir(ar_out)
+    if reference_dir:
+        evidence_pack = _build_related_species_evidence_pack(species_name, reference_dir=reference_dir)
+    else:
+        evidence_pack = _build_related_species_evidence_pack(species_name)
     existing_ref = ar_out.get("related_species_evidence_pack_ref")
     if existing_ref and _json_artifact_payload_matches(existing_ref, evidence_pack):
         return {}
@@ -268,6 +273,143 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
         "related_species_evidence_pack_ref": evidence_ref,
     }
     return {"stage_outputs": outputs}
+
+
+def _related_species_reference_dir(ar_out: dict[str, Any]) -> str | Path | None:
+    value = ar_out.get("related_species_reference_dir") or os.environ.get("GENE_AGENT_NCBI_METAZOA_REFERENCE_DIR")
+    return value if value else None
+
+
+def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
+    """Build statistics pack and comparative notebook for assembly review."""
+    stage_outputs = state.get("stage_outputs") or {}
+    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    if is_fail_status(ar_out.get("status")):
+        return {}
+
+    species_name = _target_species_name(state)
+    reference_dir = _related_species_reference_dir(ar_out)
+
+    # Extract target metrics from the first candidate's signals
+    target_metrics = _extract_target_metrics_from_signals(ar_out)
+
+    # Build statistics pack
+    if reference_dir:
+        statistics_pack = _build_related_species_statistics_pack(
+            species_name, reference_dir=reference_dir, target_metrics=target_metrics
+        )
+    else:
+        statistics_pack = _build_related_species_statistics_pack(species_name, target_metrics=target_metrics)
+
+    existing_stats_ref = ar_out.get("related_species_statistics_pack_ref")
+    if existing_stats_ref and _json_artifact_payload_matches(existing_stats_ref, statistics_pack):
+        # Statistics pack unchanged; check if notebook needs regeneration
+        existing_notebook_ref = ar_out.get("assembly_review_comparative_notebook_ref")
+        if existing_notebook_ref and Path(existing_notebook_ref).exists():
+            return {}
+
+    # Write statistics pack
+    statistics_ref = _write_json_artifact(
+        state,
+        "related_species_statistics_pack.json",
+        statistics_pack,
+        artifact_type=ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
+    )
+
+    # Render figures
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    figures_dir = data_dir / "artifacts" / "assembly_review" / session_id / "figures"
+    figure_paths = render_statistics_figures(statistics_pack, figures_dir)
+
+    # Register figure artifacts
+    figure_artifacts = []
+    for logical_name, abs_path in figure_paths.items():
+        figure_artifacts.append(
+            ArtifactMeta.from_file(
+                Path(abs_path),
+                stage="assembly_review",
+                method_name="assembly_review.contract",
+                artifact_type=f"assembly_review.figure.{logical_name}",
+                metadata={"figure_type": logical_name},
+            )
+        )
+    if figure_artifacts:
+        append_artifact_records(data_dir, session_id, figure_artifacts)
+
+    # Build notebook with relative paths
+    out_dir = data_dir / "artifacts" / "assembly_review" / session_id
+    statistics_pack_relpath = "related_species_statistics_pack.json"
+    figures_relpaths = {name: f"figures/{Path(path).name}" for name, path in figure_paths.items()}
+    evidence_pack = ar_out.get("related_species_evidence_pack", {})
+
+    notebook = build_assembly_review_notebook(
+        statistics_pack=statistics_pack,
+        evidence_pack=evidence_pack,
+        target_metrics=target_metrics,
+        session_id=session_id,
+        statistics_pack_relpath=statistics_pack_relpath,
+        figures_relpaths=figures_relpaths,
+    )
+
+    # Write notebook
+    notebook_path = out_dir / "assembly_review_report.ipynb"
+    write_notebook(notebook, notebook_path)
+
+    # Register notebook artifact
+    notebook_artifact = ArtifactMeta.from_file(
+        notebook_path,
+        stage="assembly_review",
+        method_name="assembly_review.contract",
+        artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
+        metadata={"session_id": session_id, "figure_count": len(figure_paths)},
+    )
+    append_artifact_records(data_dir, session_id, [notebook_artifact])
+
+    outputs = dict(stage_outputs)
+    outputs["assembly_review"] = {
+        **ar_out,
+        "related_species_statistics_pack": statistics_pack,
+        "related_species_statistics_pack_ref": statistics_ref,
+        "assembly_review_comparative_notebook_ref": str(notebook_path),
+        "comparative_figures": figure_paths,
+    }
+    return {"stage_outputs": outputs}
+
+
+def _extract_target_metrics_from_signals(ar_out: dict[str, Any]) -> dict[str, float] | None:
+    """Extract target assembly metrics from available signals for percentile computation."""
+    candidates = ar_out.get("candidates", [])
+    if not candidates:
+        return None
+
+    # Use the first candidate's metrics (typically there's only one at review time, or they're comparable)
+    first_candidate_id = candidates[0].get("candidate_id")
+    if not first_candidate_id:
+        return None
+
+    signals = ar_out.get("signals", [])
+    candidate_metrics = _candidate_metrics(first_candidate_id, signals)
+
+    target_metrics: dict[str, float] = {}
+
+    # Map QUAST metrics
+    quast = candidate_metrics.get("quast", {})
+    if quast.get("n50") is not None:
+        target_metrics["n50_bp"] = float(quast["n50"])
+    if quast.get("total_length") is not None:
+        target_metrics["assembly_size_bp"] = float(quast["total_length"])
+    if quast.get("gc_percent") is not None:
+        target_metrics["gc_percent"] = float(quast["gc_percent"])
+
+    # Map BUSCO metrics
+    busco = candidate_metrics.get("busco", {})
+    if busco.get("complete_percent") is not None:
+        target_metrics["busco_complete_percent"] = float(busco["complete_percent"])
+    if busco.get("duplicated_percent") is not None:
+        target_metrics["busco_duplicated_percent"] = float(busco["duplicated_percent"])
+
+    return target_metrics if target_metrics else None
 
 
 def human_review_gate(state: TopLevelState) -> dict:
@@ -289,7 +431,7 @@ def human_review_gate(state: TopLevelState) -> dict:
             "stop_human_review",
         ],
         notes=[
-            "Thresholds for BUSCO, QUAST, Merqury, and purge_dups require human approval before application.",
+            "Thresholds for BUSCO and QUAST require human approval before application.",
             "Accept continues with the selected assembly to Hi-C scaffolding, then T2T, then annotation stages.",
             "Rerun keeps the workflow at assembly review after a new assembly attempt; stop leaves downstream stages unstarted.",
         ],
@@ -1592,7 +1734,7 @@ def _existing_assembly_ref(registry_ref: str) -> str | None:
     return None
 
 
-_EVAL_SIGNAL_NAMES = {"quast", "busco", "merqury", "mapping_coverage"}
+_EVAL_SIGNAL_NAMES = {"quast", "busco"}
 
 
 def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
@@ -1601,12 +1743,6 @@ def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
         return False
 
     signals = [s for s in (ar_out.get("signals") or []) if isinstance(s, dict)]
-    for signal in signals:
-        if signal.get("signal_name") != "contamination_check":
-            continue
-        if signal.get("status") == "available" and signal.get("metric_refs"):
-            return False
-
     for candidate in candidates:
         candidate_id = candidate.get("candidate_id")
         has_quast = any(
@@ -1649,8 +1785,4 @@ def _review_signal_method_name(signal_name: str) -> str:
     return {
         "quast": "assembly_review.eval.quast",
         "busco": "assembly_review.eval.busco",
-        "merqury": "assembly_review.eval.merqury",
-        "mapping_coverage": "assembly_review.eval.mapping_coverage",
-        "purge_dups_check": "assembly_review.check.purge_dups",
-        "contamination_check": "assembly_review.check.contamination",
     }[signal_name]

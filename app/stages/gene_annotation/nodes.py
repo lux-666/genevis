@@ -29,16 +29,11 @@ from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 GENE_CANDIDATE_METHODS = [
-    "gene_annotation.candidate.braker3",
-    "gene_annotation.candidate.maker",
     "gene_annotation.candidate.augustus",
     "gene_annotation.candidate.miniprot",
 ]
-RNA_HELPER_METHODS = [
-    "gene_annotation.helper.hisat2",
-    "gene_annotation.helper.stringtie",
-]
-LONG_RNA_HELPER_METHODS = ["gene_annotation.helper.isoquant"]
+RNA_HELPER_METHODS: list[str] = []
+LONG_RNA_HELPER_METHODS: list[str] = []
 PROTEIN_HELPER_METHODS: list[str] = []
 GENE_CONTRACT_METHOD = "gene_annotation.contract"
 
@@ -179,7 +174,7 @@ def select_evidence_profile(state: TopLevelState) -> dict:
 
 
 def plan_gene_methods(state: TopLevelState) -> dict:
-    """Plan candidate gene annotation methods without selecting a default."""
+    """List executable candidate gene annotation methods without selecting a default."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "evidence_profile_selected":
         return {}
@@ -202,7 +197,7 @@ def plan_gene_methods(state: TopLevelState) -> dict:
         "predicted_proteins": str(work_dir / "proteins.fa"),
         "evidence_report": str(work_dir / "evidence_report.json"),
     }
-    notes = ["execution_deferred_to_method_specific_task"]
+    notes = ["gene_annotation_methods_require_explicit_execution_selection"]
     if profile == "no_evidence":
         notes.append("ab_initio_planning_explicit_no_evidence")
     return _update_gene_output(
@@ -249,7 +244,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
         review_triggers=review_triggers,
         method_selection_required=True,
         notes=gene_out.get("notes", []),
-        metadata={"execution_enabled": False},
+        metadata={"execution_enabled": bool(gene_out.get("executed_methods"))},
     )
     plan_ref = out_dir / "gene_annotation_plan.json"
     plan_ref.write_text(
@@ -264,7 +259,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
         metadata={
             "evidence_profile": gene_out["evidence_profile"],
             "genome_input_source": gene_out["genome_input_source"],
-            "execution_enabled": False,
+            "execution_enabled": bool(gene_out.get("executed_methods")),
             "review_required": review_required,
         },
     )
@@ -777,15 +772,7 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
     else:
         confirmed = candidate_methods
 
-    # Reject selections that contain only planned_only (not-yet-implemented) methods.
-    executable = [m for m in confirmed if m in GENE_EXECUTABLE_METHODS]
-    if not executable:
-        planned_only = [m for m in confirmed if m not in GENE_EXECUTABLE_METHODS]
-        raise ResumeValidationError(
-            f"no executable gene annotation methods among selected {confirmed}; "
-            f"the following are planned_only placeholders not yet implemented: {planned_only}"
-        )
-    readiness_issues = _gene_method_readiness_issues(state, executable)
+    readiness_issues = _gene_method_readiness_issues(state, confirmed)
     if readiness_issues:
         raise ResumeValidationError("; ".join(readiness_issues))
 
@@ -811,37 +798,31 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
     return own
 
 
-# --- planning-only method runner stub ------------------------------------------
+# --- executable method preparation ---------------------------------------------
 
-def run_gene_methods_planning_only(state: TopLevelState) -> dict:
-    """Record expected candidate outputs and gate to execution or review."""
+def prepare_gene_method_execution(state: TopLevelState) -> dict:
+    """Prepare output targets for confirmed executable methods."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "methods_confirmed":
         return {}
     methods = list(gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or [])
-    work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
-    # Only executable methods become real candidates; deferred (planned_only)
-    # methods produce no files and must not seed candidate_refs (which would
-    # pollute review and EVM with non-existent paths).
-    executable = [m for m in methods if m in GENE_EXECUTABLE_METHODS]
-    if executable:
-        candidate_refs = {m: str(work_dir / f"{m.split('.')[-1]}.gff3") for m in executable}
-        return _update_gene_output(
+    unsupported = [method for method in methods if method not in GENE_EXECUTABLE_METHODS]
+    if unsupported:
+        return _fail_update(
             state,
-            {
-                "status": "pending_execution",
-                "candidate_refs": candidate_refs,
-                "candidate_gene_counts": {m: 0 for m in executable},
-                "executed_methods": [],
-            },
+            "gene_annotation confirmed methods are not locally executable: "
+            + ", ".join(sorted(unsupported)),
         )
-    # planned_only methods are placeholders for future implementation;
-    # selecting only non-executable methods is not supported yet.
-    planned_only = [m for m in methods if m not in GENE_EXECUTABLE_METHODS]
-    return _fail_update(
+    work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
+    candidate_refs = {m: str(work_dir / f"{m.split('.')[-1]}.gff3") for m in methods}
+    return _update_gene_output(
         state,
-        "no executable gene annotation methods selected; "
-        f"planned_only methods are not yet supported: {planned_only}",
+        {
+            "status": "pending_execution",
+            "candidate_refs": candidate_refs,
+            "candidate_gene_counts": {m: 0 for m in methods},
+            "executed_methods": [],
+        },
     )
 
 
@@ -876,7 +857,6 @@ def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPaylo
         candidates=candidates,
         decisions_allowed=decisions,
         auto_decidable=not conflict,
-        notes=["execution_support=planning_only"],
     )
 
 
@@ -966,7 +946,7 @@ def build_merge_review_payload(state: TopLevelState) -> ReviewPayload:
         signals=signals,
         decisions_allowed=["accept_weights", "adjust_weights", "stop"],
         auto_decidable=not merge_policy,
-        candidate_comparison_context={"evm_weight_table": dict(_DEFAULT_MERGE_WEIGHTS), "execution_support": "planning_only"},
+        candidate_comparison_context={"evm_weight_table": dict(_DEFAULT_MERGE_WEIGHTS)},
     )
 
 
@@ -1033,7 +1013,6 @@ def build_final_gene_set_review_payload(state: TopLevelState) -> ReviewPayload:
         signals=[busco],
         decisions_allowed=["accept", "reject", "stop"],
         auto_decidable=auto_decidable,
-        notes=["execution_support=planning_only"],
     )
 
 
@@ -2058,17 +2037,9 @@ def _candidate_methods(profile: str) -> list[str]:
     if profile == "no_evidence":
         return ["gene_annotation.candidate.augustus"]
     if profile == "protein":
-        return [
-            "gene_annotation.candidate.braker3",
-            "gene_annotation.candidate.maker",
-            "gene_annotation.candidate.miniprot",
-        ]
+        return ["gene_annotation.candidate.miniprot"]
     if profile in {"rnaseq", "long_rna"}:
-        return [
-            "gene_annotation.candidate.braker3",
-            "gene_annotation.candidate.maker",
-            "gene_annotation.candidate.augustus",
-        ]
+        return ["gene_annotation.candidate.augustus"]
     return GENE_CANDIDATE_METHODS
 
 

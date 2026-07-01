@@ -85,7 +85,7 @@ The trace must answer these session-level questions:
 For each stage, the trace must show:
 
 - stage name;
-- status using a small stable vocabulary such as `executed`, `planned_only`,
+- status using a small stable vocabulary such as `executed`, `candidate_only`,
   `skipped`, `blocked_human`, `failed`, or `completed`;
 - methods attempted, if any;
 - attempt outcomes, if available;
@@ -192,7 +192,7 @@ Trace generation lives in `app/reports/trace_writer.py` (previously an empty
 placeholder; no new module added):
 
 - Status vocabulary (`app/reports/trace_writer.py:33`): `executed`,
-  `planned_only`, `blocked_human`, `failed`, `completed`,
+  `candidate_only`, `blocked_human`, `failed`, `completed`,
   `no_durable_evidence`.
 - Gap vocabulary (`app/reports/trace_writer.py:44`): `unavailable`,
   `checkpoint_only`, `unsupported`.

@@ -31,7 +31,7 @@ execution is opt-in per stage and is currently wired for: `read_qc`
 libraries), `gene_annotation` (Miniprot + AUGUSTUS runners, EVM merge,
 BUSCO), `function_annotation` (DIAMOND blastp). Real-data smoke validation
 for the annotation runners is pending (Phase 7 task 08). All remaining
-methods are planning-only contracts.
+methods are candidate-only contracts.
 
 Phase 6 task 04 (session observability and run trace) is code-complete and
 locally validated: `gene-agent inspect --trace` reconstructs a stage-by-stage
@@ -521,7 +521,7 @@ still pending.
 - reported: `supervision_state=failed_terminal`,
   `final_or_current_stage=assembly` (source: operator_report),
   `stage_path_observed=[read_qc, genome_survey, assembly]`;
-  `read_qc` executed, `genome_survey` planned_only, `assembly` failed on
+  `read_qc` executed, `genome_survey` candidate_only, `assembly` failed on
   `assembly.candidate.flye`; open-first `operator_report.failed_terminal`.
 - durable-record gaps surfaced: `route_trace` and `skip_reasons` are
   `checkpoint_only` (authoritative ordering lives in checkpoint/in-memory
@@ -586,7 +586,7 @@ gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --dec
   be skippable.
 - Genome survey output is a prior for assembly, not a hard prerequisite.
 - The only real assembler execution path is explicit local Flye; default
-  assembly behavior is planning-only. NextDenovo / Canu / hifiasm are
+  assembly behavior is candidate-only. NextDenovo / Canu / hifiasm are
   planning placeholders only.
 - Assembly review is the main mandatory human gate. Existing assembly
   inputs auto-accept as a deterministic pass-through; assembly-stage

@@ -66,7 +66,7 @@ was skipped.
 ### `env_geno_exec` env (tools)
 
 This env hosts every binary the workflow can actually invoke today, plus
-the descriptors for tools whose stages are still planning-only. Channels:
+the descriptors for tools whose stages are still candidate-only. Channels:
 `bioconda` + `conda-forge`.
 
 #### Wired into the executable mainline — install these for Phase 4 / 5 acceptance

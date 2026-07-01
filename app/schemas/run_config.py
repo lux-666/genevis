@@ -48,13 +48,11 @@ LocalExecStage = Literal[
 
 FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
 NextDenovoReadType = Literal["ont", "clr", "hifi"]
-AssemblyMethod = Literal["flye", "nextdenovo", "canu", "hifiasm"]
+HifiasmReadType = Literal["hifi", "ont"]
+AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
-    "read_qc.length_filter.chopper",
-    "read_qc.length_filter.filtlong",
-    "read_qc.length_filter.fastplong",
 ]
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
@@ -143,6 +141,15 @@ class NextDenovoRunParameters(BaseModel):
     read_cutoff: int = Field(default=1000, gt=0)
 
 
+class HifiasmRunParameters(BaseModel):
+    """Explicit hifiasm parameters for local assembly execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read_type: HifiasmReadType | None = None
+    threads: int = Field(gt=0)
+
+
 class AssemblyRunConfig(BaseModel):
     """Run-config block for the assembly stage."""
 
@@ -151,6 +158,7 @@ class AssemblyRunConfig(BaseModel):
     assembly_method: AssemblyMethod | None = None
     flye_parameters: FlyeRunParameters | None = None
     nextdenovo_parameters: NextDenovoRunParameters | None = None
+    hifiasm_parameters: HifiasmRunParameters | None = None
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
@@ -158,16 +166,12 @@ class AssemblyRunConfig(BaseModel):
 
 
 def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> None:
-    """Validate the method/parameter contract after all local-exec inputs merge.
-
-    Canu and hifiasm remain selectable planning candidates until their method
-    adapters are implemented; they intentionally do not require executable
-    method parameters yet.
-    """
+    """Validate the method/parameter contract after all local-exec inputs merge."""
     if assembly is None:
         raise ValueError(
             "run_config: local_exec includes 'assembly' but "
-            "assembly.flye_parameters or assembly.nextdenovo_parameters is missing"
+            "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
+            "assembly.hifiasm_parameters is missing"
         )
 
     method = assembly.assembly_method
@@ -179,12 +183,9 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         if not assembly.nextdenovo_parameters:
             raise ValueError("run_config: local assembly method 'nextdenovo' requires assembly.nextdenovo_parameters")
         return
-    if method in {"canu", "hifiasm"}:
-        if assembly.flye_parameters or assembly.nextdenovo_parameters:
-            raise ValueError(
-                f"run_config: local assembly method '{method}' is planning-only; "
-                "do not provide Flye or NextDenovo execution parameters"
-            )
+    if method == "hifiasm":
+        if not assembly.hifiasm_parameters:
+            raise ValueError("run_config: local assembly method 'hifiasm' requires assembly.hifiasm_parameters")
         return
 
     provided = [
@@ -192,13 +193,15 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         for name, value in [
             ("flye", assembly.flye_parameters),
             ("nextdenovo", assembly.nextdenovo_parameters),
+            ("hifiasm", assembly.hifiasm_parameters),
         ]
         if value is not None
     ]
     if not provided:
         raise ValueError(
             "run_config: local_exec includes 'assembly' but "
-            "assembly.flye_parameters or assembly.nextdenovo_parameters is missing"
+            "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
+            "assembly.hifiasm_parameters is missing"
         )
     if len(provided) > 1:
         raise ValueError(
@@ -304,6 +307,7 @@ class AssemblyReviewRunConfig(BaseModel):
     quast: QuastRunParameters | None = None
     busco: BuscoRunParameters | None = None
     max_reruns: int = Field(default=3, ge=1, le=10)
+    related_species_reference_dir: str | None = None
 
 
 class Juicer3DDNARunParameters(BaseModel):

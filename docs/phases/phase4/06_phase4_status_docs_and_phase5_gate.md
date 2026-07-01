@@ -20,7 +20,7 @@ execution before the Phase 4 real-biology mainline is accepted.
   - task files under `docs/phases/phase4/`
   - `docs/phases/phase_completion_plan.md` if phase boundaries need wording
     updates
-- Record which execution slices are real, opt-in, planning-only, or deferred.
+- Record which execution slices are real, opt-in, candidate-only, or deferred.
 - Add a clear Phase 5 entry gate.
 - Keep durable resume, RemoteRunner, requested-stage routing, and annotation
   database downloads as explicit later decisions unless separately approved.
@@ -72,7 +72,7 @@ git diff --check
   describe the realized Phase 3/4 slices: real `read_qc` / `genome_survey`
   (Jellyfish+GenomeScope2 opt-in) / `assembly` (Flye opt-in) /
   `assembly_review` (QUAST opt-in + action provenance) / `hic_scaffolding`
-  (YaHS opt-in) / `repeat_annotation` (RepeatMasker opt-in); planning-only
+  (YaHS opt-in) / `repeat_annotation` (RepeatMasker opt-in); candidate-only
   `gene_annotation` and `function_annotation`; shared `EnvResolver` +
   `env_dispatch` wired into five of six stages (`genome_survey` excepted);
   and CLI `--local-exec` + `--run-config` structured entry. The "Read First"

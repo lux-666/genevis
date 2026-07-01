@@ -18,10 +18,7 @@ class FunctionAnnotationDescriptorTests(unittest.TestCase):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         expected = {
-            "function_annotation.candidate.interproscan": "interproscan",
-            "function_annotation.candidate.eggnog_mapper": "eggnog_mapper",
             "function_annotation.candidate.diamond": "diamond",
-            "function_annotation.candidate.kofamscan": "kofamscan",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -68,21 +65,12 @@ class FunctionAnnotationStageTests(unittest.TestCase):
     def _provenance(self, proteins_ref: str) -> list[dict]:
         return [
             {
-                "method_name": "function_annotation.candidate.interproscan",
-                "database_name": "InterPro",
-                "database_version": "99.0",
+                "method_name": "function_annotation.candidate.diamond",
+                "database_name": "UniProt",
+                "database_version": "2026_02",
                 "snapshot_date": "2026-05-05",
-                "database_source_ref": "/db/interpro/99.0",
-                "descriptor_version": "interproscan.yaml",
-                "input_proteins_ref": proteins_ref,
-            },
-            {
-                "method_name": "function_annotation.candidate.kofamscan",
-                "database_name": "KOfam",
-                "database_version": "2026-04",
-                "snapshot_date": "2026-05-05",
-                "database_source_ref": "/db/kofam/2026-04",
-                "command": "exec_annotation --version",
+                "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                "descriptor_version": "diamond.yaml",
                 "input_proteins_ref": proteins_ref,
             },
         ]
@@ -121,11 +109,11 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 tmpdir,
                 provenance=[
                     {
-                        "method_name": "function_annotation.candidate.interproscan",
-                        "database_name": "InterPro",
+                        "method_name": "function_annotation.candidate.diamond",
+                        "database_name": "UniProt",
                         "snapshot_date": "2026-05-05",
-                        "database_source_ref": "/db/interpro/99.0",
-                        "descriptor_version": "interproscan.yaml",
+                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "descriptor_version": "diamond.yaml",
                         "input_proteins_ref": proteins_ref,
                     }
                 ],
@@ -143,11 +131,11 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 tmpdir,
                 provenance=[
                     {
-                        "method_name": "function_annotation.candidate.interproscan",
-                        "database_name": "InterPro",
-                        "database_version": "99.0",
+                        "method_name": "function_annotation.candidate.diamond",
+                        "database_name": "UniProt",
+                        "database_version": "2026_02",
                         "snapshot_date": "2026-05-05",
-                        "database_source_ref": "/db/interpro/99.0",
+                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
                         "input_proteins_ref": proteins_ref,
                     }
                 ],
@@ -157,6 +145,29 @@ class FunctionAnnotationStageTests(unittest.TestCase):
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("command or descriptor_version", result["last_error"])
+
+    def test_deleted_provenance_method_fails_terminally(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proteins_ref = str(Path(tmpdir) / "proteins.fa")
+            state = self._protein_state(
+                tmpdir,
+                provenance=[
+                    {
+                        "method_name": "function_annotation.candidate.interproscan",
+                        "database_name": "InterPro",
+                        "database_version": "99.0",
+                        "snapshot_date": "2026-05-05",
+                        "database_source_ref": "/db/interpro/99.0",
+                        "descriptor_version": "interproscan.yaml",
+                        "input_proteins_ref": proteins_ref,
+                    }
+                ],
+            )
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("method_name", result["last_error"])
 
     def test_provenance_input_proteins_ref_must_match_resolved_proteins(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -177,12 +188,12 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 tmpdir,
                 provenance=[
                     {
-                        "method_name": "function_annotation.candidate.interproscan",
-                        "database_name": "InterPro",
-                        "database_version": "99.0",
+                        "method_name": "function_annotation.candidate.diamond",
+                        "database_name": "UniProt",
+                        "database_version": "2026_02",
                         "snapshot_date": "2026-05-05",
-                        "database_source_ref": "/db/interpro/99.0",
-                        "descriptor_version": "interproscan.yaml",
+                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "descriptor_version": "diamond.yaml",
                     }
                 ],
             )
@@ -224,13 +235,13 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertIsNone(function["annotated_gene_models_gff3_ref"])
             self.assertTrue(Path(function["plan_artifact_ref"]).exists())
             self.assertTrue(Path(function["bundle_artifact_ref"]).exists())
-            self.assertEqual(len(function["database_provenance"]), 2)
+            self.assertEqual(len(function["database_provenance"]), 1)
             plan = json.loads(Path(function["plan_artifact_ref"]).read_text(encoding="utf-8"))
             self.assertFalse(plan["metadata"]["execution_enabled"])
             self.assertFalse(plan["metadata"]["database_download_enabled"])
             bundle = json.loads(Path(function["bundle_artifact_ref"]).read_text(encoding="utf-8"))
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], proteins_ref)
-            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/interpro/99.0")
+            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/uniprot/2026_02.dmnd")
             self.assertIsNone(bundle["diamond_hits_ref"])
             self.assertIsNone(bundle["gene_function_tsv_ref"])
             self.assertIsNone(bundle["go_annotation_table_ref"])

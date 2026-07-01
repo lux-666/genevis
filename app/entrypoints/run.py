@@ -34,7 +34,6 @@ _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
 _ASSEMBLY_METHOD_NAMES = {
     "flye": "assembly.candidate.flye",
     "nextdenovo": "assembly.candidate.nextdenovo",
-    "canu": "assembly.candidate.canu",
     "hifiasm": "assembly.candidate.hifiasm",
 }
 
@@ -402,6 +401,8 @@ def _run_session(args: argparse.Namespace) -> int:
             assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
         if run_config.assembly.nextdenovo_parameters:
             assembly_out["nextdenovo_parameters"] = run_config.assembly.nextdenovo_parameters.model_dump(exclude_none=True)
+        if run_config.assembly.hifiasm_parameters:
+            assembly_out["hifiasm_parameters"] = run_config.assembly.hifiasm_parameters.model_dump(exclude_none=True)
         for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
             value = getattr(run_config.assembly, key)
             if value is not None:
@@ -415,6 +416,8 @@ def _run_session(args: argparse.Namespace) -> int:
         if run_config.assembly_review.busco:
             review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
         review_out["max_reruns"] = run_config.assembly_review.max_reruns
+        if run_config.assembly_review.related_species_reference_dir:
+            review_out["related_species_reference_dir"] = run_config.assembly_review.related_species_reference_dir
         stage_outputs["assembly_review"] = review_out
     if run_config and run_config.hic_scaffolding:
         hic_out = dict(stage_outputs.get("hic_scaffolding") or {})

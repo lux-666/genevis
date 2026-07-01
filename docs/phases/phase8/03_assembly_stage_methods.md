@@ -83,7 +83,7 @@ assembly
         run
         collect
       canu
-        freeze/planning-only initially
+        freeze/candidate-only initially
   commit_assembly_plan
 ```
 

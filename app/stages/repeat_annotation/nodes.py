@@ -32,11 +32,8 @@ from app.schemas.artifacts import (
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 
-REPEAT_LIBRARY_CANDIDATES = [
-    "repeat_annotation.library.edta",
-    "repeat_annotation.library.repeatmodeler",
-]
-REPEAT_HELPER_METHODS = ["repeat_annotation.helper.trf"]
+REPEAT_LIBRARY_CANDIDATES: list[str] = []
+REPEAT_HELPER_METHODS: list[str] = []
 REPEAT_MASKING_METHOD = "repeat_annotation.masking.repeatmasker"
 REPEAT_CONTRACT_METHOD = "repeat_annotation.contract"
 
@@ -504,7 +501,7 @@ def block_mask_review(state: TopLevelState) -> dict:
             "repeat_percentage": repeat_out.get("repeat_percentage"),
             "library_source": repeat_out.get("repeat_library_source"),
             "steps_run": ["repeatmasker"],
-            "steps_skipped": ["trf", "de_novo_library"],
+            "steps_skipped": ["de_novo_library"],
         }],
         decisions_allowed=["accept", "skip"],
         notes=repeat_out.get("notes", []),

@@ -49,7 +49,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             candidate_ref = self._candidate_bundle(
                 tmpdir,
                 candidate_id="s1:assembly.candidate.flye",
-                draft_ref=str(Path(tmpdir) / "planned_only.fasta"),
+                draft_ref=str(Path(tmpdir) / "candidate_only.fasta"),
             )
             state = self._state(tmpdir)
             state["stage_outputs"] = {

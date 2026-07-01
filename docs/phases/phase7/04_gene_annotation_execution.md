@@ -25,7 +25,7 @@ repeat_annotation / mask_review
 - `gene_annotation.candidate.miniprot`
 - `gene_annotation.candidate.augustus`
 
-仍为 planning-only 的方法：
+仍为 candidate-only 的方法：
 
 - `braker3`
 - `maker`

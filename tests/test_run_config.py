@@ -63,20 +63,27 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.nextdenovo_parameters.genome_size, 2_000_000)
         self.assertEqual(config.assembly.nextdenovo_parameters.threads, 4)
 
-    def test_local_planning_only_hifiasm_does_not_require_unrelated_executor_parameters(self):
+    def test_valid_config_with_hifiasm_parameters(self):
         config = RunConfig.model_validate(
             {
                 "local_exec": ["assembly"],
-                "assembly": {"assembly_method": "hifiasm", "assembly_route": "hifi"},
+                "assembly": {
+                    "assembly_method": "hifiasm",
+                    "hifiasm_parameters": {
+                        "read_type": "hifi",
+                        "threads": 4,
+                    },
+                },
             }
         )
 
         assert config.assembly is not None
         self.assertEqual(config.assembly.assembly_method, "hifiasm")
-        self.assertIsNone(config.assembly.flye_parameters)
-        self.assertIsNone(config.assembly.nextdenovo_parameters)
+        assert config.assembly.hifiasm_parameters is not None
+        self.assertEqual(config.assembly.hifiasm_parameters.read_type, "hifi")
+        self.assertEqual(config.assembly.hifiasm_parameters.threads, 4)
 
-    def test_local_planning_only_method_rejects_executor_parameters(self):
+    def test_local_hifiasm_method_requires_hifiasm_parameters(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
@@ -88,7 +95,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("planning-only", str(ctx.exception))
+        self.assertIn("hifiasm_parameters", str(ctx.exception))
 
     def test_local_assembly_with_two_parameter_sets_requires_explicit_method(self):
         with self.assertRaises(ValidationError) as ctx:
@@ -221,7 +228,7 @@ class RunConfigSchemaTests(unittest.TestCase):
 
         self.assertIn("min_len", str(ctx.exception))
 
-    def test_read_qc_planned_only_filter_cannot_be_approved(self):
+    def test_read_qc_unsupported_filter_method_is_rejected(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
                 {
@@ -235,7 +242,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("approved execution", str(ctx.exception))
+        self.assertIn("literal_error", str(ctx.exception))
 
     def test_assembly_review_quast_parameters_are_accepted(self):
         config = RunConfig.model_validate(
@@ -509,6 +516,11 @@ class RunConfigSchemaTests(unittest.TestCase):
         assert cfg.assembly_review is not None
         self.assertEqual(cfg.assembly_review.max_reruns, 5)
 
+    def test_assembly_review_related_species_reference_dir_accepted(self):
+        cfg = RunConfig.model_validate({"assembly_review": {"related_species_reference_dir": "/ref/ncbi_metazoa"}})
+        assert cfg.assembly_review is not None
+        self.assertEqual(cfg.assembly_review.related_species_reference_dir, "/ref/ncbi_metazoa")
+
     def test_assembly_review_max_reruns_default(self):
         cfg = RunConfig.model_validate({"assembly_review": {}})
         assert cfg.assembly_review is not None
@@ -520,17 +532,17 @@ class RunConfigSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RunConfig.model_validate({"assembly_review": {"max_reruns": 11}})
 
-    def test_function_annotation_database_provenance_accepted(self):
+    def test_function_annotation_database_provenance_accepts_diamond(self):
         cfg = RunConfig.model_validate({
             "function_annotation": {
                 "database_provenance": [
                     {
-                        "method_name": "function_annotation.candidate.interproscan",
-                        "database_name": "InterPro",
-                        "database_version": "99.0",
+                        "method_name": "function_annotation.candidate.diamond",
+                        "database_name": "UniProt",
+                        "database_version": "2026_02",
                         "snapshot_date": "2026-05-16",
-                        "database_source_ref": "/db/interpro/99.0",
-                        "descriptor_version": "interproscan.yaml",
+                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "descriptor_version": "diamond.yaml",
                         "input_proteins_ref": "/data/proteins.fa",
                     }
                 ]
@@ -538,7 +550,25 @@ class RunConfigSchemaTests(unittest.TestCase):
         })
         assert cfg.function_annotation is not None
         assert len(cfg.function_annotation.database_provenance) == 1
-        assert cfg.function_annotation.database_provenance[0].database_name == "InterPro"
+        assert cfg.function_annotation.database_provenance[0].database_name == "UniProt"
+
+    def test_function_annotation_rejects_deleted_provenance_methods(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate({
+                "function_annotation": {
+                    "database_provenance": [
+                        {
+                            "method_name": "function_annotation.candidate.interproscan",
+                            "database_name": "InterPro",
+                            "database_version": "99.0",
+                            "snapshot_date": "2026-05-16",
+                            "database_source_ref": "/db/interpro/99.0",
+                            "descriptor_version": "interproscan.yaml",
+                            "input_proteins_ref": "/data/proteins.fa",
+                        }
+                    ]
+                }
+            })
 
     def test_function_annotation_empty_database_provenance_rejected_by_run_config(self):
         with self.assertRaises(ValidationError):
@@ -580,12 +610,12 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "function_annotation": {
                         "database_provenance": [
                             {
-                                "method_name": "function_annotation.candidate.interproscan",
-                                "database_name": "InterPro",
-                                "database_version": "99.0",
+                                "method_name": "function_annotation.candidate.diamond",
+                                "database_name": "UniProt",
+                                "database_version": "2026_02",
                                 "snapshot_date": "2026-05-16",
                                 "database_source_ref": "",
-                                "descriptor_version": "interproscan.yaml",
+                                "descriptor_version": "diamond.yaml",
                                 "input_proteins_ref": "/data/proteins.fa",
                             }
                         ]

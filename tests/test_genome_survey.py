@@ -21,14 +21,12 @@ class GenomeSurveyDescriptorTests(unittest.TestCase):
     def test_descriptor_registry_loads_genome_survey_placeholders(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
-        for package_name in ["jellyfish", "meryl", "genomescope2", "smudgeplot"]:
+        for package_name in ["jellyfish", "genomescope2"]:
             self.assertIn(package_name, registry.packages)
 
         expected_methods = {
             "genome_survey.kmer_count.jellyfish",
-            "genome_survey.kmer_count.meryl",
             "genome_survey.model.genomescope2",
-            "genome_survey.model.smudgeplot",
         }
         self.assertTrue(expected_methods.issubset(set(registry.by_stage["genome_survey"])))
 

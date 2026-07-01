@@ -195,7 +195,6 @@ def _parse_set_params(raw: list[str]) -> dict[str, str]:
 _ROLE_LABELS = {
     "executable": "run",
     "dependency": "dep",
-    "planned_only": "plan-only",
 }
 
 _PARAM_HINTS: dict[str, str] = {
@@ -390,28 +389,20 @@ def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any])
     roles = summary.get("stage_roles") or {}
     role = roles.get(stage)
     selected = _selected_methods_for_stage(plan, stage)
-    statuses = summary.get("method_execution_status") or {}
     if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
         return "method needed before locking"
-    if selected and all(statuses.get(method) == "executable" for method in selected):
-        return "will run locally"
-    if selected and any(statuses.get(method) == "executable" for method in selected):
-        return "partly local; some selected methods are not locally executable"
     if selected:
-        return "included, but not locally executable in this run"
+        return "will run locally"
     if role == "dependency":
         return "included as a dependency"
-    if role == "planned_only":
-        return "included for planning"
     return "included"
 
 
 def _draft_stage_method_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
     selected = _selected_methods_for_stage(plan, stage)
-    statuses = summary.get("method_execution_status") or {}
     if not selected and stage in _STAGES_NEEDING_METHOD_SELECTION:
         return ["missing"]
-    return [f"{method}{_method_tag(statuses.get(method, ''))}" for method in selected]
+    return list(selected)
 
 
 def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
@@ -623,7 +614,6 @@ def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
                 stage: [
                     {
                         "method_name": m["method_name"],
-                        "execution_support": m["execution_support"],
                         "selection_role": m.get("selection_role"),
                         "display_name": m.get("display_name"),
                     }
@@ -802,7 +792,6 @@ def _render_plan_summary(
             print(f"  [{label:>9}] {stage}")
 
     methods = summary.get("selected_methods", {})
-    exec_status = summary.get("method_execution_status", {})
     method_note = "  (recommended)" if draft is not None else ""
     if preview and order:
         print("\nMethods:")
@@ -813,13 +802,13 @@ def _render_plan_summary(
                 continue
             method_list = value if isinstance(value, list) else [value]
             for m in method_list:
-                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}{method_note}")
+                print(f"  {stage}: {m}{method_note}")
     elif methods:
         print("\nMethods:")
         for stage, value in methods.items():
             method_list = value if isinstance(value, list) else [value]
             for m in method_list:
-                print(f"  {stage}: {m}{_method_tag(exec_status.get(m, ''))}")
+                print(f"  {stage}: {m}")
 
     missing_fields = list(summary.get("missing_parameter_fields") or [])
     shared_defaults = summary.get("shared_parameter_defaults", {}) if preview else {}
@@ -892,14 +881,6 @@ def _render_plan_summary(
     print("=" * 50)
     if preview and draft is None:
         print("Advisory preview. Remaining choices and a final confirmation follow.")
-
-
-def _method_tag(status: str) -> str:
-    if status == "executable":
-        return " [local]"
-    if status == "planned_only":
-        return " [deferred]"
-    return ""
 
 
 def _render_preview_parameters(
@@ -1058,8 +1039,7 @@ def _render_stage_plan_details(details: list[dict[str, Any]]) -> None:
         if methods:
             for method in methods:
                 method_name = method.get("method", "?")
-                execution = _method_tag(str(method.get("execution_support") or ""))
-                print(f"    method: {method_name}{execution}")
+                print(f"    method: {method_name}")
                 params = method.get("parameters") or {}
                 missing = method.get("missing_parameters") or []
                 if params:
@@ -1162,15 +1142,13 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
     methods_by_stage = req.choices.get("methods_by_stage", {})
     selected: dict[str, str | list[str]] = {}
 
-    print("\n--- Step 2: Method Selection ---")
-    print("  [local] = runs on this machine  [deferred] = planned for HPC/cloud\n")
+    print("\n--- Step 2: Method Selection ---\n")
 
     for stage, methods in methods_by_stage.items():
         method_names = [m["method_name"] for m in methods]
         if stage == "read_qc":
             selected[stage] = _prompt_read_qc_filter_choice(methods, req.choices.get("defaults", {}).get(stage))
             continue
-        executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
         requested_default = req.choices.get("defaults", {}).get(stage)
         if isinstance(requested_default, list):
             default_checked = [m for m in requested_default if m in method_names]
@@ -1182,15 +1160,13 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
         # its interactive choice singular even though other stages may run
         # several methods in one pass.
         if not default_checked:
-            default_checked = executable[:1] if stage == "assembly" else (executable or method_names[:1])
+            default_checked = method_names[:1]
 
         if _HAS_QUESTIONARY:
             choices = []
             for m in methods:
-                support = m.get("execution_support", "")
-                suffix = " [local]" if support == "executable" else " [deferred]"
                 choices.append(questionary.Choice(
-                    f"{m['method_name']}{suffix}",
+                    m["method_name"],
                     value=m["method_name"],
                     checked=(m["method_name"] in default_checked),
                 ))
@@ -1199,7 +1175,7 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
                     f"Primary method for {stage}:",
                     choices=choices,
                     default=default_checked[0],
-                    instruction="(choose one executable or planning-only primary)",
+                    instruction="(choose one primary)",
                 ))
             else:
                 answer = _safe_ask(questionary.checkbox(
@@ -1213,10 +1189,8 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
         else:
             print(f"  Methods for [{stage}]:")
             for i, m in enumerate(methods, 1):
-                support = m.get("execution_support", "")
-                label = " [local]" if support == "executable" else " [deferred]"
                 marker = "*" if m["method_name"] in default_checked else " "
-                print(f"    {marker} {i}. {m['method_name']}{label}")
+                print(f"    {marker} {i}. {m['method_name']}")
             prompt = "Choose one number or name" if stage == "assembly" else "Enter numbers or names"
             print(f"\n  {prompt}. Enter = {', '.join(default_checked)}:")
             raw = input(f"  {stage}> ").strip()
@@ -1377,9 +1351,6 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
 
     _METHOD_LABELS = {
         "function_annotation.candidate.diamond": "DIAMOND",
-        "function_annotation.candidate.interproscan": "InterProScan",
-        "function_annotation.candidate.eggnog_mapper": "eggNOG-mapper",
-        "function_annotation.candidate.kofamscan": "KOfamScan",
     }
 
     records: list[dict[str, Any]] = []

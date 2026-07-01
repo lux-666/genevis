@@ -11,15 +11,15 @@ durable resume, assembly_review gate). The annotation half does not:
 
 - `repeat_annotation` executes RepeatMasker against a **provided** repeat
   library and publishes a mask-reviewable softmasked genome bundle. De novo
-  library build (EDTA / RepeatModeler) and TRF remain planning-only.
+  library build (EDTA / RepeatModeler) and TRF remain candidate-only.
 - `gene_annotation` has executable runners for Miniprot and AUGUSTUS, candidate
   bundles, EVM/single-candidate merge, gffread materialization, BUSCO, and final
   gene set review. BRAKER3, MAKER, GeMoMa, and RNA-seq helpers remain
-  planning-only. Real-data smoke validation is pending in task 08.
+  candidate-only. Real-data smoke validation is pending in task 08.
 - `function_annotation` has an executable DIAMOND runner and no longer
   publishes GO/KEGG/Pfam placeholder refs as if they were materialized outputs.
   It now records DIAMOND in a FunctionMethodResult; InterProScan,
-  eggNOG-mapper, and KofamScan remain planning-only. Real-data smoke validation
+  eggNOG-mapper, and KofamScan remain candidate-only. Real-data smoke validation
   is pending in task 08.
 - `assembly_review` has the full review-policy path, and `hic_scaffolding`
   already has a partial gate/resume path. The remaining downstream review points
@@ -33,12 +33,12 @@ Phase 7 makes the annotation half real **and** review-driven.
 1. **Execution landing** — give annotation methods real runners
    (runner + freeze + collect, mirroring `run_flye_attempt` / `run_yahs_attempt`
    + `LocalRunner`), flipping each method's registry `execution_support` from
-   `planned_only` to `executable`.
+   `candidate_only` to `executable`.
 2. **Review-chain landing** — stand up the chain of human/auto review gates the
    annotation agent needs, reusing the existing policy/timeout/recommender
    mechanism.
 
-These are decoupled because a review gate can be exercised over a planning-only
+These are decoupled because a review gate can be exercised over a candidate-only
 method (a candidate can be reviewed before it can actually run). The review
 chain can therefore go first, with execution slices filling in behind it.
 

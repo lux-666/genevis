@@ -3,7 +3,6 @@ stage: gene_annotation
 package_ref: miniprot
 goal: "Plan Miniprot protein homology evidence mapping without execution."
 category: homology
-execution_status: local
 recommended_default: true_if_protein_reference_available
 required_inputs:
   - name: genome_fasta_ref

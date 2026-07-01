@@ -58,6 +58,8 @@ def route_after_plan(state: TopLevelState) -> str:
         return "flye"
     if status == "nextdenovo_execution_planned":
         return "nextdenovo"
+    if status == "hifiasm_execution_planned":
+        return "hifiasm"
     return "commit"
 
 

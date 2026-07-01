@@ -20,9 +20,7 @@ from app.stages.base import stage_output, update_stage_output
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
-    "genome_survey.kmer_count.meryl",
     "genome_survey.model.genomescope2",
-    "genome_survey.model.smudgeplot",
 ]
 EXECUTED_FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",

@@ -29,6 +29,8 @@ ASSEMBLY_REVIEW_ACTION = "assembly_review.action"
 ASSEMBLY_REVIEW_REPORT = "assembly_review.report"
 ASSEMBLY_REVIEW_REPORT_DATA = "assembly_review.report_data"
 ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK = "assembly_review.related_species_evidence_pack"
+ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK = "assembly_review.related_species_statistics_pack"
+ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK = "assembly_review.comparative_notebook"
 ASSEMBLY_CANDIDATE_COMPARISON = "assembly_review.candidate_comparison"
 ASSEMBLY_CANDIDATE_COMPARISON_REPORT = "assembly_review.candidate_comparison_report"
 HIC_SCAFFOLD_PLAN = "hic_scaffolding.plan"
@@ -379,10 +381,13 @@ class CandidateBundle(BaseModel):
     status: Literal["materialized", "materialization_failed"] = "materialized"
 
 
+FunctionAnnotationProvenanceMethod = Literal["function_annotation.candidate.diamond"]
+
+
 class FunctionDatabaseProvenance(BaseModel):
     """Database provenance required for planned function annotation."""
 
-    method_name: str
+    method_name: FunctionAnnotationProvenanceMethod
     database_name: str
     database_version: str
     snapshot_date: str

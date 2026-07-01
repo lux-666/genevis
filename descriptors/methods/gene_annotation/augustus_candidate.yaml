@@ -3,7 +3,6 @@ stage: gene_annotation
 package_ref: augustus
 goal: "Plan AUGUSTUS ab initio gene prediction without execution."
 category: ab_initio
-execution_status: local
 recommended_default: false
 required_inputs:
   - name: genome_fasta_ref

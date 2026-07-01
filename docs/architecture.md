@@ -91,7 +91,7 @@ hard to resume when these facts are mixed.
 
 ## Stage Shape
 
-Executable stages use the following shape; planning-only methods may stop after
+Executable stages use the following shape; candidate-only methods may stop after
 their planning/review nodes:
 
 ```text

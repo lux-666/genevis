@@ -1,7 +1,7 @@
 # Stage Contracts
 
 This document defines the stable biological stage boundaries and the contracts
-used by both executable and planning-only method subgraphs.
+used by both executable and candidate-only method subgraphs.
 
 ## Shared Stage Shape
 
@@ -398,7 +398,7 @@ Review triggers (named, emitted by `_review_triggers`):
   unmasked final assembly.
 - `species_or_training_policy_required` — no evidence profile (ab initio only).
 - predicted gene count far outside expected range and EVM failures/dropped
-  evidence classes are future real-runner triggers; planning-only does not emit
+  evidence classes are future real-runner triggers; candidate-only does not emit
   them.
 
 ### Adoption path (provided annotation assets present)

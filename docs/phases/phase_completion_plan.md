@@ -92,7 +92,7 @@ Exit criteria:
 ## Phase 7: Annotation Execution And The Review-Driven Annotation Agent
 
 Goal: make the annotation half of the workflow real. Today `gene_annotation`
-and `function_annotation` are planning-only, `repeat_annotation` executes only
+and `function_annotation` are candidate-only, `repeat_annotation` executes only
 RepeatMasker against a provided library, `assembly_review` has the full review
 path, and `hic_scaffolding` already has a partial gate/resume path. Phase 7
 turns the downstream stages into a **review-driven annotation agent**: real tool
@@ -129,7 +129,7 @@ Tasks in `docs/phases/phase7/` (subjects first; specifics deferred):
    `annotation.intake_plan`, then stand up the gate skeleton for the full path —
    mask review → gene-method planning review → candidate-evidence review →
    merge/EVM-weight review → final-gene-set + BUSCO review — initially over
-   planning-only methods so the chain is exercised before execution lands.
+   candidate-only methods so the chain is exercised before execution lands.
 4. Gene annotation execution slices: real runners for the gene predictors one
    method at a time (e.g. an ab-initio path first), mirroring the Flye/YaHS
    runner pattern, each flipping its registry `execution_support` to executable.

@@ -10,7 +10,7 @@
 
 - `function_annotation.candidate.diamond`
 
-仍为 planning-only：
+仍为 candidate-only：
 
 - `interproscan`
 - `eggnog_mapper`

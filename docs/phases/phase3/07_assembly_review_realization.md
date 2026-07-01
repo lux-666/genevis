@@ -57,7 +57,7 @@ Decision artifacts/method roles:
 
 - [x] Keep `assembly_review` as the existing review/evaluation stage; no top-level `assembly_qc` stage is added.
 - [x] Add one explicit local evaluation route for materialized draft assemblies: QUAST.
-- [x] Keep default review behavior planning-only unless `stage_outputs.assembly_review.execution_mode == "local"` is explicitly set.
+- [x] Keep default review behavior candidate-only unless `stage_outputs.assembly_review.execution_mode == "local"` is explicitly set.
 - [x] Register QUAST report artifacts, command stdout/stderr, updated evaluation bundle, and ledger attempt events.
 - [x] Update candidate-specific QUAST review signals to `available`, `failed`, or `missing` without applying thresholds.
 - [x] Preserve the human review gate for generated assembly candidates even when QUAST metrics are available.

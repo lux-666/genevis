@@ -30,12 +30,10 @@ FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
 _ASSEMBLY_METHODS_NEED_SHARED_GENOME_SIZE = {
     "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
-    "assembly.candidate.canu",
 }
 _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
     "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
-    "assembly.candidate.canu",
     "assembly.candidate.hifiasm",
 }
 _GENOME_SURVEY_EXECUTABLE_METHODS = {
@@ -66,9 +64,6 @@ READ_QC_HANDOFF_METHOD = "read_qc.make_fofn.local"
 READ_QC_FILTER_METHODS = [
     READ_QC_FILTER_SKIP,
     READ_QC_FILTER_SEQKIT,
-    "read_qc.length_filter.chopper",
-    "read_qc.length_filter.filtlong",
-    "read_qc.length_filter.fastplong",
 ]
 READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
 
@@ -76,14 +71,12 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "read_qc": [
         {
             "method_name": READ_QC_STATS_METHOD,
-            "execution_support": "executable",
             "required_parameters": [],
             "parameter_defaults": {},
             "selection_role": "always",
         },
         {
             "method_name": READ_QC_FILTER_SKIP,
-            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
             "selection_role": "length_filter",
@@ -91,35 +84,12 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": READ_QC_FILTER_SEQKIT,
-            "execution_support": "executable",
             "required_parameters": ["min_len"],
             "parameter_defaults": {},
             "selection_role": "length_filter",
         },
         {
-            "method_name": "read_qc.length_filter.chopper",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "length_filter",
-        },
-        {
-            "method_name": "read_qc.length_filter.filtlong",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "length_filter",
-        },
-        {
-            "method_name": "read_qc.length_filter.fastplong",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "length_filter",
-        },
-        {
             "method_name": READ_QC_HANDOFF_METHOD,
-            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
             "selection_role": "always",
@@ -128,97 +98,47 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "genome_survey": [
         {
             "method_name": "genome_survey.kmer_count.jellyfish",
-            "execution_support": "executable",
             "required_parameters": ["kmer_size", "hash_size", "threads"],
             "parameter_defaults": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
         },
         {
             "method_name": "genome_survey.model.genomescope2",
-            "execution_support": "executable",
             "required_parameters": ["kmer_size"],
             "parameter_defaults": {"kmer_size": 21},
-        },
-        {
-            "method_name": "genome_survey.kmer_count.meryl",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "genome_survey.model.smudgeplot",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
         },
     ],
     "assembly": [
         {
             "method_name": "assembly.candidate.flye",
-            "execution_support": "executable",
             "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 4},
         },
         {
             "method_name": "assembly.candidate.nextdenovo",
-            "execution_support": "executable",
             "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 4},
         },
         {
-            "method_name": "assembly.candidate.canu",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
             "method_name": "assembly.candidate.hifiasm",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 4},
         },
     ],
     "assembly_review": [
         {
             "method_name": "assembly_review.eval.quast",
-            "execution_support": "executable",
             "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 4},
         },
         {
             "method_name": "assembly_review.eval.busco",
-            "execution_support": "executable",
             "required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"],
             "parameter_defaults": {"threads": 8},
-        },
-        {
-            "method_name": "assembly_review.eval.merqury",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "assembly_review.eval.mapping_coverage",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "assembly_review.check.contamination",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "assembly_review.check.purge_dups",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
         },
     ],
     "hic_scaffolding": [
         {
             "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-            "execution_support": "executable",
             "required_parameters": ["input_mode", "chromosome_count"],
             "conditional_required_parameters": [
                 {
@@ -234,7 +154,6 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": "hic_scaffolding.candidate.yahs",
-            "execution_support": "executable",
             "required_parameters": ["hic_alignment_ref"],
             "parameter_defaults": {},
         },
@@ -242,7 +161,6 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "t2t": [
         {
             "method_name": "t2t.alignment.minimap2",
-            "execution_support": "executable",
             "required_parameters": [
                 "mode",
                 "telomere_motif",
@@ -268,120 +186,27 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
     "repeat_annotation": [
         {
             "method_name": "repeat_annotation.masking.repeatmasker",
-            "execution_support": "executable",
             "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 8},
-        },
-        {
-            "method_name": "repeat_annotation.library.edta",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "repeat_annotation.library.repeatmodeler",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "repeat_annotation.helper.trf",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
         },
     ],
     "gene_annotation": [
         {
             "method_name": "gene_annotation.candidate.augustus",
-            "execution_support": "executable",
             "category": "ab_initio",
             "required_parameters": [],
             "parameter_defaults": {},
         },
         {
-            "method_name": "gene_annotation.candidate.annevo",
-            "execution_support": "planned_only",
-            "category": "ab_initio_deep_learning",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
             "method_name": "gene_annotation.candidate.miniprot",
-            "execution_support": "executable",
             "category": "homology",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.candidate.genewise",
-            "execution_support": "planned_only",
-            "category": "homology_high_accuracy",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.candidate.gemoma",
-            "execution_support": "planned_only",
-            "category": "homology_reference_annotation",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.candidate.braker3",
-            "execution_support": "planned_only",
-            "category": "evidence_guided_ab_initio",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.candidate.maker",
-            "execution_support": "planned_only",
-            "category": "integration_pipeline",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.helper.hisat2",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.helper.stringtie",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.helper.isoquant",
-            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
         },
     ],
     "function_annotation": [
         {
-            "method_name": "function_annotation.candidate.interproscan",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "function_annotation.candidate.eggnog_mapper",
-            "execution_support": "planned_only",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
             "method_name": "function_annotation.candidate.diamond",
-            "execution_support": "executable",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "function_annotation.candidate.kofamscan",
-            "execution_support": "planned_only",
             "required_parameters": [],
             "parameter_defaults": {},
         },
@@ -431,7 +256,7 @@ def _all_known_methods() -> set[str]:
 
 
 def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
-    return [m for m in _STAGE_METHODS.get(stage, []) if m["execution_support"] == "executable"]
+    return _STAGE_METHODS.get(stage, [])
 
 
 def _auto_fill_pipeline_methods(execution_order: list[str]) -> dict[str, str | list[str]]:
@@ -625,7 +450,7 @@ def merge_clarification_response(plan: AskPlanState, response: AskClarificationR
 def build_run_config_payload(plan: AskPlanState) -> dict[str, Any]:
     local_stages = []
     for stage in plan.resolved_execution_order or []:
-        if _stage_has_executable_method(plan, stage):
+        if _stage_has_method(plan, stage):
             local_stages.append(stage)
 
     payload: dict[str, Any] = {"local_exec": local_stages}
@@ -672,11 +497,7 @@ def _build_assembly_execution_config(
 
     selected = (plan.selected_methods or {}).get("assembly")
     methods = selected if isinstance(selected, list) else [selected] if selected else []
-    executable = [
-        method
-        for method in methods
-        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
-    ]
+    executable = list(methods)
     if len(executable) != 1:
         raise ValueError(
             "assembly local execution requires exactly one executable method selection"
@@ -693,11 +514,16 @@ def _build_assembly_execution_config(
         if method_read_type:
             params.setdefault("read_type", method_read_type)
         if shared.estimated_genome_size:
-            genome_key = "estimated_genome_size" if config_method == "flye" else "genome_size"
-            params.setdefault(genome_key, shared.estimated_genome_size)
+            if config_method == "flye":
+                params.setdefault("estimated_genome_size", shared.estimated_genome_size)
+            elif config_method == "nextdenovo":
+                params.setdefault("genome_size", shared.estimated_genome_size)
 
     parameter_key = f"{config_method}_parameters"
-    return {"assembly_method": config_method, parameter_key: params}
+    config: dict[str, Any] = {"assembly_method": config_method, parameter_key: params}
+    if config_method == "hifiasm":
+        config["assembly_route"] = "hifi"
+    return config
 
 
 def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
@@ -733,13 +559,8 @@ def _hic_scaffolding_plan_candidates(plan: AskPlanState) -> list[HiCScaffoldingP
     """Represent selected methods as permissive plan candidates before execution."""
     selected = (plan.selected_methods or {}).get("hic_scaffolding")
     methods = selected if isinstance(selected, list) else [selected] if selected else []
-    executable = [
-        method
-        for method in methods
-        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
-    ]
     candidates: list[HiCScaffoldingPlanCandidate] = []
-    for method in executable:
+    for method in methods:
         params = dict((plan.method_parameters or {}).get(method) or {})
         if method.endswith("juicer_3ddna_juicebox"):
             tool_keys = {
@@ -793,8 +614,8 @@ def clarification_template(request: AskClarificationRequest) -> dict[str, Any]:
             if default:
                 selected[stage] = default
                 continue
-            executable = [m["method_name"] for m in methods if m.get("execution_support") == "executable"]
-            selected[stage] = executable[0] if executable else (methods[0]["method_name"] if methods else "")
+            executable = [m["method_name"] for m in methods]
+            selected[stage] = executable[0] if executable else ""
         return {"kind": "method_selection", "selected_methods": selected}
     if request.kind == "parameter_values":
         defaults = dict(request.choices.get("defaults", {}))
@@ -835,7 +656,6 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
             methods_by_stage[stage] = [
                 {
                     "method_name": m["method_name"],
-                    "execution_support": m["execution_support"],
                     "selection_role": m.get("selection_role"),
                     "display_name": m.get("display_name"),
                 }
@@ -875,7 +695,7 @@ def _parameter_values_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
         all_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
-        if not cap or cap["execution_support"] != "executable":
+        if not cap:
             continue
         for param in cap["required_parameters"]:
             all_fields.append(f"{method}.{param}")
@@ -982,12 +802,6 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     hic_candidates = _hic_scaffolding_plan_candidates(plan)
     if hic_candidates:
         summary["hic_scaffolding_plan_candidates"] = [candidate.model_dump(mode="json") for candidate in hic_candidates]
-    method_status: dict[str, str] = {}
-    for stage, method in _iter_selected_methods(plan):
-        cap = _get_method_descriptor(method)
-        method_status[method] = cap["execution_support"] if cap else "unknown"
-    if method_status:
-        summary["method_execution_status"] = method_status
     warnings = [*param_warnings, *_plan_validation_warnings(plan)]
     if warnings:
         summary["warnings"] = warnings
@@ -1096,7 +910,6 @@ def _stage_plan_details(
         selected_methods = selected if isinstance(selected, list) else [selected] if selected else []
         stage_methods: list[dict[str, Any]] = []
         for method in selected_methods:
-            cap = _get_method_descriptor(method) or {}
             method_missing = [
                 field[len(method) + 1:]
                 for field in missing_fields
@@ -1105,7 +918,6 @@ def _stage_plan_details(
             stage_methods.append(
                 {
                     "method": method,
-                    "execution_support": cap.get("execution_support", "unknown"),
                     "parameters": dict(parameter_defaults.get(method) or {}),
                     "missing_parameters": method_missing,
                 }
@@ -1275,11 +1087,7 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
             if READ_QC_HANDOFF_METHOD not in method_list:
                 raise ValueError(f"read_qc method selection requires {READ_QC_HANDOFF_METHOD}")
         if stage == "genome_survey":
-            executable = {
-                method
-                for method in method_list
-                if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
-            }
+            executable = set(method_list)
             if executable and executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
                 raise ValueError(
                     "genome_survey executable selection requires both "
@@ -1339,6 +1147,10 @@ def _build_function_annotation_config(plan: AskPlanState) -> dict[str, Any] | No
     params = (plan.stage_parameters or {}).get("function_annotation") or {}
     provenance = params.get("database_provenance")
     if not provenance:
+        methods = (plan.selected_methods or {}).get("function_annotation")
+        method_list = methods if isinstance(methods, list) else [methods] if methods else []
+        if plan.confirmed and FUNCTION_ANNOTATION_DIAMOND_METHOD in method_list:
+            raise ValueError("function_annotation.database_provenance is required for DIAMOND execution")
         return None
     return {"database_provenance": provenance}
 
@@ -1398,7 +1210,7 @@ def _needs_parameter_values(plan: AskPlanState) -> bool:
         return True
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
-        if not cap or cap["execution_support"] != "executable":
+        if not cap:
             continue
         if cap["required_parameters"]:
             provided = (plan.method_parameters or {}).get(method, {})
@@ -1453,7 +1265,7 @@ def _missing_parameters_and_defaults(
         missing_fields.append("shared_parameters.estimated_genome_size")
     for stage, method in _iter_selected_methods(plan):
         cap = _get_method_descriptor(method)
-        if not cap or cap["execution_support"] != "executable":
+        if not cap:
             continue
         provided = (plan.method_parameters or {}).get(method, {})
         inferred, method_warnings = _infer_parameter_defaults(plan, method, cap, manifest=manifest)
@@ -1638,11 +1450,7 @@ def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
         return False
     selected = (plan.selected_methods or {}).get("genome_survey")
     method_list = selected if isinstance(selected, list) else [selected] if selected else []
-    executable = {
-        method
-        for method in method_list
-        if (_get_method_descriptor(method) or {}).get("execution_support") == "executable"
-    }
+    executable = set(method_list)
     if executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
         return False
     manifest = _load_manifest(plan.manifest_ref)
@@ -1672,42 +1480,30 @@ def _method_specific_shared_overrides(plan: AskPlanState) -> dict[str, Any]:
     return shared
 
 
-def _stage_has_executable_method(plan: AskPlanState, stage: str) -> bool:
+def _stage_has_method(plan: AskPlanState, stage: str) -> bool:
     if stage == "read_qc":
         return stage in (plan.resolved_execution_order or []) or stage in (plan.selected_stages or [])
     value = (plan.selected_methods or {}).get(stage)
     if not value:
         return _STAGE_SELECTION_MODE.get(stage) == "pipeline"
     methods = value if isinstance(value, list) else [value]
-    return any(
-        (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "executable"
-        for m in methods
-    )
+    return any(_get_method_descriptor(m) is not None for m in methods)
 
 
 def _classify_stage_roles(plan: AskPlanState) -> dict[str, str]:
-    """Label each stage in execution order as executable, dependency, or planned_only."""
+    """Label each stage in execution order as executable or dependency."""
     selected = set(plan.selected_stages or [])
     roles: dict[str, str] = {}
     for stage in plan.resolved_execution_order or []:
-        if _stage_has_executable_method(plan, stage):
+        if _stage_has_method(plan, stage):
             if stage in selected:
                 roles[stage] = "executable"
             else:
                 roles[stage] = "dependency"
+        elif stage not in selected:
+            roles[stage] = "dependency"
         else:
-            value = (plan.selected_methods or {}).get(stage)
-            methods = value if isinstance(value, list) else [value] if value else []
-            has_planned = any(
-                (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "planned_only"
-                for m in methods
-            )
-            if has_planned:
-                roles[stage] = "planned_only"
-            elif stage not in selected:
-                roles[stage] = "dependency"
-            else:
-                roles[stage] = "executable"
+            roles[stage] = "executable"
     return roles
 
 
@@ -1738,17 +1534,6 @@ def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
                 "function_annotation: no gene_annotation upstream and no "
                 "predicted_proteins/gene_models in manifest; stage will fail without protein input"
             )
-    for stage in order:
-        methods = (plan.selected_methods or {}).get(stage)
-        if not methods:
-            continue
-        method_list = methods if isinstance(methods, list) else [methods]
-        all_planned = all(
-            (cap := _get_method_descriptor(m)) is not None and cap["execution_support"] == "planned_only"
-            for m in method_list
-        )
-        if all_planned:
-            warnings.append(f"{stage}: all selected methods are planned_only (execution deferred, not local)")
     return warnings
 
 

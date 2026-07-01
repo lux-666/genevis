@@ -29,25 +29,21 @@ SHARED_TO_METHOD_READ_TYPE = {
     "ont_raw": {
         "flye": "nano-raw",
         "nextdenovo": "ont",
-        "canu": "nanopore",
         "hifiasm": "ont",
     },
     "ont_hq": {
         "flye": "nano-hq",
         "nextdenovo": "ont",
-        "canu": "nanopore",
         "hifiasm": "ont",
     },
     "pacbio_clr": {
         "flye": "pacbio-raw",
         "nextdenovo": "clr",
-        "canu": "pacbio",
         "hifiasm": "not_preferred",
     },
     "pacbio_hifi": {
         "flye": "pacbio-hifi",
         "nextdenovo": "hifi",
-        "canu": "pacbio-hifi",
         "hifiasm": "hifi",
     },
 }

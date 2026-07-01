@@ -57,11 +57,9 @@ class MethodDescriptor(BaseModel):
     resource_hints: ResourceHints = Field(default_factory=ResourceHints)
     # Gene-annotation taxonomy / candidate-bundle contract (all optional so
     # existing descriptors stay valid). category groups methods (ab_initio,
-    # homology, integration, merge); execution_status records whether a method
-    # runs locally today or is a deferred placeholder; materialize_outputs lists
-    # the standardized candidate files the method must produce on disk.
+    # homology, integration, merge); materialize_outputs lists the standardized
+    # candidate files the method must produce on disk.
     category: str | None = None
-    execution_status: str | None = None
     recommended_default: str | bool | None = None
     materialize_outputs: list[str] = Field(default_factory=list)
     readiness_rules: list[str] = Field(default_factory=list)

@@ -27,10 +27,7 @@ class RepeatAnnotationDescriptorTests(unittest.TestCase):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         expected = {
-            "repeat_annotation.library.edta": "edta",
-            "repeat_annotation.library.repeatmodeler": "repeatmodeler",
             "repeat_annotation.masking.repeatmasker": "repeatmasker",
-            "repeat_annotation.helper.trf": "trf",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -285,9 +282,8 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(repeat["strategy"], "de_novo")
             self.assertEqual(repeat["repeat_library_source"], "de_novo")
-            self.assertIn("repeat_annotation.library.edta", repeat["library_candidate_methods"])
-            self.assertIn("repeat_annotation.library.repeatmodeler", repeat["library_candidate_methods"])
-            self.assertIn("repeat_annotation.helper.trf", repeat["helper_methods"])
+            self.assertEqual(repeat["library_candidate_methods"], [])
+            self.assertEqual(repeat["helper_methods"], [])
             self.assertIn("repeat_annotation.masking.repeatmasker", repeat["candidate_methods"])
             self.assertTrue(repeat["method_selection_required"])
             self.assertNotIn("primary_method", repeat)

@@ -37,10 +37,6 @@ class AssemblyReviewDescriptorTests(unittest.TestCase):
         expected = {
             "assembly_review.eval.quast": "quast",
             "assembly_review.eval.busco": "busco",
-            "assembly_review.eval.merqury": "merqury",
-            "assembly_review.eval.mapping_coverage": "minimap2",
-            "assembly_review.check.purge_dups": "purge_dups",
-            "assembly_review.check.contamination": "minimap2",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -826,9 +822,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
             result = graph.invoke(state)
             ar_out = result["stage_outputs"]["assembly_review"]
             planned = ar_out.get("planned_signals", [])
-            self.assertIn("merqury", planned)
-            self.assertIn("mapping_coverage", planned)
-            self.assertIn("purge_dups_check", planned)
+            self.assertEqual(planned, ["quast", "busco"])
+            self.assertNotIn("merqury", planned)
+            self.assertNotIn("mapping_coverage", planned)
+            self.assertNotIn("purge_dups_check", planned)
             eval_payload = json.loads(Path(ar_out["eval_bundle_ref"]).read_text(encoding="utf-8"))
             self.assertIn("clean_short_dna_reads", eval_payload["available_inputs"])
 
@@ -971,18 +968,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/x.tsv"]},
             ],
         }
-        ar_out_contam = {
-            "candidates": [{"candidate_id": "flye_01"}],
-            "signals": [
-                {"signal_name": "quast", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/q.tsv"]},
-                {"signal_name": "busco", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/b.json"]},
-                {"signal_name": "contamination_check", "candidate_id": "flye_01", "status": "available", "metric_refs": ["/c.tsv"]},
-            ],
-        }
         self.assertFalse(_assembly_review_auto_decidable(ar_out_pending))
         self.assertFalse(_assembly_review_auto_decidable(ar_out_no_metrics))
         self.assertFalse(_assembly_review_auto_decidable(ar_out_no_candidates))
-        self.assertFalse(_assembly_review_auto_decidable(ar_out_contam))
 
     def test_auto_decidable_false_does_not_call_recommender(self):
         with tempfile.TemporaryDirectory() as tmpdir:

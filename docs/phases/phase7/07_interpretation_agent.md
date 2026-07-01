@@ -14,7 +14,7 @@ narrative an operator can read, rather than a pile of files.
 - No stage exists for this; it is a wholly new terminal capability, not a
   retrofit onto `function_annotation`.
 - It depends on the annotation agent producing real, reviewed outputs first
-  (tasks 01-06). Interpreting planning-only placeholders has no value.
+  (tasks 01-06). Interpreting candidate-only placeholders has no value.
 
 ## Rough Shape (to be designed later)
 

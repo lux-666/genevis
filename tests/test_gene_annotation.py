@@ -85,14 +85,8 @@ class GeneAnnotationDescriptorTests(unittest.TestCase):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         expected = {
-            "gene_annotation.candidate.braker3": "braker3",
-            "gene_annotation.candidate.maker": "maker",
             "gene_annotation.candidate.augustus": "augustus",
             "gene_annotation.candidate.miniprot": "miniprot",
-            "gene_annotation.candidate.gemoma": "gemoma",
-            "gene_annotation.helper.hisat2": "hisat2",
-            "gene_annotation.helper.stringtie": "stringtie",
-            "gene_annotation.helper.isoquant": "isoquant",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -194,7 +188,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertTrue(Path(gene["plan_artifact_ref"]).exists())
             self.assertTrue(Path(gene["bundle_artifact_ref"]).exists())
             plan = json.loads(Path(gene["plan_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertFalse(plan["metadata"]["execution_enabled"])
+            self.assertTrue(plan["metadata"]["execution_enabled"])
 
     def test_provided_gene_annotation_adopts_real_artifacts_without_planned_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -289,10 +283,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "rnaseq")
-            self.assertIn("gene_annotation.helper.hisat2", gene["helper_methods"])
-            self.assertIn("gene_annotation.helper.stringtie", gene["helper_methods"])
-            self.assertIn("gene_annotation.candidate.braker3", gene["candidate_methods"])
-            self.assertIn("gene_annotation.candidate.maker", gene["candidate_methods"])
+            self.assertEqual(gene["helper_methods"], [])
             self.assertIn("gene_annotation.candidate.augustus", gene["candidate_methods"])
 
     def test_long_rna_evidence_adds_isoquant(self):
@@ -308,8 +299,8 @@ class GeneAnnotationStageTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["evidence_profile"], "long_rna")
-            self.assertIn("gene_annotation.helper.isoquant", gene["helper_methods"])
-            self.assertIn("gene_annotation.candidate.braker3", gene["candidate_methods"])
+            self.assertEqual(gene["helper_methods"], [])
+            self.assertIn("gene_annotation.candidate.augustus", gene["candidate_methods"])
 
     def test_genome_long_reads_do_not_enable_isoquant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -482,7 +473,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 gate = get_review_gate("gene_annotation", gate_id)
                 self.assertEqual(gate.gate_id, gate_id)
 
-    def test_planning_only_auto_chain_runs_enter_to_commit(self):
+    def test_auto_chain_runs_executable_methods_enter_to_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             result = build_stage().invoke(self._softmasked_state(tmpdir, str(registry)))
@@ -525,11 +516,24 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             update = resume_review_state(resume_state, request)
             self.assertEqual(update["stage_outputs"]["gene_annotation"]["status"], "methods_confirmed")
             self.assertEqual(update["stage_outputs"]["gene_annotation"]["confirmed_methods"], ["gene_annotation.candidate.augustus"])
-            # Re-invoke the graph so routing runs method stub → downstream gates.
+            # Re-invoke the graph so routing prepares executable methods.
             merged = {**resume_state, **update, "supervision_state": "running_stage"}
             result = build_stage().invoke(merged)
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(list(gene["candidate_refs"].keys()), ["gene_annotation.candidate.augustus"])
+
+    def test_confirmed_non_executable_gene_method_fails_instead_of_planning_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._softmasked_state(tmpdir, None)
+            state["stage_outputs"]["gene_annotation"] = {
+                "status": "methods_confirmed",
+                "confirmed_methods": ["gene_annotation.candidate.braker3"],
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertIn("not locally executable", result["last_error"])
 
     def test_candidate_evidence_review_blocks_on_conflict_and_accepts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -652,7 +656,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             gene = update["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["merge_weights"], {"ab_initio": 2, "rnaseq": 8})
 
-    def test_final_gene_set_review_planning_only_auto_decidable_and_commits(self):
+    def test_final_gene_set_review_auto_decidable_and_commits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             state = self._softmasked_state(tmpdir, str(registry))
@@ -717,32 +721,6 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             self.assertEqual(update["stage_outputs"]["repeat_annotation"], repeat_before)
             self.assertEqual(update["stage_outputs"]["hic_scaffolding"], hic_before)
 
-    def test_planned_only_methods_rejected_at_method_review(self):
-        """Selecting only planned_only (non-executable) methods raises a validation error."""
-        from app.control.lifecycle import ResumeValidationError
-        from app.stages.gene_annotation.nodes import apply_gene_method_planning_review_decision
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            registry = self._write_registry(tmpdir, assets=[])
-            state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"] = {
-                "status": "methods_planned",
-                "candidate_methods": [
-                    "gene_annotation.candidate.braker3",
-                    "gene_annotation.candidate.maker",
-                ],
-                "evidence_profile": "protein",
-            }
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="gene_annotation",
-                gate_id="gene_method_planning_review",
-                decision="accept",
-            )
-            with self.assertRaises(ResumeValidationError) as ctx:
-                apply_gene_method_planning_review_decision(state, request)
-            self.assertIn("planned_only", str(ctx.exception))
-
     def test_augustus_without_species_model_blocks_method_planning_readiness(self):
         """AUGUSTUS readiness is checked before execution, not deferred to freeze."""
         from app.control.lifecycle import ResumeValidationError
@@ -773,26 +751,6 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             with self.assertRaises(ResumeValidationError) as ctx:
                 apply_gene_method_planning_review_decision(state, request)
             self.assertIn("augustus_species_model", str(ctx.exception))
-
-    def test_run_gene_methods_planning_only_fails_for_non_executable(self):
-        """run_gene_methods_planning_only returns failed status when no executable methods are confirmed."""
-        from app.stages.gene_annotation.nodes import run_gene_methods_planning_only
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            registry = self._write_registry(tmpdir, assets=[])
-            state = self._softmasked_state(tmpdir, str(registry))
-            state["stage_outputs"]["gene_annotation"] = {
-                "status": "methods_confirmed",
-                "confirmed_methods": [
-                    "gene_annotation.candidate.braker3",
-                    "gene_annotation.candidate.maker",
-                ],
-                "evidence_profile": "protein",
-            }
-            result = run_gene_methods_planning_only(state)
-            gene = result["stage_outputs"]["gene_annotation"]
-            self.assertEqual(gene["status"], "failed")
-            self.assertIn("planned_only", gene["reason"])
 
 
 if __name__ == "__main__":

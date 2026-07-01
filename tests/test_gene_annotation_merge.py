@@ -108,22 +108,19 @@ class EVMFreezeTests(unittest.TestCase):
 
     def test_multi_candidate_freezes_evm_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            gff1 = Path(tmpdir) / "braker3.gff3"
+            gff1 = Path(tmpdir) / "augustus.gff3"
             gff2 = Path(tmpdir) / "miniprot.gff3"
-            gff3 = Path(tmpdir) / "genewise.gff3"
-            for gff in (gff1, gff2, gff3):
+            for gff in (gff1, gff2):
                 gff.write_text("##gff-version 3\n", encoding="utf-8")
             state = _merge_accepted_state(
                 tmpdir,
                 candidate_refs={
-                    "gene_annotation.candidate.braker3": str(gff1),
+                    "gene_annotation.candidate.augustus": str(gff1),
                     "gene_annotation.candidate.miniprot": str(gff2),
-                    "gene_annotation.candidate.genewise": str(gff3),
                 },
                 accepted_candidate_refs={
-                    "gene_annotation.candidate.braker3": str(gff1),
+                    "gene_annotation.candidate.augustus": str(gff1),
                     "gene_annotation.candidate.miniprot": str(gff2),
-                    "gene_annotation.candidate.genewise": str(gff3),
                 },
             )
             result = freeze_evm_attempt(state)
@@ -135,17 +132,14 @@ class EVMFreezeTests(unittest.TestCase):
             weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
             self.assertIn("--weights", script)
-            # braker3 + native miniprot GFF both emit gene-model-like records → --gene_predictions.
+            # augustus (ab initio) + native miniprot GFF both emit gene-model-like
+            # records → --gene_predictions.
             self.assertIn(f"--gene_predictions {gff1},{gff2}", script)
-            # genewise is a true protein alignment → --protein_alignments.
-            self.assertIn(f"--protein_alignments {gff3}", script)
-            self.assertNotIn(f"--protein_alignments {gff2}", script)
-            self.assertIn("OTHER_PREDICTION\tbraker3\t1", weights)
+            self.assertNotIn("--protein_alignments", script)
+            self.assertIn("ABINITIO_PREDICTION\taugustus\t1", weights)
             self.assertIn("OTHER_PREDICTION\tminiprot\t1", weights)
-            self.assertIn("PROTEIN\tgenewise\t5", weights)
             self.assertNotIn(str(gff1), weights)
             self.assertNotIn(str(gff2), weights)
-            self.assertNotIn(str(gff3), weights)
 
     def test_freeze_requires_merge_accepted(self):
         with tempfile.TemporaryDirectory() as tmpdir:

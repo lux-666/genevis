@@ -112,7 +112,7 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent gene-agent r
   --local-exec read_qc
 ```
 
-Without `--local-exec read_qc` the read QC stage stays in planning-only mode
+Without `--local-exec read_qc` the read QC stage stays in candidate-only mode
 and only a FOFN is committed; `--local-exec read_qc` is what opts the stage
 into real SeqKit execution through the configured conda env.
 
@@ -161,7 +161,7 @@ into real SeqKit execution through the configured conda env.
   mapping as the stats method.
 - CLI `gene-agent run` gained a repeatable `--local-exec STAGE` flag that
   seeds `stage_outputs[STAGE].execution_mode = "local"` before the graph
-  starts. Without this flag `read_qc` stays in the planning-only path and
+  starts. Without this flag `read_qc` stays in the candidate-only path and
   only the FOFN is committed; supplying `--local-exec read_qc` is what opts
   the stage into real SeqKit execution.
 

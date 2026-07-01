@@ -67,7 +67,7 @@ migration is explicitly scoped and tested.
 
 - [x] Keep annotation stage names as `repeat_annotation`, `gene_annotation`, and `function_annotation`.
 - [x] Add the first explicit local repeat-layer execution route: provided repeat library plus RepeatMasker softmasking.
-- [x] Keep default repeat annotation behavior planning-only unless `stage_outputs.repeat_annotation.execution_mode == "local"` and `primary_method == "repeat_annotation.masking.repeatmasker"` are both explicit.
+- [x] Keep default repeat annotation behavior candidate-only unless `stage_outputs.repeat_annotation.execution_mode == "local"` and `primary_method == "repeat_annotation.masking.repeatmasker"` are both explicit.
 - [x] Register RepeatMasker softmasked genome, repeat GFF3, command stdout/stderr, bundle artifacts, and ledger attempt events.
 - [x] Continue routing gene annotation from `softmasked_genome_ref`, now possibly materialized by local RepeatMasker.
 - [x] Keep de novo repeat library discovery, gene-structure annotation execution, function annotation execution, function database downloads, evidence merging, and thresholds deferred.
@@ -85,7 +85,7 @@ migration is explicitly scoped and tested.
 - `app/stages/repeat_annotation/builder.py` and `routing.py` insert optional RepeatMasker freeze/run/collect nodes before commit.
 - `app/schemas/artifacts.py` defines typed repeat plan, bundle, softmasked genome, hardmasked genome, and GFF3 artifact constants.
 - `descriptors/methods/repeat_annotation/repeatmasker_masking.yaml` now documents the provided-library local RepeatMasker route without renaming descriptors.
-- `tests/test_repeat_annotation.py` covers fake RepeatMasker success/failure, default planning-only behavior, local mode without explicit method, and de novo planning-only behavior.
+- `tests/test_repeat_annotation.py` covers fake RepeatMasker success/failure, default candidate-only behavior, local mode without explicit method, and de novo candidate-only behavior.
 
 ## Acceptance
 

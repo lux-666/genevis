@@ -38,9 +38,6 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         expected = {
-            "read_qc.length_filter.chopper": "chopper",
-            "read_qc.length_filter.fastplong": "fastplong",
-            "read_qc.length_filter.filtlong": "filtlong",
             "read_qc.length_filter.seqkit_seq": "seqkit",
         }
         for method_name, package_name in expected.items():
@@ -613,7 +610,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             read_qc = result["stage_outputs"]["read_qc"]
             self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
-            self.assertEqual(read_qc["substeps"]["length_filter"]["skip_reason"], "filter_method_not_executable")
+            self.assertEqual(read_qc["substeps"]["length_filter"]["skip_reason"], "unknown_filter_method")
             self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.filtlong")
             self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
 

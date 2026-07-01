@@ -9,7 +9,6 @@ from pathlib import Path
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state
 from app.stages.gene_annotation.nodes import (
-    GENE_EXECUTABLE_METHODS,
     collect_augustus_artifacts,
     collect_miniprot_artifacts,
     freeze_augustus_attempt,
@@ -102,7 +101,7 @@ def _fake_gffread_bin(tmpdir: str) -> Path:
 
 
 def _pending_execution_state(tmpdir: str, **gene_updates):
-    """State as it stands after run_gene_methods_planning_only with executable methods."""
+    """State as it stands after preparing executable gene methods."""
     softmasked = Path(tmpdir) / "softmasked.fa"
     softmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
     state = initial_state(

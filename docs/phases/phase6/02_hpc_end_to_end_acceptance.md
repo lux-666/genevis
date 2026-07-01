@@ -44,7 +44,7 @@ validates that they work together in one raw-read-to-terminal session.
 - Use the existing sqlite checkpoint backend.
 - Use real local execution where the current project already supports it and the
   HPC tools/data are available.
-- Use planning-only or explicit skip behavior where a stage lacks required data.
+- Use candidate-only or explicit skip behavior where a stage lacks required data.
 - Exercise at least the `assembly_review` decision path with durable
   inspect/resume unless a documented auto policy path is intentionally used.
 - Exercise `hic_scaffolding` review/resume if Hi-C inputs are included; otherwise
@@ -106,7 +106,7 @@ Minimal shape:
   "function_annotation": {
     "database_provenance": [
       {
-        "method_name": "function_annotation.candidate.interproscan",
+        "method_name": "function_annotation.candidate.diamond",
         "database_name": "InterPro",
         "database_version": "operator_supplied",
         "snapshot_date": "2026-05-26",

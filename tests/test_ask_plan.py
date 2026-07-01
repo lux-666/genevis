@@ -15,6 +15,7 @@ from app.entrypoints.ask_planner import (
     READ_QC_STATS_METHOD,
     _STAGE_METHODS,
     _all_selectable_stages,
+    _auto_fill_inferred_defaults,
     _extract_busco_version,
     _infer_parameter_defaults,
     _plan_validation_warnings,
@@ -246,6 +247,25 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             self.assertEqual(draft.resolved_execution_order, ["assembly"])
             self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.flye")
 
+    def test_pacbio_hifi_assembly_draft_writes_hifi_route_to_run_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\ngenome_size_estimate: 2000000\nassets:\n"
+                f"  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n    format: fastq\n    platform: pacbio_hifi\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(manifest_ref=str(manifest), entry_request={"requested_stages": ["assembly"]})
+
+            draft = build_initial_plan_draft(plan)
+            payload = build_run_config_payload(draft.model_copy(update={"confirmed": True}))
+
+            self.assertEqual(draft.selected_methods["assembly"], "assembly.candidate.hifiasm")
+            self.assertEqual(payload["assembly"]["assembly_method"], "hifiasm")
+            self.assertEqual(payload["assembly"]["assembly_route"], "hifi")
+
     def test_multi_stage_goal_keeps_requested_stages_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -352,7 +372,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         }
         self.assertEqual(read_qc_methods[READ_QC_FILTER_SKIP]["display_name"], "skip filtering, use raw reads")
         flye = [m for m in result.choices["methods_by_stage"]["assembly"] if m["method_name"] == "assembly.candidate.flye"]
-        self.assertEqual(flye[0]["execution_support"], "executable")
+        self.assertNotIn("execution_support", flye[0])
 
     def test_assembly_review_method_selection_uses_registered_method_names(self):
         plan = _base_plan(
@@ -364,8 +384,8 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
             m["method_name"]
             for m in result.choices["methods_by_stage"]["assembly_review"]
         }
-        self.assertIn("assembly_review.eval.merqury", method_names)
-        self.assertIn("assembly_review.eval.mapping_coverage", method_names)
+        self.assertIn("assembly_review.eval.quast", method_names)
+        self.assertIn("assembly_review.eval.busco", method_names)
         self.assertNotIn("assembly_review.check.merqury", method_names)
 
     def test_assembly_dedup_is_default_auto_without_method_or_parameter_questions(self):
@@ -410,7 +430,7 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
         )
         response = AskClarificationResponse(
             kind="method_selection",
-            selected_methods={"genome_survey": "function_annotation.candidate.kofamscan"},
+            selected_methods={"genome_survey": "function_annotation.candidate.diamond"},
         )
         with self.assertRaisesRegex(ValueError, "method is not valid"):
             merge_clarification_response(plan, response)
@@ -553,7 +573,7 @@ class AskPlannerParameterTests(unittest.TestCase):
             "awaiting_genome_survey",
         )
 
-    def test_planned_only_survey_still_requires_genome_size(self):
+    def test_unexecuted_survey_still_requires_genome_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             long_reads = Path(tmp) / "long.fq"
             short_reads = Path(tmp) / "short.fq"
@@ -818,6 +838,28 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             },
         })
 
+    def test_build_run_config_executes_selected_hifiasm_method(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.hifiasm"},
+            shared_parameters={"platform": "pacbio_hifi", "read_type": "pacbio_hifi", "estimated_genome_size": 2000000},
+            confirmed=True,
+        )
+        plan = _auto_fill_inferred_defaults(plan)
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(payload["assembly"], {
+            "assembly_method": "hifiasm",
+            "assembly_route": "hifi",
+            "hifiasm_parameters": {
+                "read_type": "hifi",
+                "threads": 4,
+            },
+        })
+
     def test_build_run_config_rejects_multiple_executable_assembly_methods(self):
         plan = _base_plan(
             selected_stages=["assembly"],
@@ -916,14 +958,14 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             selected_methods={
                 "read_qc": [
                     READ_QC_STATS_METHOD,
-                    "read_qc.length_filter.filtlong",
+                    READ_QC_FILTER_SKIP,
                     READ_QC_HANDOFF_METHOD,
                 ]
             },
             confirmed=True,
         )
         payload = build_run_config_payload(plan)
-        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "read_qc.length_filter.filtlong")
+        self.assertEqual(payload["read_qc"]["length_filter"]["method"], "skip")
 
     def test_build_run_config_uses_selected_seqkit_filter_threshold(self):
         plan = _base_plan(
@@ -1058,8 +1100,10 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
             m["method_name"]: m
             for m in result.choices["methods_by_stage"]["assembly_review"]
         }
-        self.assertEqual(ar_methods["assembly_review.eval.busco"]["execution_support"], "executable")
-        self.assertEqual(ar_methods["assembly_review.eval.quast"]["execution_support"], "executable")
+        self.assertIn("assembly_review.eval.busco", ar_methods)
+        self.assertIn("assembly_review.eval.quast", ar_methods)
+        self.assertNotIn("execution_support", ar_methods["assembly_review.eval.busco"])
+        self.assertNotIn("execution_support", ar_methods["assembly_review.eval.quast"])
 
     def test_busco_parameter_clarification_asks_for_all_fields(self):
         plan = _base_plan(
@@ -1160,7 +1204,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
                 },
             },
         )
-        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}, "execution_support": "executable"}
+        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}}
         inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
         self.assertEqual(inferred["lineage_name"], "insecta_odb10")
         self.assertEqual(inferred["lineage_version"], "odb10")
@@ -1180,7 +1224,7 @@ class AskPlannerBuscoFlowTests(unittest.TestCase):
                 },
             },
         )
-        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}, "execution_support": "executable"}
+        cap = {"required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"], "parameter_defaults": {"threads": 8}}
         inferred, _ = _infer_parameter_defaults(plan, "assembly_review.eval.busco", cap)
         self.assertEqual(inferred["lineage_name"], "custom_lineage")
         self.assertNotIn("lineage_version", inferred)
@@ -1258,13 +1302,10 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertEqual(result.kind, "method_selection")
         self.assertIn("gene_annotation", result.choices["methods_by_stage"])
         methods = {m["method_name"] for m in result.choices["methods_by_stage"]["gene_annotation"]}
-        self.assertIn("gene_annotation.candidate.braker3", methods)
-        self.assertIn("gene_annotation.helper.hisat2", methods)
+        self.assertIn("gene_annotation.candidate.miniprot", methods)
+        self.assertIn("gene_annotation.candidate.augustus", methods)
         for m in result.choices["methods_by_stage"]["gene_annotation"]:
-            if m["method_name"] in ("gene_annotation.candidate.miniprot", "gene_annotation.candidate.augustus"):
-                self.assertEqual(m["execution_support"], "executable")
-            else:
-                self.assertEqual(m["execution_support"], "planned_only")
+            self.assertNotIn("execution_support", m)
         defaults = result.choices["defaults"]["gene_annotation"]
         self.assertIn("gene_annotation.candidate.miniprot", defaults)
         self.assertIn("gene_annotation.candidate.augustus", defaults)
@@ -1323,7 +1364,7 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertEqual(result.kind, "method_selection")
         methods = result.choices["methods_by_stage"]["hic_scaffolding"]
         three_dna = next(m for m in methods if m["method_name"] == "hic_scaffolding.candidate.juicer_3ddna_juicebox")
-        self.assertEqual(three_dna["execution_support"], "executable")
+        self.assertNotIn("execution_support", three_dna)
         self.assertEqual(
             result.choices["defaults"]["hic_scaffolding"],
             ["hic_scaffolding.candidate.juicer_3ddna_juicebox", "hic_scaffolding.candidate.yahs"],
@@ -1442,20 +1483,18 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertEqual(result.kind, "method_selection")
         methods = {m["method_name"] for m in result.choices["methods_by_stage"]["repeat_annotation"]}
         self.assertIn("repeat_annotation.masking.repeatmasker", methods)
-        self.assertIn("repeat_annotation.helper.trf", methods)
 
-    def test_no_function_annotation_in_run_config(self):
+    def test_diamond_function_annotation_requires_database_provenance_for_run_config(self):
         plan = _base_plan(
             selected_stages=["function_annotation"],
             resolved_execution_order=["function_annotation"],
             selected_methods={
-                "function_annotation": ["function_annotation.candidate.interproscan"],
+                "function_annotation": ["function_annotation.candidate.diamond"],
             },
             confirmed=True,
         )
-        payload = build_run_config_payload(plan)
-        self.assertNotIn("function_annotation", payload)
-        self.assertNotIn("function_annotation", payload.get("local_exec", []))
+        with self.assertRaisesRegex(ValueError, "database_provenance"):
+            build_run_config_payload(plan)
 
 
 class AskPlannerValidationWarningTests(unittest.TestCase):
@@ -1464,7 +1503,7 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
             selected_stages=["function_annotation"],
             resolved_execution_order=["function_annotation"],
             selected_methods={
-                "function_annotation": ["function_annotation.candidate.interproscan"],
+                "function_annotation": ["function_annotation.candidate.diamond"],
             },
         )
         warnings = _plan_validation_warnings(plan)
@@ -1475,23 +1514,12 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
             selected_stages=["gene_annotation", "function_annotation"],
             resolved_execution_order=["gene_annotation", "function_annotation"],
             selected_methods={
-                "gene_annotation": ["gene_annotation.candidate.braker3"],
-                "function_annotation": ["function_annotation.candidate.interproscan"],
+                "gene_annotation": ["gene_annotation.candidate.augustus"],
+                "function_annotation": ["function_annotation.candidate.diamond"],
             },
         )
         warnings = _plan_validation_warnings(plan)
         self.assertFalse(any("protein input" in w for w in warnings))
-
-    def test_planned_only_stages_warned(self):
-        plan = _base_plan(
-            selected_stages=["gene_annotation"],
-            resolved_execution_order=["gene_annotation"],
-            selected_methods={
-                "gene_annotation": ["gene_annotation.candidate.braker3"],
-            },
-        )
-        warnings = _plan_validation_warnings(plan)
-        self.assertTrue(any("planned_only" in w and "gene_annotation" in w for w in warnings))
 
     def test_hic_without_reads_warns(self):
         plan = _base_plan(
@@ -1533,28 +1561,6 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
         )
         warnings = _plan_validation_warnings(plan)
         self.assertFalse(any("without a genome" in w for w in warnings))
-
-
-    def test_method_execution_status_in_summary(self):
-        plan = _base_plan(
-            selected_stages=["hic_scaffolding", "gene_annotation"],
-            resolved_execution_order=["hic_scaffolding", "gene_annotation"],
-            selected_methods={
-                "hic_scaffolding": "hic_scaffolding.candidate.yahs",
-                "gene_annotation": ["gene_annotation.candidate.braker3"],
-            },
-            method_parameters={
-                "hic_scaffolding.candidate.yahs": {"hic_alignment_ref": "/data/hic.bam"},
-            },
-            confirmed=True,
-        )
-        result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertIsNone(result)
-        from app.entrypoints.ask_planner import build_run_plan_summary
-        summary = build_run_plan_summary(plan)
-        status = summary["method_execution_status"]
-        self.assertEqual(status["hic_scaffolding.candidate.yahs"], "executable")
-        self.assertEqual(status["gene_annotation.candidate.braker3"], "planned_only")
 
 
 if __name__ == "__main__":

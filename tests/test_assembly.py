@@ -14,8 +14,10 @@ from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_T
 from app.schemas.state import initial_state
 from app.stages.assembly.builder import build_stage
 from app.stages.assembly.method_application import flye as flye_graph
+from app.stages.assembly.method_application import hifiasm as hifiasm_graph
 from app.stages.assembly.method_application import nextdenovo as nextdenovo_graph
 from app.stages.assembly.method_application.flye import build_flye_graph
+from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
 
 
@@ -27,7 +29,6 @@ class AssemblyDescriptorTests(unittest.TestCase):
             "assembly.candidate.flye": "flye",
             "assembly.candidate.hifiasm": "hifiasm",
             "assembly.candidate.nextdenovo": "nextdenovo",
-            "assembly.candidate.canu": "canu",
         }
         for method_name, package_name in expected.items():
             self.assertIn(package_name, registry.packages)
@@ -36,7 +37,7 @@ class AssemblyDescriptorTests(unittest.TestCase):
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["assembly"])
         hifiasm = registry.methods["assembly.candidate.hifiasm"]
-        self.assertIn("compatibility candidate", hifiasm.goal)
+        self.assertIn("assembly candidate", hifiasm.goal)
         self.assertIn("compatibility_route_explicitly_requested", hifiasm.review_rules)
         self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
 
@@ -50,7 +51,6 @@ class AssemblyDescriptorTests(unittest.TestCase):
                 mapping = SHARED_TO_METHOD_READ_TYPE[shared_read_type]
                 self.assertIn("flye", mapping)
                 self.assertIn("nextdenovo", mapping)
-                self.assertIn("canu", mapping)
                 self.assertIn("hifiasm", mapping)
 
 
@@ -62,6 +62,7 @@ class AssemblyStageTests(unittest.TestCase):
 
         self.assertIn("flye", outer_nodes)
         self.assertIn("nextdenovo", outer_nodes)
+        self.assertIn("hifiasm", outer_nodes)
         self.assertNotIn("method_application", outer_nodes)
         self.assertNotIn("freeze_flye_attempt", outer_nodes)
         self.assertNotIn("run_flye_attempt", outer_nodes)
@@ -72,9 +73,13 @@ class AssemblyStageTests(unittest.TestCase):
         self.assertIn("freeze", nextdenovo_nodes)
         self.assertIn("run", nextdenovo_nodes)
         self.assertIn("collect", nextdenovo_nodes)
+        hifiasm_nodes = set(build_hifiasm_graph().get_graph().nodes)
+        self.assertIn("freeze", hifiasm_nodes)
+        self.assertIn("run", hifiasm_nodes)
+        self.assertIn("collect", hifiasm_nodes)
 
     def test_method_subgraphs_do_not_import_parent_graph_modules(self):
-        for module in [flye_graph, nextdenovo_graph]:
+        for module in [flye_graph, nextdenovo_graph, hifiasm_graph]:
             source = inspect.getsource(module)
             self.assertNotIn("app.stages.assembly.nodes", source)
             self.assertNotIn("app.stages.assembly.routing", source)
@@ -155,6 +160,34 @@ class AssemblyStageTests(unittest.TestCase):
                 encoding="utf-8",
             )
         nextdenovo.chmod(0o755)
+        return bin_dir
+
+    def _fake_hifiasm_bin(self, tmpdir: str, *, fail: bool = False, marker: Path | None = None) -> Path:
+        bin_dir = Path(tmpdir) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        hifiasm = bin_dir / "hifiasm"
+        if fail:
+            hifiasm.write_text(
+                "#!/bin/sh\n"
+                f"{f'echo hifiasm-called > {marker!s}' if marker else ':'}\n"
+                "echo fake hifiasm failed >&2\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+        else:
+            hifiasm.write_text(
+                "#!/bin/sh\n"
+                f"{f'echo hifiasm-called > {marker!s}' if marker else ':'}\n"
+                "prefix=\"\"\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = \"-o\" ]; then shift; prefix=\"$1\"; fi\n"
+                "  shift\n"
+                "done\n"
+                "printf 'S\\tcontig1\\tACGTACGT\\n' > \"$prefix.bp.p_ctg.gfa\"\n"
+                "printf 'fake hifiasm stdout\\n'\n",
+                encoding="utf-8",
+            )
+        hifiasm.chmod(0o755)
         return bin_dir
 
     def test_missing_assembly_inputs_fails_terminally(self):
@@ -287,7 +320,6 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(set(assembly["candidate_methods"]), {
                 "assembly.candidate.flye",
                 "assembly.candidate.nextdenovo",
-                "assembly.candidate.canu",
             })
 
     def test_explicit_hifiasm_request_remains_allowed_as_compatibility_route(self):
@@ -323,6 +355,40 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("assembly.candidate.hifiasm", assembly["selected_methods"])
             self.assertIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
 
+    def test_raw_long_reads_with_pacbio_hifi_platform_count_as_hifi_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_reads = Path(tmpdir) / "raw.fastq"
+            raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:raw.fastq",
+                        "asset_type": "raw_long_reads",
+                        "path": str(raw_reads),
+                        "platform": "pacbio_hifi",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "assembly": {
+                    "assembly_route": "hifi",
+                    "method_decision": {
+                        "primary": "assembly.candidate.hifiasm",
+                    },
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_dedup")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["input_ref"], str(raw_reads))
+            self.assertEqual(assembly["primary_long_read_platform"], "pacbio_hifi")
+            self.assertIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
+
     def test_auto_planning_without_genome_size_selects_only_flye(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
@@ -351,7 +417,6 @@ class AssemblyStageTests(unittest.TestCase):
                 assembly["rejected_candidates"],
                 {
                     "assembly.candidate.nextdenovo": "genome_size_required",
-                    "assembly.candidate.canu": "genome_size_required",
                 },
             )
             self.assertNotIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
@@ -624,12 +689,13 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("attempt_failed", event_types)
             self.assertNotIn("attempt_succeeded", event_types)
 
-    def test_local_mode_with_explicit_hifiasm_does_not_execute_flye(self):
+    def test_local_hifiasm_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
             clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            called_marker = Path(tmpdir) / "flye-called"
-            fake_bin = self._fake_flye_bin(tmpdir, marker=called_marker)
+            flye_marker = Path(tmpdir) / "flye-called"
+            self._fake_flye_bin(tmpdir, marker=flye_marker)
+            fake_bin = self._fake_hifiasm_bin(tmpdir)
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -648,17 +714,133 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "hifiasm_parameters": {"read_type": "hifi", "threads": 1},
                 }
             }
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
-            self.assertFalse(called_marker.exists())
+            self.assertFalse(flye_marker.exists())
             assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "draft_ready")
             self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["substeps"]["hifiasm_assembly"]["status"], "executed")
+            draft = Path(assembly["draft_assembly_ref"])
+            self.assertTrue(draft.exists())
+            self.assertTrue(draft.read_text(encoding="utf-8").startswith(">contig1"))
+            self.assertNotIn("hifiasm_frozen_attempt", assembly)
+            self.assertNotIn("hifiasm_execution_result", assembly)
+
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
-            self.assertEqual(candidate["status"], "planned")
+            self.assertEqual(candidate["status"], "executed")
+            self.assertTrue(candidate["metadata"]["execution_enabled"])
+
+            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            events = [
+                json.loads(line)["event_type"]
+                for line in ledger_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("attempt_started", events)
+            self.assertIn("attempt_succeeded", events)
+
+    def test_local_hifiasm_execution_from_fofn_uses_ont_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "ont.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fofn = Path(tmpdir) / "long_reads.fofn"
+            fofn.write_text(f"{reads}\n", encoding="utf-8")
+            fake_bin = self._fake_hifiasm_bin(tmpdir)
+            registry = self._write_registry(tmpdir, assets=[])
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
+                "assembly": {
+                    "assembly_route": "ont",
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "hifiasm_parameters": {"read_type": "ont", "threads": 1},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly_dedup")
+            script = (Path(tmpdir) / "work" / "assembly" / "s1" / "hifiasm" / "run_hifiasm.sh").read_text(encoding="utf-8")
+            self.assertIn("--ont", script)
+
+    def test_local_hifiasm_rejects_invalid_threads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fake_bin = self._fake_hifiasm_bin(tmpdir)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "pacbio_hifi",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "assembly": {
+                    "assembly_route": "hifi",
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "hifiasm_parameters": {"read_type": "hifi", "threads": 0},
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "blocked_param")
+
+    def test_failed_local_hifiasm_records_failed_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_reads = Path(tmpdir) / "clean.fastq"
+            clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            fake_bin = self._fake_hifiasm_bin(tmpdir, fail=True)
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:clean.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(clean_reads),
+                        "platform": "pacbio_hifi",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "assembly": {
+                    "assembly_route": "hifi",
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "hifiasm_parameters": {"read_type": "hifi", "threads": 1},
+                }
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            events = [
+                json.loads(line)["event_type"]
+                for line in ledger_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn("attempt_started", events)
+            self.assertIn("attempt_failed", events)
+            self.assertNotIn("attempt_succeeded", events)
 
     def test_local_nextdenovo_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:

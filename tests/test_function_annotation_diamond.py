@@ -99,17 +99,7 @@ class DiamondFreezeTests(unittest.TestCase):
                     "status": "provenance_validated",
                     "proteins_fasta_ref": str(proteins),
                     "expected_outputs": {"gene_function_tsv": str(Path(tmpdir) / "gene_function.tsv")},
-                    "database_provenance": [
-                        {
-                            "method_name": "function_annotation.candidate.interproscan",
-                            "database_name": "InterPro",
-                            "database_version": "99.0",
-                            "snapshot_date": "2026-01-01",
-                            "database_source_ref": "/db/interpro",
-                            "descriptor_version": "interproscan.yaml",
-                            "input_proteins_ref": str(proteins),
-                        },
-                    ],
+                    "database_provenance": [],
                 },
             }
             result = freeze_diamond_attempt(state)

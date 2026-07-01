@@ -37,7 +37,7 @@ clarification steps, then confirm the execution plan before starting.
 - [x] Parameter inference from manifest (platform to read_type, genome_size_estimate)
   with actual missing-param check; skip parameter step when all defaults inferred.
 - [x] Surface genome_size conflicts between manifest and request as warnings.
-- [x] Final confirm step with stage_roles (executable/dependency/planned_only),
+- [x] Final confirm step with stage_roles (executable/dependency/candidate_only),
   run_config_preview, and warnings.
 - [x] Reject `--local-exec` in ask mode without `--run-config`; clarification
   flow manages execution stages.
@@ -74,7 +74,7 @@ clarification steps, then confirm the execution plan before starting.
 - `_validate_selected_methods` rejects empty strings and unknown method
   names against `_ALL_KNOWN_METHODS` (union of executable + planned).
 - Confirm summary includes `stage_roles` dict classifying each stage as
-  executable, dependency, or planned_only so operators know which stages
+  executable, dependency, or candidate_only so operators know which stages
   will actually run vs. which are preflight dependencies.
 - `--local-exec` is rejected in ask clarification mode (only valid with
   `--run-config` bypass) since the clarification flow manages execution
