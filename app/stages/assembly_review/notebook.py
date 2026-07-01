@@ -50,7 +50,9 @@ def _add_disclaimer(fig) -> None:
     fig.text(0.5, 0.01, DISCLAIMER, ha="center", va="bottom", fontsize=7, style="italic")
 
 
-def render_statistics_figures(statistics_pack: dict, out_dir: Path) -> dict[str, str]:
+def render_statistics_figures(
+    statistics_pack: dict, out_dir: Path, target_metrics: dict[str, float] | None = None
+) -> dict[str, str]:
     """Render the 7 comparative PNG charts for a related-species statistics pack.
 
     Writes nothing and returns {} when the pack is unavailable or has no analysis
@@ -87,10 +89,9 @@ def render_statistics_figures(statistics_pack: dict, out_dir: Path) -> dict[str,
         ax.set_ylabel("Count")
         ax.set_title("N50 distribution (related species cohort)")
         percentile = target_position.get("n50_percentile")
-        if percentile is not None:
-            xmin, xmax = ax.get_xlim()
-            target_x = xmin + (xmax - xmin) * (percentile / 100.0)
-            ax.axvline(x=target_x, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
+        target_value = target_metrics.get("n50_bp") if target_metrics else None
+        if percentile is not None and target_value is not None:
+            ax.axvline(x=target_value, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
             ax.legend()
         _save("n50_distribution", fig)
 
@@ -103,10 +104,9 @@ def render_statistics_figures(statistics_pack: dict, out_dir: Path) -> dict[str,
         ax.set_ylabel("Count")
         ax.set_title("Assembly size distribution (related species cohort)")
         percentile = target_position.get("assembly_size_percentile")
-        if percentile is not None:
-            xmin, xmax = ax.get_xlim()
-            target_x = xmin + (xmax - xmin) * (percentile / 100.0)
-            ax.axvline(x=target_x, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
+        target_value = target_metrics.get("assembly_size_bp") if target_metrics else None
+        if percentile is not None and target_value is not None:
+            ax.axvline(x=target_value, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
             ax.legend()
         _save("assembly_size_distribution", fig)
 
@@ -119,10 +119,9 @@ def render_statistics_figures(statistics_pack: dict, out_dir: Path) -> dict[str,
         ax.set_ylabel("Count")
         ax.set_title("GC% distribution (related species cohort)")
         percentile = target_position.get("gc_percentile")
-        if percentile is not None:
-            xmin, xmax = ax.get_xlim()
-            target_x = xmin + (xmax - xmin) * (percentile / 100.0)
-            ax.axvline(x=target_x, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
+        target_value = target_metrics.get("gc_percent") if target_metrics else None
+        if percentile is not None and target_value is not None:
+            ax.axvline(x=target_value, color="red", linestyle="--", label=f"target ({percentile:.1f}th pct)")
             ax.legend()
         _save("gc_distribution", fig)
 

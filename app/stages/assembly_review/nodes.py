@@ -290,10 +290,8 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     species_name = _target_species_name(state)
     reference_dir = _related_species_reference_dir(ar_out)
 
-    # Extract target metrics from the first candidate's signals
     target_metrics = _extract_target_metrics_from_signals(ar_out)
 
-    # Build statistics pack
     if reference_dir:
         statistics_pack = _build_related_species_statistics_pack(
             species_name, reference_dir=reference_dir, target_metrics=target_metrics
@@ -303,12 +301,38 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
 
     existing_stats_ref = ar_out.get("related_species_statistics_pack_ref")
     if existing_stats_ref and _json_artifact_payload_matches(existing_stats_ref, statistics_pack):
-        # Statistics pack unchanged; check if notebook needs regeneration
         existing_notebook_ref = ar_out.get("assembly_review_comparative_notebook_ref")
         if existing_notebook_ref and Path(existing_notebook_ref).exists():
+            # Files unchanged, but ensure artifacts are registered in ledger for this session
+            data_dir = absolute_data_dir(state)
+            session_id = state["session_id"]
+
+            notebook_artifact = ArtifactMeta.from_file(
+                Path(existing_notebook_ref),
+                stage="assembly_review",
+                method_name="assembly_review.contract",
+                artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
+                metadata={"session_id": session_id},
+            )
+            append_artifact_records(data_dir, session_id, [notebook_artifact])
+
+            figure_paths = ar_out.get("comparative_figures", {})
+            figure_artifacts = [
+                ArtifactMeta.from_file(
+                    Path(abs_path),
+                    stage="assembly_review",
+                    method_name="assembly_review.contract",
+                    artifact_type=f"assembly_review.figure.{logical_name}",
+                    metadata={"figure_type": logical_name},
+                )
+                for logical_name, abs_path in figure_paths.items()
+                if Path(abs_path).exists()
+            ]
+            if figure_artifacts:
+                append_artifact_records(data_dir, session_id, figure_artifacts)
+
             return {}
 
-    # Write statistics pack
     statistics_ref = _write_json_artifact(
         state,
         "related_species_statistics_pack.json",
@@ -320,7 +344,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     figures_dir = data_dir / "artifacts" / "assembly_review" / session_id / "figures"
-    figure_paths = render_statistics_figures(statistics_pack, figures_dir)
+    figure_paths = render_statistics_figures(statistics_pack, figures_dir, target_metrics=target_metrics)
 
     # Register figure artifacts
     figure_artifacts = []
