@@ -20,14 +20,22 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
     def test_statistics_and_notebook_node_with_unavailable_snapshot(self):
         """Node handles unavailable NCBI snapshot gracefully (no crash, writes valid unavailable pack + minimal notebook)."""
         with tempfile.TemporaryDirectory() as tmpdir:
+            # Create an empty reference directory with manifest but no data files
+            empty_ref_dir = Path(tmpdir) / "empty_reference"
+            empty_ref_dir.mkdir()
+            manifest_content = {"snapshot_date": "2024-01-01", "record_count": 0}
+            (empty_ref_dir / "reference_manifest.json").write_text(json.dumps(manifest_content))
+
             manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n", encoding="utf-8")
+            manifest.write_text("session_id: s1\nuser_metadata:\n  target_species: Test species\nassets: []\n", encoding="utf-8")
             state = initial_state(session_id="s1", input_manifest_ref=str(manifest), data_dir=tmpdir)
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
                     "candidates": [{"candidate_id": "c1", "method_name": "flye", "final_assembly_ref": "draft.fa"}],
                     "signals": [],
+                    # Point to empty reference dir (has manifest but no TSV/lineage files)
+                    "related_species_reference_dir": str(empty_ref_dir),
                 }
             }
 
