@@ -28,6 +28,7 @@ _ALL_FIGURE_KEYS = [
     "chromosome_count_distribution",
     "n50_vs_assembly_size",
     "cohort_composition",
+    "summary_panel",
 ]
 
 
