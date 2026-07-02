@@ -5,7 +5,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
-from app.stages.assembly.method_application import build_flye_graph, build_hifiasm_graph, build_nextdenovo_graph
+from app.stages.assembly.method_application import build_flye_graph, build_hifiasm_graph, build_hifiasm_ont_graph, build_nextdenovo_graph
 from app.stages.assembly.nodes import (
     block_assembly_for_human,
     build_assembly_candidate_set,
@@ -43,6 +43,7 @@ def build_stage():
     graph.add_node("flye", build_flye_graph())
     graph.add_node("nextdenovo", build_nextdenovo_graph())
     graph.add_node("hifiasm", build_hifiasm_graph())
+    graph.add_node("hifiasm_ont", build_hifiasm_ont_graph())
     graph.add_node("commit", commit_assembly_plan)
     graph.add_node("fail", fail_assembly)
     graph.add_node("block", block_assembly_for_human)
@@ -77,7 +78,7 @@ def build_stage():
     graph.add_conditional_edges(
         "plan_candidate_attempts",
         route_after_plan,
-        {"flye": "flye", "nextdenovo": "nextdenovo", "hifiasm": "hifiasm", "commit": "commit", "fail": "fail"},
+        {"flye": "flye", "nextdenovo": "nextdenovo", "hifiasm": "hifiasm", "hifiasm_ont": "hifiasm_ont", "commit": "commit", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "flye",
@@ -91,6 +92,11 @@ def build_stage():
     )
     graph.add_conditional_edges(
         "hifiasm",
+        route_after_method_subgraph,
+        {"commit": "commit", "fail": "fail"},
+    )
+    graph.add_conditional_edges(
+        "hifiasm_ont",
         route_after_method_subgraph,
         {"commit": "commit", "fail": "fail"},
     )

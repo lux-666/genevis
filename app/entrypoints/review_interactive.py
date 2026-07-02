@@ -16,6 +16,8 @@ from typing import Any
 from app.review.gates import find_review_gate, registered_review_stage_label
 from app.storage.paths import locate_session_data_dir
 
+_MAX_INVALID_PROMPT_ATTEMPTS = 3
+
 
 # ---------------------------------------------------------------------------
 # Rendering
@@ -562,20 +564,24 @@ def _prompt_choice(label: str, options: list[str], descriptions: dict[str, str] 
     for i, opt in enumerate(options, 1):
         suffix = f" - {descriptions[opt]}" if descriptions and descriptions.get(opt) else ""
         print(f"  {i}. {_choice_display(opt)}{suffix}")
-    try:
-        raw = input(f"select {display_label} [1-{len(options)}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return None
-    if not raw:
-        return None
-    try:
-        idx = int(raw) - 1
-        if 0 <= idx < len(options):
-            return options[idx]
-    except ValueError:
-        if raw in options:
-            return raw
-    print(f"invalid selection: {raw!r}", file=sys.stderr)
+    invalid_attempts = 0
+    while invalid_attempts < _MAX_INVALID_PROMPT_ATTEMPTS:
+        try:
+            raw = input(f"select {display_label} [1-{len(options)}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw:
+            return None
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(options):
+                return options[idx]
+        except ValueError:
+            if raw in options:
+                return raw
+        invalid_attempts += 1
+        print(f"invalid selection: {raw!r}", file=sys.stderr)
+    print("too many invalid selections; aborting review prompt", file=sys.stderr)
     return None
 
 
@@ -1106,6 +1112,13 @@ def run_interactive_review(
         return 1
 
     state = snapshot.values
+    if state.get("supervision_state") != "blocked_human":
+        print(
+            f"error: session {session_id!r} is not blocked for human review "
+            f"(supervision_state={state.get('supervision_state')!r})",
+            file=sys.stderr,
+        )
+        return 1
 
     intake_selection = None
     try:
@@ -1134,7 +1147,7 @@ def run_interactive_review(
         })
         print(f"error: resume rejected: {exc}", file=sys.stderr)
         return 1
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         from app.control.ledger import Ledger as _Ledger
         _Ledger(data_dir).record_event(session_id, "resume_rejected", {
             "source": "interactive_review",
@@ -1163,7 +1176,24 @@ def run_interactive_review(
     }
     ledger.record_event(session_id, "resume_started", resume_event_payload)
 
-    graph.update_state(config, update)
+    try:
+        update_result = graph.update_state(config, update)
+    except Exception as exc:
+        ledger.record_event(
+            session_id,
+            "resume_failed",
+            {**resume_event_payload, "error": f"update_state failed: {type(exc).__name__}: {exc}"},
+        )
+        print(f"error: resume update failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if update_result is False:
+        ledger.record_event(
+            session_id,
+            "resume_failed",
+            {**resume_event_payload, "error": "update_state returned False"},
+        )
+        print("error: resume update failed: update_state returned False", file=sys.stderr)
+        return 1
     try:
         final = graph.invoke(None, config=config)
     except Exception as exc:

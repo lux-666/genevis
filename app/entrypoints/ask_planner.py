@@ -35,6 +35,7 @@ _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
     "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
     "assembly.candidate.hifiasm",
+    "assembly.candidate.hifiasm_ont",
 }
 _GENOME_SURVEY_EXECUTABLE_METHODS = {
     "genome_survey.kmer_count.jellyfish",
@@ -120,6 +121,11 @@ _STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
         },
         {
             "method_name": "assembly.candidate.hifiasm",
+            "required_parameters": ["threads"],
+            "parameter_defaults": {"threads": 4},
+        },
+        {
+            "method_name": "assembly.candidate.hifiasm_ont",
             "required_parameters": ["threads"],
             "parameter_defaults": {"threads": 4},
         },
@@ -523,6 +529,8 @@ def _build_assembly_execution_config(
     config: dict[str, Any] = {"assembly_method": config_method, parameter_key: params}
     if config_method == "hifiasm":
         config["assembly_route"] = "hifi"
+    elif config_method == "hifiasm_ont":
+        config["assembly_route"] = "ont"
     return config
 
 

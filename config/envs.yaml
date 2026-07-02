@@ -105,6 +105,14 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - nextDenovo
+  assembly.candidate.hifiasm:
+    conda_env: env_geno_exec
+    required_tools:
+      - hifiasm
+  assembly.candidate.hifiasm_ont:
+    conda_env: env_geno_exec
+    required_tools:
+      - hifiasm
   assembly_dedup.purge_dups:
     conda_env: env_geno_exec
     required_tools:

@@ -22,6 +22,7 @@ packages:
 methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
+  assembly.candidate.hifiasm_ont: assembly/hifiasm_ont_candidate.yaml
   assembly.candidate.nextdenovo: assembly/nextdenovo_candidate.yaml
   assembly_dedup.purge_dups: assembly_dedup/purge_dups.yaml
   assembly_review.eval.quast: assembly_review/quast_eval.yaml
@@ -50,6 +51,7 @@ by_stage:
   assembly:
     - assembly.candidate.flye
     - assembly.candidate.hifiasm
+    - assembly.candidate.hifiasm_ont
     - assembly.candidate.nextdenovo
   assembly_dedup:
     - assembly_dedup.purge_dups

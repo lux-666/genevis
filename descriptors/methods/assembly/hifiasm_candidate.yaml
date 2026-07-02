@@ -1,11 +1,11 @@
 method_name: assembly.candidate.hifiasm
 stage: assembly
 package_ref: hifiasm
-goal: "Plan and optionally execute a hifiasm assembly candidate for explicit HiFi/non-ONT assembly routes."
+goal: "Plan and optionally execute a hifiasm assembly candidate for HiFi assembly routes."
 required_inputs:
   - name: long_reads
     type: clean_long_reads
-    description: "Clean HiFi-compatible reads or an explicitly approved non-ONT long-read FOFN."
+    description: "Clean HiFi reads (FASTA or FASTQ)."
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly

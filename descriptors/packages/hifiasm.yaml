@@ -1,5 +1,5 @@
 package_name: hifiasm
-version_constraint: ">=0.19"
+version_constraint: ">=0.21.0"
 language: cli
 install_channel: conda
 entry_patterns:

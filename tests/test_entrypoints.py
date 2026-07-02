@@ -19,7 +19,7 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
-from app.entrypoints.tui import _tui_main
+from app.entrypoints.tui import _tui_main, run_tui
 from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
@@ -248,6 +248,14 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("目标物种", stdout.getvalue())
         self.assertIn("卵鳎", stdout.getvalue())
+
+    def test_tui_request_interrupt_reports_phase(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), patch("builtins.input", side_effect=KeyboardInterrupt):
+            code = run_tui("data")
+
+        self.assertEqual(code, 1)
+        self.assertIn("Aborted during request entry.", stdout.getvalue())
 
     def test_ask_args_parse_minimal_defaults(self):
         args = _parse_args(["ask", "use inputs/manifest.yaml to start s1", "--session-id", "s1", "--data-dir", "out"])
@@ -1159,6 +1167,137 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 "/ref/ncbi_metazoa",
             )
 
+    def test_run_config_seeds_hifiasm_ont_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "assembly_method": "hifiasm_ont",
+                            "hifiasm_ont_parameters": {
+                                "read_type": "ont",
+                                "threads": 4,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
+            self.assertEqual(assembly_out["execution_mode"], "local")
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+
+    def test_run_config_inferrs_hifiasm_ont_method_from_single_parameter_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "hifiasm_ont_parameters": {
+                                "read_type": "ont",
+                                "threads": 4,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+
+    def test_run_config_inferrs_hifiasm_method_from_single_parameter_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "hifiasm_parameters": {
+                                "read_type": "hifi",
+                                "threads": 4,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            def fake_initial_state(**kwargs):
+                return {"session_id": kwargs["session_id"], "stage_outputs": {}}
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm"})
+            self.assertEqual(assembly_out["hifiasm_parameters"], {"read_type": "hifi", "threads": 4})
+
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1772,7 +1911,7 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("gene_annotation.bundle", artifact_types)
             self.assertIn("operator_report.failed_terminal", artifact_types)
 
-    def test_existing_assembly_interactive_review_writes_annotation_intake_plan(self):
+    def test_existing_assembly_interactive_review_reports_missing_function_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase6-intake-sqlite-smoke"
@@ -1820,18 +1959,16 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                     )
 
             self.assertEqual(review_code, 1)
-            self.assertIn("annotation_intake_plan:", review_stdout)
-            self.assertIn("current_stage:     function_annotation", review_stdout)
+            self.assertNotIn("annotation_intake_plan:", review_stdout)
+            self.assertIn("resume rejected", review_stderr)
             self.assertIn("database_provenance", review_stderr)
 
             artifact_types = _artifact_types(data_dir, session_id)
-            self.assertIn("annotation.intake_plan", artifact_types)
-            self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
-            self.assertIn("gene_annotation.bundle", artifact_types)
+            self.assertNotIn("annotation.intake_plan", artifact_types)
 
             events = Ledger(SessionPaths(data_dir, session_id).run_dir).read_events(session_id)
-            self.assertTrue(any(event["event_type"] == "annotation_intake_planned" for event in events))
-            self.assertTrue(any(event["event_type"] == "review_decision" for event in events))
+            self.assertTrue(any(event["event_type"] == "resume_rejected" for event in events))
+            self.assertFalse(any(event["event_type"] == "annotation_intake_planned" for event in events))
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:

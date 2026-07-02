@@ -11,13 +11,17 @@ from unittest.mock import patch
 
 from app.entrypoints.ask_interactive import (
     is_interactive,
+    _UserAbort,
     _parse_set_params,
     run_interactive_loop,
     _apply_set_params,
+    _attempt_preflight_validation,
     _draft_attention_items,
+    _edit_draft_stage,
     _group_missing_fields_by_scope,
     _parse_genome_size,
     _prompt_parameter_values,
+    _prompt_text_value,
     _render_draft_review,
     _render_confirm,
     _render_plan_summary,
@@ -190,6 +194,7 @@ class InteractiveLoopTests(unittest.TestCase):
             # "y" accept draft (nothing left to clarify), "y" confirm.
             inputs = iter(["y", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=False), \
                  patch("builtins.input", side_effect=lambda *args: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
@@ -218,6 +223,7 @@ class InteractiveLoopTests(unittest.TestCase):
             args = _ask_ns()
             inputs = iter(["", "1p", "500m", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=False), \
                  patch("builtins.input", side_effect=lambda *args: next(inputs)), \
                  patch("sys.stdout", new_callable=io.StringIO) as stdout, \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
@@ -366,22 +372,50 @@ class InteractiveLoopTests(unittest.TestCase):
             response_schema={},
             next_action={},
         )
-        plan = _base_plan(
-            data_dir="/data",
-            selected_stages=["function_annotation"],
-            resolved_execution_order=["function_annotation"],
-            selected_methods={"function_annotation": ["function_annotation.candidate.diamond"]},
-        )
-        inputs = iter(["/db/uniprot/2026_02.dmnd", "UniProt", "2026_02"])
-        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-             patch("builtins.input", side_effect=lambda _: next(inputs)):
-            response = _prompt_parameter_values(req, plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "uniprot.dmnd"
+            db_path.write_text("placeholder", encoding="utf-8")
+            plan = _base_plan(
+                data_dir="/data",
+                selected_stages=["function_annotation"],
+                resolved_execution_order=["function_annotation"],
+                selected_methods={"function_annotation": ["function_annotation.candidate.diamond"]},
+            )
+            inputs = iter([str(db_path), "UniProt", "2026_02"])
+            with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("builtins.input", side_effect=lambda _: next(inputs)):
+                response = _prompt_parameter_values(req, plan)
 
         self.assertIsNotNone(response.stage_parameters)
         provenance = response.stage_parameters["function_annotation"]["database_provenance"]
         self.assertEqual(provenance[0]["method_name"], "function_annotation.candidate.diamond")
         self.assertEqual(provenance[0]["database_name"], "UniProt")
         self.assertIsNone(provenance[0]["input_proteins_ref"])
+
+    def test_parameter_prompt_rejects_missing_function_database_path(self):
+        req = AskClarificationRequest(
+            status="clarification_required",
+            kind="parameter_values",
+            session_id="s1",
+            ask_plan_ref="/tmp/plan.json",
+            manifest_ref="test.yaml",
+            question="Parameters",
+            choices={"stage_defaults": {}},
+            required_fields=["function_annotation.database_provenance"],
+            response_schema={},
+            next_action={},
+        )
+        plan = _base_plan(
+            data_dir="/data",
+            selected_stages=["function_annotation"],
+            resolved_execution_order=["function_annotation"],
+            selected_methods={"function_annotation": ["function_annotation.candidate.diamond"]},
+        )
+        inputs = iter(["/missing/db1.dmnd", "/missing/db2.dmnd", "/missing/db3.dmnd"])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            with self.assertRaises(_UserAbort):
+                _prompt_parameter_values(req, plan)
 
     def test_parameter_prompt_accepts_platform_default(self):
         req = AskClarificationRequest(
@@ -507,6 +541,7 @@ class InteractiveLoopTests(unittest.TestCase):
                 "", "", "", "", "", "y",
             ])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=False), \
                  patch("builtins.input", side_effect=lambda *args: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
@@ -525,6 +560,7 @@ class InteractiveLoopTests(unittest.TestCase):
         )
         args = _ask_ns()
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=False), \
              patch("builtins.input", side_effect=["n", EOFError]), \
              patch("app.entrypoints.ask_interactive.save_plan_to_default_path") as mock_save:
             code = run_interactive_loop(plan, args)
@@ -560,6 +596,30 @@ class InteractiveLoopTests(unittest.TestCase):
             self.assertEqual(mock_preflight.call_count, 2)
             mock_exec.assert_called_once()
 
+    def test_provide_data_interrupt_prints_single_abort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                selected_stages=["assembly"],
+                resolved_execution_order=["assembly"],
+                selected_methods={"assembly": "assembly.candidate.flye"},
+                shared_parameters={"read_type": "ont_raw", "estimated_genome_size": 500_000_000},
+                method_parameters={"assembly.candidate.flye": {"threads": 4}},
+            )
+            args = _ask_ns()
+            with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=True), \
+                 patch("app.entrypoints.ask_interactive._prompt_validation_action", return_value="provide_data"), \
+                 patch("builtins.input", side_effect=KeyboardInterrupt), \
+                 patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                code = run_interactive_loop(plan, args)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout.getvalue().count("Aborted."), 1)
+
     def test_parameter_prompt_then_confirm(self):
         with tempfile.TemporaryDirectory() as tmp:
             reads = Path(tmp) / "reads.fastq"
@@ -581,11 +641,40 @@ class InteractiveLoopTests(unittest.TestCase):
             # to the plan, continue, and confirm the final run plan.
             inputs = iter(["1p", "500m", "", "", "", "y"])
             with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+                 patch("app.entrypoints.ask_interactive._attempt_preflight_validation", return_value=False), \
                  patch("builtins.input", side_effect=lambda _: next(inputs)), \
                  patch("app.entrypoints.ask_interactive._execute_confirmed_plan", return_value=0) as mock_exec:
                 code = run_interactive_loop(plan, args)
             self.assertEqual(code, 0)
             mock_exec.assert_called_once()
+
+    def test_edit_draft_stage_returns_after_repeated_invalid_actions(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.flye"},
+        )
+        inputs = iter(["x", "?", "nope"])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            updated = _edit_draft_stage(plan, "assembly")
+        self.assertEqual(updated, plan)
+
+    def test_required_text_value_reprompts_then_aborts_on_empty_input(self):
+        inputs = iter(["", "", ""])
+        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
+             patch("builtins.input", side_effect=lambda _: next(inputs)):
+            with self.assertRaises(_UserAbort):
+                _prompt_text_value("required field", None, required=True)
+
+    def test_preflight_validation_exception_blocks_confirmation(self):
+        plan = _base_plan(manifest_ref="manifest.yaml")
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            plan = plan.model_copy(update={"manifest_ref": str(manifest)})
+            with patch("app.stages.inventory.nodes.validate_inputs", side_effect=RuntimeError("boom")):
+                self.assertTrue(_attempt_preflight_validation(plan))
 
 
 class ResumeTests(unittest.TestCase):

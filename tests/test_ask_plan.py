@@ -860,6 +860,28 @@ class AskPlannerRunConfigTests(unittest.TestCase):
             },
         })
 
+    def test_build_run_config_executes_selected_hifiasm_ont_method(self):
+        plan = _base_plan(
+            selected_stages=["assembly"],
+            resolved_execution_order=["assembly"],
+            selected_methods={"assembly": "assembly.candidate.hifiasm_ont"},
+            shared_parameters={"platform": "ont", "read_type": "ont_raw", "estimated_genome_size": 2000000},
+            confirmed=True,
+        )
+        plan = _auto_fill_inferred_defaults(plan)
+
+        payload = build_run_config_payload(plan)
+
+        self.assertEqual(payload["local_exec"], ["assembly"])
+        self.assertEqual(payload["assembly"], {
+            "assembly_method": "hifiasm_ont",
+            "assembly_route": "ont",
+            "hifiasm_ont_parameters": {
+                "read_type": "ont",
+                "threads": 4,
+            },
+        })
+
     def test_build_run_config_rejects_multiple_executable_assembly_methods(self):
         plan = _base_plan(
             selected_stages=["assembly"],

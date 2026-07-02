@@ -18,6 +18,7 @@ from app.stages.assembly.constants import (
     FLYE_READ_TYPE_FLAGS,
     GENOME_SIZE_REQUIRED,
     HIFIASM_METHOD,
+    HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
 from app.stages.assembly.knowledge import load_skill_context
@@ -421,6 +422,10 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         assembly_out.get("execution_mode") == "local"
         and assembly_out.get("primary_method") == HIFIASM_METHOD
     )
+    local_hifiasm_ont = (
+        assembly_out.get("execution_mode") == "local"
+        and assembly_out.get("primary_method") == HIFIASM_ONT_METHOD
+    )
     candidate_refs: list[str] = []
     artifacts: list[ArtifactMeta] = []
     selected_plans = []
@@ -431,6 +436,8 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             log_path = data_dir / "work" / "assembly" / session_id / "nextdenovo" / "run.cfg"
         elif method_name == HIFIASM_METHOD:
             log_path = data_dir / "work" / "assembly" / session_id / "hifiasm" / "run_hifiasm.sh"
+        elif method_name == HIFIASM_ONT_METHOD:
+            log_path = data_dir / "work" / "assembly" / session_id / "hifiasm_ont" / "run_hifiasm_ont.sh"
         else:
             log_path = data_dir / "work" / "assembly" / session_id / short_name / "flye_out" / "flye.log"
         bundle_path = candidate_dir / f"{short_name}_candidate.json"
@@ -438,6 +445,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             (local_flye and method_name == FLYE_METHOD)
             or (local_nextdenovo and method_name == NEXTDENOVO_METHOD)
             or (local_hifiasm and method_name == HIFIASM_METHOD)
+            or (local_hifiasm_ont and method_name == HIFIASM_ONT_METHOD)
         )
         method_graph_requested = execution_enabled
         bundle = AssemblyCandidateBundle(
@@ -490,6 +498,8 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         status = "nextdenovo_execution_planned"
     elif local_hifiasm:
         status = "hifiasm_execution_planned"
+    elif local_hifiasm_ont:
+        status = "hifiasm_ont_execution_planned"
     else:
         status = "planned"
     return _update_assembly_output(
@@ -518,6 +528,12 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
                     "status": "planned" if local_hifiasm else "skipped",
                     "method_name": HIFIASM_METHOD,
                     "skip_reason": None if local_hifiasm else "local_execution_not_enabled",
+                },
+                "hifiasm_ont_assembly": {
+                    "name": "hifiasm_ont_assembly",
+                    "status": "planned" if local_hifiasm_ont else "skipped",
+                    "method_name": HIFIASM_ONT_METHOD,
+                    "skip_reason": None if local_hifiasm_ont else "local_execution_not_enabled",
                 },
             },
         },

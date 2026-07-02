@@ -6,6 +6,7 @@ import argparse
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -45,6 +46,7 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+_MAX_INVALID_PROMPT_ATTEMPTS = 3
 
 
 class _UserAbort(Exception):
@@ -65,6 +67,18 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
     except (_UserAbort, KeyboardInterrupt, EOFError):
         print("\nAborted.")
         return 1
+
+
+def _reset_plan_selection(plan: AskPlanState) -> AskPlanState:
+    return plan.model_copy(update={
+        "selected_stages": None,
+        "resolved_execution_order": None,
+        "selected_methods": None,
+        "shared_parameters": None,
+        "method_parameters": None,
+        "stage_parameters": None,
+        "confirmed": False,
+    })
 
 
 def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int:
@@ -105,61 +119,38 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
 
                     if choice == "modify_stages":
                         print("\n--- Restarting from stage selection ---\n")
-                        plan = plan.model_copy(update={
-                            "selected_stages": None,
-                            "resolved_execution_order": None,
-                            "selected_methods": None,
-                            "shared_parameters": None,
-                            "method_parameters": None,
-                            "stage_parameters": None,
-                            "confirmed": False,
-                        })
+                        plan = _reset_plan_selection(plan)
                         plan_ref = save_plan_to_default_path(plan)
                         continue
                     elif choice == "provide_data":
                         print("\n📝 Please add the missing assets to your manifest.")
-                        print("After updating the manifest, press Enter to re-validate, or Ctrl+C to exit.")
-                        try:
-                            input()
-                        except (EOFError, KeyboardInterrupt):
-                            print("\nAborted.")
-                            return 1
+                        raw = input("After updating the manifest, press Enter to re-validate, or type b to edit the plan: ").strip().lower()
+                        if raw in {"b", "back", "edit"}:
+                            print("\n--- Restarting from stage selection ---\n")
+                            plan = _reset_plan_selection(plan)
+                            plan_ref = save_plan_to_default_path(plan)
+                            continue
 
                         # Re-validate after user updates manifest
                         print("\n--- Re-validating after manifest update ---\n")
                         validation_attempted = _attempt_preflight_validation(plan)
                         if validation_attempted:
                             # Still has blocking issues - reset to stage selection
-                            print("\n⚠️  Validation still failed. Restarting from stage selection.\n")
-                            plan = plan.model_copy(update={
-                                "selected_stages": None,
-                                "resolved_execution_order": None,
-                                "selected_methods": None,
-                                "shared_parameters": None,
-                                "method_parameters": None,
-                                "stage_parameters": None,
-                                "confirmed": False,
-                            })
+                            print("\n⚠️  Validation still failed. Returning to stage selection so you can edit the plan.\n")
+                            plan = _reset_plan_selection(plan)
                             plan_ref = save_plan_to_default_path(plan)
                             continue
                         else:
                             # Validation passed - continue to confirmation
                             print("✓ Validation passed! Continuing...\n")
                     elif choice == "proceed_anyway":
-                        print("\n⚠️  Warning: Ignoring validation errors, continuing execution...")
+                        print("\n⚠️  Warning: continuing despite preflight validation errors.")
+                        print("Execution may fail later or stop at a human-review gate if required inputs are still missing.")
 
             _render_confirm(clarification)
             if not _prompt_confirm("Proceed?"):
                 print("\n--- Restarting from stage selection ---\n")
-                plan = plan.model_copy(update={
-                    "selected_stages": None,
-                    "resolved_execution_order": None,
-                    "selected_methods": None,
-                    "shared_parameters": None,
-                    "method_parameters": None,
-                    "stage_parameters": None,
-                    "confirmed": False,
-                })
+                plan = _reset_plan_selection(plan)
                 plan_ref = save_plan_to_default_path(plan)
                 continue
             response = AskClarificationResponse(kind="confirm", confirmed=True)
@@ -553,6 +544,7 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
 
 def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
     current = plan
+    invalid_attempts = 0
     while True:
         summary = build_run_plan_summary(current)
         print()
@@ -570,12 +562,18 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
         if raw in ("", "b", "back"):
             return current
         if raw in ("m", "method", "methods"):
+            invalid_attempts = 0
             current = _edit_stage_methods(current, stage)
             continue
         if raw in ("p", "param", "params", "parameters"):
+            invalid_attempts = 0
             current = _edit_stage_parameters(current, stage)
             continue
+        invalid_attempts += 1
         print("Unknown action. Use m, p, or b.")
+        if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
+            print("Too many invalid actions; returning to the plan.")
+            return current
 
 
 def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
@@ -1273,8 +1271,12 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
             current_shared_defaults = _derive_shared_parameter_defaults({**shared_defaults, **shared_params})
             default = current_shared_defaults.get(param_name)
             if param_name == "read_type" and default and current_shared_defaults.get("platform"):
-                shared_params[param_name] = default
-                continue
+                if not _shared_parameter_value_is_valid("read_type", default):
+                    default = None
+                else:
+                    print(f"  [shared_parameters] read_type derived from platform={current_shared_defaults.get('platform')}: {default}")
+                    shared_params[param_name] = default
+                    continue
         else:
             default = _find_default(field, defaults)
 
@@ -1286,7 +1288,7 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
             value = _prompt_function_database_provenance(plan)
             stage_params.setdefault("function_annotation", {})["database_provenance"] = value
         else:
-            value = _prompt_text_value(label, default)
+            value = _prompt_text_value(label, default, required=True)
             if param_name == "estimated_genome_size" and isinstance(value, str):
                 value = _parse_genome_size(value)
             params.setdefault(method_key, {})[param_name] = value
@@ -1360,12 +1362,17 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
 
         # Database source path (the only thing the user must provide)
         db_path = None
+        invalid_attempts = 0
         while not db_path:
-            raw = _prompt_text_value(f"{label} database path", None)
-            if raw and str(raw).strip():
-                db_path = str(raw).strip()
-            else:
-                print(f"    Database path is required for {label}.")
+            raw = _prompt_text_value(f"{label} database path", None, required=True)
+            candidate = Path(str(raw).strip()).expanduser()
+            if candidate.exists():
+                db_path = str(candidate)
+                break
+            invalid_attempts += 1
+            print(f"    Database path does not exist for {label}: {candidate}")
+            if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
+                raise _UserAbort()
 
         # Database name (optional, defaults to label)
         db_name = _prompt_text_value(f"{label} database name", label)
@@ -1394,18 +1401,29 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
     return records
 
 
-def _prompt_text_value(label: str, default: Any) -> Any:
-    if _HAS_QUESTIONARY:
-        answer = _safe_ask(questionary.text(
-            f"{label}:",
-            default=str(default) if default is not None else "",
-        ))
-    else:
-        if default is not None:
-            answer = input(f"  {label} [{default}]: ").strip()
+def _prompt_text_value(label: str, default: Any, *, required: bool = False) -> Any:
+    invalid_attempts = 0
+    while True:
+        if _HAS_QUESTIONARY:
+            answer = _safe_ask(questionary.text(
+                f"{label}:",
+                default=str(default) if default is not None else "",
+            ))
         else:
-            answer = input(f"  {label}: ").strip()
-    return answer if answer else default
+            if default is not None:
+                answer = input(f"  {label} [{default}]: ").strip()
+            else:
+                answer = input(f"  {label}: ").strip()
+        if answer:
+            return answer
+        if default is not None:
+            return default
+        if not required:
+            return default
+        invalid_attempts += 1
+        print(f"  {label} is required.")
+        if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
+            raise _UserAbort()
 
 
 def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
@@ -1623,23 +1641,19 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
     """
     Attempt preflight validation before execution.
 
-    Returns True if validation failed and found blocking issues.
-    Returns False if validation passed or couldn't be performed.
+    Returns True if validation failed or could not be completed safely.
+    Returns False if validation passed.
     """
     try:
         # Load manifest and run inventory to get asset registry
-        from pathlib import Path
-        from app.schemas.manifest import load_manifest
-        from app.stages.inventory.nodes import inventory_node
+        from app.stages.inventory.nodes import register_assets, validate_inputs
         from app.schemas.state import initial_state
         from app.stages.preflight import validate_execution_plan
 
         manifest_path = Path(plan.manifest_ref)
         if not manifest_path.exists():
-            # Manifest not found, skip validation
-            return False
-
-        manifest = load_manifest(plan.manifest_ref)
+            print(f"\nPreflight validation could not run: manifest not found: {manifest_path}", file=sys.stderr)
+            return True
 
         # Create initial state and run inventory to get asset_registry_ref
         state = initial_state(
@@ -1648,8 +1662,11 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
             data_dir=plan.data_dir,
         )
 
-        # Run inventory to populate asset_registry_ref
-        state = inventory_node(state)
+        # Run the inventory nodes needed to populate asset_registry_ref.
+        for inventory_step in (validate_inputs, register_assets):
+            update = inventory_step(state)
+            if update:
+                state = {**state, **update}
 
         # Now validate with the populated state
         validation = validate_execution_plan(
@@ -1663,11 +1680,14 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
 
         return False
 
-    except Exception:
-        logger.debug("Skipping preflight validation after unexpected error.", exc_info=True)
-        # If validation fails for any reason, just skip it
-        # (e.g., manifest issues will be caught during actual execution)
-        return False
+    except Exception as exc:
+        logger.warning("Preflight validation failed unexpectedly.", exc_info=True)
+        print(
+            f"\nPreflight validation could not complete: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        print("Fix the validation error, edit the plan, or choose the advanced override to proceed anyway.", file=sys.stderr)
+        return True
 
 
 def _render_validation_errors(validation) -> None:
@@ -1704,6 +1724,7 @@ def _prompt_validation_action() -> str:
     print("  2. Provide missing data (add assets to manifest)")
     print("  3. Proceed anyway (advanced)")
 
+    invalid_attempts = 0
     while True:
         choice = input("\nYour choice [1/2/3]: ").strip()
         if choice == "1":
@@ -1713,7 +1734,10 @@ def _prompt_validation_action() -> str:
         elif choice == "3":
             return "proceed_anyway"
         else:
+            invalid_attempts += 1
             print("Invalid choice. Please enter 1, 2, or 3.")
+            if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
+                raise _UserAbort()
 
 
 def _execute_confirmed_plan(plan: AskPlanState, args: argparse.Namespace) -> int:

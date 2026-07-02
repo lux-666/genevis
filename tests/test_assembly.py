@@ -28,6 +28,7 @@ class AssemblyDescriptorTests(unittest.TestCase):
         expected = {
             "assembly.candidate.flye": "flye",
             "assembly.candidate.hifiasm": "hifiasm",
+            "assembly.candidate.hifiasm_ont": "hifiasm",
             "assembly.candidate.nextdenovo": "nextdenovo",
         }
         for method_name, package_name in expected.items():
@@ -44,14 +45,15 @@ class AssemblyDescriptorTests(unittest.TestCase):
     def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "ont_raw")
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["pacbio_hifi"], "pacbio_hifi")
-        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_raw"]["hifiasm"], "ont")
-        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_hq"]["hifiasm"], "ont")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_raw"]["hifiasm_ont"], "ont")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_hq"]["hifiasm_ont"], "ont")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["pacbio_hifi"]["hifiasm"], "hifi")
         for shared_read_type in PLATFORM_TO_SHARED_READ_TYPE.values():
             with self.subTest(shared_read_type=shared_read_type):
                 mapping = SHARED_TO_METHOD_READ_TYPE[shared_read_type]
                 self.assertIn("flye", mapping)
                 self.assertIn("nextdenovo", mapping)
-                self.assertIn("hifiasm", mapping)
+                self.assertTrue({"hifiasm", "hifiasm_ont"} & set(mapping))
 
 
 class AssemblyStageTests(unittest.TestCase):
@@ -759,15 +761,15 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "ont",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "method_decision": {"primary": "assembly.candidate.hifiasm"},
-                    "hifiasm_parameters": {"read_type": "ont", "threads": 1},
+                    "method_decision": {"primary": "assembly.candidate.hifiasm_ont"},
+                    "hifiasm_ont_parameters": {"read_type": "ont", "threads": 1},
                 },
             }
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
-            script = (Path(tmpdir) / "work" / "assembly" / "s1" / "hifiasm" / "run_hifiasm.sh").read_text(encoding="utf-8")
+            script = (Path(tmpdir) / "work" / "assembly" / "s1" / "hifiasm_ont" / "run_hifiasm_ont.sh").read_text(encoding="utf-8")
             self.assertIn("--ont", script)
 
     def test_local_hifiasm_rejects_invalid_threads(self):

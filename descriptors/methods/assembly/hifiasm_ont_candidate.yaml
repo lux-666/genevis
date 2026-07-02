@@ -1,0 +1,23 @@
+method_name: assembly.candidate.hifiasm_ont
+stage: assembly
+package_ref: hifiasm
+goal: "Plan and optionally execute a hifiasm ONT assembly candidate for ONT and CycloneSEQ long reads (FASTQ only)."
+required_inputs:
+  - name: long_reads
+    type: clean_long_reads
+    description: "Clean ONT or CycloneSEQ reads in FASTQ format (FASTA not supported for ONT mode)."
+expected_outputs:
+  - name: draft_assembly
+    type: draft_assembly
+    description: "Draft assembly FASTA path for the hifiasm ONT candidate when local execution is enabled."
+review_rules:
+  - candidate_bundle_exists
+  - ont_or_cyclone_route_required
+  - fastq_format_required
+human_review_triggers:
+  - ont_cyclone_route_and_fastq_format_required
+resource_hints:
+  cpu_cores: 32
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 48.0

@@ -18,6 +18,7 @@ from app.entrypoints.review_interactive import (
     render_blocked_summary,
     render_decision_brief,
     run_interactive_review,
+    _prompt_choice,
 )
 from app.execution.artifacts import append_artifact_records
 from app.review.base import ResumeReviewRequest
@@ -113,6 +114,12 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
 
 
 class PromptAssemblyReviewTests(unittest.TestCase):
+    def test_prompt_choice_retries_invalid_input(self):
+        inputs = iter(["bad", "2"])
+        with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            choice = _prompt_choice("decision", ["accept", "rerun"])
+        self.assertEqual(choice, "rerun")
+
     def test_accept_single_candidate_auto_selects(self):
         with tempfile.TemporaryDirectory() as tmp:
             draft = _write_fasta(tmp)
@@ -401,6 +408,43 @@ class RunInteractiveReviewTests(unittest.TestCase):
             code = run_interactive_review(session_id, str(data_dir))
             self.assertEqual(code, 1)
 
+    def test_wrong_supervision_state_does_not_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "review-wrong-state"
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "completed",
+                "current_stage": "assembly_review",
+                "stage_outputs": {"assembly_review": {"status": "completed"}},
+                "route_trace": [],
+            }
+            graph = type(
+                "FakeGraph",
+                (),
+                {
+                    "get_state": lambda self, config: type("Snapshot", (), {"values": state})(),
+                    "update_state": lambda self, config, update: (_ for _ in ()).throw(AssertionError("should not update")),
+                    "invoke": lambda self, state_arg, config: (_ for _ in ()).throw(AssertionError("should not invoke")),
+                },
+            )()
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="draft.fasta",
+            )
+            raw_decision = request.model_dump(mode="json")
+            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
+                 patch("app.entrypoints.run.build_graph", return_value=graph):
+                code = run_interactive_review(session_id, str(data_dir))
+            self.assertEqual(code, 1)
+
     def test_cancelled_prompt_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _assembly_blocked_session(tmp)
@@ -457,6 +501,102 @@ class RunInteractiveReviewTests(unittest.TestCase):
             self.assertFalse(list(decision_dir.glob("assembly_review_interactive_decision_*.json")) if decision_dir.exists() else [])
             events = Ledger(data_dir).read_events(session_id)
             self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
+
+    def test_update_state_failure_does_not_invoke_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "review-update-failure"
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "route_trace": [],
+            }
+            graph = type(
+                "FakeGraph",
+                (),
+                {
+                    "get_state": lambda self, config: type("Snapshot", (), {"values": state})(),
+                    "update_state": lambda self, config, update: (_ for _ in ()).throw(RuntimeError("update boom")),
+                    "invoke": lambda self, state_arg, config: (_ for _ in ()).throw(AssertionError("should not invoke")),
+                },
+            )()
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="draft.fasta",
+            )
+            raw_decision = request.model_dump(mode="json")
+            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
+                 patch("app.entrypoints.run.build_graph", return_value=graph), \
+                 patch("app.review.annotation_intake.collect_annotation_intake_selection", return_value=None), \
+                 patch("app.control.lifecycle.resume_review_state", return_value={"supervision_state": "running_stage"}):
+                code = run_interactive_review(session_id, str(data_dir))
+
+            self.assertEqual(code, 1)
+            events = Ledger(data_dir).read_events(session_id)
+            self.assertTrue(any(event["event_type"] == "resume_failed" for event in events))
+
+    def test_annotation_intake_value_error_is_reported_without_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "review-intake-value-error"
+            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
+            db_path.parent.mkdir(parents=True)
+            db_path.write_text("", encoding="utf-8")
+            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(data_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "route_trace": [],
+            }
+            graph = type(
+                "FakeGraph",
+                (),
+                {
+                    "get_state": lambda self, config: type("Snapshot", (), {"values": state})(),
+                    "update_state": lambda self, config, update: (_ for _ in ()).throw(AssertionError("should not update")),
+                    "invoke": lambda self, state_arg, config: (_ for _ in ()).throw(AssertionError("should not invoke")),
+                },
+            )()
+            request = ResumeReviewRequest(
+                session_id=session_id,
+                stage="assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                final_assembly_ref="draft.fasta",
+            )
+            raw_decision = request.model_dump(mode="json")
+            intake_selection = type(
+                "IntakeSelection",
+                (),
+                {"recommended_plan": object(), "final_plan": object()},
+            )()
+            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
+                 patch("app.entrypoints.run.build_graph", return_value=graph), \
+                 patch("app.review.annotation_intake.collect_annotation_intake_selection", return_value=intake_selection), \
+                 patch("app.review.annotation_intake.persist_annotation_intake_plan", side_effect=ValueError("missing provenance")), \
+                 patch("app.control.lifecycle.resume_review_state", return_value={"supervision_state": "running_stage"}):
+                code = run_interactive_review(session_id, str(data_dir))
+
+            self.assertEqual(code, 1)
+            events = Ledger(data_dir).read_events(session_id)
+            rejected = [event for event in events if event["event_type"] == "resume_rejected"]
+            self.assertEqual(len(rejected), 1)
+            self.assertIn("ValueError: missing provenance", rejected[0]["error"])
 
     def test_dry_run_writes_decision_without_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,6 +35,7 @@ _ASSEMBLY_METHOD_NAMES = {
     "flye": "assembly.candidate.flye",
     "nextdenovo": "assembly.candidate.nextdenovo",
     "hifiasm": "assembly.candidate.hifiasm",
+    "hifiasm_ont": "assembly.candidate.hifiasm_ont",
 }
 
 
@@ -386,16 +387,24 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
-        if run_config.assembly.assembly_method:
+        assembly_method = run_config.assembly.assembly_method
+        if assembly_method is None:
+            provided_methods = [
+                method
+                for method, params in [
+                    ("flye", run_config.assembly.flye_parameters),
+                    ("nextdenovo", run_config.assembly.nextdenovo_parameters),
+                    ("hifiasm", run_config.assembly.hifiasm_parameters),
+                    ("hifiasm_ont", run_config.assembly.hifiasm_ont_parameters),
+                ]
+                if params is not None
+            ]
+            if len(provided_methods) == 1:
+                assembly_method = provided_methods[0]
+        if assembly_method:
             assembly_out["method_decision"] = {
                 **dict(assembly_out.get("method_decision") or {}),
-                "primary": _ASSEMBLY_METHOD_NAMES[run_config.assembly.assembly_method],
-            }
-        elif run_config.assembly.nextdenovo_parameters and not run_config.assembly.flye_parameters:
-            assembly_out.setdefault("method_decision", {})
-            assembly_out["method_decision"] = {
-                **dict(assembly_out.get("method_decision") or {}),
-                "primary": _ASSEMBLY_METHOD_NAMES["nextdenovo"],
+                "primary": _ASSEMBLY_METHOD_NAMES[assembly_method],
             }
         if run_config.assembly.flye_parameters:
             assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
@@ -403,6 +412,8 @@ def _run_session(args: argparse.Namespace) -> int:
             assembly_out["nextdenovo_parameters"] = run_config.assembly.nextdenovo_parameters.model_dump(exclude_none=True)
         if run_config.assembly.hifiasm_parameters:
             assembly_out["hifiasm_parameters"] = run_config.assembly.hifiasm_parameters.model_dump(exclude_none=True)
+        if run_config.assembly.hifiasm_ont_parameters:
+            assembly_out["hifiasm_ont_parameters"] = run_config.assembly.hifiasm_ont_parameters.model_dump(exclude_none=True)
         for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
             value = getattr(run_config.assembly, key)
             if value is not None:

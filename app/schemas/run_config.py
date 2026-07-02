@@ -48,8 +48,9 @@ LocalExecStage = Literal[
 
 FlyeReadType = Literal["nano-raw", "nano-hq", "pacbio-raw", "pacbio-hifi"]
 NextDenovoReadType = Literal["ont", "clr", "hifi"]
-HifiasmReadType = Literal["hifi", "ont"]
-AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm"]
+HifiasmReadType = Literal["hifi"]
+HifiasmOntReadType = Literal["ont"]
+AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
@@ -150,6 +151,15 @@ class HifiasmRunParameters(BaseModel):
     threads: int = Field(gt=0)
 
 
+class HifiasmOntRunParameters(BaseModel):
+    """Explicit hifiasm ONT-mode parameters for local assembly execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    read_type: HifiasmOntReadType | None = None
+    threads: int = Field(gt=0)
+
+
 class AssemblyRunConfig(BaseModel):
     """Run-config block for the assembly stage."""
 
@@ -159,6 +169,7 @@ class AssemblyRunConfig(BaseModel):
     flye_parameters: FlyeRunParameters | None = None
     nextdenovo_parameters: NextDenovoRunParameters | None = None
     hifiasm_parameters: HifiasmRunParameters | None = None
+    hifiasm_ont_parameters: HifiasmOntRunParameters | None = None
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
@@ -171,7 +182,7 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         raise ValueError(
             "run_config: local_exec includes 'assembly' but "
             "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
-            "assembly.hifiasm_parameters is missing"
+            "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
         )
 
     method = assembly.assembly_method
@@ -187,6 +198,10 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         if not assembly.hifiasm_parameters:
             raise ValueError("run_config: local assembly method 'hifiasm' requires assembly.hifiasm_parameters")
         return
+    if method == "hifiasm_ont":
+        if not assembly.hifiasm_ont_parameters:
+            raise ValueError("run_config: local assembly method 'hifiasm_ont' requires assembly.hifiasm_ont_parameters")
+        return
 
     provided = [
         name
@@ -194,6 +209,7 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
             ("flye", assembly.flye_parameters),
             ("nextdenovo", assembly.nextdenovo_parameters),
             ("hifiasm", assembly.hifiasm_parameters),
+            ("hifiasm_ont", assembly.hifiasm_ont_parameters),
         ]
         if value is not None
     ]
@@ -201,7 +217,7 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         raise ValueError(
             "run_config: local_exec includes 'assembly' but "
             "assembly.flye_parameters, assembly.nextdenovo_parameters, or "
-            "assembly.hifiasm_parameters is missing"
+            "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
         )
     if len(provided) > 1:
         raise ValueError(

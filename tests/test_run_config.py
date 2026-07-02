@@ -83,6 +83,26 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.hifiasm_parameters.read_type, "hifi")
         self.assertEqual(config.assembly.hifiasm_parameters.threads, 4)
 
+    def test_valid_config_with_hifiasm_ont_parameters(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["assembly"],
+                "assembly": {
+                    "assembly_method": "hifiasm_ont",
+                    "hifiasm_ont_parameters": {
+                        "read_type": "ont",
+                        "threads": 4,
+                    },
+                },
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.assembly_method, "hifiasm_ont")
+        assert config.assembly.hifiasm_ont_parameters is not None
+        self.assertEqual(config.assembly.hifiasm_ont_parameters.read_type, "ont")
+        self.assertEqual(config.assembly.hifiasm_ont_parameters.threads, 4)
+
     def test_local_hifiasm_method_requires_hifiasm_parameters(self):
         with self.assertRaises(ValidationError) as ctx:
             RunConfig.model_validate(
@@ -96,6 +116,20 @@ class RunConfigSchemaTests(unittest.TestCase):
             )
 
         self.assertIn("hifiasm_parameters", str(ctx.exception))
+
+    def test_local_hifiasm_ont_method_requires_hifiasm_ont_parameters(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "local_exec": ["assembly"],
+                    "assembly": {
+                        "assembly_method": "hifiasm_ont",
+                        "hifiasm_parameters": {"threads": 4},
+                    },
+                }
+            )
+
+        self.assertIn("hifiasm_ont_parameters", str(ctx.exception))
 
     def test_local_assembly_with_two_parameter_sets_requires_explicit_method(self):
         with self.assertRaises(ValidationError) as ctx:

@@ -29,12 +29,12 @@ SHARED_TO_METHOD_READ_TYPE = {
     "ont_raw": {
         "flye": "nano-raw",
         "nextdenovo": "ont",
-        "hifiasm": "ont",
+        "hifiasm_ont": "ont",
     },
     "ont_hq": {
         "flye": "nano-hq",
         "nextdenovo": "ont",
-        "hifiasm": "ont",
+        "hifiasm_ont": "ont",
     },
     "pacbio_clr": {
         "flye": "pacbio-raw",

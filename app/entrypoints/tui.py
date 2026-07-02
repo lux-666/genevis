@@ -20,7 +20,7 @@ def run_tui(data_dir: str) -> int:
     try:
         return _tui_main(data_dir)
     except (KeyboardInterrupt, EOFError):
-        print("\nAborted.")
+        print("\nAborted during interactive planning.")
         return 1
 
 
@@ -34,6 +34,7 @@ def _tui_main(data_dir: str) -> int:
     try:
         request_text = input("> ").strip()
     except (EOFError, KeyboardInterrupt):
+        print("\nAborted during request entry.")
         return 1
 
     if not request_text:
