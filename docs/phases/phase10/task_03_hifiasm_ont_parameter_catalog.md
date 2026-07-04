@@ -66,6 +66,8 @@ parameters:
     level: 0
     source: executor
     value_type: path
+    source_priority:
+      - execution.output_prefix
     description: "Output file prefix"
 
   threads:
@@ -75,6 +77,8 @@ parameters:
     value_type: int
     default: 32
     min: 1
+    source_priority:
+      - assembly.hifiasm_ont_parameters.threads
     description: "Number of CPU threads"
 
   input_reads:
@@ -82,6 +86,8 @@ parameters:
     level: 0
     source: executor
     value_type: path_list
+    source_priority:
+      - execution.input_reads
     description: "Input ONT read files; must be FASTQ for ONT mode"
 
   ont_mode:
@@ -229,6 +235,7 @@ parameters:
 - LLM output may contain only L2 keys.
 - If the LLM omits an L2 key, the command builder should omit that CLI flag unless a default is explicitly required by the run contract.
 - There is no separate prompt allowlist. If an ONT-valid behavior-changing parameter is in the catalog as L2, it is part of the MVP recommender surface.
+- L0/L1 values are derived through catalog `source_priority`; method adapters may provide `execution` context values, but generic command building should not hard-code parameter names.
 
 ## Tests
 

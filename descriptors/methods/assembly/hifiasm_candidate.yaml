@@ -1,6 +1,7 @@
 method_name: assembly.candidate.hifiasm
 stage: assembly
 package_ref: hifiasm
+parameter_catalog: hifiasm
 goal: "Plan and optionally execute a hifiasm assembly candidate for HiFi assembly routes."
 required_inputs:
   - name: long_reads

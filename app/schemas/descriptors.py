@@ -65,6 +65,7 @@ class MethodDescriptor(BaseModel):
     readiness_rules: list[str] = Field(default_factory=list)
     review_notes: list[str] = Field(default_factory=list)
     evm: dict[str, str] | None = None
+    parameter_catalog: str | None = None
 
 
 class FrozenAttemptSpec(BaseModel):

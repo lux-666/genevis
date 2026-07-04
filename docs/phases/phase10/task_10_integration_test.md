@@ -16,6 +16,8 @@ profile -> select cases -> recommend L2 params -> validate -> build argv -> free
 
 The tests should prove the system is executable, replayable, can fail safely, can retry deterministically, and exposes the full cataloged L2 parameter surface rather than a hand-picked prompt subset.
 
+The tests should also prove that the complete parameter profile is saved for replay while prompt payloads contain only the task-scoped profile slice.
+
 ## Test 1: Catalog and Prompt Permissions
 
 ```python
@@ -61,6 +63,31 @@ def test_llm_cannot_modify_l0_or_l1():
 
     assert not result["valid"]
     assert {v["param"] for v in result["violations"]} >= {"threads", "hg_size"}
+```
+
+## Test 2b: Full Profile and Prompt Profile Split
+
+```python
+def test_full_profile_is_replayable_but_prompt_profile_is_task_scoped():
+    full_profile = build_full_parameter_profile(state, previous_attempt=attempt)
+    prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
+
+    assert "previous_attempt" in full_profile
+    assert "assembly_review" in full_profile
+    assert "previous_attempt" not in prompt_profile
+    assert "input_files" not in prompt_profile["assets"]
+
+
+def test_validator_can_use_full_profile_paths():
+    result = validate_recommended_parameters(
+        method_id="hifiasm_ont",
+        catalog=catalog,
+        recommended_params={"purge_level": 3},
+        readonly_facts={},
+        full_profile={"genome_survey": {"heterozygosity": "high"}},
+        rules={"rules": [{"condition": {"genome_survey.heterozygosity": "high"}, "constraints": {"purge_level": [0, 1]}}]},
+    )
+    assert not result["valid"]
 ```
 
 ## Test 3: Happy Path Builds Replayable Attempt
@@ -180,6 +207,8 @@ def test_max_review_retries_stop():
 
 - [ ] Tests cover initial pass path.
 - [ ] Tests prove the prompt includes the full cataloged L2 surface, not a hand-picked subset.
+- [ ] Tests prove full profile is replayable while prompt profile is task-scoped.
+- [ ] Tests prove validator can use complete profile fields through dotted paths.
 - [ ] Tests cover validation failure before execution.
 - [ ] Tests cover command failure retry with log tail.
 - [ ] Tests cover review failure retry.

@@ -1,0 +1,729 @@
+method_id: hifiasm_ont
+tool: hifiasm
+read_type: ont
+description: "ONT simplex assembly mode using hifiasm >=0.21.0; --ont is fixed by the route."
+
+parameters:
+  output_prefix:
+    cli: "-o"
+    level: 0
+    source: executor
+    value_type: path
+    source_priority:
+      - execution.output_prefix
+    description: "Output file prefix."
+  threads:
+    cli: "-t"
+    level: 0
+    source: run_config
+    value_type: int
+    default: 32
+    min: 1
+    source_priority:
+      - assembly.hifiasm_ont_parameters.threads
+    description: "Number of CPU threads."
+  input_reads:
+    cli: null
+    level: 0
+    source: executor
+    value_type: path_list
+    source_priority:
+      - execution.input_reads
+    description: "Input ONT read files; FASTQ required for ONT mode."
+  help:
+    cli: "-h"
+    level: 0
+    source: executor
+    value_type: boolean
+    fixed_value: false
+    description: "Show help information."
+  version:
+    cli: "--version"
+    level: 0
+    source: executor
+    value_type: boolean
+    fixed_value: false
+    description: "Show version number."
+  ont_mode:
+    cli: "--ont"
+    level: 0
+    source: route_selector
+    value_type: boolean
+    fixed_value: true
+    description: "Fixed ONT mode flag."
+  ignore_cached_overlaps:
+    cli: "-i"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Ignore saved read correction and overlaps."
+  write_paf:
+    cli: "--write-paf"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Dump overlaps in PAF; output/audit mechanic."
+  write_ec:
+    cli: "--write-ec"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Dump error-corrected reads; output/audit mechanic."
+  dbg_gfa:
+    cli: "--dbg-gfa"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Debug GFA output."
+  dbg_het_cnt:
+    cli: "--dbg-het-cnt"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Debug heterozygous k-mer count output."
+  dbg_ovec:
+    cli: "--dbg-ovec"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Debug overlap error correction output."
+  prt_raw:
+    cli: "--prt-raw"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Print raw/debug output."
+  bin_only:
+    cli: "--bin-only"
+    level: 0
+    source: executor
+    value_type: boolean
+    default: false
+    description: "Internal/debug binary-only mode."
+  primary_mode:
+    cli: "--primary"
+    level: 0
+    source: route_selector
+    value_type: boolean
+    default: false
+    description: "Output primary and alternate contigs; route/output contract."
+  hap1_yak:
+    cli: "-1"
+    level: 0
+    source: route_selector
+    value_type: path
+    description: "Paternal/haplotype1 yak k-mer dump for trio route."
+  hap2_yak:
+    cli: "-2"
+    level: 0
+    source: route_selector
+    value_type: path
+    description: "Maternal/haplotype2 yak k-mer dump for trio route."
+  hap1_read_names:
+    cli: "-3"
+    level: 0
+    source: route_selector
+    value_type: path
+    description: "Haplotype1 read-name list for trio route."
+  hap2_read_names:
+    cli: "-4"
+    level: 0
+    source: route_selector
+    value_type: path
+    description: "Haplotype2 read-name list for trio route."
+  hic_r1:
+    cli: "--h1"
+    level: 0
+    source: route_selector
+    value_type: path_list
+    description: "Hi-C R1 input files."
+  hic_r2:
+    cli: "--h2"
+    level: 0
+    source: route_selector
+    value_type: path_list
+    description: "Hi-C R2 input files."
+  hic_enzyme:
+    cli: "--enzyme"
+    level: 0
+    source: route_selector
+    value_type: string
+    description: "Hi-C restriction enzyme route input."
+  ul_reads:
+    cli: "--ul"
+    level: 0
+    source: route_selector
+    value_type: path_list
+    description: "Ultra-long read inputs for hybrid route."
+  secondary_input:
+    cli: "--sec-in"
+    level: 0
+    source: route_selector
+    value_type: path
+    description: "Secondary input route file."
+  seed:
+    cli: "--seed"
+    level: 0
+    source: executor
+    value_type: int
+    default: 11
+    min: 0
+    description: "RNG seed for reproducibility."
+
+  hg_size:
+    cli: "--hg-size"
+    level: 1
+    source: genome_survey
+    value_type: string
+    source_priority:
+      - genome_survey.genome_size_prior
+      - genome_survey.estimates.genome_size
+      - shared_parameters.estimated_genome_size
+    description: "Estimated haploid genome size, e.g. 100m or 3g."
+  hom_cov:
+    cli: "--hom-cov"
+    level: 1
+    source: genome_survey
+    value_type: int
+    min: 1
+    source_priority:
+      - genome_survey.estimates.hom_cov
+      - genome_survey.estimates.kmer_peak_coverage
+      - read_qc.estimated_coverage
+    description: "Homozygous read coverage."
+  n_hap:
+    cli: "--n-hap"
+    level: 1
+    source: manifest
+    value_type: int
+    allowed_values: [1, 2, 3, 4, 5, 6, 8]
+    default: 2
+    source_priority:
+      - shared_parameters.ploidy
+      - manifest.ploidy
+    description: "Assumed haplotype count."
+
+  kmer_length:
+    cli: "-k"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 51
+    min: 11
+    max: 63
+    description: "K-mer length; hifiasm requires <64."
+  minimizer_window:
+    cli: "-w"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 51
+    min: 1
+    max: 500
+    description: "Minimizer window size."
+  bloom_filter_bits:
+    cli: "-f"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 37
+    min: 0
+    max: 45
+    description: "Number of bits for the bloom filter; 0 disables it."
+  high_freq_kmer_drop:
+    cli: "-D"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 5.0
+    min: 0
+    max: 100
+    description: "Drop k-mers occurring above FLOAT*coverage."
+  max_overlaps_per_read:
+    cli: "-N"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 1
+    max: 1000000
+    description: "Consider up to max(-D*coverage, -N) overlaps per oriented read."
+  correction_rounds:
+    cli: "-r"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 3
+    min: 0
+    max: 20
+    description: "Rounds of haplotype-aware error correction."
+  adapter_trim_length:
+    cli: "-z"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 0
+    min: 0
+    max: 1000
+    description: "Trim this many bases from both ends of reads."
+  max_kmer_occurrence:
+    cli: "--max-kocc"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 2000
+    min: 1
+    max: 10000000
+    description: "Rescue repetitive overlaps with k-mers below this occurrence count."
+  min_hist_count:
+    cli: "--min-hist-cnt"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 5
+    min: 0
+    max: 1000
+    description: "Ignore k-mer spectrum counts below this value."
+  max_overlap_diff_ec:
+    cli: "--max-od-ec"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.04
+    min: 0
+    max: 1
+    description: "Maximum overlap difference during error correction."
+  max_overlap_diff_final:
+    cli: "--max-od-final"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.03
+    min: 0
+    max: 1
+    description: "Maximum overlap difference during final overlap filtering."
+  exact_list:
+    cli: "--ex-list"
+    level: 2
+    source: parameter_recommender
+    value_type: path
+    description: "Exact/exception list used by hifiasm internals."
+  exact_iterations:
+    cli: "--ex-iter"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    max: 100
+    description: "Iteration count for exact/exception handling."
+  skip_triobin:
+    cli: "--skip-triobin"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Skip trio binning behavior."
+  fast_mode:
+    cli: "--fast"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Fast assembly mode."
+  dp_error_rate:
+    cli: "--dp-er"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    min: 0
+    max: 1
+    description: "Dynamic-programming error-rate parameter."
+  unskew:
+    cli: "--unskew"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Enable unskew behavior."
+  kpt_rate:
+    cli: "--kpt-rate"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    min: 0
+    max: 1
+    description: "Keep-rate parameter."
+  low_heterozygosity_mode:
+    cli: "--low-het"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Enable mode for very low heterozygosity genomes."
+  integer_correct:
+    cli: "--integer-correct"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    max: 10
+    description: "Integer correction mode parameter."
+
+  assembly_cleaning_rounds:
+    cli: "-a"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 4
+    min: 0
+    max: 50
+    description: "Rounds of assembly graph cleaning."
+  contig_bubble_pop_distance:
+    cli: "-m"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 10000000
+    min: 0
+    description: "Pop bubbles below this size in contig graphs."
+  unitig_bubble_pop_distance:
+    cli: "-p"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 0
+    min: 0
+    description: "Pop bubbles below this size in unitig graphs."
+  short_unitig_read_count:
+    cli: "-n"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 3
+    min: 0
+    max: 1000
+    description: "Remove tip unitigs composed of <=INT reads."
+  max_overlap_drop_ratio:
+    cli: "-x"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.8
+    min: 0
+    max: 1
+    description: "Max overlap drop ratio."
+  min_overlap_drop_ratio:
+    cli: "-y"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.2
+    min: 0
+    max: 1
+    description: "Min overlap drop ratio."
+  post_join:
+    cli: "-u"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    allowed_values: [0, 1]
+    description: "Post-join step switch."
+  primary_coverage_range:
+    cli: "--pri-range"
+    level: 2
+    source: parameter_recommender
+    value_type: string
+    description: "Min,max coverage cutoff for primary contigs."
+  low_quality_bed_threshold:
+    cli: "--lowQ"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 70
+    min: 0
+    max: 100
+    description: "Output contig regions with >=INT percent inconsistency; 0 disables."
+  break_low_coverage:
+    cli: "--b-cov"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: -1
+    description: "Break contigs at low-coverage positions; works with --m-rate."
+  break_high_coverage:
+    cli: "--h-cov"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: -1
+    description: "Break contigs at high-coverage positions; works with --m-rate."
+  break_overlap_rate:
+    cli: "--m-rate"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.75
+    min: 0
+    max: 1
+    description: "Break contigs with <=FLOAT*coverage exact overlaps."
+  contig_tip_read_count:
+    cli: "--ctg-n"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 3
+    min: 0
+    max: 1000
+    description: "Remove tip contigs composed of <=INT reads."
+
+  trio_lower_frequency:
+    cli: "-c"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 2
+    min: 0
+    max: 1000000
+    description: "Lower bound of binned k-mer frequency."
+  trio_upper_frequency:
+    cli: "-d"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 5
+    min: 0
+    max: 1000000
+    description: "Upper bound of binned k-mer frequency."
+  trio_unexpected_occurrence:
+    cli: "--t-occ"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 60
+    min: 0
+    description: "Remove unitigs with unexpected haplotype-specific reads."
+  trio_dual:
+    cli: "--trio-dual"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Use homology information to correct trio phasing errors."
+
+  purge_level:
+    cli: "-l"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    allowed_values: [0, 1, 2, 3]
+    default: 3
+    description: "Purge duplication level."
+  purge_similarity:
+    cli: "-s"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.75
+    min: 0
+    max: 1
+    description: "Similarity threshold for duplicate haplotig purging."
+  duplicate_overlap_min_reads:
+    cli: "-O"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 1
+    min: 1
+    description: "Minimum overlapped reads for duplicate haplotigs."
+  purge_max:
+    cli: "--purge-max"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 1
+    description: "Coverage upper bound of Purge-dups."
+
+  homology_base_similarity:
+    cli: "--s-base"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.5
+    min: -1
+    max: 1
+    description: "Similarity threshold for homology detection in base-level."
+  hic_weight_rounds:
+    cli: "--n-weight"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 3
+    min: 0
+    max: 1000
+    description: "Rounds of reweighting Hi-C links."
+  hic_perturb_rounds:
+    cli: "--n-perturb"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 10000
+    min: 0
+    description: "Rounds of Hi-C perturbation."
+  hic_flip_fraction:
+    cli: "--f-perturb"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    default: 0.1
+    min: 0
+    max: 1
+    description: "Fraction to flip for perturbation."
+  hic_misjoin_length:
+    cli: "--l-msjoin"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 500000
+    min: 0
+    description: "Detect misjoined unitigs of >=INT bases; 0 disables."
+
+  ul_error_rate:
+    cli: "--ul-rate"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    min: 0
+    max: 1
+    description: "Error rate of ultra-long reads."
+  ul_tip_read_count:
+    cli: "--ul-tip"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 6
+    min: 0
+    max: 1000
+    description: "Remove tip unitigs composed of <=INT reads for UL assembly."
+  ul_rounds:
+    cli: "--ul-round"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    max: 100
+    description: "Ultra-long assembly round count."
+  ul_cut:
+    cli: "--ul-cut"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Filter out ultra-long reads shorter than INT."
+  ul_mode:
+    cli: "--ul-m"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    allowed_values: [0, 1]
+    description: "Hybrid ultra-long assembly mode."
+  path_max_drop_ratio:
+    cli: "--path-max"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    min: 0
+    max: 1
+    description: "Maximum path drop ratio."
+  path_min_drop_ratio:
+    cli: "--path-min"
+    level: 2
+    source: parameter_recommender
+    value_type: float
+    min: 0
+    max: 1
+    description: "Minimum path drop ratio."
+  dual_scaffold:
+    cli: "--dual-scaf"
+    level: 2
+    source: parameter_recommender
+    value_type: boolean
+    default: false
+    description: "Output self-scaffolding."
+  scaffold_gap:
+    cli: "--scaf-gap"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Maximum gap size for scaffolding."
+
+  somatic_coverage:
+    cli: "--somatic-cov"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Somatic coverage parameter."
+  telomere_motif:
+    cli: "--telo-m"
+    level: 2
+    source: parameter_recommender
+    value_type: string
+    description: "Telomere motif at 5-prime end."
+  telomere_penalty:
+    cli: "--telo-p"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Non-telomeric penalty."
+  telomere_drop:
+    cli: "--telo-d"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Telomere max drop."
+  telomere_min_score:
+    cli: "--telo-s"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Minimum score for telomere reads."
+
+  chimeric_support:
+    cli: "--chem-c"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Chimeric read detection support threshold."
+  chimeric_flank:
+    cli: "--chem-f"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Chimeric read detection flanking length."
+  read_length_cutoff:
+    cli: "--rl-cut"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    description: "Filter out ONT simplex reads shorter than INT."
+  score_cutoff:
+    cli: "--sc-cut"
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    min: 0
+    max: 60
+    description: "Filter out ONT simplex reads with mean base quality below INT."

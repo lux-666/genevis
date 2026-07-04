@@ -10,6 +10,7 @@ from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
 from app.stages.assembly.constants import HIFIASM_ONT_METHOD, HIFIASM_ONT_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
@@ -21,6 +22,8 @@ from app.stages.assembly.method_application.lifecycle import (
     positive_int,
     update_assembly_output,
 )
+from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameter_profile import build_full_parameter_profile
 from app.stages.base import absolute_data_dir
 
 
@@ -83,11 +86,35 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     gfa = output_dir / "hifiasm_ont.bp.p_ctg.gfa"
     fallback_gfa = output_dir / "hifiasm_ont.p_ctg.gfa"
     script = working_dir / "run_hifiasm_ont.sh"
-    reads = " ".join(shlex.quote(str(path)) for path in read_paths)
-    read_flag = HIFIASM_ONT_READ_TYPE_FLAGS[params["read_type"]]
+    catalog, catalog_error = _load_catalog()
+    if catalog_error:
+        return fail_update(state, catalog_error)
+    recommended_params, recommended_error = _recommended_params(output, "hifiasm_ont_recommended_params")
+    if recommended_error:
+        return fail_update(state, recommended_error)
+
+    full_profile = build_full_parameter_profile(state, assembly_out=output)
+
+    try:
+        parameter_sources = build_parameter_sources(
+            method_id=HIFIASM_ONT_METHOD,
+            catalog=catalog,
+            state=state,
+            assembly_out=output,
+            attempt_id=int(output.get("current_parameter_attempt_id") or 0),
+            recommended_params=recommended_params,
+            execution_context={
+                "output_prefix": str(prefix),
+                "input_reads": [str(path) for path in read_paths],
+            },
+        )
+        argv = build_command(method_id=HIFIASM_ONT_METHOD, catalog=catalog, parameter_sources=parameter_sources)
+    except ParameterCommandError as exc:
+        return fail_update(state, f"Hifiasm ONT parameter sources are invalid: {exc}")
+    command = " ".join(shlex.quote(arg) for arg in argv)
     script.write_text(
         "set -e\n"
-        f"hifiasm -o {shlex.quote(str(prefix))} -t {params['threads']} {read_flag} {reads}\n"
+        f"{command}\n"
         f"if [ -f {shlex.quote(str(gfa))} ]; then gfa={shlex.quote(str(gfa))};"
         f" elif [ -f {shlex.quote(str(fallback_gfa))} ]; then gfa={shlex.quote(str(fallback_gfa))};"
         " else echo 'expected hifiasm primary contig GFA missing' >&2; exit 1; fi\n"
@@ -111,8 +138,11 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             "read_paths": [str(path) for path in read_paths],
             "read_profile": params["read_type"],
             "threads": params["threads"],
+            "parameter_sources": parameter_sources,
+            "argv": argv,
             "hifiasm_ont_output_dir": str(output_dir),
             "draft_assembly_path": str(draft),
+            "full_parameter_profile": full_profile,
         },
     )
     return update_assembly_output(
@@ -181,3 +211,21 @@ def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
     if missing or invalid:
         return {}, blocked_parameters("hifiasm_ont_parameters", HIFIASM_ONT_METHOD, missing, invalid)
     return {"read_type": str(read_type), "threads": threads}, None
+
+
+def _load_catalog():
+    try:
+        return load_parameter_catalog(HIFIASM_ONT_METHOD), None
+    except (FileNotFoundError, ValueError) as exc:
+        return None, f"Hifiasm ONT parameter catalog is not usable: {exc}"
+
+
+def _recommended_params(output: dict[str, Any], method_key: str) -> tuple[dict[str, Any], str | None]:
+    raw = output.get(method_key)
+    if raw is None:
+        raw = output.get("recommended_params")
+    if raw is None:
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, f"Hifiasm ONT recommended parameters must be a mapping, got {type(raw).__name__}"
+    return dict(raw), None

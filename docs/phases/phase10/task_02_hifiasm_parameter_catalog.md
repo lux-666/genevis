@@ -64,6 +64,8 @@ parameters:
     level: 0
     source: executor
     value_type: path
+    source_priority:
+      - execution.output_prefix
     description: "Output file prefix"
 
   threads:
@@ -73,6 +75,8 @@ parameters:
     value_type: int
     default: 32
     min: 1
+    source_priority:
+      - assembly.hifiasm_parameters.threads
     description: "Number of CPU threads"
 
   input_reads:
@@ -80,6 +84,8 @@ parameters:
     level: 0
     source: executor
     value_type: path_list
+    source_priority:
+      - execution.input_reads
     description: "Input HiFi read files"
 
   ignore_cached_overlaps:
@@ -205,6 +211,7 @@ parameters:
 
 - Defaults are documentation and fallback only. If the recommender omits an L2 parameter, the command builder should usually omit it and let hifiasm defaults apply.
 - L1 values are emitted only when confidently derived. If a factual value is missing, put `unknown` or omit it from L1 prompt context.
+- L0/L1 values are derived through catalog `source_priority`; do not add builder-side hard-coded knowledge for specific parameter names.
 - L2 bounds should be coarse safety bounds. Biological rules live in `parameter_recommender/rules.yaml`.
 - The prompt should receive all L2 parameters present in this catalog. Manual pruning happens by editing the catalog, not by adding another exposure flag or by maintaining a hidden allowlist.
 

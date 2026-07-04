@@ -34,6 +34,7 @@ Already useful:
 Missing:
 
 - A simple parameter catalog with only three LLM permission levels.
+- A full parameter input profile artifact separated from task-scoped prompt profiles.
 - A recommender prompt contract that uses selected cases, rules, skill text, read_qc, and genome_survey.
 - A replayable `parameter_attempts` ledger entry.
 - Command construction from accepted parameter sources.
@@ -152,6 +153,21 @@ quality_gate:
 
 Replay rule: a retry never mutates a previous entry. It reads previous attempt refs and writes `attempt_id + 1`.
 
+## Full Profile vs Prompt Profile
+
+Phase10 maintains two related contracts:
+
+- `input_profile_ref`: a complete replay/audit artifact with `sample`, `assets`, `read_qc`, `genome_survey`, `previous_attempt`, and `assembly_review` sections.
+- prompt profile: a task-scoped slice of the full profile. The LLM does not receive every field by default.
+
+Prompt slicing:
+
+- Initial recommendation receives sample context plus read_qc, genome_survey, and selected cases.
+- Execution repair receives previous command/params, exit code, failure class, and log tails.
+- Quality replan receives previous params/command/cases plus BUSCO/QUAST and assembly size ratio signals.
+
+The rule validator may use the complete full profile for hard constraints, including fields not shown to the LLM.
+
 ## First Executable Surface
 
 The first closed loop should cover:
@@ -181,6 +197,7 @@ The first closed loop should cover:
 - No Phase10 document uses any permission model beyond L0/L1/L2.
 - The MVP docs consistently require a full supported hifiasm/hifiasm_ont parameter catalog, not a small L2 subset.
 - The graph can produce a full attempt entry before running a command.
+- The graph records a complete profile artifact while prompt payloads remain task-scoped.
 - The executor does not run when recommendation JSON is invalid or rules fail.
 - A command failure can be retried with previous inputs plus last 100 log lines.
 - A review failure can be retried with metrics and failure mode.

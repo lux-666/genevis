@@ -37,7 +37,8 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
 Assembly output should provide:
 
 - selected route / primary method,
-- input profile ref,
+- full parameter profile ref,
+- prompt profile for the current recommendation task,
 - read_qc summary refs or embedded summaries,
 - genome_survey result ref or embedded estimates,
 - current attempt id,
@@ -60,14 +61,25 @@ Use selected primary method when available. Route fallback:
 ## Prompt Construction
 
 1. Load method catalog.
-2. Split parameters by level:
+2. Build and save the full parameter profile artifact:
+   - `sample`
+   - `assets`
+   - `read_qc`
+   - `genome_survey`
+   - `previous_attempt`
+   - `assembly_review`
+3. Build a task-scoped prompt profile from the full profile:
+   - initial recommendation: sample + assets + read_qc + genome_survey,
+   - execution repair: sample + assets + previous command/params + exit code + failure class + log tails,
+   - quality replan: sample + previous params/command/cases + assembly_review metrics.
+4. Split parameters by level:
    - L0 excluded,
    - L1 copied into `readonly_facts`,
    - all L2 entries copied into `modifiable_parameters`.
-3. Load `parameter_recommender` pack.
-4. Select 3-8 cases.
-5. Build prompt payload.
-6. Save prompt payload as an artifact before invoking the LLM.
+5. Load `parameter_recommender` pack.
+6. Select 3-8 cases.
+7. Build prompt payload.
+8. Save prompt payload as an artifact before invoking the LLM.
 
 Prompt payload:
 
@@ -80,6 +92,20 @@ readonly_facts:
   coverage: 42
   read_n50_kb: 30
   heterozygosity: medium
+prompt_profile:
+  sample:
+    sample_id: s1
+    target_level: draft
+  assets:
+    read_type: ont
+    has_hifi: false
+    has_ont: true
+  read_qc:
+    read_n50: 30000
+    effective_coverage_5kb: 42
+  genome_survey:
+    estimated_genome_size: 1000000000
+    heterozygosity: medium
 modifiable_parameters:
   purge_level: {cli: "-l", allowed_values: [0, 1, 2, 3], default: 1}
   read_length_cutoff: {cli: "--rl-cut", allowed_values: [1000, 3000, 5000, 10000, 15000]}
@@ -151,8 +177,9 @@ attempt_id: 0
 method_id: hifiasm_ont
 status: recommended
 prompt_payload_ref: ...
+input_profile_ref: ...
 llm_response_ref: ...
-readonly_facts: {}
+prompt_profile: {}
 selected_case_ids: []
 recommended_params: {}
 validation: {}
@@ -180,6 +207,7 @@ Routing:
 ## Tests
 
 - Initial recommendation writes prompt and response refs.
+- Full parameter profile is saved for replay and prompt profile contains only task-relevant fields.
 - LLM output with L2 params passes.
 - LLM output with L1/L0 keys fails.
 - Invalid JSON fails before command execution.
@@ -191,7 +219,9 @@ Routing:
 
 - [ ] Node implemented.
 - [ ] Prompt payload has L1 facts and L2 modifiable parameters only.
+- [ ] Prompt payload uses a task-scoped profile and does not expose the full profile by default.
 - [ ] Prompt payload includes every L2 parameter in the selected method catalog.
+- [ ] Attempt entry records the full profile ref.
 - [ ] Attempt entry is replayable.
 - [ ] Failure branches stop before execution.
 - [ ] Retry modes reuse previous attempt context.

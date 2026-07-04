@@ -37,6 +37,7 @@ def validate_recommended_parameters(
     recommended_params: dict[str, Any],
     readonly_facts: dict[str, Any],
     rules: dict[str, Any],
+    full_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return {'valid': bool, 'violations': [...], 'warnings': [...]}."""
 ```
@@ -46,7 +47,7 @@ def validate_recommended_parameters(
 1. **JSON shape**: recommendation has a dict-like `params`.
 2. **Permission**: every key in `params` exists in catalog and has `level: 2`.
 3. **Catalog constraints**: enforce `allowed_values`, `min`, and `max`.
-4. **Rule constraints**: apply conditional rules using L1 readonly facts and prompt facts.
+4. **Rule constraints**: apply conditional rules using the complete full profile when available, plus any explicit readonly facts.
 5. **No mutation of facts**: reject any output key with catalog level 0 or 1.
 
 ## Rule Matching Semantics
@@ -80,7 +81,10 @@ Condition behavior:
 Input:
 
 ```python
-readonly_facts = {"heterozygosity": "high", "coverage": 35}
+full_profile = {
+    "genome_survey": {"heterozygosity": "high"},
+    "read_qc": {"effective_coverage_5kb": 35},
+}
 recommended_params = {"purge_level": 3}
 ```
 
@@ -128,6 +132,7 @@ The executor must not run.
 - Catalog enum violation fails.
 - Catalog min/max violation fails.
 - Conditional rule violation fails.
+- Conditional rules can match dotted full-profile paths such as `genome_survey.heterozygosity`.
 - Non-applicable rule is skipped.
 - Valid L2 recommendation passes.
 
@@ -135,5 +140,6 @@ The executor must not run.
 
 - [ ] Validator implemented.
 - [ ] Validation result is JSON-serializable.
+- [ ] Validator can use complete profile facts for hard constraints without exposing all fields to the LLM.
 - [ ] Validation failure is recorded in `parameter_attempts`.
 - [ ] Command freezing is impossible after validation failure.
