@@ -1,88 +1,88 @@
 # Phase 10 Integration Status
 
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Summary
 
-Phase 10 parameter recommendation infrastructure is now **fully integrated** into the hifiasm/hifiasm_ont freeze functions. All core modules are connected and operational.
+Phase 10 is partially integrated. The catalog, validator, profile helper, and command-builder foundation are in place for hifiasm and hifiasm_ont freeze paths. The recommender node, profile artifacts, prompt payload artifacts, replay ledger, and retry loop are still pending.
 
-## Integration Checklist
+## Completed
 
-### ✅ Completed Integrations
+1. **Catalog schema and loader**
+   - `app/schemas/parameter_catalog.py` defines the three-level catalog model.
+   - `app/stages/assembly/parameter_catalog.py` resolves registry methods through descriptor `parameter_catalog`.
+   - hifiasm and hifiasm_ont descriptors declare their catalog ids.
 
-1. **parameter_profile.py → freeze functions**
-   - `build_full_parameter_profile()` now called in both hifiasm.py and hifiasm_ont.py
-   - Full profile stored in attempt metadata as `full_parameter_profile`
-   - Profile available for LLM parameter recommendation and audit replay
-   - Location: hifiasm.py:95, hifiasm_ont.py:95
+2. **Method catalogs**
+   - `descriptors/knowledge_packs/assembly/methods/hifiasm/params.yaml`
+   - `descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml`
+   - Both catalogs use only L0/L1/L2 and `source_priority` for derivation hints.
 
-2. **parameter_validation.py → command_builder.py**
-   - `flatten_profile_facts()` used for rule validation
-   - Validates L2 recommendations against catalog rules before command execution
-   - Already integrated (pre-existing)
+3. **Catalog-driven command building**
+   - `build_parameter_sources()` derives L0/L1 values from catalog `source_priority`.
+   - `build_command()` merges L0/L1/L2 into deterministic argv.
+   - Method freeze functions store `parameter_sources` and `argv` in frozen attempt metadata.
 
-3. **command_builder.py → freeze functions**
-   - Both freeze functions use `build_parameter_sources()` and `build_command()`
-   - Parameter sources and argv stored in attempt metadata
-   - Already integrated (pre-existing)
+4. **Validation and profile helpers**
+   - `validate_recommended_parameters()` validates L2-only recommendations, catalog constraints, and hard profile-backed rules.
+   - `build_full_parameter_profile()` and `build_prompt_profile()` exist.
+   - Freeze functions currently store `full_parameter_profile` in metadata.
 
-### ❌ Pending Integration
+5. **Structured failure paths**
+   - Missing catalogs and malformed recommended-parameter state return structured failure updates from freeze nodes.
 
-1. **parameter_profile.py → parameter recommender node**
-   - `build_prompt_profile()` not yet called by any node
-   - **Reason**: Parameter recommender node (task_08) not yet implemented
-   - **Impact**: Profile infrastructure ready but LLM recommendation workflow incomplete
+6. **Parameter recommender knowledge pack** ✅
+   - `descriptors/knowledge_packs/assembly/parameter_recommender/` now uses manifest files plus `cases/*.yaml` and `rules/*.yaml` shards
+   - `SKILL.md` carries pack metadata and explainable heuristics only
+   - Case shards store evidence observations, not few-shot recommendation answers
+   - Rule shards store hard validator boundaries only
+   - All observed/constraint parameter keys are aligned with real hifiasm catalog L2 parameters
 
-## Documentation Alignment
+7. **Prompt payload builder** ✅
+   - `app/stages/assembly/prompt_payload.py` implemented
+   - `build_prompt_payload()` creates task-scoped prompt profiles
+   - Prompt payload includes selected evidence cases plus selection metadata, not the full case database
+   - Dual reference system (hash ref + path ref) for artifact tracking
+   - **Current state**: Implemented and tested, not yet integrated into main assembly flow
+   - **Integration pending**: P1 phase will connect to recommender node and session-scoped artifact writer
 
-### Fixed: task_08 Documentation Deviation
+## Pending
 
-**Issue**: Documentation stated initial recommendation receives "sample + read_qc + genome_survey"
+1. **Integration of prompt payload builder into main assembly flow**
+   - Currently `build_prompt_payload()` is only used in tests
+   - Need to integrate into recommender node workflow
+   - Connect artifact writing to session-scoped artifact writer (when implemented)
+   - Note: Profile and payload artifact writing functions exist but need integration
 
-**Resolution**: Updated task_08_parameter_recommender_node.md to reflect actual implementation:
-- Initial recommendation: sample + **assets** + read_qc + genome_survey
-- Execution repair: sample + **assets** + previous_attempt
-- Quality replan: sample + previous_attempt + assembly_review
+2. **Parameter recommender node**
+   - Implement initial recommendation, execution repair, and quality replan modes.
+   - Validate LLM output before freeze/run.
+   - Record raw response, parsed params, validation result, and selected cases.
 
-**Rationale**: Assets section contains critical routing information (read_type, has_hifi, has_ont) essential for parameter recommendation.
+3. **Replay ledger**
+   - Append immutable `parameter_attempts` entries.
+   - Record catalog refs, profile refs, prompt/response refs, parameter sources, argv, frozen attempt refs, execution result, and review result.
 
-## Architecture Technical Debt
+4. **Attempt-specific retry directories**
+   - Current freeze paths still use method-level directories.
+   - Retries must write attempt-specific work/output/artifact paths to avoid overwriting previous attempts.
 
-Two issues documented with TODO comments for future resolution:
+5. **Runtime catalog verification**
+   - Verify hifiasm and hifiasm_ont catalogs against the project-pinned hifiasm binary/help output in the execution environment.
 
-### 1. Catalog Alias Indirection (parameter_catalog.py:18-29)
+## Next Recommended Slice
 
-**Current**: Method IDs like "assembly.candidate.hifiasm" map to catalog directory "hifiasm" via implicit alias logic
+**Phase 11 (Knowledge Pack + Prompt Payload Builder) - ✅ COMPLETED**
 
-**Desired**: Registry descriptors should directly declare their catalog directory via `parameter_catalog` field
+The recommender input layer is now implemented:
+1. ✅ Parameter recommender knowledge pack created with sharded rules, sharded cases, and skill instructions
+2. ✅ Prompt payload builder implemented with dual reference system
+3. ✅ Tested: L0 excluded, L1 read-only, all L2 parameters exposed, selected cases only, complete profile available
 
-**Impact**: Adding new methods requires updating alias mapping
+**Next: P1 Integration Phase**
 
-### 2. Hardcoded Execution Context Keys (command_builder.py:47-67)
-
-**Current**: Keys "output_prefix", "threads", "input_reads" are hardcoded magic strings
-
-**Desired**: Catalog source_priority declarations should drive these mappings
-
-**Impact**: Execution context structure is implicit rather than catalog-driven
-
-## Test Coverage
-
-All 27 phase10 tests passing:
-- Parameter catalog schema validation
-- Command builder L0/L1/L2 merging
-- Parameter validation rules
-- Profile building and flattening
-- Method freeze integration
-
-## Next Steps
-
-1. **Implement parameter recommender node** (task_08)
-   - Will connect `build_prompt_profile()` to actual LLM workflow
-   - Three recommendation modes: initial, execution_failure, review_failure
-   - Completes the parameter recommendation loop
-
-2. **Address architecture technical debt** (future phase)
-   - Remove catalog alias indirection
-   - Make execution context catalog-driven
-   - Consider during broader refactoring effort
+Integrate the prompt payload builder into the main assembly flow:
+1. Connect `build_prompt_payload()` to recommender node
+2. Implement parameter recommender node with LLM calls
+3. Integrate session-scoped artifact writer
+4. Connect to replay ledger

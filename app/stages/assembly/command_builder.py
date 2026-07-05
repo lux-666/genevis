@@ -56,11 +56,6 @@ def build_parameter_sources(
 ) -> dict[str, dict[str, Any]]:
     """Build replayable parameter source groups for hifiasm methods."""
 
-    # TODO: Architecture improvement needed - execution_context keys are hardcoded
-    # (output_prefix, threads, input_reads). These should be driven by the catalog's
-    # source field declarations rather than implicitly known by callers.
-    # See phase10 architecture review for details.
-
     execution_context = execution_context or {}
     l0_fixed: dict[str, Any] = {}
     l1_readonly: dict[str, Any] = {}

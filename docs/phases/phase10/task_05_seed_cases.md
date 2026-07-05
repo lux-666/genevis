@@ -8,7 +8,7 @@
 
 ## Goal
 
-Populate `parameter_recommender/cases.yaml` with 5-10 seed cases. Cases are evidence only: sample facts, parameters used, quality results, and source. Do not encode rules or generic recommendations in cases.
+Populate `parameter_recommender/cases/*.yaml` with 5-10 seed cases and list them through `parameter_recommender/cases.yaml`. Cases are evidence only: sample facts, parameters used, quality results, and source. Do not encode rules, generic recommendations, or expected LLM answers in cases.
 
 ## Case Template
 
@@ -29,10 +29,11 @@ Populate `parameter_recommender/cases.yaml` with 5-10 seed cases. Cases are evid
     mean_quality: null
   params:
     tool: hifiasm|hifiasm_ont
-    purge_level: 1
-    purge_similarity: default
-    read_length_cutoff: null
-    score_cutoff: null
+    values:
+      purge_level: 1
+      purge_similarity: default
+      read_length_cutoff: null
+      score_cutoff: null
   quality:
     busco_complete: 0.975
     busco_duplicate: 0.023
@@ -83,7 +84,7 @@ The implementation should not pass all cases to the LLM. It should select a smal
 
 ## Acceptance Criteria
 
-- [ ] `cases.yaml` exists and loads.
+- [ ] `cases.yaml` exists, lists case shard files, and loads through the strict knowledge-pack loader.
 - [ ] Seed cases cover HiFi and ONT.
 - [ ] Seed cases include enough fields for similarity selection.
 - [ ] Integration tests can select a small case subset for a mock sample.

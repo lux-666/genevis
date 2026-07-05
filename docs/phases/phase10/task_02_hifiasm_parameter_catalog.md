@@ -1,10 +1,10 @@
 # Task 2: Create hifiasm Parameter Catalog
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented; version verification pending
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -209,6 +209,7 @@ parameters:
 
 ## Implementation Notes
 
+- The current implementation catalog exists at `descriptors/knowledge_packs/assembly/methods/hifiasm/params.yaml` and loads through the shared schema. Before release, verify the catalog against the project-pinned hifiasm binary/help output in the execution environment.
 - Defaults are documentation and fallback only. If the recommender omits an L2 parameter, the command builder should usually omit it and let hifiasm defaults apply.
 - L1 values are emitted only when confidently derived. If a factual value is missing, put `unknown` or omit it from L1 prompt context.
 - L0/L1 values are derived through catalog `source_priority`; do not add builder-side hard-coded knowledge for specific parameter names.
@@ -226,9 +227,10 @@ parameters:
 
 ## Acceptance Criteria
 
-- [ ] `params.yaml` exists for hifiasm.
-- [ ] No secondary permission-control fields exist.
-- [ ] Catalog loads through the new schema.
-- [ ] The catalog covers the supported hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
+- [x] `params.yaml` exists for hifiasm.
+- [x] No secondary permission-control fields exist.
+- [x] Catalog loads through the new schema.
+- [x] The catalog covers the currently documented hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
+- [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
 - [ ] The recommender can build a prompt with all L2 entries.
-- [ ] The command builder can merge L0/L1/L2 sources into a deterministic hifiasm argv.
+- [x] The command builder can merge L0/L1/L2 sources into a deterministic hifiasm argv.

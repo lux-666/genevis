@@ -1,9 +1,9 @@
 # Task 1: Three-Level Parameter Catalog Schema
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Completed
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -163,9 +163,9 @@ def load_parameter_catalog(method_id: str) -> MethodParameterCatalog:
 
 ## Acceptance Criteria
 
-- [ ] Catalog schema implemented in `app/schemas/parameter_catalog.py`.
-- [ ] Loader implemented in `app/stages/assembly/parameter_catalog.py`.
-- [ ] Method descriptors declare their `parameter_catalog` id.
-- [ ] Invalid levels are rejected.
-- [ ] Unknown schema fields are rejected.
-- [ ] Unit tests cover missing catalog, invalid level, and L1/L2 permission checks.
+- [x] Catalog schema implemented in `app/schemas/parameter_catalog.py`.
+- [x] Loader implemented in `app/stages/assembly/parameter_catalog.py`.
+- [x] Method descriptors declare their `parameter_catalog` id.
+- [x] Invalid levels are rejected.
+- [x] Unknown schema fields are rejected.
+- [x] Unit tests cover missing catalog, invalid level, and L1/L2 permission checks.

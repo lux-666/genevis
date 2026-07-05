@@ -1,0 +1,56 @@
+cases:
+  - case_id: hifi_human_diploid_high_coverage
+    source:
+      kind: seed_observation
+      label: "internal seed case"
+      year: 2026
+    features:
+      organism: "Homo sapiens"
+      clade: vertebrate
+      genome_size_mb: 3100
+      heterozygosity: low
+      read_type: hifi
+      coverage: 60
+      read_n50_kb: 15
+      mean_quality: 30
+    params:
+      tool: hifiasm
+      values:
+        kmer_length: 51
+        purge_level: 1
+        correction_rounds: 3
+    quality:
+      busco_complete: 0.985
+      busco_duplicate: 0.018
+      n50_mb: 85.0
+      assembly_size_mb: 3050
+      contig_count: 340
+    evidence_note: "High-coverage diploid HiFi run with near-default graph parameters and low duplicate BUSCO."
+
+  - case_id: hifi_small_nematode_low_coverage
+    source:
+      kind: seed_observation
+      label: "internal seed case"
+      year: 2026
+    features:
+      organism: "Caenorhabditis elegans"
+      clade: invertebrate
+      genome_size_mb: 100
+      heterozygosity: low
+      read_type: hifi
+      coverage: 25
+      read_n50_kb: 12
+      mean_quality: 28
+    params:
+      tool: hifiasm
+      values:
+        kmer_length: 41
+        purge_level: 0
+        correction_rounds: 2
+    quality:
+      busco_complete: 0.972
+      busco_duplicate: 0.006
+      n50_mb: 12.0
+      assembly_size_mb: 101
+      contig_count: 42
+    evidence_note: "Low-coverage small-genome HiFi run where modest k-mer length preserved connectivity."

@@ -23,7 +23,6 @@ from app.stages.assembly.method_application.lifecycle import (
     update_assembly_output,
 )
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_profile import build_full_parameter_profile
 from app.stages.base import absolute_data_dir
 
 
@@ -92,6 +91,9 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     recommended_params, recommended_error = _recommended_params(output, "hifiasm_ont_recommended_params")
     if recommended_error:
         return fail_update(state, recommended_error)
+
+    # Import here to avoid circular dependency
+    from app.stages.assembly.parameter_profile import build_full_parameter_profile
 
     full_profile = build_full_parameter_profile(state, assembly_out=output)
 

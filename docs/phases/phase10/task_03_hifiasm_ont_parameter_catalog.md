@@ -1,10 +1,10 @@
 # Task 3: Create hifiasm_ont Parameter Catalog
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented; version verification and retry wiring pending
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -229,6 +229,7 @@ parameters:
 
 ## Prompt Behavior
 
+- The current implementation catalog exists at `descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml` and loads through the shared schema. Before release, verify the ONT-valid surface against the project-pinned hifiasm binary/help output in the execution environment.
 - L0 fields are excluded from prompt payload.
 - L1 fields enter `readonly_facts`.
 - L2 fields enter `modifiable_parameters`.
@@ -248,9 +249,10 @@ parameters:
 
 ## Acceptance Criteria
 
-- [ ] `params.yaml` exists for hifiasm_ont.
-- [ ] The catalog validates through the three-level schema.
-- [ ] The catalog covers the supported ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
+- [x] `params.yaml` exists for hifiasm_ont.
+- [x] The catalog validates through the three-level schema.
+- [x] The catalog covers the currently documented ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
+- [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
 - [ ] The recommender prompt can include all L2 entries.
-- [ ] The command builder emits `--ont` mechanically from L0 and never from LLM output.
+- [x] The command builder emits `--ont` mechanically from L0 and never from LLM output.
 - [ ] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.

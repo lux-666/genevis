@@ -1,9 +1,9 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Planning
+**Status**: Partial implementation
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -29,15 +29,23 @@ Already useful:
 - `read_qc` can provide read summary facts such as total bases, N50, and quality fields.
 - `genome_survey` can provide `genome_size_prior`, heterozygosity, and repeat fraction.
 - `assembly_review` already evaluates candidates through QUAST/BUSCO-style signals and has rerun infrastructure.
-- `descriptors/knowledge_packs/assembly/*` already uses the three-file knowledge-pack pattern: `cases.yaml`, `rules.yaml`, `SKILL.md`.
+- `descriptors/knowledge_packs/assembly/*` already uses knowledge-pack files. Phase10 refines the parameter recommender pack into `SKILL.md` plus manifest-driven case/rule shards so evidence and hard boundaries do not become single-file dumps.
 
-Missing:
+Implemented in the current slice:
 
-- A simple parameter catalog with only three LLM permission levels.
+- Three-level parameter catalog schema and loader.
+- hifiasm and hifiasm_ont method catalogs.
+- Method descriptor `parameter_catalog` wiring.
+- Catalog-driven L0/L1 source derivation and deterministic command building.
+- Validator core for L2-only recommendations, catalog bounds/enums, and profile-backed hard rules.
+- Full/prompt profile helper functions.
+- Freeze metadata now records `parameter_sources`, `argv`, and `full_parameter_profile`.
+
+Still missing:
+
 - A full parameter input profile artifact separated from task-scoped prompt profiles.
 - A recommender prompt contract that uses selected cases, rules, skill text, read_qc, and genome_survey.
 - A replayable `parameter_attempts` ledger entry.
-- Command construction from accepted parameter sources.
 - Retry routing for command failure and assembly_review failure.
 
 ## Existing/New Architecture
@@ -63,14 +71,14 @@ genome_survey (EXISTS) ─────────┘        |
                                       parameter_catalog_loader (NEW) <── method_param_catalog params.yaml (NEW)
                                           |                              describes L0 / L1 / L2 for hifiasm, hifiasm_ont
                                           v
-                                      case_selector (NEW) <───────────── cases.yaml (NEW)
+                                      case_selector (NEW) <───────────── cases.yaml manifest + cases/*.yaml (NEW)
                                           |  selects 3-8 similar cases
                                           v
                                       parameter_recommender (NEW) <───── SKILL.md (NEW)
                                           |  prompt = L1 readonly facts + L2 modifiable params + selected cases, SKILL
                                           |  retry prompt also includes previous attempt plus failure context
                                           v
-                                      rule_validator (NEW) <──────────── rules.yaml (NEW; hard boundaries only)
+                                      rule_validator (NEW) <──────────── rules.yaml manifest + rules/*.yaml (NEW; hard boundaries only)
                                           |  validates JSON, catalog bounds, L2-only output, and biological boundaries
                                           v
                                       command_builder (REFACTOR)
@@ -107,11 +115,11 @@ Operational rule: enumerate the full supported hifiasm CLI surface in the method
 
 ## Knowledge Pack Boundary
 
-`descriptors/knowledge_packs/assembly/parameter_recommender/` must follow strict separation:
+`descriptors/knowledge_packs/assembly/parameter_recommender/` must follow strict separation. Root YAML files are manifests; domain content lives in smaller shards:
 
-- `cases.yaml`: evidence only. Each case records sample facts, method, parameters used, quality outcome, source, and a short note. It does not encode rules.
-- `rules.yaml`: hard boundaries only. It constrains valid values or combinations. It does not contain soft recommendation heuristics.
-- `SKILL.md`: explainable heuristics only. It explains how to reason from evidence, how to interpret failure modes, and how to be conservative under uncertainty. It does not invent hard constraints.
+- `cases.yaml`: indexes `cases/*.yaml`. Case shards contain evidence only: sample facts, method, parameters used, quality outcome, source, and a short note. They do not encode rules or recommended-answer examples.
+- `rules.yaml`: indexes `rules/*.yaml`. Rule shards contain hard boundaries only: impossible, unsafe, or explicitly disallowed values/combinations. They do not contain soft recommendation heuristics.
+- `SKILL.md`: pack metadata plus explainable heuristics. It explains how to reason from evidence, how to interpret failure modes, and how to be conservative under uncertainty. It does not invent hard constraints.
 
 ## MVP LangGraph Shape
 
@@ -155,10 +163,12 @@ Replay rule: a retry never mutates a previous entry. It reads previous attempt r
 
 ## Full Profile vs Prompt Profile
 
-Phase10 maintains two related contracts:
+Phase10 target contract maintains two related artifacts:
 
 - `input_profile_ref`: a complete replay/audit artifact with `sample`, `assets`, `read_qc`, `genome_survey`, `previous_attempt`, and `assembly_review` sections.
 - prompt profile: a task-scoped slice of the full profile. The LLM does not receive every field by default.
+
+Current implementation checkpoint: `build_full_parameter_profile()` and `build_prompt_profile()` exist, and freeze functions store `full_parameter_profile` inside `FrozenAttemptSpec.metadata`. Task 8 still needs to write the complete profile as an artifact ref and build/save the task-scoped prompt payload.
 
 Prompt slicing:
 
@@ -182,15 +192,16 @@ The first closed loop should cover:
 ## Task Order
 
 1. Define the three-level parameter catalog schema.
-2. Create full hifiasm and hifiasm_ont catalogs using only `level`, `cli`, `value_type`, defaults, allowed/bounds, and source hints.
-3. Create the `parameter_recommender` knowledge pack.
-4. Add seed evidence cases.
-5. Implement rule validation.
-6. Refactor command building around L0/L1/L2 sources.
-7. Implement initial/retry parameter recommender node.
-8. Implement execution failure and assembly_review failure retry gates.
-9. Add integration tests for a replayable pass/fail/retry loop.
-10. Document the methodology.
+2. Create the hifiasm parameter catalog.
+3. Create the hifiasm_ont parameter catalog.
+4. Create the `parameter_recommender` knowledge pack.
+5. Add seed evidence cases.
+6. Implement rule validation.
+7. Refactor command building around L0/L1/L2 sources.
+8. Implement initial/retry parameter recommender node.
+9. Implement execution failure and assembly_review failure retry gates.
+10. Add integration tests for a replayable pass/fail/retry loop.
+11. Document the methodology.
 
 ## Acceptance Criteria
 

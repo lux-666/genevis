@@ -1,0 +1,6 @@
+version: 1
+description: "Evidence-case manifest. Case files contain observations only; they do not encode recommendation rules."
+case_files:
+  - cases/initial_hifi.yaml
+  - cases/initial_ont.yaml
+  - cases/retry_failures.yaml

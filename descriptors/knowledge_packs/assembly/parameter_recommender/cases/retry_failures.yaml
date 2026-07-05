@@ -1,0 +1,57 @@
+cases:
+  - case_id: retry_hifi_memory_exhausted
+    source:
+      kind: seed_observation
+      label: "internal retry case"
+      year: 2026
+    features:
+      organism: "Zea mays"
+      clade: plant
+      genome_size_mb: 2300
+      heterozygosity: medium
+      read_type: hifi
+      coverage: 70
+      read_n50_kb: 19
+      failure_mode: memory_exhausted
+    params:
+      tool: hifiasm
+      values:
+        kmer_length: 51
+        bloom_filter_bits: 37
+        max_overlaps_per_read: 100
+    quality:
+      exit_code: 137
+      busco_complete: null
+      busco_duplicate: null
+      n50_mb: null
+      assembly_size_mb: null
+      contig_count: null
+    evidence_note: "Retry context with memory exhaustion during overlap-heavy stages."
+
+  - case_id: retry_review_fragmented_hifi
+    source:
+      kind: seed_observation
+      label: "internal review case"
+      year: 2026
+    features:
+      organism: "Drosophila melanogaster"
+      clade: invertebrate
+      genome_size_mb: 180
+      heterozygosity: low
+      read_type: hifi
+      coverage: 38
+      read_n50_kb: 13
+      failure_mode: fragmented
+    params:
+      tool: hifiasm
+      values:
+        kmer_length: 41
+        assembly_cleaning_rounds: 2
+        purge_level: 1
+    quality:
+      busco_complete: 0.88
+      busco_duplicate: 0.012
+      n50_mb: 0.2
+      assembly_size_mb: 176
+      contig_count: 800
+    evidence_note: "Review failure case with many contigs and low N50 after an over-cleaned assembly attempt."

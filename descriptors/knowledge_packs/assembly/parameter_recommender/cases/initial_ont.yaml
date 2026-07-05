@@ -1,0 +1,56 @@
+cases:
+  - case_id: ont_vertebrate_moderate_coverage
+    source:
+      kind: seed_observation
+      label: "internal seed case"
+      year: 2026
+    features:
+      organism: "Danio rerio"
+      clade: vertebrate
+      genome_size_mb: 1400
+      heterozygosity: medium
+      read_type: ont
+      coverage: 42
+      read_n50_kb: 28
+      mean_quality: 18
+    params:
+      tool: hifiasm_ont
+      values:
+        kmer_length: 51
+        read_length_cutoff: 1000
+        purge_level: 1
+    quality:
+      busco_complete: 0.948
+      busco_duplicate: 0.031
+      n50_mb: 18.5
+      assembly_size_mb: 1430
+      contig_count: 390
+    evidence_note: "Moderate-coverage ONT run with retained shorter reads and conservative purge behavior."
+
+  - case_id: ont_large_plant_high_repeat
+    source:
+      kind: seed_observation
+      label: "internal seed case"
+      year: 2026
+    features:
+      organism: "Triticum aestivum"
+      clade: plant
+      genome_size_mb: 14500
+      heterozygosity: unknown
+      read_type: ont
+      coverage: 55
+      read_n50_kb: 45
+      mean_quality: 20
+    params:
+      tool: hifiasm_ont
+      values:
+        kmer_length: 51
+        bloom_filter_bits: 37
+        max_overlaps_per_read: 200
+    quality:
+      busco_complete: 0.921
+      busco_duplicate: 0.044
+      n50_mb: 22.0
+      assembly_size_mb: 15020
+      contig_count: 1820
+    evidence_note: "Large repeat-rich ONT profile where overlap pressure and memory-sensitive settings were recorded."

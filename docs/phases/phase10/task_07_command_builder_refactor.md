@@ -1,10 +1,10 @@
 # Task 7: Refactor Command Builder Around L0/L1/L2
 
 **Phase**: 10
-**Status**: Completed
+**Status**: Partially completed
 **Depends on**: Tasks 1-3 and 6
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -178,7 +178,7 @@ Replaying an attempt should not require the LLM.
 
 ## Implementation Notes
 
-**Completed**: 2026-07-03
+**Implemented slice**: 2026-07-03
 
 ### Key Implementation Points
 
@@ -196,14 +196,8 @@ Replaying an attempt should not require the LLM.
 
 3. **Error handling**: Catalog loading and parameter command errors return structured failures via `fail_update()`
 
-### Architecture Notes
+### Remaining Gaps
 
-Two technical debt items identified (marked with TODO comments):
-
-1. **Catalog alias indirection** (parameter_catalog.py:18-29)
-   - Registry descriptors should directly declare catalog directory names
-   - Current implementation requires manual alias mapping
-
-2. **Hardcoded execution_context keys** (command_builder.py:47-67)
-   - Keys like "output_prefix", "threads", "input_reads" are implicit
-   - Should be driven by catalog source field declarations
+- Retry attempts still need attempt-specific work/output/artifact directories.
+- The current freeze functions record `parameter_sources`, `argv`, and `full_parameter_profile` in `FrozenAttemptSpec.metadata`, but do not yet append the full Phase10 `parameter_attempts` ledger entry.
+- `input_profile_ref` and `prompt_payload_ref` are still Task 8 responsibilities.

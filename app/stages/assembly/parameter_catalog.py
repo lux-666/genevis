@@ -18,11 +18,6 @@ _REGISTRY_PATH = _PROJECT_ROOT / "descriptors" / "registry.yaml"
 def catalog_id_for_method(method_id: str) -> str:
     """Return the catalog directory id for a registry method or catalog id."""
 
-    # TODO: Architecture improvement needed - this alias mapping is a temporary solution.
-    # Ideally, registry descriptors should directly declare their catalog directory name
-    # via a parameter_catalog field, eliminating the need for this indirection.
-    # See phase10 architecture review for details.
-
     if "." not in method_id:
         return method_id
     registry = DescriptorRegistry.load(_REGISTRY_PATH)
