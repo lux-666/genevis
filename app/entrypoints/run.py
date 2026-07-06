@@ -16,13 +16,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, get_args
 
+from app.domains.assembly.selection import (
+    AssemblySelection,
+    default_primary_method,
+    read_type_from_method_parameters,
+    resolve_read_type,
+)
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
 from app.schemas.run_config import (
+    AssemblyRunConfig,
     LocalExecStage,
     RunConfig,
+    infer_assembly_method,
     load_run_config,
     validate_local_assembly_execution,
 )
@@ -37,6 +45,80 @@ _ASSEMBLY_METHOD_NAMES = {
     "hifiasm": "assembly.candidate.hifiasm",
     "hifiasm_ont": "assembly.candidate.hifiasm_ont",
 }
+_ASSEMBLY_PARAMETER_ATTRS = {
+    "flye": "flye_parameters",
+    "nextdenovo": "nextdenovo_parameters",
+    "hifiasm": "hifiasm_parameters",
+    "hifiasm_ont": "hifiasm_ont_parameters",
+}
+
+
+def _assembly_parameter_dump(
+    assembly: AssemblyRunConfig,
+    method: str,
+) -> dict[str, Any] | None:
+    parameters = getattr(assembly, _ASSEMBLY_PARAMETER_ATTRS[method])
+    return parameters.model_dump(exclude_none=True) if parameters else None
+
+
+def _configured_assembly_parameter_items(assembly: AssemblyRunConfig):
+    for method in _ASSEMBLY_PARAMETER_ATTRS:
+        params = _assembly_parameter_dump(assembly, method)
+        if params:
+            yield method, params
+
+
+def _build_assembly_selection(
+    *,
+    assembly: AssemblyRunConfig,
+    shared_parameters: dict[str, Any] | None,
+    shared_platform: Any = None,
+) -> AssemblySelection | None:
+    assembly_method = infer_assembly_method(assembly)
+    if assembly_method:
+        read_type = resolve_read_type(
+            (
+                f"assembly.{assembly_method}_parameters.read_type",
+                read_type_from_method_parameters(assembly_method, _assembly_parameter_dump(assembly, assembly_method)),
+            ),
+            ("assembly.assembly_route", assembly.assembly_route),
+            ("shared_parameters.read_type", (shared_parameters or {}).get("read_type")),
+            ("shared_parameters.platform", None, shared_platform),
+            context="entrypoints.run.assembly_selection",
+        )
+        if read_type is None:
+            if assembly.assembly_method is not None:
+                raise ValueError(
+                    "run_config: assembly.assembly_method is set but no read_type could be inferred; "
+                    "set assembly.<method>_parameters.read_type, assembly.assembly_route, "
+                    "shared_parameters.read_type, or shared_parameters.platform"
+                )
+            return None
+        return AssemblySelection(
+            read_type=read_type,
+            primary_method=_ASSEMBLY_METHOD_NAMES[assembly_method],
+            source="run_config",
+            rationale="run_config explicitly selected assembly method",
+            parameter_overrides={
+                _ASSEMBLY_METHOD_NAMES[name]: params
+                for name, params in _configured_assembly_parameter_items(assembly)
+            },
+            metadata={"assembly_route": assembly.assembly_route},
+        )
+
+    if assembly.assembly_route == "auto":
+        return None
+
+    read_type = resolve_read_type(("assembly.assembly_route", assembly.assembly_route), context="entrypoints.run.assembly_route")
+    if read_type is None:
+        return None
+    return AssemblySelection(
+        read_type=read_type,
+        primary_method=default_primary_method(read_type),
+        source="run_config",
+        rationale="run_config provided legacy assembly_route read-type hint",
+        metadata={"assembly_route": assembly.assembly_route},
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -387,33 +469,29 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
-        assembly_method = run_config.assembly.assembly_method
-        if assembly_method is None:
-            provided_methods = [
-                method
-                for method, params in [
-                    ("flye", run_config.assembly.flye_parameters),
-                    ("nextdenovo", run_config.assembly.nextdenovo_parameters),
-                    ("hifiasm", run_config.assembly.hifiasm_parameters),
-                    ("hifiasm_ont", run_config.assembly.hifiasm_ont_parameters),
-                ]
-                if params is not None
-            ]
-            if len(provided_methods) == 1:
-                assembly_method = provided_methods[0]
-        if assembly_method:
+        try:
+            selection = _build_assembly_selection(
+                assembly=run_config.assembly,
+                shared_parameters=state.get("shared_parameters"),
+                shared_platform=(run_config.shared_parameters.platform if run_config.shared_parameters else None),
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if selection:
+            assembly_out["assembly_selection"] = selection.model_dump(mode="json")
             assembly_out["method_decision"] = {
-                **dict(assembly_out.get("method_decision") or {}),
-                "primary": _ASSEMBLY_METHOD_NAMES[assembly_method],
+                "primary": selection.primary_method,
+                "source": "run_config_explicit",
             }
         if run_config.assembly.flye_parameters:
-            assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
+            assembly_out["flye_parameters"] = _assembly_parameter_dump(run_config.assembly, "flye")
         if run_config.assembly.nextdenovo_parameters:
-            assembly_out["nextdenovo_parameters"] = run_config.assembly.nextdenovo_parameters.model_dump(exclude_none=True)
+            assembly_out["nextdenovo_parameters"] = _assembly_parameter_dump(run_config.assembly, "nextdenovo")
         if run_config.assembly.hifiasm_parameters:
-            assembly_out["hifiasm_parameters"] = run_config.assembly.hifiasm_parameters.model_dump(exclude_none=True)
+            assembly_out["hifiasm_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm")
         if run_config.assembly.hifiasm_ont_parameters:
-            assembly_out["hifiasm_ont_parameters"] = run_config.assembly.hifiasm_ont_parameters.model_dump(exclude_none=True)
+            assembly_out["hifiasm_ont_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm_ont")
         for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
             value = getattr(run_config.assembly, key)
             if value is not None:

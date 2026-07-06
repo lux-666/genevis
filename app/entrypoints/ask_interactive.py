@@ -1505,7 +1505,7 @@ def _normalize_shared_platform(value: Any) -> Any:
         index = int(raw)
         if 1 <= index <= len(_SHARED_PLATFORM_VALUES):
             return _SHARED_PLATFORM_VALUES[index - 1]
-    if raw in {"nanopore", "nano", "ont_raw", "ont_hq"}:
+    if raw in {"nanopore", "nano", "ont_hq"}:
         return "ont"
     if raw in {"pacbio_hifi", "pacbio_hifi_reads", "hifi", "ccs"}:
         return "pacbio_hifi"

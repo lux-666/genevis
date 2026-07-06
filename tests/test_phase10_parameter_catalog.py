@@ -384,11 +384,45 @@ class ParameterProfileTests(unittest.TestCase):
 
         self.assertEqual(set(full_profile), {"sample", "assets", "read_qc", "genome_survey", "previous_attempt", "assembly_review"})
         self.assertEqual(full_profile["sample"]["organism"], "Example species")
+        self.assertEqual(full_profile["assets"]["assembly_route"], "ont")
+        self.assertEqual(full_profile["assets"]["read_type"], "ont")
         self.assertEqual(full_profile["assets"]["input_files"], ["reads.fastq"])
         self.assertEqual(full_profile["read_qc"]["read_n50"], 30000)
         self.assertEqual(full_profile["genome_survey"]["estimated_genome_size"], 1000000000)
         self.assertEqual(full_profile["previous_attempt"]["stderr_tail"], "invalid value")
         self.assertEqual(full_profile["assembly_review"]["busco_duplicate"], 0.21)
+
+    def test_cyclone_route_keeps_route_separate_from_case_read_type(self):
+        state, assembly_out, previous_attempt = self._profile_state()
+        assembly_out["assembly_route"] = "cyclone"
+        assembly_out["read_type"] = "nano-raw"
+        assembly_out["input_profile"]["recommended_route"] = "cyclone"
+
+        full_profile = build_full_parameter_profile(
+            state,
+            assembly_out=assembly_out,
+            previous_attempt=previous_attempt,
+        )
+        prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
+
+        self.assertEqual(full_profile["assets"]["assembly_route"], "cyclone")
+        self.assertEqual(full_profile["assets"]["read_type"], "ont")
+        self.assertEqual(prompt_profile["assets"]["assembly_route"], "cyclone")
+        self.assertEqual(prompt_profile["assets"]["read_type"], "ont")
+
+    def test_hifi_route_maps_to_parameter_case_read_type(self):
+        state, assembly_out, previous_attempt = self._profile_state()
+        assembly_out["assembly_route"] = "hifi"
+        assembly_out["input_profile"]["recommended_route"] = "hifi"
+
+        full_profile = build_full_parameter_profile(
+            state,
+            assembly_out=assembly_out,
+            previous_attempt=previous_attempt,
+        )
+
+        self.assertEqual(full_profile["assets"]["assembly_route"], "hifi")
+        self.assertEqual(full_profile["assets"]["read_type"], "hifi")
 
     def test_prompt_profiles_are_task_scoped(self):
         state, assembly_out, previous_attempt = self._profile_state()

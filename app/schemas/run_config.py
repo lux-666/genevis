@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.domains.assembly.selection import is_method_read_type_compatible, normalize_read_type
 from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.shared_parameters import SharedParameters
 
@@ -51,13 +52,13 @@ NextDenovoReadType = Literal["ont", "clr", "hifi"]
 HifiasmReadType = Literal["hifi"]
 HifiasmOntReadType = Literal["ont"]
 AssemblyMethod = Literal["flye", "nextdenovo", "hifiasm", "hifiasm_ont"]
+AssemblyRoute = Literal["cyclone", "ont", "hifi", "auto"]
 ReadQCLengthFilterMethod = Literal[
     "skip",
     "read_qc.length_filter.seqkit_seq",
 ]
 ReviewPolicyMode = Literal["strict", "auto"]
 ReviewPolicyStage = Literal["assembly", "assembly_review", "hic_scaffolding"]
-
 
 class T2TThresholdProfile(BaseModel):
     """Conservative evidence thresholds for automatic telomere extension."""
@@ -160,6 +161,30 @@ class HifiasmOntRunParameters(BaseModel):
     threads: int = Field(gt=0)
 
 
+def infer_assembly_method(assembly: "AssemblyRunConfig") -> AssemblyMethod | None:
+    """Return the explicit assembly method or infer it from one parameter block."""
+    if assembly.assembly_method is not None:
+        return assembly.assembly_method
+
+    provided = _provided_assembly_parameter_methods(assembly)
+    if len(provided) == 1:
+        return provided[0]
+    return None
+
+
+def _provided_assembly_parameter_methods(assembly: "AssemblyRunConfig") -> list[AssemblyMethod]:
+    return [
+        name
+        for name, value in [
+            ("flye", assembly.flye_parameters),
+            ("nextdenovo", assembly.nextdenovo_parameters),
+            ("hifiasm", assembly.hifiasm_parameters),
+            ("hifiasm_ont", assembly.hifiasm_ont_parameters),
+        ]
+        if value is not None
+    ]
+
+
 class AssemblyRunConfig(BaseModel):
     """Run-config block for the assembly stage."""
 
@@ -173,7 +198,25 @@ class AssemblyRunConfig(BaseModel):
     hifi_reads_ref: str | None = None
     hic_reads_ref: str | None = None
     target_level: Literal["draft", "near_t2t", "strict_t2t"] = "draft"
-    assembly_route: Literal["cyclone", "ont", "hifi", "auto"] = "auto"
+    assembly_route: AssemblyRoute = "auto"
+
+    @model_validator(mode="after")
+    def _validate_read_type_method_consistency(self) -> "AssemblyRunConfig":
+        """Validate explicit method/read-type compatibility for legacy route hints."""
+        method = infer_assembly_method(self)
+        if method is None or self.assembly_route == "auto":
+            return self
+
+        read_type = normalize_read_type(self.assembly_route)
+        if read_type is None:
+            return self
+        if not is_method_read_type_compatible(method, read_type):
+            raise ValueError(
+                f"assembly_route '{self.assembly_route}' implies read_type '{read_type}' and is "
+                f"incompatible with assembly_method '{method}'"
+            )
+
+        return self
 
 
 def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> None:
@@ -185,7 +228,7 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
             "assembly.hifiasm_parameters, or assembly.hifiasm_ont_parameters is missing"
         )
 
-    method = assembly.assembly_method
+    method = infer_assembly_method(assembly)
     if method == "flye":
         if not assembly.flye_parameters:
             raise ValueError("run_config: local assembly method 'flye' requires assembly.flye_parameters")
@@ -203,16 +246,7 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
             raise ValueError("run_config: local assembly method 'hifiasm_ont' requires assembly.hifiasm_ont_parameters")
         return
 
-    provided = [
-        name
-        for name, value in [
-            ("flye", assembly.flye_parameters),
-            ("nextdenovo", assembly.nextdenovo_parameters),
-            ("hifiasm", assembly.hifiasm_parameters),
-            ("hifiasm_ont", assembly.hifiasm_ont_parameters),
-        ]
-        if value is not None
-    ]
+    provided = _provided_assembly_parameter_methods(assembly)
     if not provided:
         raise ValueError(
             "run_config: local_exec includes 'assembly' but "

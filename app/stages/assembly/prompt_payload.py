@@ -12,8 +12,9 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog
-from app.stages.assembly.knowledge_pack import load_knowledge_pack, select_evidence_cases
+from app.domains.assembly.case_selector import evidence_read_type_matches, select_evidence_cases
 
 # Avoid circular import by using local import in function
 ParameterPromptTask = Literal[
@@ -118,6 +119,7 @@ def build_prompt_payload(
         method_id=method_id,
         task=task,
         prompt_profile=prompt_profile,
+        strategy=knowledge_pack.get("strategies"),
     )
 
     # Defensive validation: verify all selected cases match profile read_type
@@ -125,7 +127,7 @@ def build_prompt_payload(
     if profile_read_type:
         for case in selected_cases:
             case_read_type = (case.get("features") or {}).get("read_type")
-            if case_read_type and case_read_type != profile_read_type:
+            if case_read_type and not evidence_read_type_matches(profile_read_type, case_read_type):
                 raise ValueError(
                     f"Case selector failed: case {case.get('case_id')} has read_type={case_read_type} "
                     f"but profile has read_type={profile_read_type}"

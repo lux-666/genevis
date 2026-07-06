@@ -477,7 +477,7 @@ class InteractiveLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.platform, "cycloneseq")
-        self.assertEqual(response.shared_parameters.read_type, "ont_raw")
+        self.assertEqual(response.shared_parameters.read_type, "cyclone")
 
     def test_apply_set_params_accepts_platform_alias(self):
         plan = _base_plan()

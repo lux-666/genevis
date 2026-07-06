@@ -6,7 +6,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.control.lifecycle import ResumeValidationError
+from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
+from app.domains.assembly.selection import (
+    AssemblySelection,
+    compatible_methods,
+    default_primary_method,
+    is_method_read_type_compatible,
+    method_read_type,
+    normalize_method_id,
+    normalize_read_type,
+    resolve_read_type,
+    route_from_read_type as _route_from_read_type,
+)
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
 from app.llm.factory import build_chat_model
@@ -21,7 +32,7 @@ from app.stages.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
-from app.stages.assembly.knowledge import load_skill_context
+from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
@@ -83,11 +94,26 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
         {"hic_reads", "hi_c_reads"},
     )
 
-    primary_long_reads_ref = hifi_reads_ref or ont_reads_ref
+    configured_route = assembly_out.get("assembly_route") or "auto"
+    existing_selection = _selection_from_output(assembly_out)
+    hinted_read_type = resolve_read_type(
+        ("assembly_selection.read_type", existing_selection.read_type if existing_selection else None),
+        ("assembly_route", configured_route if configured_route != "auto" else None),
+        ("shared_parameters.read_type", _shared_parameters(state).get("read_type")),
+        ("hifi_reads_ref", "pacbio_hifi" if hifi_reads_ref else None),
+        ("read_type_prior", _normalized_read_type_prior(state)),
+        context="assembly.resolve_extended_inputs",
+    )
+    if hinted_read_type == "pacbio_hifi":
+        primary_long_reads_ref = hifi_reads_ref or read_qc_ref or asset_long_ref
+    else:
+        primary_long_reads_ref = ont_reads_ref or hifi_reads_ref
+    if hinted_read_type == "pacbio_hifi" and primary_long_reads_ref and not hifi_reads_ref:
+        hifi_reads_ref = primary_long_reads_ref
     if not primary_long_reads_ref:
         return _fail_update(state, "assembly requires long reads (clean_long_reads or long_reads.fofn)")
 
-    primary_platform = "pacbio_hifi" if hifi_reads_ref else long_read_platform
+    primary_platform = "pacbio_hifi" if hinted_read_type == "pacbio_hifi" or (hifi_reads_ref and not ont_reads_ref) else long_read_platform
     input_source = "read_qc" if read_qc_ref else "asset_registry"
     if hifi_reads_ref and not ont_reads_ref:
         input_source = "run_config" if assembly_out.get("hifi_reads_ref") else "asset_registry"
@@ -95,7 +121,6 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     genome_size_prior = _genome_size_prior(state)
     read_type_prior = _read_type_prior(state)
     target_level = assembly_out.get("target_level") or "draft"
-    configured_route = assembly_out.get("assembly_route") or "auto"
     explicit_route = configured_route if configured_route in ROUTE_VALUES else None
     input_ref = primary_long_reads_ref
     input_type = "long_reads.fofn" if str(input_ref).endswith(".fofn") else "clean_long_reads"
@@ -121,24 +146,32 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
             "genome_survey_result_ref": _genome_survey_result_ref(state),
             "shared_parameters": _shared_parameters(state),
             "read_type_prior": read_type_prior,
+            "normalized_read_type": hinted_read_type,
         },
     )
 
 
 def infer_input_profile(state: TopLevelState) -> dict:
-    """Write an AssemblyInputProfile and optional explicit route decision."""
+    """Write an AssemblyInputProfile and recommendation/final selection."""
     assembly_out = _assembly_output(state)
     if assembly_out.get("status") != "resolved_extended":
         return {}
 
+    existing_selection = _selection_from_output(assembly_out)
     explicit_route = assembly_out.get("explicit_route")
-    if explicit_route:
+    if existing_selection or explicit_route:
+        selection = existing_selection or _selection_from_route(
+            explicit_route,
+            source="run_config",
+            rationale=f"run_config explicitly selected {explicit_route} read type",
+        )
+        if selection is None:
+            return _fail_update(state, f"unsupported assembly route: {explicit_route}")
         profile = _build_input_profile(
             state,
             assembly_out,
-            recommended_route=explicit_route,
-            confidence=1.0,
-            reasoning=f"run_config explicitly selected {explicit_route} route",
+            recommended_route=_route_from_read_type(selection.read_type),
+            reasoning=selection.rationale,
             uncertainty_notes=[],
             profile_source="run_config_explicit",
         )
@@ -151,9 +184,10 @@ def infer_input_profile(state: TopLevelState) -> dict:
         )
         decision = AssemblyRouteDecision(
             session_id=state["session_id"],
-            selected_route=explicit_route,
+            selected_route=_route_from_read_type(selection.read_type),
             decided_by="run_config_explicit",
             rationale=profile.recommendation_reasoning,
+            metadata={"assembly_selection": selection.model_dump(mode="json")},
         )
         decision_ref = _write_assembly_json_artifact(
             state,
@@ -162,6 +196,7 @@ def infer_input_profile(state: TopLevelState) -> dict:
             artifact_type=ASSEMBLY_ROUTE_DECISION,
             method_name="assembly.route_selector",
         )
+
         return _update_assembly_output(
             state,
             {
@@ -170,22 +205,37 @@ def infer_input_profile(state: TopLevelState) -> dict:
                 "input_profile_ref": profile_ref,
                 "route_decision": decision.model_dump(mode="json"),
                 "route_decision_ref": decision_ref,
-                "selected_route": explicit_route,
+                "assembly_selection": selection.model_dump(mode="json"),
+                "selected_route": _route_from_read_type(selection.read_type),
+                "method_decision": _resolve_method_decision(
+                    assembly_out.get("method_decision"),
+                    _legacy_method_decision(selection),
+                ),
             },
         )
 
-    ctx = load_skill_context("route_selector")
+    ctx = load_knowledge_pack(
+        "route_selector",
+        strict=False,
+        include_actions=True,
+        required_files=(),
+    )
     recommendation = _recommend_route_with_llm(state, assembly_out, ctx)
     recommended_route = recommendation["recommended_route"]
-    confidence = float(recommendation["confidence"])
-    if confidence < 0.5:
-        recommended_route = "insufficient_data"
+    recommended_selection = (
+        _selection_from_route(
+            recommended_route,
+            source="recommendation",
+            rationale=str(recommendation.get("reasoning") or "selector recommendation"),
+        )
+        if recommended_route != "insufficient_data"
+        else None
+    )
 
     profile = _build_input_profile(
         state,
         assembly_out,
         recommended_route=recommended_route,
-        confidence=confidence,
         reasoning=str(recommendation.get("reasoning") or "route selector recommendation"),
         uncertainty_notes=list(recommendation.get("uncertainty_notes") or []),
         profile_source="llm_inferred",
@@ -203,56 +253,38 @@ def infer_input_profile(state: TopLevelState) -> dict:
             "status": "profile_ready",
             "input_profile": profile.model_dump(mode="json"),
             "input_profile_ref": profile_ref,
+            "recommended_assembly_selection": recommended_selection.model_dump(mode="json") if recommended_selection else None,
         },
     )
 
 
 def select_route(state: TopLevelState) -> dict:
-    """Confirm or block on the route recommendation."""
+    """Confirm or block on the assembly selection recommendation."""
     assembly_out = _assembly_output(state)
     if assembly_out.get("status") != "profile_ready":
         return {}
-    if assembly_out.get("route_decision"):
+    if assembly_out.get("assembly_selection"):
         return _update_assembly_output(state, {"status": "route_selected"})
 
     profile = dict(assembly_out.get("input_profile") or {})
     recommended_route = profile.get("recommended_route")
-    confidence = float(profile.get("recommendation_confidence") or 0.0)
     if recommended_route == "insufficient_data":
         return _block_for_route_review(state, "assembly_route_insufficient_data")
 
-    policy_mode = _assembly_review_policy_mode(assembly_out)
-    if policy_mode == "auto" and confidence >= 0.7 and recommended_route in ROUTE_VALUES:
-        decision = AssemblyRouteDecision(
-            session_id=state["session_id"],
-            selected_route=recommended_route,
-            decided_by="llm_auto",
-            rationale=str(profile.get("recommendation_reasoning") or "auto route selection"),
-        )
-        decision_ref = _write_assembly_json_artifact(
-            state,
-            "route_decision.json",
-            decision.model_dump(mode="json"),
-            artifact_type=ASSEMBLY_ROUTE_DECISION,
-            method_name="assembly.route_selector",
-        )
-        return _update_assembly_output(
-            state,
-            {
-                "status": "route_selected",
-                "selected_route": recommended_route,
-                "route_decision": decision.model_dump(mode="json"),
-                "route_decision_ref": decision_ref,
-            },
-        )
-
-    return _block_for_route_review(state, "assembly_route_human_confirmation_required")
+    # All LLM recommendations require human gate (unless max_blocked_seconds configured)
+    return _block_for_route_review(state, "assembly_selection_human_confirmation_required")
 
 
-def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict[str, Any]:
-    """Apply a human route-selection gate decision."""
+def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, _selection_source: str = "human") -> dict[str, Any]:
+    """Apply a human or timeout assembly-selection gate decision.
+
+    Args:
+        state: Current state
+        request: Resume request
+        _selection_source: Internal source set by timeout logic, not user-controllable
+    """
     if request.stage != "assembly":
-        raise ResumeValidationError("assembly route resume requires stage assembly")
+        raise ResumeValidationError("assembly selection resume requires stage assembly")
     if request.decision == "stop_human_review":
         return {
             "current_stage": "assembly",
@@ -263,15 +295,35 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest) -> 
 
     selected_route = ROUTE_DECISION_MAP.get(request.decision)
     if selected_route not in ROUTE_VALUES:
-        raise ResumeValidationError(f"unsupported assembly route decision: {request.decision}")
+        raise ResumeValidationError(f"unsupported assembly selection decision: {request.decision}")
 
     assembly_out = _assembly_output(state)
+    read_type, read_type_source = _requested_read_type(request, assembly_out, selected_route)
+    method = _requested_method(request, assembly_out, read_type)
+    try:
+        selection = AssemblySelection(
+            read_type=read_type,
+            primary_method=method,
+            source="timeout" if _selection_source == "timeout" else "human",
+            rationale="; ".join(request.notes) if request.notes else f"{_selection_source} selected {selected_route} read type",
+            metadata={"resume_decision": request.decision, **request.metadata, "read_type_source": read_type_source},
+        )
+    except ValueError as exc:
+        raise ResumeValidationError(str(exc)) from exc
+
+    decided_by = "llm_auto" if _selection_source == "timeout" else "human_override"
+
     decision = AssemblyRouteDecision(
         session_id=state["session_id"],
         selected_route=selected_route,
-        decided_by="human_override",
-        rationale="; ".join(request.notes) if request.notes else f"human selected {selected_route} route",
-        metadata={"resume_decision": request.decision},
+        decided_by=decided_by,
+        rationale=selection.rationale,
+        metadata={
+            "assembly_selection": selection.model_dump(mode="json"),
+            "resume_decision": request.decision,
+            **request.metadata,
+            "read_type_source": read_type_source,
+        },
     )
     decision_ref = _write_assembly_json_artifact(
         state,
@@ -280,13 +332,19 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest) -> 
         artifact_type=ASSEMBLY_ROUTE_DECISION,
         method_name="assembly.route_selector",
     )
+
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly"] = {
         **assembly_out,
         "status": "route_selected",
-        "selected_route": selected_route,
         "route_decision": decision.model_dump(mode="json"),
         "route_decision_ref": decision_ref,
+        "assembly_selection": selection.model_dump(mode="json"),
+        "selected_route": selected_route,
+        "method_decision": _resolve_method_decision(
+            assembly_out.get("method_decision"),
+            _legacy_method_decision(selection),
+        ),
     }
     return {
         "current_stage": "assembly",
@@ -296,14 +354,54 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest) -> 
     }
 
 
+def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    """Commit the current assembly recommendation after a configured timeout."""
+    active_interrupt = state.get("active_interrupt") or {}
+    selection_payload = active_interrupt.get("recommended_assembly_selection")
+    if not isinstance(selection_payload, dict) and active_interrupt.get("recommended_route") in ROUTE_VALUES:
+        selection = _selection_from_route(
+            str(active_interrupt.get("recommended_route")),
+            source="recommendation",
+            rationale=str(active_interrupt.get("recommendation_reasoning") or "timeout committed legacy recommendation"),
+        )
+        selection_payload = selection.model_dump(mode="json") if selection else None
+    if not isinstance(selection_payload, dict):
+        return _timeout_stop_update(state, request, timeout)
+    try:
+        route = _route_from_read_type(str(selection_payload.get("read_type")))
+    except ValueError:
+        return _timeout_stop_update(state, request, timeout)
+    decision = {"hifi": "select_hifi", "ont": "select_ont", "cyclone": "select_cyclone"}.get(route)
+    if not decision:
+        return _timeout_stop_update(state, request, timeout)
+    timeout_request = request.model_copy(
+        update={
+            "decision": decision,
+            "method_name": selection_payload.get("primary_method"),
+            "notes": [*request.notes, f"timeout committed recommended assembly selection: {selection_payload.get('primary_method')}"],
+            "metadata": {
+                **request.metadata,
+                "read_type": selection_payload.get("read_type"),
+                "blocked_timeout": timeout,
+                "auto_accepted": True,
+            },
+        }
+    )
+    return apply_route_decision(state, timeout_request, _selection_source="timeout")
+
+
 def build_assembly_candidate_set(state: TopLevelState) -> dict:
     """Build compatible and rejected assembly candidates from descriptors."""
     assembly_out = _assembly_output(state)
     if assembly_out.get("status") not in {"resolved", "route_selected"}:
         return {}
 
+    selection = _selection_from_output(assembly_out)
+    if selection is None:
+        return _fail_update(state, "assembly_selection is required before candidate planning")
+
     registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-    planned_methods = _planned_candidate_methods(assembly_out)
+    planned_methods = _planned_candidate_methods(assembly_out, selection)
     missing = [method for method in planned_methods if method not in registry.methods]
     if missing:
         return _fail_update(state, f"assembly descriptors missing: {missing}")
@@ -313,7 +411,11 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
     rejected: dict[str, str] = {}
     for method_name in planned_methods:
         requires_genome_size = method_name in GENOME_SIZE_REQUIRED
-        rejection_reason = "genome_size_required" if requires_genome_size and not genome_size_prior else None
+        rejection_reason = None
+        if not is_method_read_type_compatible(method_name, selection.read_type):
+            rejection_reason = f"method_read_type_incompatible:{selection.read_type}"
+        elif requires_genome_size and not genome_size_prior:
+            rejection_reason = "genome_size_required"
         status = "rejected" if rejection_reason else "compatible"
         if rejection_reason:
             rejected[method_name] = rejection_reason
@@ -339,12 +441,28 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
     )
 
 
-def _planned_candidate_methods(assembly_out: dict[str, Any]) -> list[str]:
+def _planned_candidate_methods(assembly_out: dict[str, Any], selection: AssemblySelection) -> list[str]:
+    methods = list(dict.fromkeys([selection.primary_method, *ASSEMBLY_AUTO_CANDIDATES]))
+    if selection.fallback_method and selection.fallback_method not in methods:
+        methods.append(selection.fallback_method)
+    for legacy_method in _legacy_requested_methods(assembly_out):
+        if legacy_method not in methods:
+            methods.append(legacy_method)
+    return methods
+
+
+def _legacy_requested_methods(assembly_out: dict[str, Any]) -> list[str]:
     decision = dict(assembly_out.get("method_decision") or {})
-    methods = list(ASSEMBLY_AUTO_CANDIDATES)
-    for key in ["primary", "fallback"]:
-        method = decision.get(key)
-        if method in ASSEMBLY_COMPATIBILITY_CANDIDATES and method not in methods:
+    methods: list[str] = []
+    for key in ("primary", "fallback"):
+        raw = decision.get(key)
+        if not raw:
+            continue
+        try:
+            method = normalize_method_id(str(raw))
+        except ValueError:
+            continue
+        if method not in methods:
             methods.append(method)
     return methods
 
@@ -360,9 +478,11 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
         for candidate in assembly_out.get("candidate_plans", [])
         if candidate.get("status") == "compatible"
     ]
-    decision = dict(assembly_out.get("method_decision") or {})
-    requested_primary = decision.get("primary")
-    requested_fallback = decision.get("fallback")
+    selection = _selection_from_output(assembly_out)
+    if selection is None:
+        return _block_for_human(state, "assembly_selection_missing")
+    requested_primary = selection.primary_method
+    requested_fallback = selection.fallback_method
 
     if requested_primary:
         if requested_primary not in ASSEMBLY_CANDIDATES:
@@ -429,6 +549,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
     candidate_refs: list[str] = []
     artifacts: list[ArtifactMeta] = []
     selected_plans = []
+    selection = _selection_from_output(assembly_out)
     for method_name in assembly_out["selected_methods"]:
         short_name = method_name.rsplit(".", 1)[-1]
         fasta_path = data_dir / "artifacts" / "assembly" / session_id / short_name / "draft_assembly.fasta"
@@ -461,6 +582,8 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             metadata={
                 "genome_survey_result_ref": assembly_out.get("genome_survey_result_ref"),
                 "read_type_prior": assembly_out.get("read_type_prior"),
+                "assembly_selection": selection.model_dump(mode="json") if selection else None,
+                "method_read_type": method_read_type(method_name, selection.read_type) if selection else None,
                 "execution_enabled": execution_enabled,
                 "method_graph_requested": method_graph_requested,
                 "draft_assembly_ref_status": "pending_execution" if execution_enabled else "planned_path_not_materialized",
@@ -557,6 +680,9 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "input_ref",
         "input_source",
         "input_type",
+        "assembly_selection",
+        "normalized_read_type",
+        "read_type_prior",
         "method_application_notes",
         "primary_method",
         "primary_long_read_platform",
@@ -622,24 +748,58 @@ def _block_for_human(state: TopLevelState, reason: str) -> dict:
 
 
 def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
+    from datetime import datetime, timezone
+    from app.review.base import ReviewPayload
+    from app.review.policy import evaluate
+
     assembly_out = _assembly_output(state)
     profile = dict(assembly_out.get("input_profile") or {})
+    recommended_selection = dict(assembly_out.get("recommended_assembly_selection") or {})
+
+    # Construct ReviewPayload for policy evaluation
+    payload = ReviewPayload(
+        stage="assembly",
+        gate_id="route_selection",
+        reason=reason,
+        decisions_allowed=["select_cyclone", "select_ont", "select_hifi", "stop_human_review"],
+        signals=[],
+        notes=[
+            f"Recommended read_type: {recommended_selection.get('read_type')}",
+            f"Recommended method: {recommended_selection.get('primary_method')}",
+            f"Reasoning: {profile.get('recommendation_reasoning')}",
+        ] + profile.get("uncertainty_notes", []),
+        auto_decidable=False,
+    )
+
+    # Evaluate policy
+    outcome = evaluate("assembly", payload, assembly_out.get("review_policy"))
+
     interrupt = {
         "stage": "assembly",
         "gate_id": "route_selection",
         "reason": reason,
         "decisions_allowed": ["select_cyclone", "select_ont", "select_hifi", "stop_human_review"],
         "recommended_route": profile.get("recommended_route"),
+        "recommended_assembly_selection": recommended_selection,
         "recommendation_reasoning": profile.get("recommendation_reasoning"),
         "uncertainty_notes": profile.get("uncertainty_notes", []),
         "available_routes": _available_routes(assembly_out),
+        "available_read_types": sorted({route for route in ["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]}),
+        "compatible_methods": {
+            read_type: compatible_methods(read_type) for read_type in ["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
+        },
+        "blocked_at": datetime.now(timezone.utc).isoformat(),
+        "review_policy": assembly_out.get("review_policy") or {"mode": outcome.mode},
+        "review_policy_outcome": outcome.model_dump(mode="json"),
     }
+
     return _update_assembly_output(
         state,
         {
             "status": "blocked_human",
             "block_reason": reason,
             "active_interrupt": interrupt,
+            "review_policy_outcome": outcome.model_dump(mode="json"),
         },
     )
 
@@ -651,6 +811,121 @@ def _available_routes(assembly_out: dict[str, Any]) -> list[str]:
     if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
         routes.append("hifi")
     return _unique_refs(routes)
+
+
+def _selection_from_output(assembly_out: dict[str, Any]) -> AssemblySelection | None:
+    payload = assembly_out.get("assembly_selection")
+    if isinstance(payload, AssemblySelection):
+        return payload
+    if isinstance(payload, dict):
+        try:
+            return AssemblySelection.model_validate(payload)
+        except ValueError:
+            return None
+    legacy = dict(assembly_out.get("method_decision") or {})
+    legacy_primary = legacy.get("primary")
+    read_type = resolve_read_type(
+        ("normalized_read_type", assembly_out.get("normalized_read_type")),
+        ("read_type", assembly_out.get("read_type")),
+        ("explicit_route", assembly_out.get("explicit_route")),
+        ("read_type_prior", _normalized_read_type_from_prior(assembly_out.get("read_type_prior"))),
+        context="assembly.selection_from_output",
+    )
+    if legacy_primary and read_type:
+        try:
+            return AssemblySelection(
+                read_type=read_type,
+                primary_method=str(legacy_primary),
+                fallback_method=legacy.get("fallback"),
+                source="run_config" if _is_run_config_explicit_method_decision(legacy) else "recommendation",
+                rationale="legacy method_decision adapted to assembly_selection",
+                metadata={"legacy_method_decision": legacy},
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _selection_from_route(route: str | None, *, source: str, rationale: str) -> AssemblySelection | None:
+    read_type = normalize_read_type(route)
+    if not read_type:
+        return None
+    return AssemblySelection(
+        read_type=read_type,
+        primary_method=default_primary_method(read_type),
+        source=source,
+        rationale=rationale,
+        metadata={"legacy_route": route},
+    )
+
+
+def _legacy_method_decision(selection: AssemblySelection) -> dict[str, str]:
+    source = "run_config_explicit" if selection.source == "run_config" else "assembly_selection"
+    payload = {"primary": selection.primary_method, "source": source}
+    if selection.fallback_method:
+        payload["fallback"] = selection.fallback_method
+    return payload
+
+
+def _resolve_method_decision(existing: Any, route_derived: dict[str, str]) -> dict[str, str]:
+    existing_decision = dict(existing or {})
+    if _is_run_config_explicit_method_decision(existing_decision):
+        return existing_decision
+    return route_derived
+
+
+def _is_run_config_explicit_method_decision(decision: Any) -> bool:
+    return isinstance(decision, dict) and decision.get("source") == "run_config_explicit"
+
+
+def _requested_read_type(request: ResumeReviewRequest, assembly_out: dict[str, Any], selected_route: str) -> tuple[str, str]:
+    route_read_type = normalize_read_type(selected_route)
+    if route_read_type is None:
+        raise ResumeValidationError(f"unsupported assembly route: {selected_route}")
+
+    for source, raw_value in (
+        ("metadata.read_type", request.metadata.get("read_type")),
+        ("metadata.shared_read_type", request.metadata.get("shared_read_type")),
+    ):
+        if raw_value is None:
+            continue
+        read_type = normalize_read_type(raw_value)
+        if read_type is None:
+            raise ResumeValidationError(f"unsupported assembly {source}: {raw_value!r}")
+        if _route_from_read_type(read_type) != selected_route:
+            raise ResumeValidationError(
+                f"assembly selection {request.decision!r} maps to route {selected_route!r}, "
+                f"but {source}={raw_value!r} normalizes to read_type {read_type!r}"
+            )
+        return read_type, source
+
+    prior_read_type = resolve_read_type(
+        ("read_type_prior", _normalized_read_type_from_prior(assembly_out.get("read_type_prior"))),
+        context="assembly.requested_read_type",
+    )
+    if prior_read_type and _route_from_read_type(prior_read_type) == selected_route:
+        return prior_read_type, "read_type_prior"
+    return route_read_type, "selected_route"
+
+
+def _requested_method(request: ResumeReviewRequest, assembly_out: dict[str, Any], read_type: str) -> str:
+    try:
+        if request.method_name:
+            return normalize_method_id(request.method_name)
+        recommended = dict(assembly_out.get("recommended_assembly_selection") or {})
+        recommended_method = recommended.get("primary_method")
+        if recommended_method and recommended.get("read_type") == read_type:
+            return normalize_method_id(str(recommended_method))
+        existing = _selection_from_output(assembly_out)
+        if existing and existing.read_type == read_type:
+            return existing.primary_method
+        return default_primary_method(read_type)
+    except ValueError as exc:
+        raise ResumeValidationError(str(exc)) from exc
+
+
+def _timeout_stop_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    return timeout_terminal_update(state, request, timeout)
 
 
 def _assembly_review_policy_mode(assembly_out: dict[str, Any]) -> str:
@@ -687,7 +962,6 @@ def _build_input_profile(
     assembly_out: dict[str, Any],
     *,
     recommended_route: str,
-    confidence: float,
     reasoning: str,
     uncertainty_notes: list[str],
     profile_source: str,
@@ -704,7 +978,7 @@ def _build_input_profile(
         has_hifi=bool(assembly_out.get("hifi_reads_ref")),
         has_hic=bool(assembly_out.get("hic_reads_ref")),
         recommended_route=recommended_route,
-        recommendation_confidence=confidence,
+        recommendation_confidence=0.0,  # deprecated field, kept for schema compatibility
         recommendation_reasoning=reasoning,
         uncertainty_notes=uncertainty_notes,
         profile_source=profile_source,
@@ -729,7 +1003,6 @@ def _recommend_route_with_llm(
             raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
         return {
             "recommended_route": recommended,
-            "confidence": float(payload.get("confidence", payload.get("recommendation_confidence", 0.0))),
             "reasoning": str(payload.get("reasoning", payload.get("recommendation_reasoning", ""))),
             "uncertainty_notes": list(payload.get("uncertainty_notes") or []),
             "source": "llm",
@@ -737,7 +1010,6 @@ def _recommend_route_with_llm(
     except Exception as exc:
         return {
             "recommended_route": "insufficient_data",
-            "confidence": 0.0,
             "reasoning": "route selector LLM unavailable; route selection requires human/data review",
             "source": "llm_unavailable",
             "uncertainty_notes": [
@@ -778,7 +1050,6 @@ def _route_selector_messages(
                     "allowed_actions": ctx.get("allowed_actions") or [],
                     "required_output": {
                         "recommended_route": "one of allowed_actions",
-                        "confidence": "float from 0 to 1",
                         "reasoning": "short explanation",
                         "uncertainty_notes": "list of strings",
                     },
@@ -850,6 +1121,13 @@ def _genome_size_prior(state: TopLevelState) -> int | None:
 
 def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
     assembly_out = _assembly_output(state)
+    selection = _selection_from_output(assembly_out)
+    if selection:
+        return {
+            **SHARED_TO_METHOD_READ_TYPE[selection.read_type],
+            "shared_read_type": selection.read_type,
+            "source": "assembly_selection",
+        }
     params = dict(assembly_out.get("flye_parameters") or {})
     if params.get("read_type"):
         return {"flye": str(params["read_type"]), "source": "flye_parameters"}
@@ -872,6 +1150,16 @@ def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
             "source": "manifest_platform",
         }
     return None
+
+
+def _normalized_read_type_prior(state: TopLevelState) -> str | None:
+    return _normalized_read_type_from_prior(_read_type_prior(state))
+
+
+def _normalized_read_type_from_prior(prior: Any) -> str | None:
+    if not isinstance(prior, dict):
+        return None
+    return resolve_read_type(("read_type_prior.shared_read_type", prior.get("shared_read_type")), context="assembly.read_type_prior")
 
 
 def _shared_parameters(state: TopLevelState) -> dict[str, Any]:

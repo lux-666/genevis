@@ -43,8 +43,9 @@ class AssemblyDescriptorTests(unittest.TestCase):
         self.assertIn("explicit_hifi_or_non_ont_route_required", hifiasm.human_review_triggers)
 
     def test_shared_read_type_mapping_covers_manifest_platforms_and_methods(self):
-        self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "ont_raw")
+        self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["cyclone"], "cyclone")
         self.assertEqual(PLATFORM_TO_SHARED_READ_TYPE["pacbio_hifi"], "pacbio_hifi")
+        self.assertEqual(SHARED_TO_METHOD_READ_TYPE["cyclone"]["hifiasm_ont"], "ont")
         self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_raw"]["hifiasm_ont"], "ont")
         self.assertEqual(SHARED_TO_METHOD_READ_TYPE["ont_hq"]["hifiasm_ont"], "ont")
         self.assertEqual(SHARED_TO_METHOD_READ_TYPE["pacbio_hifi"]["hifiasm"], "hifi")

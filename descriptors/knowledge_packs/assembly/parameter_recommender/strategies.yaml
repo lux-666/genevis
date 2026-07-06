@@ -1,0 +1,21 @@
+version: 1
+default_strategy: structured_v1
+strategies:
+  structured_v1:
+    hard_filters:
+      read_type_mismatch: true
+      exclude_failure_cases_for_initial: true
+    scoring_weights:
+      method_exact_match: 8
+      method_family_match: 3
+      read_type_match: 8
+      failure_mode_match: 5
+      clade_match: 2
+      coverage_bucket_match: 2
+      genome_size_bucket_match: 2
+      heterozygosity_bucket_match: 2
+      read_n50_bucket_match: 1
+    buckets:
+      coverage: [30, 60]
+      genome_size_mb: [500, 3000, 10000]
+      read_n50_kb: [15, 30, 50]

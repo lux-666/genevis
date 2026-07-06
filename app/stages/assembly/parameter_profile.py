@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from app.domains.assembly.selection import resolve_parameter_case_read_type
 from app.schemas.state import TopLevelState
 from app.stages.assembly.method_application.lifecycle import assembly_output
 
@@ -32,6 +33,7 @@ INITIAL_SAMPLE_FIELDS = (
     "target_level",
 )
 PROMPT_ASSET_FIELDS = (
+    "assembly_route",
     "read_type",
     "read_format",
     "has_hifi",
@@ -166,9 +168,12 @@ def _sample_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[
 def _assets_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[str, Any]:
     input_profile = dict(assembly_out.get("input_profile") or {})
     input_ref = assembly_out.get("input_ref") or input_profile.get("primary_long_reads_ref")
+    selection = dict(assembly_out.get("assembly_selection") or {})
+    assembly_route = _first_value(assembly_out.get("assembly_route"), input_profile.get("recommended_route"))
     return _drop_empty(
         {
-            "read_type": _first_value(assembly_out.get("assembly_route"), input_profile.get("recommended_route")),
+            "assembly_route": assembly_route,
+            "read_type": _parameter_case_read_type(selection, assembly_route, assembly_out, input_profile),
             "read_format": _infer_read_format(input_ref),
             "input_files": _input_files(input_ref),
             "has_hifi": _first_value(input_profile.get("has_hifi"), bool(assembly_out.get("hifi_reads_ref"))),
@@ -178,6 +183,22 @@ def _assets_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[
             "has_trio": _first_value(input_profile.get("has_trio"), bool(assembly_out.get("trio_refs"))),
             "has_rnaseq": _first_value(input_profile.get("has_rnaseq"), bool((state.get("stage_outputs") or {}).get("rnaseq"))),
         }
+    )
+
+
+def _parameter_case_read_type(
+    selection: dict[str, Any],
+    route: Any,
+    assembly_out: dict[str, Any],
+    input_profile: dict[str, Any],
+) -> str | None:
+    return resolve_parameter_case_read_type(
+        ("assembly_selection.read_type", selection.get("read_type")),
+        ("assembly_out.read_type", assembly_out.get("read_type")),
+        ("input_profile.read_type", input_profile.get("read_type")),
+        ("input_profile.primary_read_type", input_profile.get("primary_read_type")),
+        ("assembly_route", route),
+        context="assembly.parameter_profile.assets",
     )
 
 

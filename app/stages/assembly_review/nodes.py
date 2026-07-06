@@ -797,6 +797,9 @@ def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_fina
         raise ResumeValidationError(f"assembly_review {request.decision} output must differ from pre-action assembly")
     if not Path(str(action_output_ref)).exists():
         raise ResumeValidationError(f"assembly_review {request.decision} action output ref must exist")
+    # Trust boundary: human_approved_action is user-asserted, not system-verified.
+    # This documents that a human performed and approved an external action.
+    # Additional validation (output exists, differs from input, has evidence) reduces risk.
     if not (request.metadata.get("human_approved_action") is True or request.metadata.get("approval") == "human"):
         raise ResumeValidationError(f"assembly_review {request.decision} requires human-approved action metadata")
     evidence_refs = list(request.metadata.get("evidence_refs") or [])

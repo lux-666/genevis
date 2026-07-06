@@ -11,8 +11,8 @@ import json
 
 import pytest
 
+from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
-from app.stages.assembly.knowledge_pack import load_knowledge_pack
 from app.stages.assembly.prompt_payload import (
     ParameterPromptTask,
     build_prompt_payload,
@@ -915,6 +915,30 @@ class TestEdgeCases:
         assert payload["case_selection"]["selected_case_ids"] == [
             case["case_id"] for case in payload["selected_cases"]
         ]
+
+    def test_cyclone_route_selects_ont_evidence_cases(self, sample_catalog, sample_full_profile):
+        cyclone_profile = {
+            **sample_full_profile,
+            "assets": {
+                **sample_full_profile["assets"],
+                "assembly_route": "cyclone",
+                "read_type": "ont",
+                "has_hifi": False,
+                "has_ont": True,
+            },
+        }
+
+        payload = build_prompt_payload(
+            method_id="test_method",
+            catalog=sample_catalog,
+            full_profile=cyclone_profile,
+            task="recommend_initial",
+        )
+
+        assert payload["prompt_profile"]["assets"]["assembly_route"] == "cyclone"
+        assert payload["prompt_profile"]["assets"]["read_type"] == "ont"
+        assert payload["selected_cases"]
+        assert {case["features"]["read_type"] for case in payload["selected_cases"]} == {"ont"}
 
 
 class TestRealCatalogCompatibility:

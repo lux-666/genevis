@@ -178,7 +178,7 @@ class DurableResumeTests(unittest.TestCase):
             # N3: resume events should record backend + data_dir so the
             # ledger trail distinguishes between sqlite and memory runs.
             self.assertEqual(resume_started[0]["checkpointer"], "sqlite")
-            self.assertEqual(resume_started[0]["data_dir"], str(data_dir))
+            self.assertEqual(Path(resume_started[0]["data_dir"]).resolve(strict=False), data_dir.resolve(strict=False))
             self.assertEqual(resume_completed[0]["checkpointer"], "sqlite")
             self.assertIn(resume_completed[0]["supervision_state"], {"running_stage", "completed", "failed_terminal", "blocked_human"})
             self.assertIn("current_stage", resume_completed[0])

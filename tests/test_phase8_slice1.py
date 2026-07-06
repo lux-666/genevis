@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.lifecycle import resume_review_state
+from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.schemas.artifacts import (
@@ -21,7 +21,7 @@ from app.schemas.artifacts import (
     AssemblyT2TReadiness,
 )
 from app.schemas.state import initial_state
-from app.stages.assembly.knowledge import load_skill_context
+from app.knowledge.packs import load_knowledge_pack
 from app.stages.assembly.nodes import (
     apply_route_decision,
     infer_input_profile,
@@ -84,31 +84,56 @@ class Phase8SchemaTests(unittest.TestCase):
 
 
 class KnowledgePackTests(unittest.TestCase):
-    def test_load_skill_context_full(self):
-        ctx = load_skill_context("route_selector")
+    def test_load_route_selector_context_full(self):
+        ctx = load_knowledge_pack(
+            "route_selector",
+            strict=False,
+            include_actions=True,
+            required_files=(),
+        )
 
         self.assertIn("hifi", ctx["allowed_actions"])
         self.assertIn("Route Selection Skill", ctx["skill_text"])
         self.assertTrue(ctx["cases"])
 
-    def test_load_skill_context_missing(self):
-        ctx = load_skill_context("does_not_exist")
+    def test_load_route_selector_context_missing(self):
+        ctx = load_knowledge_pack(
+            "does_not_exist",
+            strict=False,
+            include_actions=True,
+            required_files=(),
+        )
 
-        self.assertEqual(ctx, {"rules": {}, "skill_text": None, "cases": [], "allowed_actions": []})
+        self.assertEqual(
+            ctx,
+            {
+                "rules": {},
+                "cases": [],
+                "skill": None,
+                "skill_text": None,
+                "strategies": {},
+                "allowed_actions": [],
+            },
+        )
 
-    def test_load_skill_context_cwd_independent(self):
+    def test_load_route_selector_context_cwd_independent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
-                ctx = load_skill_context("qc_interpretation")
+                ctx = load_knowledge_pack(
+                    "qc_interpretation",
+                    strict=False,
+                    include_actions=True,
+                    required_files=(),
+                )
             finally:
                 os.chdir(old_cwd)
 
         self.assertIn("safety_boundaries", ctx["rules"])
         self.assertIn("all_candidates_fragmented", ctx["rules"]["safety_boundaries"]["always_block_human"])
 
-    def test_load_skill_context_partial(self):
+    def test_load_route_selector_context_partial(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "assembly"
             pack = root / "partial_pack"
@@ -117,8 +142,13 @@ class KnowledgePackTests(unittest.TestCase):
                 "allowed_actions:\n  - choose\n",
                 encoding="utf-8",
             )
-            with patch("app.stages.assembly.knowledge._PACK_ROOT", root):
-                ctx = load_skill_context("partial_pack")
+            ctx = load_knowledge_pack(
+                "partial_pack",
+                root=root,
+                strict=False,
+                include_actions=True,
+                required_files=(),
+            )
 
         self.assertEqual(ctx["allowed_actions"], ["choose"])
         self.assertIsNone(ctx["skill_text"])
@@ -186,6 +216,25 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["primary_long_reads_ref"], str(hifi_reads))
             self.assertEqual(assembly["input_ref"], str(hifi_reads))
 
+    def test_resolve_extended_inputs_hifi_hint_falls_back_to_clean_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[{"asset_id": "reads", "asset_type": "clean_long_reads", "path": str(reads)}],
+            )
+            state["shared_parameters"] = {"read_type": "pacbio_hifi"}
+
+            result = resolve_extended_inputs(state)
+            assembly = result["stage_outputs"]["assembly"]
+
+            self.assertEqual(assembly["status"], "resolved_extended")
+            self.assertEqual(assembly["primary_long_reads_ref"], str(reads))
+            self.assertEqual(assembly["hifi_reads_ref"], str(reads))
+            self.assertEqual(assembly["input_ref"], str(reads))
+            self.assertEqual(assembly["normalized_read_type"], "pacbio_hifi")
+
     def test_resolve_extended_inputs_no_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
@@ -211,6 +260,45 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["input_profile"]["profile_source"], "run_config_explicit")
             self.assertEqual(assembly["route_decision"]["selected_route"], "hifi")
             self.assertTrue(Path(assembly["input_profile_ref"]).exists())
+
+    def test_explicit_cyclone_route_defaults_to_flye_method_decision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[{"asset_id": "cyclone", "asset_type": "clean_long_reads", "path": str(reads)}],
+            )
+            state["stage_outputs"] = {"assembly": {"assembly_route": "cyclone"}}
+            resolved = {**state, **resolve_extended_inputs(state)}
+
+            result = infer_input_profile(resolved)
+
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["selected_route"], "cyclone")
+            self.assertEqual(assembly["assembly_selection"]["read_type"], "cyclone")
+            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.flye")
+            self.assertEqual(assembly["assembly_selection"]["source"], "run_config")
+
+    def test_explicit_ont_route_preserves_ont_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
+            state = self._state(
+                tmpdir,
+                assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}],
+            )
+            state["stage_outputs"] = {"assembly": {"assembly_route": "ont"}}
+            resolved = {**state, **resolve_extended_inputs(state)}
+
+            result = infer_input_profile(resolved)
+
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["selected_route"], "ont")
+            self.assertEqual(assembly["route_decision"]["selected_route"], "ont")
+            self.assertEqual(assembly["input_profile"]["recommended_route"], "ont")
+            self.assertEqual(assembly["assembly_selection"]["read_type"], "ont_raw")
+            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
 
     def test_infer_input_profile_llm_prompt_receives_skill_text(self):
         class FakeModel:
@@ -283,6 +371,7 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["active_interrupt"]["gate_id"], "route_selection")
 
     def test_select_route_auto_policy_can_adopt_high_confidence(self):
+        """All LLM recommendations now require human gate (confidence removed)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             state["stage_outputs"] = {
@@ -301,8 +390,10 @@ class InputProfilerTests(unittest.TestCase):
             result = select_route(state)
             assembly = result["stage_outputs"]["assembly"]
 
-            self.assertEqual(assembly["status"], "route_selected")
-            self.assertEqual(assembly["route_decision"]["selected_route"], "cyclone")
+            # After confidence removal, all LLM recommendations block for human gate
+            self.assertEqual(assembly["status"], "blocked_human")
+            self.assertNotIn("route_decision", assembly)
+            self.assertEqual(assembly["active_interrupt"]["gate_id"], "route_selection")
 
     def test_select_route_insufficient_data_blocks_without_decision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -370,3 +461,197 @@ class InputProfilerTests(unittest.TestCase):
             result = resume_review_state(state, request)
 
             self.assertEqual(result["stage_outputs"]["assembly"]["selected_route"], "cyclone")
+
+    def test_route_decision_maps_to_method_decision(self):
+        """P1 fix: route decisions should map to the intended methods."""
+        cases = [
+            {
+                "name": "test_route_decision_maps_to_method_decision_hifi",
+                "decision": "select_hifi",
+                "selected_route": "hifi",
+                "assembly_selection": {
+                    "read_type": "pacbio_hifi",
+                    "primary_method": "assembly.candidate.hifiasm",
+                    "source": "human",
+                },
+            },
+            {
+                "name": "test_route_decision_maps_to_method_decision_ont",
+                "decision": "select_ont",
+                "selected_route": "ont",
+                "assembly_selection": {
+                    "read_type": "ont_raw",
+                    "primary_method": "assembly.candidate.hifiasm_ont",
+                },
+            },
+            {
+                "name": "test_route_decision_maps_to_method_decision_cyclone",
+                "decision": "select_cyclone",
+                "selected_route": "cyclone",
+                "assembly_selection": {
+                    "read_type": "cyclone",
+                    "primary_method": "assembly.candidate.flye",
+                },
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case["name"]):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    state = self._state(tmpdir)
+                    state["supervision_state"] = "blocked_human"
+                    state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
+                    state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
+                    request = ResumeReviewRequest(
+                        session_id="s1",
+                        stage="assembly",
+                        gate_id="route_selection",
+                        decision=case["decision"],
+                    )
+
+                    result = apply_route_decision(state, request)
+                    assembly = result["stage_outputs"]["assembly"]
+
+                    self.assertEqual(assembly["selected_route"], case["selected_route"])
+                    for key, expected in case.get("assembly_selection", {}).items():
+                        self.assertEqual(assembly["assembly_selection"][key], expected)
+                    if "method_decision_primary" in case:
+                        self.assertEqual(
+                            assembly["method_decision"]["primary"],
+                            case["method_decision_primary"],
+                        )
+
+    def test_route_selection_includes_review_policy_outcome(self):
+        """P1 fix: route selection should call evaluate() and include policy outcome"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["stage_outputs"] = {
+                "assembly": {
+                    "status": "profile_ready",
+                    "review_policy": {"mode": "strict", "max_blocked_seconds": 180},
+                    "input_profile": {
+                        "recommended_route": "hifi",
+                        "recommendation_reasoning": "HiFi available",
+                        "uncertainty_notes": [],
+                    },
+                }
+            }
+
+            result = select_route(state)
+            assembly = result["stage_outputs"]["assembly"]
+
+            self.assertEqual(assembly["status"], "blocked_human")
+            self.assertIn("review_policy_outcome", assembly)
+            outcome = assembly["review_policy_outcome"]
+            self.assertEqual(outcome["action"], "BLOCK_WITH_TIMEOUT")
+            self.assertEqual(outcome["max_blocked_seconds"], 180)
+
+            # Check interrupt includes blocked_at and review_policy
+            interrupt = assembly["active_interrupt"]
+            self.assertIn("blocked_at", interrupt)
+            self.assertIn("review_policy", interrupt)
+            self.assertIn("review_policy_outcome", interrupt)
+
+    def test_route_selection_no_timeout_blocks_indefinitely(self):
+        """P1 fix: strict mode without timeout should block indefinitely"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["stage_outputs"] = {
+                "assembly": {
+                    "status": "profile_ready",
+                    "review_policy": {"mode": "strict"},
+                    "input_profile": {
+                        "recommended_route": "hifi",
+                        "recommendation_reasoning": "HiFi available",
+                        "uncertainty_notes": [],
+                    },
+                }
+            }
+
+            result = select_route(state)
+            assembly = result["stage_outputs"]["assembly"]
+
+            self.assertEqual(assembly["status"], "blocked_human")
+            outcome = assembly["review_policy_outcome"]
+            self.assertEqual(outcome["action"], "BLOCK_INDEFINITE")
+            self.assertIsNone(outcome["max_blocked_seconds"])
+
+    def test_explicit_route_maps_to_method_decision(self):
+        """P1 fix: explicit route from run_config should also set method_decision"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["stage_outputs"] = {
+                "assembly": {
+                    "status": "resolved_extended",
+                    "explicit_route": "hifi",
+                    "hifi_reads_ref": "reads/hifi.fastq",
+                }
+            }
+
+            result = infer_input_profile(state)
+            assembly = result["stage_outputs"]["assembly"]
+
+            self.assertEqual(assembly["status"], "profile_ready")
+            self.assertEqual(assembly["selected_route"], "hifi")
+            self.assertIn("method_decision", assembly)
+            self.assertEqual(assembly["method_decision"]["primary"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["assembly_selection"]["read_type"], "pacbio_hifi")
+            self.assertEqual(assembly["assembly_selection"]["source"], "run_config")
+
+    def test_route_decision_honors_explicit_resume_method_and_read_type(self):
+        """Selector V2 uses method_name plus metadata.read_type for human intent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["supervision_state"] = "blocked_human"
+            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
+            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="assembly",
+                gate_id="route_selection",
+                decision="select_hifi",
+                method_name="assembly.candidate.nextdenovo",
+                metadata={"read_type": "pacbio_hifi"},
+            )
+
+            result = apply_route_decision(state, request)
+            assembly = result["stage_outputs"]["assembly"]
+
+            self.assertEqual(assembly["selected_route"], "hifi")
+            self.assertEqual(assembly["assembly_selection"]["read_type"], "pacbio_hifi")
+            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.nextdenovo")
+            self.assertEqual(assembly["assembly_selection"]["metadata"]["read_type_source"], "metadata.read_type")
+
+    def test_route_decision_rejects_read_type_metadata_that_conflicts_with_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["supervision_state"] = "blocked_human"
+            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
+            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="assembly",
+                gate_id="route_selection",
+                decision="select_hifi",
+                metadata={"read_type": "ont"},
+            )
+
+            with self.assertRaisesRegex(ResumeValidationError, "maps to route 'hifi'.*metadata.read_type"):
+                apply_route_decision(state, request)
+
+    def test_route_decision_rejects_unknown_method_name_as_resume_validation_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            state["supervision_state"] = "blocked_human"
+            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
+            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
+            request = ResumeReviewRequest(
+                session_id="s1",
+                stage="assembly",
+                gate_id="route_selection",
+                decision="select_hifi",
+                method_name="assembly.candidate.unknown",
+            )
+
+            with self.assertRaisesRegex(ResumeValidationError, "unknown assembly method"):
+                apply_route_decision(state, request)

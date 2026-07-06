@@ -1209,8 +1209,42 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
             self.assertEqual(assembly_out["execution_mode"], "local")
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+
+    def test_run_config_explicit_assembly_method_without_read_type_fails_before_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "assembly_method": "hifiasm_ont",
+                            "hifiasm_ont_parameters": {"threads": 4},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("app.entrypoints.run.build_graph") as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("assembly.assembly_method is set but no read_type could be inferred", stderr)
+            build_graph.assert_not_called()
 
     def test_run_config_inferrs_hifiasm_ont_method_from_single_parameter_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1252,7 +1286,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
 
     def test_run_config_inferrs_hifiasm_method_from_single_parameter_block(self):
@@ -1295,7 +1329,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_parameters"], {"read_type": "hifi", "threads": 4})
 
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
@@ -1383,7 +1417,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(assembly_out["execution_mode"], "local")
             self.assertEqual(
                 assembly_out["method_decision"],
-                {"primary": "assembly.candidate.nextdenovo"},
+                {"primary": "assembly.candidate.nextdenovo", "source": "run_config_explicit"},
             )
             self.assertEqual(
                 assembly_out["nextdenovo_parameters"],
@@ -2405,6 +2439,49 @@ class ResumeCLITests(unittest.TestCase):
         self.assertFalse(data_dir.exists())
         self.assertFalse((data_dir / "checkpoints").exists())
         self.assertFalse((data_dir / "ledger").exists())
+
+    def test_resume_started_records_resolved_session_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_root = root / "data"
+            session_id = "s1"
+            run_dir = SessionPaths(data_root, session_id).run_dir
+            (run_dir / "checkpoints").mkdir(parents=True)
+            (run_dir / "checkpoints" / "checkpoints.sqlite").write_text("", encoding="utf-8")
+            Ledger(run_dir).create_session(session_id, "manifest.json")
+            decision = self._write_decision(root / "decision.json")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(run_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+            }
+            graph = _FakeResumeGraph(state)
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), \
+                    patch(
+                        "app.control.lifecycle.resume_review_state",
+                        return_value={"current_stage": "done", "supervision_state": "completed"},
+                    ), \
+                    patch("app.review.annotation_intake.maybe_collect_annotation_intake", return_value=None):
+                code, _stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id=session_id,
+                        decision_file=str(decision),
+                        data_dir=str(data_root),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            events = Ledger(run_dir).read_events(session_id)
+            started = [event for event in events if event["event_type"] == "resume_started"]
+            self.assertEqual(started[0]["data_dir"], str(run_dir))
 
     def test_resume_decision_file_records_recommended_intake_without_prompting(self):
         # A continue-downstream (assembly_review accept) decision-file resume is

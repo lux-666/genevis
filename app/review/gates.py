@@ -9,6 +9,7 @@ from typing import Any, Callable
 from app.schemas.state import TopLevelState
 
 DecisionApplier = Callable[[TopLevelState, Any], dict[str, Any]]
+TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class ReviewGateDeclaration:
     prompt_adapter: str = "generic"
     template_preferred_decision: str | None = None
     required_resume_fields: tuple[str, ...] = field(default_factory=tuple)
+    timeout_applier: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -38,6 +40,16 @@ class ReviewGateDeclaration:
         applier = getattr(module, function_name)
         if not callable(applier):
             raise TypeError(f"review gate applier is not callable: {self.decision_applier}")
+        return applier
+
+    def load_timeout_applier(self) -> TimeoutApplier | None:
+        if not self.timeout_applier:
+            return None
+        module_name, function_name = self.timeout_applier.rsplit(":", 1)
+        module = import_module(module_name)
+        applier = getattr(module, function_name)
+        if not callable(applier):
+            raise TypeError(f"review gate timeout applier is not callable: {self.timeout_applier}")
         return applier
 
 
@@ -100,6 +112,18 @@ def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, 
     return gate.load_decision_applier()(state, request)
 
 
+def apply_review_gate_timeout(state: TopLevelState, request: Any, timeout: dict[str, Any]) -> dict[str, Any] | None:
+    gate_id = getattr(request, "gate_id", None)
+    active_interrupt = state.get("active_interrupt") or {}
+    if isinstance(active_interrupt, dict):
+        gate_id = active_interrupt.get("gate_id") or gate_id
+    gate = get_review_gate(request.stage, gate_id)
+    applier = gate.load_timeout_applier()
+    if applier is None:
+        return None
+    return applier(state, request, timeout)
+
+
 register_review_gate(
     ReviewGateDeclaration(
         stage="inventory",
@@ -137,6 +161,7 @@ register_review_gate(
         gate_id="route_selection",
         decisions_allowed=("select_cyclone", "select_ont", "select_hifi", "stop_human_review"),
         decision_applier="app.stages.assembly.nodes:apply_route_decision",
+        timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
         prompt_bundle="assembly.route_selector",
         prompt_adapter="generic",
         template_preferred_decision="select_ont",

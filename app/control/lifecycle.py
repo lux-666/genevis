@@ -12,6 +12,7 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
+    apply_review_gate_timeout,
     apply_review_gate_decision,
     find_review_gate,
     get_review_gate,
@@ -169,10 +170,16 @@ def resume_review_state(
 ) -> dict[str, Any]:
     """Apply a validated human review decision to an in-memory blocked state."""
 
-    _validate_common_resume_state(state, request)
-    active_interrupt = state.get("active_interrupt") or {}
+    active_interrupt = _validate_resume_identity(state, request)
+    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+    blocked_timeout_seconds, timeout_source = _resolve_blocked_timeout_seconds(
+        active_interrupt,
+        blocked_timeout_seconds,
+    )
+
     timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
     if timeout and timeout.get("expired"):
+        timeout = _with_timeout_source(timeout, timeout_source)
         return _timeout_failed_update(state, request, timeout)
 
     try:
@@ -189,6 +196,11 @@ def reject_unsupported_lifecycle_operation(operation: str) -> None:
 
 
 def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewRequest) -> None:
+    active_interrupt = _validate_resume_identity(state, request)
+    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+
+
+def _validate_resume_identity(state: TopLevelState, request: ResumeReviewRequest) -> dict[str, Any]:
     if state.get("session_id") != request.session_id:
         raise ResumeValidationError("resume session_id does not match blocked state")
     if state.get("supervision_state") != "blocked_human":
@@ -201,7 +213,7 @@ def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewReq
     active_gate_id = active_interrupt.get("gate_id")
     if request.gate_id and active_gate_id and request.gate_id != active_gate_id:
         raise ResumeValidationError("resume gate_id does not match active_interrupt.gate_id")
-    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+    return active_interrupt
 
 
 def _ensure_decision_allowed_by_interrupt(active_interrupt: dict[str, Any], request: ResumeReviewRequest) -> None:
@@ -214,7 +226,56 @@ def _ensure_decision_allowed_by_interrupt(active_interrupt: dict[str, Any], requ
         raise ResumeValidationError(f"decision {request.decision!r} is not allowed by active_interrupt")
 
 
+def _resolve_blocked_timeout_seconds(
+    active_interrupt: dict[str, Any],
+    blocked_timeout_seconds: float | None,
+) -> tuple[float | None, dict[str, Any]]:
+    policy_timeout = _review_policy_outcome_timeout_seconds(active_interrupt)
+    if blocked_timeout_seconds is None:
+        return (
+            policy_timeout,
+            {"source": "active_interrupt.review_policy_outcome.max_blocked_seconds"}
+            if policy_timeout is not None
+            else {},
+        )
+
+    source = {"source": "blocked_timeout_seconds"}
+    if policy_timeout is not None and policy_timeout != blocked_timeout_seconds:
+        source.update(
+            {
+                "warning": "blocked_timeout_seconds overrides active_interrupt.review_policy_outcome.max_blocked_seconds",
+                "review_policy_outcome_max_blocked_seconds": policy_timeout,
+            }
+        )
+    return blocked_timeout_seconds, source
+
+
+def _review_policy_outcome_timeout_seconds(active_interrupt: dict[str, Any]) -> float | None:
+    review_policy_outcome = active_interrupt.get("review_policy_outcome") or {}
+    if not isinstance(review_policy_outcome, dict):
+        return None
+    timeout = review_policy_outcome.get("max_blocked_seconds")
+    if timeout is None:
+        return None
+    return timeout
+
+
+def _with_timeout_source(timeout: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    if not source:
+        return timeout
+    return {**timeout, **source}
+
+
 def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    """Handle timeout through the review-gate registry, then fall back to stop."""
+    try:
+        timeout_update = apply_review_gate_timeout(state, request, timeout)
+    except KeyError as exc:
+        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
+    if timeout_update is not None:
+        return timeout_update
+
+    # Fall back to stop_human_review for other gates or when no recommendation
     timeout_request = request.model_copy(
         update={
             "decision": "stop_human_review",
@@ -227,6 +288,33 @@ def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, t
     except KeyError as exc:
         raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
     return {**update, "last_error": f"{request.stage} blocked timeout expired"}
+
+
+def terminal_failure_update(
+    state: TopLevelState,
+    stage: str,
+    error: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    update = {
+        "current_stage": stage,
+        "supervision_state": "failed_terminal",
+        "active_interrupt": None,
+        "last_error": error,
+        "stage_outputs": state.get("stage_outputs") or {},
+    }
+    if metadata:
+        update.update(metadata)
+    return update
+
+
+def timeout_terminal_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    return terminal_failure_update(
+        state,
+        request.stage,
+        f"{request.stage} blocked timeout expired",
+        metadata={"blocked_timeout": timeout},
+    )
 
 
 def _stage_statuses(state: dict[str, Any]) -> dict[str, str]:

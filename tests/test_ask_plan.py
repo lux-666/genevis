@@ -625,7 +625,7 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertIn("shared_parameters.platform", result.required_fields)
         self.assertNotIn("shared_parameters.read_type", result.required_fields)
         self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
-        self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
+        self.assertEqual(shared_defaults.get("read_type"), "cyclone")
         self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
         self.assertEqual(flye_defaults.get("threads"), 4)
 
@@ -690,7 +690,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 
         self.assertIsNotNone(updated.shared_parameters)
         self.assertEqual(updated.shared_parameters.platform, "cycloneseq")
-        self.assertEqual(updated.shared_parameters.read_type, "ont_raw")
+        self.assertEqual(updated.shared_parameters.read_type, "cyclone")
 
     def test_genome_survey_jellyfish_does_not_request_read_length(self):
         plan = _base_plan(
