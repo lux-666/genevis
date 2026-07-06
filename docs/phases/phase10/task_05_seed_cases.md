@@ -1,14 +1,19 @@
 # Task 5: Create Seed Evidence Cases
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented with internal seed observations
 **Depends on**: Task 4
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
 Populate `parameter_recommender/cases/*.yaml` with 5-10 seed cases and list them through `parameter_recommender/cases.yaml`. Cases are evidence only: sample facts, parameters used, quality results, and source. Do not encode rules, generic recommendations, or expected LLM answers in cases.
+
+The current seed cases are explicitly labeled `source.kind: seed_observation`.
+They are synthetic/internal calibration cases for selector and prompt-contract
+testing. Do not treat them as verified literature evidence unless a later edit
+replaces or supplements their source blocks with checked external provenance.
 
 ## Case Template
 
@@ -76,15 +81,21 @@ The implementation should not pass all cases to the LLM. It should select a smal
 
 ## Quality Checks
 
-- [ ] At least five cases.
-- [ ] Every case has `source`, `features`, `params`, `quality`, and `evidence_note`.
-- [ ] DOI/source is verifiable before treating the case as real literature evidence.
-- [ ] No rule language such as "must", "always", or "never" appears in `evidence_note`.
-- [ ] Cases parse through the existing knowledge loader.
+- [x] At least five cases.
+- [x] Every case has `source`, `features`, `params`, `quality`, and `evidence_note`.
+- [x] Internal seed cases are labeled as internal observations rather than DOI-backed literature evidence.
+- [x] No rule language such as "must", "always", or "never" appears in `evidence_note`.
+- [x] Cases parse through the existing knowledge loader.
 
 ## Acceptance Criteria
 
-- [ ] `cases.yaml` exists, lists case shard files, and loads through the strict knowledge-pack loader.
-- [ ] Seed cases cover HiFi and ONT.
-- [ ] Seed cases include enough fields for similarity selection.
-- [ ] Integration tests can select a small case subset for a mock sample.
+- [x] `cases.yaml` exists, lists case shard files, and loads through the strict knowledge-pack loader.
+- [x] Seed cases cover HiFi and ONT.
+- [x] Seed cases include enough fields for similarity selection.
+- [x] Integration tests can select a small case subset for a mock sample.
+
+## Remaining Work
+
+No more seed-case scaffolding belongs in this task. Future work may replace
+internal seed observations with verified literature or production-run evidence,
+but that is a data-curation update, not a new planner or recommender pathway.

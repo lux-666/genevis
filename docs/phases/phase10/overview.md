@@ -3,7 +3,7 @@
 **Phase**: 10
 **Status**: Partial implementation
 **Created**: 2026-07-02
-**Updated**: 2026-07-04
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -47,6 +47,8 @@ Still missing:
 - A recommender prompt contract that uses selected cases, rules, skill text, read_qc, and genome_survey.
 - A replayable `parameter_attempts` ledger entry.
 - Retry routing for command failure and assembly_review failure.
+- No-compat cleanup of the old planner method registry, assembly-local LLM calls,
+  loose parameter-loop state, and hash-only runtime artifact refs.
 
 ## Existing/New Architecture
 
@@ -139,8 +141,8 @@ genome_survey_ref: data/artifacts/genome_survey/<session>/result.json
 catalog_ref: descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml
 knowledge_pack_ref: descriptors/knowledge_packs/assembly/parameter_recommender
 selected_case_ids: []
-prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0_prompt.json
-llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0_response.json
+prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0/prompt_payload.json
+llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0/llm_response.json
 parameter_sources:
   l0_fixed: {}
   l1_readonly: {}
@@ -202,6 +204,8 @@ The first closed loop should cover:
 9. Implement execution failure and assembly_review failure retry gates.
 10. Add integration tests for a replayable pass/fail/retry loop.
 11. Document the methodology.
+12. Use session/attempt-scoped artifact refs as the only runtime ref scheme.
+13. Remove old compatibility paths and enforce single-source architecture.
 
 ## Acceptance Criteria
 
@@ -213,3 +217,8 @@ The first closed loop should cover:
 - A command failure can be retried with previous inputs plus last 100 log lines.
 - A review failure can be retried with metrics and failure mode.
 - Every attempt is replayable from recorded refs and argv.
+- Planner method metadata comes from descriptors/catalogs, not a second Python registry.
+- Assembly LLM decisions go through a shared decision/advisor boundary.
+- Parameter-loop state is typed, compact, and ref-heavy.
+- The running graph uses session/attempt refs with hashes as integrity fields;
+  hash-only refs are not a supported runtime path.

@@ -4,11 +4,11 @@
 **Status**: Pending
 **Depends on**: All implementation tasks
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
-Document the Phase10 methodology after the MVP works. The documentation should explain the three-level permission model, full-catalog L2 recommender surface, evidence/rule/skill separation, and replayable retry loop.
+Document the Phase10 methodology after the MVP works. The documentation should explain the three-level permission model, full-catalog L2 recommender surface, evidence/rule/skill separation, replayable retry loop, and the no-compat cleanup that removes the previous duplicate planner registry, scattered LLM calls, and loose parameter-loop state.
 
 ## Deliverable 1: Methodology
 
@@ -73,15 +73,19 @@ docs/implementation/parameter_recommendation_loop.md
 Must cover:
 
 - catalog schema,
+- descriptor-derived planner method metadata,
 - adding a full method catalog from the supported tool CLI surface,
 - adding evidence cases,
 - adding hard rules,
 - prompt payload shape,
+- the shared assembly decision/advisor boundary,
 - validator behavior,
 - command builder behavior,
 - execution failure retry,
 - assembly_review failure retry,
-- how to replay an attempt from recorded refs.
+- how to replay an attempt from recorded refs,
+- why main-flow refs use session/attempt paths with hashes as integrity fields,
+- which old APIs and compatibility paths were removed.
 
 ## Deliverable 3: User-Facing Notes
 
@@ -99,6 +103,8 @@ Must explain:
 - where to find attempt records and logs,
 - how a user can manually remove an L2 parameter from consideration by editing the catalog.
 - why the MVP exposes every cataloged L2 parameter instead of maintaining a hidden prompt subset.
+- why a run's parameter recommendation artifacts live under
+  `data/artifacts/assembly/<session>/`.
 
 ## Required Language
 
@@ -110,6 +116,20 @@ Use the final three-level model only:
 
 Do not mention or reintroduce older permission models or secondary exposure switches.
 
+## Cleanup Notes To Include
+
+Document the final architecture, not the migration path:
+
+- `descriptors/registry.yaml` plus method descriptors are the method source of
+  truth; the interactive planner derives from them.
+- Assembly LLM decisions go through the shared decision/advisor boundary.
+- Parameter loop state is represented by typed compact contracts and
+  `parameter_attempts`; legacy ad hoc keys are not a parallel API.
+- Main-flow artifacts use session/attempt-scoped paths; hashes are recorded for
+  integrity, not as the primary runtime ref.
+- Historical compatibility shims removed during Phase10 should not be described
+  as supported extension points.
+
 ## Acceptance Criteria
 
 - [ ] Methodology doc written.
@@ -117,3 +137,4 @@ Do not mention or reintroduce older permission models or secondary exposure swit
 - [ ] User guide written.
 - [ ] Docs include the attempt replay contract.
 - [ ] Docs match implementation behavior.
+- [ ] Docs describe the cleanup result without preserving old compatibility paths as supported APIs.

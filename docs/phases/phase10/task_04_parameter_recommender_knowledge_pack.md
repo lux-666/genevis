@@ -1,10 +1,10 @@
 # Task 4: Create parameter_recommender Knowledge Pack
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented; main-flow integration covered by Task 8
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -35,6 +35,10 @@ descriptors/knowledge_packs/assembly/parameter_recommender/
     ├── catalog_safety.yaml
     └── profile_boundaries.yaml
 ```
+
+Current implementation also includes `strategies.yaml` for case-selection
+weights. Keep that file as selector configuration only; do not put hard
+validation boundaries or prompt examples there.
 
 ## File Responsibilities
 
@@ -214,10 +218,17 @@ Validation must reject:
 
 ## Acceptance Criteria
 
-- [ ] Pack directory exists.
-- [ ] `cases.yaml` manifests valid evidence-case shards.
-- [ ] `rules.yaml` manifests at least five hard boundary rules across shards.
-- [ ] `SKILL.md` explains initial recommendation and both retry modes.
-- [ ] Loader returns rules, cases, and skill text.
-- [ ] Prompt builder uses selected cases, not the entire case database.
-- [ ] Prompt builder includes every L2 parameter from the selected method catalog, with no hidden L2 allowlist.
+- [x] Pack directory exists.
+- [x] `cases.yaml` manifests valid evidence-case shards.
+- [x] `rules.yaml` manifests at least five hard boundary rules across shards.
+- [x] `SKILL.md` explains initial recommendation and both retry modes.
+- [x] Loader returns rules, cases, and skill text.
+- [x] Prompt builder uses selected cases, not the entire case database.
+- [x] Prompt builder includes every L2 parameter from the selected method catalog, with no hidden L2 allowlist.
+
+## Remaining Work
+
+No more standalone pack-construction work belongs in this task. Wiring the pack
+into the running assembly graph belongs to Task 8. If future edits discover a
+missing case or rule, update the shard directly; do not introduce a second
+knowledge-pack location or an alternate prompt-only case database.

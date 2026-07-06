@@ -4,7 +4,7 @@
 **Status**: Implemented; version verification and retry wiring pending
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-04
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -253,6 +253,7 @@ parameters:
 - [x] The catalog validates through the three-level schema.
 - [x] The catalog covers the currently documented ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
 - [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
-- [ ] The recommender prompt can include all L2 entries.
+- [x] The prompt payload builder can include all L2 entries.
+- [ ] The integrated recommender node consumes that prompt payload in the main graph.
 - [x] The command builder emits `--ont` mechanically from L0 and never from LLM output.
 - [ ] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.

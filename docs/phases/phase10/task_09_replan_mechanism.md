@@ -4,7 +4,7 @@
 **Status**: Pending
 **Depends on**: Task 8 and assembly_review
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -47,6 +47,19 @@ Retry gate behavior:
    - `previous_parameter_attempt`.
 6. Route back to `recommend_assembly_parameters`.
 7. If retry count exceeded, fail terminal with the recorded error.
+
+All retry paths must write attempt-specific directories and artifacts. Do not
+reuse the old method-level paths such as `work/assembly/<session>/hifiasm` or
+`artifacts/assembly/<session>/hifiasm` for retryable parameter attempts. Use an
+attempt segment, for example:
+
+```text
+data/work/assembly/<session>/parameter_attempt_<N>/<method>/
+data/artifacts/assembly/<session>/parameter_attempt_<N>/
+```
+
+After this task is complete, previous attempts must remain inspectable without
+being overwritten by a later retry.
 
 ## Assembly Review Failure Retry
 
@@ -129,7 +142,8 @@ If exceeded, route to human review or terminal failure with a concise reason and
 2. Store last 100 log lines in `parameter_attempts`.
 3. Add review quality gate as a separate node after metrics evaluation.
 4. Let review retry re-enter assembly attempt freeze/run with `attempt_id + 1`.
-5. Keep fallback/human review behavior intact if retry is not possible.
+5. If retry is not possible, route to the existing human/terminal gate, but do
+   not keep a second non-attempt retry implementation.
 
 ## Tests
 
@@ -148,3 +162,4 @@ If exceeded, route to human review or terminal failure with a concise reason and
 - [ ] All retry attempts are replayable.
 - [ ] Retry attempts use separate directories.
 - [ ] Retry caps prevent infinite loops.
+- [ ] Old method-level retry paths are removed from the parameter loop.

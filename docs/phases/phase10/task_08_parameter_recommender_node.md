@@ -4,7 +4,7 @@
 **Status**: Pending
 **Depends on**: Tasks 1-7
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -25,12 +25,33 @@ The node must support three modes:
 
 For the MVP, the node must expose the full L2 surface from the selected method catalog. It may let the LLM omit parameters in its response, but it must not pre-filter L2 parameters down to a hand-picked subset.
 
+This task is also the cleanup point for scattered LLM decision calls in the
+assembly stage. Do not add another stage-local `build_chat_model().invoke(...)`
+helper. Create a shared decision/advisor boundary for assembly decisions and
+move the existing route-selection LLM call behind it while adding parameter
+recommendation. The stage graph should receive typed decision artifacts, not
+own prompt rendering, model invocation, JSON parsing, validation, and artifact
+writing in one node.
+
 ## Node API
 
 ```python
 def recommend_assembly_parameters(state: TopLevelState) -> dict:
     """Recommend L2 parameters and append a replayable parameter attempt."""
 ```
+
+The node may delegate to a shared decision service, but the public graph node
+must remain deterministic around state transitions:
+
+```python
+def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecisionResult:
+    """Render prompt, call model, validate structured output, and write artifacts."""
+```
+
+Use one request/result schema family for route selection and parameter
+recommendation. Delete the older assembly-local route selector invocation after
+the shared path is wired; do not leave compatibility wrappers that preserve both
+decision paths.
 
 ## Inputs From State
 
@@ -80,6 +101,10 @@ Use selected primary method when available. Route fallback:
 6. Select 3-8 cases.
 7. Build prompt payload.
 8. Save prompt payload as an artifact before invoking the LLM.
+
+Artifact refs in the main graph must be session/attempt-scoped paths. Hashes
+may be recorded as integrity fields, but hash-only refs and `write_artifacts=False`
+fallback behavior must not be used by the running graph.
 
 Prompt payload:
 
@@ -204,6 +229,19 @@ Routing:
 - `parameter_validation_failed` -> fail fast.
 - no catalog or no L2 parameters -> fail fast for Phase10 MVP, because the loop cannot be tested.
 
+## Cleanup Requirements
+
+- Remove direct LLM invocation helpers from `app/stages/assembly/nodes.py` once
+  route selection and parameter recommendation share the decision boundary.
+- Keep prompt bundle, model response, parsed decision, validation result, and
+  final state transition as separate concepts and artifacts.
+- Do not support both old `recommended_params` injection and new
+  `parameter_attempts` as equal first-class paths. The closed loop writes and
+  consumes `parameter_attempts`; method freeze nodes read the current attempt.
+- Main-flow prompt/profile artifacts must use session/attempt paths under
+  `data/artifacts/assembly/<session>/`.
+- Validation failure must append an attempt entry and stop before freeze/run.
+
 ## Tests
 
 - Initial recommendation writes prompt and response refs.
@@ -225,3 +263,5 @@ Routing:
 - [ ] Attempt entry is replayable.
 - [ ] Failure branches stop before execution.
 - [ ] Retry modes reuse previous attempt context.
+- [ ] Existing route-selection LLM behavior is moved behind the shared decision boundary.
+- [ ] No stage-local model invocation remains in assembly stage nodes.

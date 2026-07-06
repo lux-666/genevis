@@ -4,7 +4,7 @@
 **Status**: Pending
 **Depends on**: Tasks 1-9
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -17,6 +17,11 @@ profile -> select cases -> recommend L2 params -> validate -> build argv -> free
 The tests should prove the system is executable, replayable, can fail safely, can retry deterministically, and exposes the full cataloged L2 parameter surface rather than a hand-picked prompt subset.
 
 The tests should also prove that the complete parameter profile is saved for replay while prompt payloads contain only the task-scoped profile slice.
+
+The suite should include architecture-regression tests for the cleanup in this
+phase: descriptor-derived planner metadata, no assembly-local model invocation,
+typed compact stage outputs for the parameter loop, and no hash-only refs in the
+running graph.
 
 ## Test 1: Catalog and Prompt Permissions
 
@@ -193,6 +198,33 @@ def test_max_review_retries_stop():
     assert result["stage_outputs"]["assembly"]["status"] in {"parameter_retries_exhausted", "blocked_human"}
 ```
 
+## Test 8: Architecture Cleanup Invariants
+
+```python
+def test_planner_methods_are_descriptor_derived():
+    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    catalog = build_planner_method_catalog(registry)
+
+    assert set(catalog.by_stage["assembly"]) == set(registry.by_stage["assembly"])
+    assert "_STAGE_METHODS" not in Path("app/entrypoints/ask_planner.py").read_text()
+
+
+def test_assembly_stage_does_not_invoke_llm_directly():
+    source = Path("app/stages/assembly/nodes.py").read_text()
+    assert "build_chat_model().invoke" not in source
+    assert "_recommend_route_with_llm" not in source
+
+
+def test_running_graph_uses_session_attempt_refs():
+    result = recommend_assembly_parameters(state)
+    attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+
+    assert attempt["input_profile_ref"].startswith("data/artifacts/assembly/")
+    assert "parameter_attempt_0/prompt_payload.json" in attempt["prompt_payload_ref"]
+    assert len(attempt["input_profile_hash"]) == 64
+    assert len(attempt["prompt_payload_hash"]) == 64
+```
+
 ## Fixtures Needed
 
 - Mock LLM returning valid L2 params.
@@ -214,3 +246,6 @@ def test_max_review_retries_stop():
 - [ ] Tests cover review failure retry.
 - [ ] Tests prove attempt entries are append-only and replayable.
 - [ ] Tests confirm only the L0/L1/L2 permission model remains.
+- [ ] Tests fail if planner method metadata is maintained as a second hardcoded registry.
+- [ ] Tests fail if assembly stage nodes invoke the LLM directly.
+- [ ] Tests fail if main-flow prompt/profile refs are hash-only instead of session/attempt paths.

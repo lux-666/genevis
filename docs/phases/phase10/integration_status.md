@@ -1,10 +1,10 @@
 # Phase 10 Integration Status
 
-**Updated**: 2026-07-04
+**Updated**: 2026-07-06
 
 ## Summary
 
-Phase 10 is partially integrated. The catalog, validator, profile helper, and command-builder foundation are in place for hifiasm and hifiasm_ont freeze paths. The recommender node, profile artifacts, prompt payload artifacts, replay ledger, and retry loop are still pending.
+Phase 10 is partially integrated. The catalog, validator, profile helper, knowledge pack, prompt payload builder, and command-builder foundation are in place for hifiasm and hifiasm_ont freeze paths. The recommender node, session/attempt artifact integration, replay ledger, retry loop, and no-compat architecture cleanup are still pending.
 
 ## Completed
 
@@ -51,13 +51,14 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, and co
 1. **Integration of prompt payload builder into main assembly flow**
    - Currently `build_prompt_payload()` is only used in tests
    - Need to integrate into recommender node workflow
-   - Connect artifact writing to session-scoped artifact writer (when implemented)
-   - Note: Profile and payload artifact writing functions exist but need integration
+   - Connect artifact writing to session/attempt-scoped artifact writer
+   - Remove hash-only runtime refs from graph execution
 
 2. **Parameter recommender node**
    - Implement initial recommendation, execution repair, and quality replan modes.
    - Validate LLM output before freeze/run.
    - Record raw response, parsed params, validation result, and selected cases.
+   - Move assembly route-selection LLM behavior behind the same decision boundary.
 
 3. **Replay ledger**
    - Append immutable `parameter_attempts` entries.
@@ -69,6 +70,12 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, and co
 
 5. **Runtime catalog verification**
    - Verify hifiasm and hifiasm_ont catalogs against the project-pinned hifiasm binary/help output in the execution environment.
+
+6. **No-compat architecture cleanup**
+   - Derive planner method metadata from descriptors/catalogs.
+   - Delete the planner's duplicate `_STAGE_METHODS` registry.
+   - Replace loose parameter-loop dict keys with typed compact contracts.
+   - Delete old compatibility paths rather than preserving wrappers.
 
 ## Next Recommended Slice
 

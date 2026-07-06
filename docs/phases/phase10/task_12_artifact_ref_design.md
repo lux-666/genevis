@@ -1,142 +1,136 @@
-# Task 12: Artifact Reference Design
+# Task 12: Session/Attempt Artifact Reference Design
 
-## Overview
+**Phase**: 10
+**Status**: Design corrected; implementation cleanup pending
+**Depends on**: Tasks 8-10
+**Created**: 2026-07-05
+**Updated**: 2026-07-06
 
-Design for dual-reference artifact storage system supporting both content-addressable (hash) and session/attempt-scoped paths.
+## Goal
+
+Use one runtime artifact-reference scheme for the Phase10 parameter loop:
+session/attempt-scoped paths are the primary refs, and SHA256 hashes are
+integrity fields. Do not keep hash-only refs or compatibility fallback APIs as
+supported main-flow behavior.
 
 ## Problem
 
-Current implementation uses content-addressable hash refs (SHA256):
-- data/artifacts/profiles/<hash>.json
-- data/artifacts/payloads/<hash>.json
+The prompt payload builder currently supports content-addressable fallback refs
+such as:
 
-Phase10 ledger contract requires session/attempt-scoped paths:
-- data/artifacts/assembly/<session>/input_profile.json
-- data/artifacts/assembly/<session>/parameter_attempt_0_prompt.json
-- data/artifacts/assembly/<session>/parameter_attempt_0_response.json
+```text
+data/artifacts/profiles/<hash>.json
+data/artifacts/payloads/<hash>.json
+```
 
-These are complementary requirements, not conflicting ones.
+That was useful for standalone tests, but it conflicts with the Phase10 replay
+contract. Parameter attempts are ordered within a session, and humans need to
+inspect the exact profile, prompt, response, command, logs, validation result,
+and review context for each attempt. The runtime ref must therefore be a stable
+session/attempt path.
 
-## Design
+## Final Ref Contract
 
-### Dual-Reference System
+Every main-flow parameter attempt records path refs plus hashes:
 
-Context-aware artifact storage with two reference formats:
-
-#### 1. Hash refs (content-addressable)
-- **Purpose**: content verification, deduplication detection, replay from any context
-- **Format**: 64-char SHA256 hex string
-- **Storage**: data/artifacts/{profiles,payloads}/<hash>.json
-- **Use case**: tests, standalone invocations, content integrity checks
-
-#### 2. Session/attempt refs (structured paths)
-- **Purpose**: human navigation, ledger replay, attempt ordering
-- **Format**: data/artifacts/assembly/<session_id>/<artifact_name>.json
-- **Examples**:
-  - input_profile.json (one per session, may be reused across attempts)
-  - parameter_attempt_0_prompt.json
-  - parameter_attempt_0_response.json
-  - parameter_attempt_1_prompt.json (retry)
-- **Use case**: LangGraph execution, ledger recording, audit trail navigation
-
-### Ledger Integration
-
-Attempt ledger entries store BOTH refs:
 ```yaml
 attempt_id: 0
-input_profile_ref: "data/artifacts/assembly/s_abc123/input_profile.json"
-input_profile_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-prompt_payload_ref: "data/artifacts/assembly/s_abc123/parameter_attempt_0_prompt.json"
-prompt_payload_hash: "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
-llm_response_ref: "data/artifacts/assembly/s_abc123/parameter_attempt_0_response.json"
-llm_response_hash: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+input_profile_ref: data/artifacts/assembly/<session>/input_profile.json
+input_profile_hash: <sha256>
+prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0/prompt_payload.json
+prompt_payload_hash: <sha256>
+llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0/llm_response.json
+llm_response_hash: <sha256>
+validation_ref: data/artifacts/assembly/<session>/parameter_attempt_0/validation.json
+validation_hash: <sha256>
 ```
 
-### Write Strategy
+Rules:
 
-- **Primary storage**: session/attempt path (when session_id and attempt_id are provided)
-- **Fallback storage**: hash path (when session context is absent)
-- **Compute hash**: for every artifact regardless of storage path
-- **Return both refs**: from write functions
+- `*_ref` fields are path refs in the running graph.
+- `*_hash` fields are for integrity verification only.
+- Retry attempts write `parameter_attempt_<N>/` and never overwrite earlier
+  attempts.
+- The full input profile is session-scoped when unchanged, but the attempt still
+  records the profile ref and hash it used.
+- Prompt payloads, responses, validation results, command metadata, and failure
+  contexts are attempt-scoped.
 
-### Load Strategy
+## Directory Structure
 
-- Accept either hash or full path
-- Detect format: 64-char hex = hash lookup, otherwise = direct path
-- Hash lookup checks hash-based storage first, then scans session directories if needed
+```text
+data/artifacts/assembly/<session>/
+  input_profile.json
+  parameter_attempt_0/
+    prompt_payload.json
+    llm_response.json
+    validation.json
+    command.json
+    execution_failure_tail.txt
+    review_failure.json
+  parameter_attempt_1/
+    prompt_payload.json
+    llm_response.json
+    validation.json
+    command.json
+```
 
-### API Changes
+## API Shape
+
+The artifact writer requires session context. Tests may use temporary sessions,
+but should not exercise a hash-only runtime branch.
 
 ```python
-# Write functions gain optional session/attempt context:
 def write_profile_artifact(
-    ref: str,
+    *,
     profile: dict[str, Any],
-    session_id: str | None = None,
-    data_dir: Path | None = None,
-) -> tuple[str, str]:
-    '''Returns (path_ref, hash_ref)'''
+    session_id: str,
+    data_dir: Path,
+) -> ArtifactRef:
+    """Write input_profile.json and return path ref plus SHA256."""
 
-def write_payload_artifact(
-    ref: str,
-    payload: dict[str, Any],
-    session_id: str | None = None,
-    attempt_id: int | None = None,
-    data_dir: Path | None = None,
-) -> tuple[str, str]:
-    '''Returns (path_ref, hash_ref)'''
 
-# Load functions accept either ref format:
-def load_artifact(ref: str, artifact_type: Literal["profile", "payload"]) -> dict[str, Any]:
-    '''Loads from hash path or session path'''
+def write_attempt_artifact(
+    *,
+    payload: dict[str, Any] | str,
+    session_id: str,
+    attempt_id: int,
+    name: str,
+    data_dir: Path,
+) -> ArtifactRef:
+    """Write data/artifacts/assembly/<session>/parameter_attempt_<N>/<name>."""
 ```
 
-### Backwards Compatibility
+`ArtifactRef` should be a typed model, not a tuple:
 
-- Existing tests use write_artifacts=False or call write functions without session_id
-- These continue to use hash-based storage
-- load_by_ref() functions remain unchanged, gain path-based lookup as fallback
-
-### Session Directory Structure
-
-```
-data/artifacts/assembly/
-  s_20260705_143022_abc123/
-    input_profile.json              # shared across attempts
-    parameter_attempt_0_prompt.json
-    parameter_attempt_0_response.json
-    parameter_attempt_1_prompt.json  # retry
-    parameter_attempt_1_response.json
-  s_20260705_150000_def456/
-    ...
+```python
+class ArtifactRef(BaseModel):
+    path_ref: str
+    sha256: str
+    artifact_type: str
 ```
 
-### Input Profile Reuse
+## Cleanup Requirements
 
-- Input profile is session-scoped, not attempt-scoped
-- Same profile may be referenced by multiple attempts in the same session
-- Hash ref allows deduplication detection across sessions
+- Remove hash-only write paths from the main prompt/profile writer API.
+- Remove `write_artifacts=False` as a main-flow behavior. Pure builders may
+  still return in-memory payloads, but graph nodes must write artifacts before
+  invoking the LLM.
+- Remove loader behavior that scans arbitrary session directories by hash as a
+  supported replay path. Replay starts from path refs recorded in the attempt.
+- Update tests that relied on hash-only refs to create a temporary session and
+  assert path refs plus hashes.
+- Update Task 8 attempt entries to record `ArtifactRef` fields rather than raw
+  tuples or hash strings.
 
-### Implementation Notes
+## Acceptance Criteria
 
-- session_id should come from TopLevelState or be generated at session start
-- attempt_id comes from parameter_attempts ledger (len(attempts))
-- Phase10 integration: pass session_id/attempt_id from recommend_assembly_parameters node
-- Tests: continue to work without session context (hash-only mode)
-
-## Migration Path
-
-1. Add optional session_id/attempt_id params to write functions (default None)
-2. Update return types to tuple[str, str] for (path_ref, hash_ref)
-3. Implement session-aware write logic with fallback to hash storage
-4. Update load functions to detect ref format and route accordingly
-5. Update build_prompt_payload() to accept and forward session/attempt context
-6. Phase10 integration: pass session_id/attempt_id from LangGraph state
-7. Update ledger schema to store both refs
-8. Tests continue to work in hash-only mode
-
-## Status
-
-- **Design**: Complete
-- **Implementation**: In progress
-- **Integration**: Pending
+- [ ] Main graph writes profile, prompt, response, validation, and command
+      metadata under `data/artifacts/assembly/<session>/`.
+- [ ] Every attempt-specific artifact is under
+      `parameter_attempt_<attempt_id>/`.
+- [ ] Attempt entries store path refs and SHA256 integrity fields.
+- [ ] No running graph path uses `data/artifacts/profiles/<hash>.json` or
+      `data/artifacts/payloads/<hash>.json`.
+- [ ] Tests use temporary session ids instead of hash-only fallback refs.
+- [ ] Documentation describes only the final session/attempt ref contract.
