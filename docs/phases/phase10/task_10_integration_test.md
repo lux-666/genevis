@@ -1,7 +1,7 @@
 # Task 10: Integration Tests for Parameter Closed Loop
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Focused tests implemented; full closed-loop coverage still expanding
 **Depends on**: Tasks 1-9
 **Created**: 2026-07-02
 **Updated**: 2026-07-06
@@ -220,6 +220,7 @@ def test_running_graph_uses_session_attempt_refs():
     attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
 
     assert attempt["input_profile_ref"].startswith("data/artifacts/assembly/")
+    assert "parameter_attempt_0/input_profile.json" in attempt["input_profile_ref"]
     assert "parameter_attempt_0/prompt_payload.json" in attempt["prompt_payload_ref"]
     assert len(attempt["input_profile_hash"]) == 64
     assert len(attempt["prompt_payload_hash"]) == 64
@@ -237,15 +238,15 @@ def test_running_graph_uses_session_attempt_refs():
 
 ## Acceptance Criteria
 
-- [ ] Tests cover initial pass path.
-- [ ] Tests prove the prompt includes the full cataloged L2 surface, not a hand-picked subset.
-- [ ] Tests prove full profile is replayable while prompt profile is task-scoped.
-- [ ] Tests prove validator can use complete profile fields through dotted paths.
-- [ ] Tests cover validation failure before execution.
-- [ ] Tests cover command failure retry with log tail.
-- [ ] Tests cover review failure retry.
-- [ ] Tests prove attempt entries are append-only and replayable.
-- [ ] Tests confirm only the L0/L1/L2 permission model remains.
+- [x] Tests cover initial pass path.
+- [x] Tests prove the prompt includes the full cataloged L2 surface, not a hand-picked subset.
+- [x] Tests prove full profile is replayable while prompt profile is task-scoped.
+- [x] Tests prove validator can use complete profile fields through dotted paths.
+- [x] Tests cover validation failure before execution.
+- [x] Tests cover command failure retry with log tail.
+- [x] Tests cover review failure retry.
+- [x] Tests prove attempt entries are append-only and replayable.
+- [x] Tests confirm only the L0/L1/L2 permission model remains.
 - [ ] Tests fail if planner method metadata is maintained as a second hardcoded registry.
-- [ ] Tests fail if assembly stage nodes invoke the LLM directly.
-- [ ] Tests fail if main-flow prompt/profile refs are hash-only instead of session/attempt paths.
+- [x] Tests fail if assembly stage nodes invoke the LLM directly.
+- [x] Tests fail if main-flow prompt/profile refs are hash-only instead of session/attempt paths.

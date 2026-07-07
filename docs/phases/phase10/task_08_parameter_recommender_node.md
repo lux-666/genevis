@@ -1,7 +1,7 @@
 # Task 8: Implement Parameter Recommender Node
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented for hifiasm/hifiasm_ont main assembly flow
 **Depends on**: Tasks 1-7
 **Created**: 2026-07-02
 **Updated**: 2026-07-06
@@ -255,13 +255,13 @@ Routing:
 
 ## Acceptance Criteria
 
-- [ ] Node implemented.
-- [ ] Prompt payload has L1 facts and L2 modifiable parameters only.
-- [ ] Prompt payload uses a task-scoped profile and does not expose the full profile by default.
-- [ ] Prompt payload includes every L2 parameter in the selected method catalog.
-- [ ] Attempt entry records the full profile ref.
-- [ ] Attempt entry is replayable.
-- [ ] Failure branches stop before execution.
-- [ ] Retry modes reuse previous attempt context.
-- [ ] Existing route-selection LLM behavior is moved behind the shared decision boundary.
-- [ ] No stage-local model invocation remains in assembly stage nodes.
+- [x] Node implemented.
+- [x] Prompt payload has L1 facts and L2 modifiable parameters only.
+- [x] Prompt payload uses a task-scoped profile and does not expose the full profile by default.
+- [x] Prompt payload includes every L2 parameter in the selected method catalog.
+- [x] Attempt entry records the full profile ref.
+- [x] Attempt entry is replayable.
+- [x] Failure branches stop before execution.
+- [x] Retry modes reuse previous attempt context.
+- [x] Existing route-selection LLM behavior is moved behind the shared decision boundary.
+- [x] No stage-local model invocation remains in assembly stage nodes.

@@ -19,6 +19,11 @@ GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
+ASSEMBLY_PARAMETER_INPUT_PROFILE = "assembly.parameter.input_profile"
+ASSEMBLY_PARAMETER_PROMPT_PAYLOAD = "assembly.parameter.prompt_payload"
+ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
+ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
+ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
@@ -96,6 +101,48 @@ class ArtifactMeta(BaseModel):
             method_name=method_name,
             metadata=metadata or {},
         )
+
+
+class ArtifactRef(BaseModel):
+    """Path ref plus integrity hash for a runtime artifact."""
+
+    path_ref: str
+    sha256: str
+    artifact_type: str
+
+
+class ParameterAttempt(BaseModel):
+    """Compact replay record for one assembly parameter recommendation attempt."""
+
+    attempt_id: int
+    method_id: str
+    status: str
+    input_profile_ref: ArtifactRef
+    prompt_payload_ref: ArtifactRef
+    llm_response_ref: ArtifactRef | None = None
+    validation_ref: ArtifactRef | None = None
+    catalog_ref: str | None = None
+    knowledge_pack_ref: str | None = None
+    selected_case_ids: list[str] = Field(default_factory=list)
+    recommended_params: dict[str, Any] = Field(default_factory=dict)
+    omitted_parameters: list[str] = Field(default_factory=list)
+    parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    argv: list[str] = Field(default_factory=list)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    reasoning: str | None = None
+    confidence: float | None = None
+    previous_attempt_id: int | None = None
+    execution_result: dict[str, Any] | None = None
+    failure_log_tail: str | None = None
+    review_failure: dict[str, Any] | None = None
+
+
+class AssemblyParameterLoopState(BaseModel):
+    """Typed compact state for Phase10 parameter-loop control."""
+
+    current_parameter_attempt_id: int = 0
+    parameter_attempts: list[ParameterAttempt] = Field(default_factory=list)
+    retry_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class GenomeSurveyResult(BaseModel):

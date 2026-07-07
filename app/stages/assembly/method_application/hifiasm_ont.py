@@ -74,9 +74,10 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     if env_blocked is not None:
         return update_assembly_output(state, env_blocked)
 
-    working_dir = data_dir / "work" / "assembly" / session_id / "hifiasm_ont"
+    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    working_dir = data_dir / "work" / "assembly" / session_id / f"parameter_attempt_{parameter_attempt_id}" / "hifiasm_ont"
     output_dir = working_dir / "hifiasm_ont_out"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "hifiasm_ont"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{parameter_attempt_id}" / "hifiasm_ont"
     working_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -88,14 +89,9 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     catalog, catalog_error = _load_catalog()
     if catalog_error:
         return fail_update(state, catalog_error)
-    recommended_params, recommended_error = _recommended_params(output, "hifiasm_ont_recommended_params")
+    recommended_params, recommended_error = _recommended_params(output)
     if recommended_error:
         return fail_update(state, recommended_error)
-
-    # Import here to avoid circular dependency
-    from app.stages.assembly.parameter_profile import build_full_parameter_profile
-
-    full_profile = build_full_parameter_profile(state, assembly_out=output)
 
     try:
         parameter_sources = build_parameter_sources(
@@ -103,7 +99,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             catalog=catalog,
             state=state,
             assembly_out=output,
-            attempt_id=int(output.get("current_parameter_attempt_id") or 0),
+            attempt_id=parameter_attempt_id,
             recommended_params=recommended_params,
             execution_context={
                 "output_prefix": str(prefix),
@@ -125,7 +121,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     )
     script.chmod(0o755)
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:hifiasm_ont",
+        attempt_id=f"{session_id}:assembly:hifiasm_ont:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
         stage="assembly",
         method_name=HIFIASM_ONT_METHOD,
@@ -144,8 +140,15 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             "argv": argv,
             "hifiasm_ont_output_dir": str(output_dir),
             "draft_assembly_path": str(draft),
-            "full_parameter_profile": full_profile,
+            "parameter_attempt_id": parameter_attempt_id,
         },
+    )
+    parameter_attempts = _update_parameter_attempt(
+        output,
+        parameter_attempt_id,
+        status="frozen",
+        parameter_sources=parameter_sources,
+        argv=argv,
     )
     return update_assembly_output(
         state,
@@ -154,6 +157,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             LIFECYCLE.frozen_attempt_key: attempt.model_dump(mode="json"),
             "hifiasm_ont_output_dir": str(output_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
+            "parameter_attempts": parameter_attempts,
         },
     )
 
@@ -222,12 +226,28 @@ def _load_catalog():
         return None, f"Hifiasm ONT parameter catalog is not usable: {exc}"
 
 
-def _recommended_params(output: dict[str, Any], method_key: str) -> tuple[dict[str, Any], str | None]:
-    raw = output.get(method_key)
-    if raw is None:
-        raw = output.get("recommended_params")
-    if raw is None:
-        return {}, None
-    if not isinstance(raw, dict):
-        return {}, f"Hifiasm ONT recommended parameters must be a mapping, got {type(raw).__name__}"
-    return dict(raw), None
+def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    for attempt in output.get("parameter_attempts") or []:
+        if isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id:
+            raw = attempt.get("recommended_params")
+            if not isinstance(raw, dict):
+                return {}, f"Hifiasm ONT current parameter attempt has invalid recommended_params: {type(raw).__name__}"
+            return dict(raw), None
+    return {}, "Hifiasm ONT recommended parameters must be a mapping in a typed current parameter attempt"
+
+
+def _update_parameter_attempt(output: dict[str, Any], attempt_id: int, **updates: Any) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    found = False
+    for item in output.get("parameter_attempts") or []:
+        if not isinstance(item, dict):
+            continue
+        current = dict(item)
+        if current.get("attempt_id") == attempt_id:
+            current.update(updates)
+            found = True
+        attempts.append(current)
+    if not found:
+        attempts.append({"attempt_id": attempt_id, **updates})
+    return attempts

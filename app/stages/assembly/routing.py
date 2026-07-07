@@ -16,6 +16,16 @@ def route_after_resolve(state: TopLevelState) -> str:
     return "fail" if is_fail_status(_output(state).get("status"), EXTRA_FAIL_STATUSES) else "infer_profile"
 
 
+def route_after_enter(state: TopLevelState) -> str:
+    """Route retry states directly back into parameter recommendation."""
+    if _output(state).get("status") in {
+        "retry_parameters_after_execution_failure",
+        "retry_parameters_after_review_failure",
+    }:
+        return "recommend"
+    return "resolve"
+
+
 def route_after_infer_profile(state: TopLevelState) -> str:
     """Route after writing the input profile."""
     status = _output(state).get("status")
@@ -46,6 +56,14 @@ def route_after_select(state: TopLevelState) -> str:
         return "block"
     if is_fail_status(status, EXTRA_FAIL_STATUSES):
         return "fail"
+    return "recommend"
+
+
+def route_after_parameter_recommendation(state: TopLevelState) -> str:
+    """Route after Phase10 parameter recommendation."""
+    status = _output(state).get("status")
+    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {"parameter_validation_failed", "parameter_recommendation_failed"}:
+        return "fail"
     return "plan"
 
 
@@ -67,7 +85,18 @@ def route_after_plan(state: TopLevelState) -> str:
 
 def route_after_method_subgraph(state: TopLevelState) -> str:
     """Route after a method-specific assembly subgraph returns."""
-    status = _output(state).get("status")
+    output = _output(state)
+    status = output.get("status")
     if is_fail_status(status, EXTRA_FAIL_STATUSES):
-        return "fail"
+        return "retry_gate" if output.get("parameter_attempts") else "fail"
     return "commit"
+
+
+def route_after_execution_retry_gate(state: TopLevelState) -> str:
+    """Route after checking whether a failed executable attempt can retry."""
+    status = _output(state).get("status")
+    if status == "retry_parameters_after_execution_failure":
+        return "recommend"
+    if status == "draft_ready":
+        return "commit"
+    return "fail"

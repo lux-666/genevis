@@ -20,7 +20,6 @@ from app.domains.assembly.selection import (
 )
 from app.execution.artifacts import append_artifact_records
 from app.graph.routing import next_stage_name
-from app.llm.factory import build_chat_model
 from app.stages.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
@@ -32,22 +31,34 @@ from app.stages.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
+from app.stages.assembly.decision import AssemblyDecisionRequest, make_assembly_decision
 from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_LLM_RESPONSE,
+    ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ASSEMBLY_PARAMETER_VALIDATION,
     ASSEMBLY_ROUTE_DECISION,
     ASSEMBLY_CANDIDATE_BUNDLE,
+    ArtifactRef,
     ArtifactMeta,
     AssemblyCandidateBundle,
     AssemblyInputProfile,
+    ParameterAttempt,
     AssemblyRouteDecision,
+    file_sha256,
 )
 from app.review.base import ResumeReviewRequest
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import TopLevelState
+from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameter_profile import build_full_parameter_profile, flatten_profile_facts
+from app.stages.assembly.parameter_validation import validate_recommended_parameters
+from app.stages.assembly.prompt_payload import build_prompt_payload
 
 ROUTE_DECISION_MAP = {
     "select_cyclone": "cyclone",
@@ -67,6 +78,15 @@ def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> di
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
     return _update_assembly_output(state, {"status": "failed", "reason": reason})
+
+
+def _resolve_data_path_ref(data_dir: Path, path_ref: str) -> Path:
+    path = Path(path_ref)
+    if path.is_absolute():
+        return path
+    if path_ref.startswith("data/"):
+        return data_dir / path_ref.removeprefix("data/")
+    return path
 
 
 def enter_assembly(state: TopLevelState) -> dict:
@@ -220,7 +240,7 @@ def infer_input_profile(state: TopLevelState) -> dict:
         include_actions=True,
         required_files=(),
     )
-    recommendation = _recommend_route_with_llm(state, assembly_out, ctx)
+    recommendation = _recommend_route_with_decision_boundary(state, assembly_out, ctx)
     recommended_route = recommendation["recommended_route"]
     recommended_selection = (
         _selection_from_route(
@@ -522,15 +542,202 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
     )
 
 
+def recommend_assembly_parameters(state: TopLevelState) -> dict:
+    """Recommend and validate L2 parameters for the selected assembly method."""
+
+    assembly_out = _assembly_output(state)
+    if assembly_out.get("status") not in {
+        "selected",
+        "retry_parameters_after_execution_failure",
+        "retry_parameters_after_review_failure",
+    }:
+        return {}
+
+    method_name = _selected_parameter_method(assembly_out)
+    if method_name is None:
+        return {}
+    try:
+        catalog = load_parameter_catalog(method_name)
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail_update(state, f"Assembly parameter catalog is not usable: {exc}")
+
+    l2_keys = [key for key, spec in catalog.parameters.items() if spec.level == 2]
+    if not l2_keys:
+        return _fail_update(state, f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}")
+
+    task = _parameter_prompt_task(assembly_out)
+    attempt_id = int(assembly_out.get("current_parameter_attempt_id") or len(assembly_out.get("parameter_attempts") or []))
+    previous_attempt = _previous_parameter_attempt(assembly_out, attempt_id)
+    full_profile = build_full_parameter_profile(
+        state,
+        assembly_out=assembly_out,
+        previous_attempt=previous_attempt,
+        assembly_review=assembly_out.get("review_failure"),
+    )
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+
+    try:
+        prompt_payload = build_prompt_payload(
+            method_id=catalog.method_id,
+            catalog=catalog,
+            full_profile=full_profile,
+            task=task,
+            write_artifacts=True,
+            session_id=session_id,
+            attempt_id=attempt_id,
+            data_dir=data_dir,
+        )
+    except Exception as exc:
+        return _fail_update(state, f"Assembly parameter prompt payload failed: {exc}")
+
+    # Append profile and prompt artifacts to artifact index
+    profile_artifacts = []
+    profile_ref = prompt_payload.get("input_profile_ref")
+    prompt_ref = prompt_payload.get("prompt_payload_ref")
+    profile_path = _resolve_data_path_ref(data_dir, str(profile_ref)) if profile_ref else None
+    prompt_path = _resolve_data_path_ref(data_dir, str(prompt_ref)) if prompt_ref else None
+    if profile_ref:
+        if profile_path and profile_path.exists():
+            profile_artifacts.append(
+                ArtifactMeta.from_file(
+                    profile_path,
+                    stage="assembly",
+                    method_name="assembly.parameter_recommender",
+                    artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+                    metadata={"attempt_id": attempt_id},
+                )
+            )
+    if prompt_ref:
+        if prompt_path and prompt_path.exists():
+            profile_artifacts.append(
+                ArtifactMeta.from_file(
+                    prompt_path,
+                    stage="assembly",
+                    method_name="assembly.parameter_recommender",
+                    artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+                    metadata={"attempt_id": attempt_id},
+                )
+            )
+    if profile_artifacts:
+        append_artifact_records(data_dir, session_id, profile_artifacts)
+
+    decision = make_assembly_decision(
+        AssemblyDecisionRequest(
+            kind="parameter_recommendation",
+            session_id=session_id,
+            prompt_payload=prompt_payload,
+            system_prompt=_parameter_recommender_system_prompt(prompt_payload),
+            allow_default_on_error=bool(
+                _parameter_recommendation_config(state, assembly_out).get("allow_model_unavailable_defaults", False)
+            ),
+        )
+    )
+    llm_response_ref = _write_attempt_json_artifact(
+        state,
+        attempt_id,
+        "llm_response.json",
+        {
+            "raw_response": decision.raw_response,
+            "parsed": decision.parsed,
+            "valid": decision.valid,
+            "error": decision.error,
+            "model_id": decision.model_id,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_LLM_RESPONSE,
+        method_name="assembly.parameter_recommender",
+    )
+
+    recommended_params = dict((decision.parsed or {}).get("params") or {}) if decision.valid else {}
+    if decision.valid:
+        validation = validate_recommended_parameters(
+            method_id=catalog.method_id,
+            catalog=catalog,
+            recommended_params=recommended_params,
+            readonly_facts=flatten_profile_facts(full_profile),
+            rules=prompt_payload.get("rules") or {},
+            full_profile=full_profile,
+        )
+    else:
+        validation = {
+            "valid": False,
+            "method_id": catalog.method_id,
+            "violations": [
+                {
+                    "param": None,
+                    "value": decision.raw_response,
+                    "reason": decision.error or "parameter recommendation failed",
+                    "severity": "critical",
+                }
+            ],
+            "warnings": [],
+        }
+    validation_ref = _write_attempt_json_artifact(
+        state,
+        attempt_id,
+        "validation.json",
+        validation,
+        artifact_type=ASSEMBLY_PARAMETER_VALIDATION,
+        method_name="assembly.parameter_validator",
+    )
+
+    parsed = decision.parsed or {}
+    selected_case_ids = list(parsed.get("selected_case_ids") or prompt_payload.get("case_selection", {}).get("selected_case_ids") or [])
+    attempt = ParameterAttempt(
+        attempt_id=attempt_id,
+        method_id=catalog.method_id,
+        status="recommended" if validation.get("valid") else "validation_failed",
+        input_profile_ref=ArtifactRef(
+            path_ref=str(prompt_payload["input_profile_ref"]),
+            sha256=str(prompt_payload["input_profile_hash"]),
+            artifact_type="assembly.parameter.input_profile",
+        ),
+        prompt_payload_ref=ArtifactRef(
+            path_ref=str(prompt_payload["prompt_payload_ref"]),
+            sha256=(
+                file_sha256(prompt_path)
+                if prompt_path and prompt_path.exists()
+                else str(prompt_payload["prompt_payload_hash"])
+            ),
+            artifact_type="assembly.parameter.prompt_payload",
+        ),
+        llm_response_ref=llm_response_ref,
+        validation_ref=validation_ref,
+        catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",
+        knowledge_pack_ref="descriptors/knowledge_packs/assembly/parameter_recommender",
+        selected_case_ids=selected_case_ids,
+        recommended_params=recommended_params,
+        omitted_parameters=list(parsed.get("omitted_parameters") or []),
+        validation=validation,
+        reasoning=parsed.get("reasoning"),
+        confidence=parsed.get("confidence"),
+        previous_attempt_id=previous_attempt.get("attempt_id") if previous_attempt else None,
+        failure_log_tail=assembly_out.get("execution_failure_log_tail"),
+        review_failure=assembly_out.get("review_failure"),
+    )
+    attempts = _upsert_parameter_attempt(assembly_out.get("parameter_attempts") or [], attempt.model_dump(mode="json"))
+    status = "parameters_recommended" if validation.get("valid") else "parameter_validation_failed"
+    update = {
+        "status": status,
+        "current_parameter_attempt_id": attempt_id,
+        "parameter_attempts": attempts,
+    }
+    if not validation.get("valid"):
+        update["reason"] = "Assembly parameter recommendation failed validation"
+    return _update_assembly_output(state, update)
+
+
 def plan_candidate_attempts(state: TopLevelState) -> dict:
     """Write candidate bundles and select the optional local Flye route."""
     assembly_out = _assembly_output(state)
-    if assembly_out.get("status") != "selected":
+    if assembly_out.get("status") not in {"selected", "parameters_recommended"}:
         return {}
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    candidate_dir = data_dir / "artifacts" / "assembly" / session_id / "candidates"
+    parameter_attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
+    candidate_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "candidates"
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
     local_flye = assembly_out.get("execution_mode") == "local" and assembly_out.get("primary_method") == FLYE_METHOD
@@ -552,15 +759,15 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
     selection = _selection_from_output(assembly_out)
     for method_name in assembly_out["selected_methods"]:
         short_name = method_name.rsplit(".", 1)[-1]
-        fasta_path = data_dir / "artifacts" / "assembly" / session_id / short_name / "draft_assembly.fasta"
+        fasta_path = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / short_name / "draft_assembly.fasta"
         if method_name == NEXTDENOVO_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / "nextdenovo" / "run.cfg"
+            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "nextdenovo" / "run.cfg"
         elif method_name == HIFIASM_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / "hifiasm" / "run_hifiasm.sh"
+            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "hifiasm" / "run_hifiasm.sh"
         elif method_name == HIFIASM_ONT_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / "hifiasm_ont" / "run_hifiasm_ont.sh"
+            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "hifiasm_ont" / "run_hifiasm_ont.sh"
         else:
-            log_path = data_dir / "work" / "assembly" / session_id / short_name / "flye_out" / "flye.log"
+            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / short_name / "flye_out" / "flye.log"
         bundle_path = candidate_dir / f"{short_name}_candidate.json"
         execution_enabled = (
             (local_flye and method_name == FLYE_METHOD)
@@ -571,7 +778,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         method_graph_requested = execution_enabled
         bundle = AssemblyCandidateBundle(
             session_id=session_id,
-            candidate_id=f"{session_id}:{method_name}",
+            candidate_id=f"{session_id}:{method_name}:{attempt_scope}",
             method_name=method_name,
             status="planned",
             input_ref=assembly_out["input_ref"],
@@ -663,6 +870,86 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
     )
 
 
+def execution_retry_gate(state: TopLevelState) -> dict:
+    """Prepare a new parameter attempt after command execution failure."""
+
+    assembly_out = _assembly_output(state)
+    if assembly_out.get("status") != "failed" or not assembly_out.get("parameter_attempts"):
+        return {}
+    attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+    attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
+    previous = next((item for item in attempts if item.get("attempt_id") == attempt_id), attempts[-1] if attempts else {})
+    execution_result = dict(previous.get("execution_result") or {})
+    failure_log_tail = _failure_log_tail(execution_result)
+    if failure_log_tail:
+        previous["failure_log_tail"] = failure_log_tail
+        previous["stderr_tail"] = _tail_from_path(execution_result.get("stderr_path"))
+        previous["stdout_tail"] = _tail_from_path(execution_result.get("stdout_path"))
+    retry_counts = dict(assembly_out.get("retry_counts") or {})
+    used = int(retry_counts.get("execution", 0))
+    max_retries = _parameter_recommendation_config(state, assembly_out).get("max_execution_retries", 1)
+    updated_attempts = [previous if item.get("attempt_id") == attempt_id else item for item in attempts]
+    if used >= int(max_retries):
+        return _update_assembly_output(
+            state,
+            {
+                "status": "parameter_retries_exhausted",
+                "reason": f"execution parameter retries exhausted after {used} retry attempt(s)",
+                "parameter_attempts": updated_attempts,
+                "execution_failure_log_tail": failure_log_tail,
+            },
+        )
+    retry_counts["execution"] = used + 1
+    return _update_assembly_output(
+        state,
+        {
+            "status": "retry_parameters_after_execution_failure",
+            "current_parameter_attempt_id": attempt_id + 1,
+            "previous_parameter_attempt": previous,
+            "parameter_attempts": updated_attempts,
+            "retry_counts": retry_counts,
+            "execution_failure_log_tail": failure_log_tail,
+        },
+    )
+
+
+def parameter_quality_gate(state: TopLevelState) -> dict:
+    """Classify review metrics and prepare a quality-replan attempt if needed."""
+
+    assembly_out = _assembly_output(state)
+    review_out = (state.get("stage_outputs") or {}).get("assembly_review") or {}
+    metrics = dict(review_out.get("metrics") or review_out.get("summary") or assembly_out.get("review_metrics") or {})
+    diagnosis = _review_failure_diagnosis(metrics)
+    if diagnosis["passed"]:
+        return _update_assembly_output(state, {"status": "parameter_quality_passed", "quality_gate": diagnosis})
+    retry_counts = dict(assembly_out.get("retry_counts") or {})
+    used = int(retry_counts.get("review", 0))
+    max_retries = _parameter_recommendation_config(state, assembly_out).get("max_review_retries", 2)
+    if used >= int(max_retries):
+        return _update_assembly_output(
+            state,
+            {
+                "status": "parameter_retries_exhausted",
+                "quality_gate": diagnosis,
+                "reason": f"review parameter retries exhausted after {used} retry attempt(s)",
+            },
+        )
+    current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+    previous = _previous_parameter_attempt(assembly_out, current_id + 1)
+    retry_counts["review"] = used + 1
+    return _update_assembly_output(
+        state,
+        {
+            "status": "retry_parameters_after_review_failure",
+            "current_parameter_attempt_id": current_id + 1,
+            "previous_parameter_attempt": previous,
+            "retry_counts": retry_counts,
+            "review_failure": diagnosis,
+            "quality_gate": diagnosis,
+        },
+    )
+
+
 def commit_assembly_plan(state: TopLevelState) -> dict:
     """Route compact assembly candidate refs to assembly_review."""
     assembly_out = _assembly_output(state)
@@ -684,6 +971,8 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "normalized_read_type",
         "read_type_prior",
         "method_application_notes",
+        "current_parameter_attempt_id",
+        "parameter_attempts",
         "primary_method",
         "primary_long_read_platform",
         "rejected_candidates",
@@ -691,6 +980,7 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "selected_candidate_refs",
         "selected_methods",
         "status",
+        "retry_counts",
         "substeps",
     ]
     outputs = dict(state.get("stage_outputs") or {})
@@ -957,6 +1247,170 @@ def _write_assembly_json_artifact(
     return str(path)
 
 
+def _write_attempt_json_artifact(
+    state: TopLevelState,
+    attempt_id: int,
+    filename: str,
+    payload: dict[str, Any],
+    *,
+    artifact_type: str,
+    method_name: str,
+) -> ArtifactRef:
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = artifact_dir / filename
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        path,
+        stage="assembly",
+        method_name=method_name,
+        artifact_type=artifact_type,
+        metadata={"attempt_id": attempt_id},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    return ArtifactRef(
+        path_ref=f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}",
+        sha256=file_sha256(path),
+        artifact_type=artifact_type,
+    )
+
+
+def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
+    if (
+        assembly_out.get("status") == "selected"
+        and assembly_out.get("execution_mode") != "local"
+    ):
+        return None
+    primary = assembly_out.get("primary_method")
+    if primary in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
+        return str(primary)
+    selection = _selection_from_output(assembly_out)
+    if selection and selection.primary_method in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
+        return selection.primary_method
+    return None
+
+
+def _parameter_prompt_task(assembly_out: dict[str, Any]) -> str:
+    status = assembly_out.get("status")
+    if status == "retry_parameters_after_execution_failure":
+        return "retry_after_execution_failure"
+    if status == "retry_parameters_after_review_failure":
+        return "retry_after_review_failure"
+    return "recommend_initial"
+
+
+def _previous_parameter_attempt(assembly_out: dict[str, Any], attempt_id: int) -> dict[str, Any]:
+    explicit = assembly_out.get("previous_parameter_attempt")
+    if isinstance(explicit, dict):
+        return explicit
+    attempts = [item for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
+    if not attempts:
+        return {}
+    return next((item for item in attempts if item.get("attempt_id") == attempt_id - 1), attempts[-1])
+
+
+def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
+    typed = [ParameterAttempt.model_validate(item).model_dump(mode="json") for item in attempts if isinstance(item, dict)]
+    return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
+
+
+def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
+    return (
+        "You are an assembly parameter advisor. Return only JSON matching the required output. "
+        "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts.\n\n"
+        + str(prompt_payload.get("skill_instructions") or "")
+    )
+
+
+def _failure_log_tail(execution_result: dict[str, Any]) -> str:
+    return _tail_from_path(execution_result.get("stderr_path")) or _tail_from_path(execution_result.get("stdout_path")) or ""
+
+
+def _tail_from_path(path_value: Any, *, line_count: int = 100) -> str:
+    if not path_value:
+        return ""
+    path = Path(str(path_value))
+    if not path.exists():
+        return ""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-line_count:])
+
+
+def _parameter_recommendation_config(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[str, Any]:
+    config = dict(assembly_out.get("parameter_recommendation") or {})
+    shared = state.get("shared_parameters") or {}
+    if isinstance(shared, dict):
+        assembly_config = dict((shared.get("assembly") or {}).get("parameter_recommendation") or {})
+        config = {**assembly_config, **config}
+    return {
+        "max_execution_retries": int(config.get("max_execution_retries", 1)),
+        "max_review_retries": int(config.get("max_review_retries", 2)),
+        "allow_model_unavailable_defaults": bool(config.get("allow_model_unavailable_defaults", False)),
+    }
+
+
+def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
+    complete = _float_or_none(_first_metric(metrics, "busco_complete", "busco_complete_ratio"))
+    duplicate = _float_or_none(_first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio"))
+    size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
+    n50 = _float_or_none(_first_metric(metrics, "contig_n50", "n50"))
+    contig_count = _float_or_none(metrics.get("contig_count"))
+    normalized_complete = _ratio(complete)
+    normalized_duplicate = _ratio(duplicate)
+    passed = (
+        normalized_complete is not None
+        and normalized_complete >= 0.95
+        and (normalized_duplicate is None or normalized_duplicate <= 0.10)
+        and (size_ratio is None or 0.75 <= size_ratio <= 1.25)
+    )
+    if passed:
+        failure_mode = None
+        suggestions: dict[str, str] = {}
+    elif normalized_duplicate is not None and normalized_duplicate >= 0.15 and size_ratio is not None and size_ratio >= 1.20:
+        failure_mode = "under_purged"
+        suggestions = {"purge_level": "consider increasing"}
+    elif normalized_complete is not None and normalized_complete <= 0.90 and size_ratio is not None and size_ratio <= 0.80:
+        failure_mode = "over_purged"
+        suggestions = {"purge_level": "consider decreasing"}
+    elif n50 is not None and contig_count is not None and n50 < 1_000_000 and contig_count > 500:
+        failure_mode = "fragmented"
+        suggestions = {"overlap_parameters": "consider less aggressive filtering"}
+    elif normalized_complete is not None and normalized_complete <= 0.90:
+        failure_mode = "low_completeness"
+        suggestions = {"read_filtering": "consider retaining more reads"}
+    else:
+        failure_mode = "execution_or_metrics_missing"
+        suggestions = {}
+    return {
+        "passed": passed,
+        "failure_mode": failure_mode,
+        "metrics": metrics,
+        "suggestions": suggestions,
+    }
+
+
+def _first_metric(metrics: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if metrics.get(key) is not None:
+            return metrics.get(key)
+    return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ratio(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return value / 100.0 if value > 1 else value
+
+
 def _build_input_profile(
     state: TopLevelState,
     assembly_out: dict[str, Any],
@@ -987,42 +1441,44 @@ def _build_input_profile(
     )
 
 
-def _recommend_route_with_llm(
+def _recommend_route_with_decision_boundary(
     state: TopLevelState,
     assembly_out: dict[str, Any],
     ctx: dict[str, Any],
 ) -> dict[str, Any]:
-    messages = _route_selector_messages(state, assembly_out, ctx)
-    try:
-        response = build_chat_model().invoke(messages)
-        raw_content = getattr(response, "content", response)
-        payload = json.loads(str(raw_content))
-        allowed = set(ctx.get("allowed_actions") or [])
-        recommended = payload.get("recommended_route")
-        if recommended not in allowed:
-            raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
+    prompt_payload = _route_selector_payload(state, assembly_out, ctx)
+    decision = make_assembly_decision(
+        AssemblyDecisionRequest(
+            kind="route_selection",
+            session_id=state["session_id"],
+            prompt_payload=prompt_payload,
+            system_prompt="You are an expert genome assembly route selector.\n\n" + str(ctx.get("skill_text") or ""),
+            allowed_actions=list(ctx.get("allowed_actions") or []),
+        )
+    )
+    if decision.valid and decision.parsed:
+        payload = decision.parsed
         return {
-            "recommended_route": recommended,
+            "recommended_route": payload.get("recommended_route"),
             "reasoning": str(payload.get("reasoning", payload.get("recommendation_reasoning", ""))),
             "uncertainty_notes": list(payload.get("uncertainty_notes") or []),
             "source": "llm",
         }
-    except Exception as exc:
-        return {
-            "recommended_route": "insufficient_data",
-            "reasoning": "route selector LLM unavailable; route selection requires human/data review",
-            "source": "llm_unavailable",
-            "uncertainty_notes": [
-                f"route selector LLM unavailable: {type(exc).__name__}",
-            ],
-        }
+    return {
+        "recommended_route": "insufficient_data",
+        "reasoning": "route selector LLM unavailable; route selection requires human/data review",
+        "source": "llm_unavailable",
+        "uncertainty_notes": [
+            f"route selector LLM unavailable: {decision.error or 'invalid decision'}",
+        ],
+    }
 
 
-def _route_selector_messages(
+def _route_selector_payload(
     state: TopLevelState,
     assembly_out: dict[str, Any],
     ctx: dict[str, Any],
-) -> list[dict[str, str]]:
+) -> dict[str, Any]:
     data_profile = {
         "session_id": state.get("session_id"),
         "ont_reads_ref": assembly_out.get("ont_reads_ref"),
@@ -1034,31 +1490,17 @@ def _route_selector_messages(
         "has_hifi": assembly_out.get("has_hifi"),
         "has_hic": assembly_out.get("has_hic"),
     }
-    return [
-        {
-            "role": "system",
-            "content": "You are an expert genome assembly route selector.\n\n"
-            + str(ctx.get("skill_text") or ""),
+    return {
+        "data_profile": data_profile,
+        "rules": ctx.get("rules") or {},
+        "cases": ctx.get("cases") or [],
+        "allowed_actions": ctx.get("allowed_actions") or [],
+        "required_output": {
+            "recommended_route": "one of allowed_actions",
+            "reasoning": "short explanation",
+            "uncertainty_notes": "list of strings",
         },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "data_profile": data_profile,
-                    "rules": ctx.get("rules") or {},
-                    "cases": ctx.get("cases") or [],
-                    "allowed_actions": ctx.get("allowed_actions") or [],
-                    "required_output": {
-                        "recommended_route": "one of allowed_actions",
-                        "reasoning": "short explanation",
-                        "uncertainty_notes": "list of strings",
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        },
-    ]
+    }
 
 def _unique_refs(refs: list[str]) -> list[str]:
     unique = []

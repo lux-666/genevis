@@ -70,9 +70,11 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     if env_blocked is not None:
         return update_assembly_output(state, env_blocked)
 
-    working_dir = data_dir / "work" / "assembly" / session_id / "nextdenovo"
+    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
+    working_dir = data_dir / "work" / "assembly" / session_id / attempt_scope / "nextdenovo"
     nextdenovo_work_dir = working_dir / "nextdenovo_work"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "nextdenovo"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "nextdenovo"
     working_dir.mkdir(parents=True, exist_ok=True)
     nextdenovo_work_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +101,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     )
     script.chmod(0o755)
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:nextdenovo",
+        attempt_id=f"{session_id}:assembly:nextdenovo:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
         stage="assembly",
         method_name=NEXTDENOVO_METHOD,

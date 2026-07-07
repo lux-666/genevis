@@ -70,9 +70,11 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     if env_blocked is not None:
         return update_assembly_output(state, env_blocked)
 
-    working_dir = data_dir / "work" / "assembly" / session_id / "flye"
+    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
+    working_dir = data_dir / "work" / "assembly" / session_id / attempt_scope / "flye"
     output_dir = working_dir / "flye_out"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "flye"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "flye"
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
@@ -90,7 +92,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     )
     script.chmod(0o755)
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:flye",
+        attempt_id=f"{session_id}:assembly:flye:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
         stage="assembly",
         method_name=FLYE_METHOD,

@@ -246,6 +246,57 @@ def evaluate_review_rules(state: TopLevelState) -> dict:
     return {"stage_outputs": outputs}
 
 
+def parameter_quality_gate(state: TopLevelState) -> dict:
+    """Route Phase10 assembly-review failures back to assembly parameter replan."""
+
+    stage_outputs = dict(state.get("stage_outputs") or {})
+    assembly_out = dict(stage_outputs.get("assembly") or {})
+    if not assembly_out.get("parameter_attempts"):
+        return {}
+
+    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    metrics = _phase10_review_metrics(ar_out, assembly_out)
+    if metrics and not ar_out.get("metrics"):
+        ar_out["metrics"] = metrics
+        stage_outputs["assembly_review"] = ar_out
+
+    from app.stages.assembly.nodes import parameter_quality_gate as assembly_parameter_quality_gate
+
+    gate_update = assembly_parameter_quality_gate({**state, "stage_outputs": stage_outputs})
+    updated_outputs = dict(gate_update.get("stage_outputs") or stage_outputs)
+    updated_assembly = dict(updated_outputs.get("assembly") or {})
+    quality_gate = updated_assembly.get("quality_gate")
+
+    if updated_assembly.get("status") == "retry_parameters_after_review_failure":
+        updated_outputs["assembly_review"] = {
+            **ar_out,
+            "status": "parameter_replan_requested",
+            "parameter_quality_gate": quality_gate,
+        }
+        return {
+            "current_stage": "assembly",
+            "supervision_state": "running_stage",
+            "active_interrupt": None,
+            "stage_outputs": updated_outputs,
+        }
+
+    if updated_assembly.get("status") == "parameter_retries_exhausted":
+        updated_outputs["assembly_review"] = {
+            **ar_out,
+            "parameter_quality_gate": quality_gate,
+            "parameter_retries_exhausted": True,
+            "parameter_quality_checked": True,
+        }
+        return {"stage_outputs": updated_outputs}
+
+    updated_outputs["assembly_review"] = {
+        **ar_out,
+        "parameter_quality_gate": quality_gate,
+        "parameter_quality_checked": True,
+    }
+    return {"stage_outputs": updated_outputs}
+
+
 def build_related_species_evidence_pack(state: TopLevelState) -> dict:
     """Build non-blocking local NCBI evidence for the review report and LLM."""
     stage_outputs = state.get("stage_outputs") or {}
@@ -466,6 +517,41 @@ def _extract_target_metrics_from_signals(ar_out: dict[str, Any]) -> dict[str, fl
         target_metrics["busco_duplicated_percent"] = float(busco["duplicated_percent"])
 
     return target_metrics if target_metrics else None
+
+
+def _phase10_review_metrics(ar_out: dict[str, Any], assembly_out: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(ar_out.get("metrics"), dict):
+        return dict(ar_out["metrics"])
+    candidates = ar_out.get("candidates") or []
+    signals = ar_out.get("signals") or []
+    candidate_id = None
+    if candidates and isinstance(candidates[0], dict):
+        candidate_id = candidates[0].get("candidate_id")
+    if not candidate_id and signals and isinstance(signals[0], dict):
+        candidate_id = signals[0].get("candidate_id")
+    if not candidate_id:
+        return {}
+    nested = _candidate_metrics(str(candidate_id), signals)
+    quast = dict(nested.get("quast") or {})
+    busco = dict(nested.get("busco") or {})
+    metrics: dict[str, Any] = {}
+    if quast.get("total_length") is not None:
+        metrics["assembly_size"] = quast.get("total_length")
+        genome_size = assembly_out.get("genome_size_prior")
+        if genome_size:
+            try:
+                metrics["assembly_size_ratio"] = float(quast["total_length"]) / float(genome_size)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+    if quast.get("n50") is not None:
+        metrics["contig_n50"] = quast.get("n50")
+    if quast.get("num_contigs") is not None:
+        metrics["contig_count"] = quast.get("num_contigs")
+    if busco.get("complete_percent") is not None:
+        metrics["busco_complete"] = busco.get("complete_percent")
+    if busco.get("duplicated_percent") is not None:
+        metrics["busco_duplicate"] = busco.get("duplicated_percent")
+    return metrics
 
 
 def human_review_gate(state: TopLevelState) -> dict:

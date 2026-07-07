@@ -13,6 +13,7 @@ import pytest
 
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
+from app.schemas.artifacts import file_sha256
 from app.stages.assembly.prompt_payload import (
     ParameterPromptTask,
     build_prompt_payload,
@@ -612,43 +613,32 @@ class TestArtifactWriter:
         )
 
         # Verify profile artifact was written to session-scoped path
-        expected_profile_path = tmp_path / "artifacts" / "assembly" / session_id / "input_profile.json"
+        expected_profile_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "input_profile.json"
         assert expected_profile_path.exists(), f"Profile artifact not found at {expected_profile_path}"
 
         # Verify payload artifact was written to attempt-scoped path
-        expected_payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}_prompt.json"
+        expected_payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "prompt_payload.json"
         assert expected_payload_path.exists(), f"Payload artifact not found at {expected_payload_path}"
 
         # Verify returned refs are path-based (not hash-based) when session_id is provided
         assert payload["input_profile_ref"].startswith("data/artifacts/assembly/")
-        assert payload["input_profile_ref"] == f"data/artifacts/assembly/{session_id}/input_profile.json"
+        assert payload["input_profile_ref"] == f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/input_profile.json"
         assert payload["prompt_payload_ref"].startswith("data/artifacts/assembly/")
-        assert payload["prompt_payload_ref"] == f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}_prompt.json"
+        assert payload["prompt_payload_ref"] == f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/prompt_payload.json"
 
     def test_write_artifacts_without_session_id(self, sample_catalog, sample_full_profile, tmp_path):
-        """Write artifacts without session_id should create hash-based paths."""
-        payload = build_prompt_payload(
-            method_id="test_method",
-            catalog=sample_catalog,
-            full_profile=sample_full_profile,
-            task="recommend_initial",
-            write_artifacts=True,
-            session_id=None,
-            attempt_id=None,
-            data_dir=tmp_path,
-        )
-
-        # Verify returned refs are hash-based (64 char hex)
-        assert len(payload["input_profile_ref"]) == 64
-        assert len(payload["prompt_payload_ref"]) == 64
-
-        # Verify profile artifact was written to hash-based path
-        expected_profile_path = tmp_path / "artifacts" / "profiles" / f"{payload['input_profile_ref']}.json"
-        assert expected_profile_path.exists(), f"Profile artifact not found at {expected_profile_path}"
-
-        # Verify payload artifact was written to hash-based path
-        expected_payload_path = tmp_path / "artifacts" / "payloads" / f"{payload['prompt_payload_ref']}.json"
-        assert expected_payload_path.exists(), f"Payload artifact not found at {expected_payload_path}"
+        """Artifact writes require final session/attempt refs."""
+        with pytest.raises(ValueError):
+            build_prompt_payload(
+                method_id="test_method",
+                catalog=sample_catalog,
+                full_profile=sample_full_profile,
+                task="recommend_initial",
+                write_artifacts=True,
+                session_id=None,
+                attempt_id=None,
+                data_dir=tmp_path,
+            )
 
     def test_artifact_content_matches_input(self, sample_catalog, sample_full_profile, tmp_path):
         """Written artifacts should contain correct content."""
@@ -667,13 +657,13 @@ class TestArtifactWriter:
         )
 
         # Read and verify profile artifact
-        profile_path = tmp_path / "artifacts" / "assembly" / session_id / "input_profile.json"
+        profile_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "input_profile.json"
         with profile_path.open("r") as f:
             loaded_profile = json.load(f)
         assert loaded_profile == sample_full_profile
 
         # Read and verify payload artifact
-        payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}_prompt.json"
+        payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "prompt_payload.json"
         with payload_path.open("r") as f:
             loaded_payload = json.load(f)
 
@@ -682,31 +672,6 @@ class TestArtifactWriter:
         assert loaded_payload["task"] == "recommend_initial"
         assert loaded_payload["prompt_profile"] == payload["prompt_profile"]
         assert loaded_payload["catalog_subset"] == payload["catalog_subset"]
-
-    def test_load_roundtrip_with_hash_refs(self, sample_catalog, sample_full_profile, tmp_path):
-        """Test load roundtrip using hash-based refs (should work)."""
-        from app.stages.assembly.prompt_payload import load_profile_by_ref, load_payload_by_ref
-
-        # Write artifacts without session_id (hash-based refs)
-        payload = build_prompt_payload(
-            method_id="test_method",
-            catalog=sample_catalog,
-            full_profile=sample_full_profile,
-            task="recommend_initial",
-            write_artifacts=True,
-            session_id=None,
-            attempt_id=None,
-            data_dir=tmp_path,
-        )
-
-        # Test profile roundtrip - pass data_dir explicitly
-        loaded_profile = load_profile_by_ref(payload["input_profile_ref"], data_dir=tmp_path)
-        assert loaded_profile == sample_full_profile
-
-        # Test payload roundtrip - pass data_dir explicitly
-        loaded_payload = load_payload_by_ref(payload["prompt_payload_ref"], data_dir=tmp_path)
-        assert loaded_payload["method_id"] == payload["method_id"]
-        assert loaded_payload["task"] == payload["task"]
 
     def test_load_roundtrip_with_path_refs(self, sample_catalog, sample_full_profile, tmp_path):
         """Test that load roundtrip with path-based refs works (P1 fix implemented)."""
@@ -728,10 +693,10 @@ class TestArtifactWriter:
         )
 
         # Verify files exist at correct paths
-        profile_path = tmp_path / "artifacts" / "assembly" / session_id / "input_profile.json"
+        profile_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "input_profile.json"
         assert profile_path.exists()
 
-        payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}_prompt.json"
+        payload_path = tmp_path / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}" / "prompt_payload.json"
         assert payload_path.exists()
 
         # Load using path refs (should work with the fix)
@@ -742,6 +707,11 @@ class TestArtifactWriter:
         assert loaded_payload["method_id"] == payload["method_id"]
         assert loaded_payload["task"] == payload["task"]
         assert loaded_payload["prompt_profile"] == payload["prompt_profile"]
+        assert loaded_payload["prompt_payload_ref"] == payload["prompt_payload_ref"]
+        assert loaded_payload["prompt_payload_hash"] == generate_payload_ref(
+            {k: v for k, v in payload.items() if k not in ("prompt_payload_ref", "prompt_payload_hash")}
+        )
+        assert loaded_payload["prompt_payload_hash"] != file_sha256(payload_path)
 
     def test_multiple_attempts_same_session(self, sample_catalog, sample_full_profile, tmp_path):
         """Multiple attempts in same session should create separate payload files."""
@@ -775,14 +745,17 @@ class TestArtifactWriter:
         )
 
         # Verify both payload files exist
-        payload1_path = tmp_path / "artifacts" / "assembly" / session_id / "parameter_attempt_1_prompt.json"
-        payload2_path = tmp_path / "artifacts" / "assembly" / session_id / "parameter_attempt_2_prompt.json"
+        payload1_path = tmp_path / "artifacts" / "assembly" / session_id / "parameter_attempt_1" / "prompt_payload.json"
+        payload2_path = tmp_path / "artifacts" / "assembly" / session_id / "parameter_attempt_2" / "prompt_payload.json"
 
         assert payload1_path.exists()
         assert payload2_path.exists()
 
         # Verify refs are different
         assert payload1["prompt_payload_ref"] != payload2["prompt_payload_ref"]
+        assert payload1["input_profile_ref"] != payload2["input_profile_ref"]
+        assert "parameter_attempt_1/input_profile.json" in payload1["input_profile_ref"]
+        assert "parameter_attempt_2/input_profile.json" in payload2["input_profile_ref"]
 
         # Verify content is different
         with payload1_path.open("r") as f:

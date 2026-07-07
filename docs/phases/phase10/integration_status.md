@@ -4,7 +4,7 @@
 
 ## Summary
 
-Phase 10 is partially integrated. The catalog, validator, profile helper, knowledge pack, prompt payload builder, and command-builder foundation are in place for hifiasm and hifiasm_ont freeze paths. The recommender node, session/attempt artifact integration, replay ledger, retry loop, and no-compat architecture cleanup are still pending.
+Phase 10 is partially integrated. The catalog, validator, profile helper, knowledge pack, prompt payload builder, command-builder foundation, parameter recommender node, session/attempt artifact refs, typed parameter attempts, execution retry gate, and review-quality retry graph edge are in place for hifiasm and hifiasm_ont freeze paths. Planner-registry cleanup is still pending.
 
 ## Completed
 
@@ -26,7 +26,7 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, knowle
 4. **Validation and profile helpers**
    - `validate_recommended_parameters()` validates L2-only recommendations, catalog constraints, and hard profile-backed rules.
    - `build_full_parameter_profile()` and `build_prompt_profile()` exist.
-   - Freeze functions currently store `full_parameter_profile` in metadata.
+   - Full parameter profiles are written as attempt-scoped replay artifacts.
 
 5. **Structured failure paths**
    - Missing catalogs and malformed recommended-parameter state return structured failure updates from freeze nodes.
@@ -42,39 +42,31 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, knowle
    - `app/stages/assembly/prompt_payload.py` implemented
    - `build_prompt_payload()` creates task-scoped prompt profiles
    - Prompt payload includes selected evidence cases plus selection metadata, not the full case database
-   - Dual reference system (hash ref + path ref) for artifact tracking
-   - **Current state**: Implemented and tested, not yet integrated into main assembly flow
-   - **Integration pending**: P1 phase will connect to recommender node and session-scoped artifact writer
+   - Main-flow artifact writes use `data/artifacts/assembly/<session>/parameter_attempt_<N>/prompt_payload.json`
+   - Hashes are integrity fields, not runtime refs
+
+8. **Parameter recommender node** ✅
+   - `recommend_assembly_parameters()` writes profile, prompt, response, and validation artifacts.
+   - The node appends compact typed `parameter_attempts`.
+   - Invalid L0/L1/L2 recommendations stop before freeze/run.
+   - Route selection and parameter recommendation both use the shared assembly decision boundary.
+
+9. **Execution retry gate** ✅
+   - Command failures can store the last 100 log lines and re-enter parameter recommendation.
+   - Retry attempts increment `current_parameter_attempt_id`.
+   - hifiasm/hifiasm_ont freeze paths use attempt-scoped work/artifact directories.
 
 ## Pending
 
-1. **Integration of prompt payload builder into main assembly flow**
-   - Currently `build_prompt_payload()` is only used in tests
-   - Need to integrate into recommender node workflow
-   - Connect artifact writing to session/attempt-scoped artifact writer
-   - Remove hash-only runtime refs from graph execution
+1. **Replay ledger completion**
+   - `parameter_attempts` record recommendation/freeze/run data, but command metadata and review results should also be written as attempt-scoped artifacts.
 
-2. **Parameter recommender node**
-   - Implement initial recommendation, execution repair, and quality replan modes.
-   - Validate LLM output before freeze/run.
-   - Record raw response, parsed params, validation result, and selected cases.
-   - Move assembly route-selection LLM behavior behind the same decision boundary.
-
-3. **Replay ledger**
-   - Append immutable `parameter_attempts` entries.
-   - Record catalog refs, profile refs, prompt/response refs, parameter sources, argv, frozen attempt refs, execution result, and review result.
-
-4. **Attempt-specific retry directories**
-   - Current freeze paths still use method-level directories.
-   - Retries must write attempt-specific work/output/artifact paths to avoid overwriting previous attempts.
-
-5. **Runtime catalog verification**
+2. **Runtime catalog verification**
    - Verify hifiasm and hifiasm_ont catalogs against the project-pinned hifiasm binary/help output in the execution environment.
 
-6. **No-compat architecture cleanup**
+3. **No-compat architecture cleanup**
    - Derive planner method metadata from descriptors/catalogs.
    - Delete the planner's duplicate `_STAGE_METHODS` registry.
-   - Replace loose parameter-loop dict keys with typed compact contracts.
    - Delete old compatibility paths rather than preserving wrappers.
 
 ## Next Recommended Slice

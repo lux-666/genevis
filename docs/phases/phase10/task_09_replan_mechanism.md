@@ -1,7 +1,7 @@
 # Task 9: Implement Retry and Replan Mechanism
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented
 **Depends on**: Task 8 and assembly_review
 **Created**: 2026-07-02
 **Updated**: 2026-07-06
@@ -157,9 +157,9 @@ If exceeded, route to human review or terminal failure with a concise reason and
 
 ## Acceptance Criteria
 
-- [ ] Execution failure can retry with last 100 log lines.
-- [ ] Review failure can retry with metrics and failure mode.
-- [ ] All retry attempts are replayable.
-- [ ] Retry attempts use separate directories.
-- [ ] Retry caps prevent infinite loops.
-- [ ] Old method-level retry paths are removed from the parameter loop.
+- [x] Execution failure can retry with last 100 log lines.
+- [x] Review failure can retry with metrics and failure mode.
+- [x] All retry attempts are replayable.
+- [x] Retry attempts use separate directories.
+- [x] Retry caps prevent infinite loops.
+- [x] Old method-level retry paths are removed from the parameter loop.

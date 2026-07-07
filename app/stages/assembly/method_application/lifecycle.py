@@ -97,14 +97,24 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         fail_label=lifecycle.name,
     )
     result = outcome.result.model_dump(mode="json")
+    parameter_attempts = _update_current_parameter_attempt(
+        output,
+        status="execution_failed" if not outcome.success else "executed",
+        execution_result=result,
+    )
     if not outcome.success:
         return update_assembly_output(
             state,
-            {"status": "failed", "reason": outcome.error, lifecycle.execution_result_key: result},
+            {
+                "status": "failed",
+                "reason": outcome.error,
+                lifecycle.execution_result_key: result,
+                "parameter_attempts": parameter_attempts,
+            },
         )
     return update_assembly_output(
         state,
-        {"status": lifecycle.ran_status, lifecycle.execution_result_key: result},
+        {"status": lifecycle.ran_status, lifecycle.execution_result_key: result, "parameter_attempts": parameter_attempts},
     )
 
 
@@ -224,6 +234,25 @@ def collect_method_artifacts(
 
 def unique_refs(refs: list[str]) -> list[str]:
     return list(dict.fromkeys(refs))
+
+
+def _update_current_parameter_attempt(output: dict[str, Any], **updates: Any) -> list[dict[str, Any]]:
+    if not output.get("parameter_attempts"):
+        return []
+    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempts: list[dict[str, Any]] = []
+    found = False
+    for item in output.get("parameter_attempts") or []:
+        if not isinstance(item, dict):
+            continue
+        current = dict(item)
+        if current.get("attempt_id") == attempt_id:
+            current.update(updates)
+            found = True
+        attempts.append(current)
+    if not found:
+        attempts.append({"attempt_id": attempt_id, **updates})
+    return attempts
 
 
 def positive_int(

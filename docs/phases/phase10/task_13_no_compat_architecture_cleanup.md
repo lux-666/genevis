@@ -1,7 +1,7 @@
 # Task 13: No-Compatibility Architecture Cleanup
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Partially implemented
 **Depends on**: Tasks 8-12
 **Created**: 2026-07-06
 **Updated**: 2026-07-06
@@ -118,7 +118,18 @@ Delete, do not wrap:
 
 - [ ] Method metadata has one source of truth.
 - [ ] Interactive planning derives from descriptors/catalogs.
-- [ ] Assembly LLM decisions use the shared decision boundary.
-- [ ] Parameter-loop state is typed and compact.
+- [x] Assembly LLM decisions use the shared decision boundary.
+- [x] Parameter-loop state is typed and compact.
 - [ ] Old compatibility paths listed above are deleted.
 - [ ] Architecture-regression tests fail if any deleted path returns.
+
+## Current Cleanup State
+
+- Done: assembly-local direct model invocation was moved behind
+  `app/stages/assembly/decision.py`.
+- Done: hifiasm/hifiasm_ont freeze nodes consume typed `parameter_attempts`
+  instead of old ad hoc recommended-parameter state.
+- Done: hash-only prompt/profile runtime artifact paths were removed from the
+  parameter-loop writer.
+- Pending: planner `_STAGE_METHODS` and interactive planner dependencies still
+  need migration to descriptor-derived metadata.

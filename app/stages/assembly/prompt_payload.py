@@ -1,9 +1,4 @@
-"""Build prompt payloads for assembly parameter recommendation.
-
-Dual-reference artifact system: hash refs (content-addressable) for deduplication
-and session/attempt paths for human navigation. See detailed design in
-docs/phases/phase10/task_12_artifact_ref_design.md.
-"""
+"""Build prompt payloads for assembly parameter recommendation."""
 
 from __future__ import annotations
 
@@ -13,6 +8,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.knowledge.packs import load_knowledge_pack
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ArtifactRef,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.domains.assembly.case_selector import evidence_read_type_matches, select_evidence_cases
 
@@ -44,16 +44,16 @@ def build_prompt_payload(
         full_profile: Complete profile from build_full_parameter_profile()
         task: Task type (recommend_initial, retry_after_execution_failure, etc.)
         knowledge_pack_id: Knowledge pack to load (default: "parameter_recommender")
-        write_artifacts: Write artifacts to disk for replay (default: False)
-        session_id: Optional session ID for session-scoped artifact paths
-        attempt_id: Optional attempt ID for attempt-scoped artifact paths (required if session_id provided and write_artifacts=True)
+        write_artifacts: Write session/attempt artifacts to disk for replay.
+        session_id: Session ID for session-scoped artifact paths.
+        attempt_id: Attempt ID for attempt-scoped artifact paths.
         data_dir: Optional data directory root (default: Path("data"))
 
     Returns:
         Structured payload with:
-        - input_profile_ref: Hash ref (no session context) OR path ref (with session_id)
+        - input_profile_ref: Path ref when artifacts are written, otherwise hash
         - input_profile_hash: Content hash (always present for integrity verification)
-        - prompt_payload_ref: Hash ref (no session/attempt context) OR path ref (with both session_id and attempt_id)
+        - prompt_payload_ref: Path ref when artifacts are written, otherwise hash
         - prompt_payload_hash: Canonical hash (excludes self-ref fields)
         - prompt_profile: Task-scoped profile slice
         - catalog_subset: L1 (readonly) + L2 (adjustable) parameters
@@ -64,29 +64,25 @@ def build_prompt_payload(
         - readonly_params: L1 parameter specs (context)
         - adjustable_params: L2 parameter specs (output targets)
 
-    Reference semantics:
-        - Without session context: refs are content hashes (SHA256)
-        - With session_id only: input_profile_ref is path, prompt_payload_ref remains hash (fallback mode)
-        - With session_id + attempt_id: both refs are structured paths for ledger integration
-        - Hash fields always present for integrity verification regardless of ref format
-
-    Note on canonical hash:
-        The prompt_payload_hash field contains a CANONICAL HASH computed by excluding
-        self-referential fields (prompt_payload_ref, prompt_payload_hash) to avoid
-        circular dependencies. When write_artifacts=True, the complete payload (WITH
-        these fields) is written to disk, so the file content hash will differ from
-        the canonical hash. This is intentional for deduplication and verification.
+    Hash fields are integrity fields. The running graph must call this with
+    write_artifacts=True, session_id, and attempt_id so refs are replayable paths.
     """
+    if write_artifacts and (not session_id or attempt_id is None):
+        raise ValueError("session_id and attempt_id are required when write_artifacts=True")
+
     # 1. Generate input profile reference (for replay)
     input_profile_hash = generate_profile_ref(full_profile)
 
     # Write full_profile to disk if requested
     if write_artifacts:
-        profile_path_ref, profile_hash_ref = write_profile_artifact(
-            input_profile_hash, full_profile, session_id=session_id, data_dir=data_dir
+        profile_ref = write_profile_artifact(
+            profile=full_profile,
+            session_id=str(session_id),
+            attempt_id=int(attempt_id),
+            data_dir=data_dir,
         )
-        # Use path_ref in payload when session context is provided
-        input_profile_ref = profile_path_ref if session_id else profile_hash_ref
+        input_profile_ref = profile_ref.path_ref
+        profile_hash_ref = profile_ref.sha256
     else:
         input_profile_ref = input_profile_hash
         profile_hash_ref = input_profile_hash
@@ -161,20 +157,15 @@ def build_prompt_payload(
 
     # Write prompt_payload to disk if requested
     if write_artifacts:
-        # First write without the ref fields to compute canonical hash
-        payload_path_ref, payload_hash_ref = write_payload_artifact(
-            payload_hash, payload, session_id=session_id, attempt_id=attempt_id, data_dir=data_dir
+        payload["prompt_payload_ref"] = (
+            f"data/artifacts/assembly/{session_id}/parameter_attempt_{int(attempt_id)}/prompt_payload.json"
         )
-        # Set both ref fields in the payload
-        payload["prompt_payload_ref"] = payload_path_ref if (session_id and attempt_id is not None) else payload_hash_ref
-        payload["prompt_payload_hash"] = payload_hash_ref
-        # Write again with the ref fields included for completeness.
-        # NOTE: This second write ensures the stored artifact contains all metadata,
-        # but the hash field represents the canonical content (without self-refs).
-        # This intentional design avoids circular dependencies while preserving
-        # complete audit trails on disk.
+        payload["prompt_payload_hash"] = payload_hash
         write_payload_artifact(
-            payload_hash, payload, session_id=session_id, attempt_id=attempt_id, data_dir=data_dir
+            payload=payload,
+            session_id=str(session_id),
+            attempt_id=int(attempt_id),
+            data_dir=data_dir,
         )
     else:
         payload["prompt_payload_ref"] = payload_hash
@@ -226,98 +217,78 @@ def generate_payload_ref(prompt_payload: dict[str, Any]) -> str:
 
 
 def write_profile_artifact(
-    ref: str,
+    *,
     profile: dict[str, Any],
-    session_id: str | None = None,
+    session_id: str,
+    attempt_id: int,
     data_dir: Path | None = None,
-) -> tuple[str, str]:
+) -> ArtifactRef:
     """Write profile artifact to disk for replay.
 
     Args:
-        ref: Profile reference ID (SHA256 hash)
         profile: Full profile dict to write
-        session_id: Optional session ID for session-scoped storage
+        session_id: Session ID for session-scoped storage
+        attempt_id: Attempt ID for immutable attempt-scoped storage
         data_dir: Optional data root directory (default: Path("data"))
 
     Returns:
-        Tuple of (path_ref, hash_ref) where:
-        - path_ref: Actual file path written (relative to repo root)
-        - hash_ref: SHA256 hash for content verification
+        Path ref plus SHA256 integrity field.
     """
     if data_dir is None:
         data_dir = Path("data")
 
-    # Determine storage path based on session context
-    if session_id:
-        # Session-scoped path: data/artifacts/assembly/<session_id>/input_profile.json
-        profile_dir = data_dir / "artifacts" / "assembly" / session_id
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        profile_path = profile_dir / "input_profile.json"
-        path_ref = f"data/artifacts/assembly/{session_id}/input_profile.json"
-    else:
-        # Hash-based path: data/artifacts/profiles/<hash>.json
-        profile_dir = data_dir / "artifacts" / "profiles"
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        profile_path = profile_dir / f"{ref}.json"
-        path_ref = f"data/artifacts/profiles/{ref}.json"
+    profile_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_path = profile_dir / "input_profile.json"
+    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/input_profile.json"
 
-    # Write artifact
     with profile_path.open("w") as f:
         json.dump(profile, f, indent=2)
 
-    return (path_ref, ref)
+    # Use actual file hash for integrity verification
+    from app.schemas.artifacts import file_sha256
+    return ArtifactRef(path_ref=path_ref, sha256=file_sha256(profile_path), artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE)
 
 
 def write_payload_artifact(
-    ref: str,
+    *,
     payload: dict[str, Any],
-    session_id: str | None = None,
-    attempt_id: int | None = None,
+    session_id: str,
+    attempt_id: int,
     data_dir: Path | None = None,
-) -> tuple[str, str]:
+) -> ArtifactRef:
     """Write prompt payload artifact to disk for audit.
 
     Args:
-        ref: Payload reference ID (SHA256 hash)
         payload: Complete prompt payload dict to write
-        session_id: Optional session ID for session-scoped storage
-        attempt_id: Optional attempt ID for attempt-scoped naming
+        session_id: Session ID for session-scoped storage
+        attempt_id: Attempt ID for attempt-scoped naming
         data_dir: Optional data root directory (default: Path("data"))
 
     Returns:
-        Tuple of (path_ref, hash_ref) where:
-        - path_ref: Actual file path written (relative to repo root)
-        - hash_ref: SHA256 hash for content verification
+        Path ref plus SHA256 integrity field.
     """
     if data_dir is None:
         data_dir = Path("data")
 
-    # Determine storage path based on session context
-    if session_id and attempt_id is not None:
-        # Attempt-scoped path: data/artifacts/assembly/<session_id>/parameter_attempt_<N>_prompt.json
-        payload_dir = data_dir / "artifacts" / "assembly" / session_id
-        payload_dir.mkdir(parents=True, exist_ok=True)
-        payload_path = payload_dir / f"parameter_attempt_{attempt_id}_prompt.json"
-        path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}_prompt.json"
-    else:
-        # Hash-based path: data/artifacts/payloads/<hash>.json
-        payload_dir = data_dir / "artifacts" / "payloads"
-        payload_dir.mkdir(parents=True, exist_ok=True)
-        payload_path = payload_dir / f"{ref}.json"
-        path_ref = f"data/artifacts/payloads/{ref}.json"
+    payload_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = payload_dir / "prompt_payload.json"
+    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/prompt_payload.json"
 
-    # Write artifact
     with payload_path.open("w") as f:
         json.dump(payload, f, indent=2)
 
-    return (path_ref, ref)
+    # Use actual file hash for integrity verification
+    from app.schemas.artifacts import file_sha256
+    return ArtifactRef(path_ref=path_ref, sha256=file_sha256(payload_path), artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD)
 
 
 def load_profile_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any]:
     """Load profile artifact from disk by reference ID.
 
     Args:
-        ref: Profile reference (SHA256 hash or path like data/artifacts/assembly/<session>/input_profile.json)
+        ref: Profile reference path like data/artifacts/assembly/<session>/parameter_attempt_<N>/input_profile.json
         data_dir: Optional data root directory (default: Path("data"))
 
     Returns:
@@ -329,14 +300,8 @@ def load_profile_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any
     if data_dir is None:
         data_dir = Path("data")
 
-    # Detect ref type: hash (64 hex chars) vs path
-    if len(ref) == 64 and all(c in "0123456789abcdef" for c in ref):
-        # Hash ref: use content-addressable storage
-        profile_path = data_dir / "artifacts" / "profiles" / f"{ref}.json"
-    else:
-        # Path ref: strip "data/" prefix if present and resolve relative to data_dir
-        ref_path = ref.removeprefix("data/")
-        profile_path = data_dir / ref_path
+    ref_path = ref.removeprefix("data/")
+    profile_path = data_dir / ref_path
 
     with profile_path.open("r") as f:
         return json.load(f)
@@ -346,7 +311,7 @@ def load_payload_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any
     """Load prompt payload artifact from disk by reference ID.
 
     Args:
-        ref: Payload reference (SHA256 hash or path like data/artifacts/assembly/<session>/parameter_attempt_<N>_prompt.json)
+        ref: Payload reference path like data/artifacts/assembly/<session>/parameter_attempt_<N>/prompt_payload.json
         data_dir: Optional data root directory (default: Path("data"))
 
     Returns:
@@ -358,14 +323,8 @@ def load_payload_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any
     if data_dir is None:
         data_dir = Path("data")
 
-    # Detect ref type: hash (64 hex chars) vs path
-    if len(ref) == 64 and all(c in "0123456789abcdef" for c in ref):
-        # Hash ref: use content-addressable storage
-        payload_path = data_dir / "artifacts" / "payloads" / f"{ref}.json"
-    else:
-        # Path ref: strip "data/" prefix if present and resolve relative to data_dir
-        ref_path = ref.removeprefix("data/")
-        payload_path = data_dir / ref_path
+    ref_path = ref.removeprefix("data/")
+    payload_path = data_dir / ref_path
 
     with payload_path.open("r") as f:
         return json.load(f)

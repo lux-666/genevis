@@ -635,7 +635,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn(str(reads_1), script_text)
             self.assertIn(str(reads_2), script_text)
@@ -717,6 +717,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_parameters": {"read_type": "hifi", "threads": 1},
                 }
             }
@@ -763,6 +764,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm_ont"},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_ont_parameters": {"read_type": "ont", "threads": 1},
                 },
             }
@@ -770,7 +772,15 @@ class AssemblyStageTests(unittest.TestCase):
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
-            script = (Path(tmpdir) / "work" / "assembly" / "s1" / "hifiasm_ont" / "run_hifiasm_ont.sh").read_text(encoding="utf-8")
+            script = (
+                Path(tmpdir)
+                / "work"
+                / "assembly"
+                / "s1"
+                / "parameter_attempt_0"
+                / "hifiasm_ont"
+                / "run_hifiasm_ont.sh"
+            ).read_text(encoding="utf-8")
             self.assertIn("--ont", script)
 
     def test_local_hifiasm_rejects_invalid_threads(self):
@@ -796,6 +806,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_parameters": {"read_type": "hifi", "threads": 0},
                 }
             }
@@ -829,6 +840,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_parameters": {"read_type": "hifi", "threads": 1},
                 }
             }
@@ -1013,7 +1025,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--pacbio-hifi", script_text)
             self.assertIn("--genome-size 2000000", script_text)
@@ -1061,7 +1073,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "flye" / "run_flye.sh"
+            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--nano-hq", script_text)
             self.assertIn("--genome-size 2000000", script_text)

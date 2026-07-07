@@ -253,7 +253,7 @@ class InputProfilerTests(unittest.TestCase):
             state["stage_outputs"] = {"assembly": {"assembly_route": "hifi", "hifi_reads_ref": str(reads)}}
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            with patch("app.stages.assembly.nodes.build_chat_model", side_effect=AssertionError("LLM should not run")):
+            with patch("app.stages.assembly.decision.build_chat_model", side_effect=AssertionError("LLM should not run")):
                 result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]
@@ -323,7 +323,7 @@ class InputProfilerTests(unittest.TestCase):
             resolved = {**state, **resolve_extended_inputs(state)}
             model = FakeModel()
 
-            with patch("app.stages.assembly.nodes.build_chat_model", return_value=model):
+            with patch("app.stages.assembly.decision.build_chat_model", return_value=model):
                 result = infer_input_profile(resolved)
 
             self.assertIsNotNone(model.messages)
@@ -339,7 +339,7 @@ class InputProfilerTests(unittest.TestCase):
             state = self._state(tmpdir, assets=[{"asset_id": "ont", "asset_type": "clean_long_reads", "path": str(reads)}])
             resolved = {**state, **resolve_extended_inputs(state)}
 
-            with patch("app.stages.assembly.nodes.build_chat_model", side_effect=RuntimeError("llm down")):
+            with patch("app.stages.assembly.decision.build_chat_model", side_effect=RuntimeError("llm down")):
                 result = infer_input_profile(resolved)
 
             assembly = result["stage_outputs"]["assembly"]

@@ -1,7 +1,7 @@
 # Task 12: Session/Attempt Artifact Reference Design
 
 **Phase**: 10
-**Status**: Design corrected; implementation cleanup pending
+**Status**: Implemented for parameter prompt/profile/response/validation artifacts
 **Depends on**: Tasks 8-10
 **Created**: 2026-07-05
 **Updated**: 2026-07-06
@@ -35,7 +35,7 @@ Every main-flow parameter attempt records path refs plus hashes:
 
 ```yaml
 attempt_id: 0
-input_profile_ref: data/artifacts/assembly/<session>/input_profile.json
+input_profile_ref: data/artifacts/assembly/<session>/parameter_attempt_0/input_profile.json
 input_profile_hash: <sha256>
 prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0/prompt_payload.json
 prompt_payload_hash: <sha256>
@@ -60,8 +60,8 @@ Rules:
 
 ```text
 data/artifacts/assembly/<session>/
-  input_profile.json
   parameter_attempt_0/
+    input_profile.json
     prompt_payload.json
     llm_response.json
     validation.json
@@ -69,6 +69,7 @@ data/artifacts/assembly/<session>/
     execution_failure_tail.txt
     review_failure.json
   parameter_attempt_1/
+    input_profile.json
     prompt_payload.json
     llm_response.json
     validation.json
@@ -85,9 +86,10 @@ def write_profile_artifact(
     *,
     profile: dict[str, Any],
     session_id: str,
+    attempt_id: int,
     data_dir: Path,
 ) -> ArtifactRef:
-    """Write input_profile.json and return path ref plus SHA256."""
+    """Write parameter_attempt_<N>/input_profile.json and return path ref plus SHA256."""
 
 
 def write_attempt_artifact(
@@ -127,10 +129,10 @@ class ArtifactRef(BaseModel):
 
 - [ ] Main graph writes profile, prompt, response, validation, and command
       metadata under `data/artifacts/assembly/<session>/`.
-- [ ] Every attempt-specific artifact is under
+- [x] Every attempt-specific artifact is under
       `parameter_attempt_<attempt_id>/`.
-- [ ] Attempt entries store path refs and SHA256 integrity fields.
-- [ ] No running graph path uses `data/artifacts/profiles/<hash>.json` or
+- [x] Attempt entries store path refs and SHA256 integrity fields.
+- [x] No running graph path uses `data/artifacts/profiles/<hash>.json` or
       `data/artifacts/payloads/<hash>.json`.
-- [ ] Tests use temporary session ids instead of hash-only fallback refs.
-- [ ] Documentation describes only the final session/attempt ref contract.
+- [x] Tests use temporary session ids instead of hash-only fallback refs.
+- [x] Documentation describes only the final session/attempt ref contract.

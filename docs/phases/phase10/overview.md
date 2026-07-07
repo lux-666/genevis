@@ -135,7 +135,7 @@ Every recommendation/run/review attempt appends a compact immutable entry:
 attempt_id: 0
 method_id: assembly.candidate.hifiasm_ont
 status: recommended | validation_failed | frozen | execution_failed | executed | review_failed | passed
-input_profile_ref: data/artifacts/assembly/<session>/input_profile.json
+input_profile_ref: data/artifacts/assembly/<session>/parameter_attempt_0/input_profile.json
 read_qc_refs: []
 genome_survey_ref: data/artifacts/genome_survey/<session>/result.json
 catalog_ref: descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml
