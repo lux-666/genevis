@@ -1,10 +1,10 @@
 # Task 7: Refactor Command Builder Around L0/L1/L2
 
 **Phase**: 10
-**Status**: Partially completed
+**Status**: Completed
 **Depends on**: Tasks 1-3 and 6
 **Created**: 2026-07-02
-**Updated**: 2026-07-04
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -172,7 +172,7 @@ Replaying an attempt should not require the LLM.
 - [x] Command builder implemented.
 - [x] hifiasm_ont freeze uses command builder.
 - [x] Attempt metadata records `parameter_sources` and `argv`.
-- [ ] Retry attempts do not overwrite prior attempt directories.
+- [x] Retry attempts do not overwrite prior attempt directories.
 - [x] Generic source derivation is catalog-driven.
 - [x] Catalog-loading and malformed-state errors fail gracefully.
 
@@ -196,8 +196,12 @@ Replaying an attempt should not require the LLM.
 
 3. **Error handling**: Catalog loading and parameter command errors return structured failures via `fail_update()`
 
-### Remaining Gaps
+### Completion Notes
 
-- Retry attempts still need attempt-specific work/output/artifact directories.
-- The current freeze functions record `parameter_sources`, `argv`, and `full_parameter_profile` in `FrozenAttemptSpec.metadata`, but do not yet append the full Phase10 `parameter_attempts` ledger entry.
-- `input_profile_ref` and `prompt_payload_ref` are still Task 8 responsibilities.
+- hifiasm and hifiasm_ont freeze paths now use
+  `parameter_attempt_<attempt_id>/` scoped work and artifact directories.
+- Freeze functions update the current typed `parameter_attempts` entry with
+  `parameter_sources`, `argv`, script paths, frozen metadata, and expected
+  outputs.
+- `input_profile_ref` and `prompt_payload_ref` are written by the recommender
+  node and stored on the same typed attempt entry.

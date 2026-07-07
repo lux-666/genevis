@@ -1,10 +1,16 @@
 # Phase 10 Integration Status
 
-**Updated**: 2026-07-06
+**Updated**: 2026-07-07
 
 ## Summary
 
-Phase 10 is partially integrated. The catalog, validator, profile helper, knowledge pack, prompt payload builder, command-builder foundation, parameter recommender node, session/attempt artifact refs, typed parameter attempts, execution retry gate, and review-quality retry graph edge are in place for hifiasm and hifiasm_ont freeze paths. Planner-registry cleanup is still pending.
+Phase 10 is mostly integrated for the hifiasm and hifiasm_ont parameter loop.
+The catalog, validator, profile helper, knowledge pack, prompt payload builder,
+command-builder foundation, parameter recommender node, session/attempt artifact
+refs, typed parameter attempts, execution retry gate, review-quality retry graph
+edge, and attempt-scoped freeze directories are in place. Planner-registry
+cleanup, runtime catalog verification, standalone command/review artifacts, and
+final documentation are still pending.
 
 ## Completed
 
@@ -56,10 +62,19 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, knowle
    - Retry attempts increment `current_parameter_attempt_id`.
    - hifiasm/hifiasm_ont freeze paths use attempt-scoped work/artifact directories.
 
+10. **Review-quality retry gate** ✅
+   - assembly_review failures can set a parameter replan request with failure
+     diagnosis.
+   - The next recommendation receives prior attempt context and review metrics.
+   - Retry caps prevent infinite review loops.
+
 ## Pending
 
-1. **Replay ledger completion**
-   - `parameter_attempts` record recommendation/freeze/run data, but command metadata and review results should also be written as attempt-scoped artifacts.
+1. **Attempt artifact completion**
+   - `parameter_attempts` record recommendation/freeze/run/review data, but
+     command metadata and review failure context should also be written as
+     attempt-scoped artifacts if the final replay contract keeps `command.json`
+     and `review_failure.json` as standalone files.
 
 2. **Runtime catalog verification**
    - Verify hifiasm and hifiasm_ont catalogs against the project-pinned hifiasm binary/help output in the execution environment.
@@ -69,19 +84,20 @@ Phase 10 is partially integrated. The catalog, validator, profile helper, knowle
    - Delete the planner's duplicate `_STAGE_METHODS` registry.
    - Delete old compatibility paths rather than preserving wrappers.
 
+4. **Final documentation**
+   - Write the methodology, implementation guide, user guide, replay contract,
+     and no-compat cleanup summary.
+
 ## Next Recommended Slice
 
-**Phase 11 (Knowledge Pack + Prompt Payload Builder) - ✅ COMPLETED**
+**Next: planner no-compat cleanup**
 
-The recommender input layer is now implemented:
-1. ✅ Parameter recommender knowledge pack created with sharded rules, sharded cases, and skill instructions
-2. ✅ Prompt payload builder implemented with dual reference system
-3. ✅ Tested: L0 excluded, L1 read-only, all L2 parameters exposed, selected cases only, complete profile available
-
-**Next: P1 Integration Phase**
-
-Integrate the prompt payload builder into the main assembly flow:
-1. Connect `build_prompt_payload()` to recommender node
-2. Implement parameter recommender node with LLM calls
-3. Integrate session-scoped artifact writer
-4. Connect to replay ledger
+1. Replace `ask_planner.py` `_STAGE_METHODS` with descriptor/catalog-derived
+   planner metadata.
+2. Update `ask_interactive.py` and registry invariant tests to consume the same
+   derived metadata.
+3. Add architecture-regression tests that fail if `_STAGE_METHODS`, old
+   planner constants, stage-local assembly model invocation, or hash-only
+   runtime refs return.
+4. After planner cleanup, add the remaining command/review attempt artifacts and
+   run hifiasm binary/help catalog verification.

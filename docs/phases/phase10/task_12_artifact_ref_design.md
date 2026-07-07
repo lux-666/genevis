@@ -1,10 +1,10 @@
 # Task 12: Session/Attempt Artifact Reference Design
 
 **Phase**: 10
-**Status**: Implemented for parameter prompt/profile/response/validation artifacts
+**Status**: Implemented for parameter prompt/profile/response/validation artifacts; command/review artifact completion pending
 **Depends on**: Tasks 8-10
 **Created**: 2026-07-05
-**Updated**: 2026-07-06
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -127,8 +127,10 @@ class ArtifactRef(BaseModel):
 
 ## Acceptance Criteria
 
-- [ ] Main graph writes profile, prompt, response, validation, and command
-      metadata under `data/artifacts/assembly/<session>/`.
+- [x] Main graph writes profile, prompt, response, and validation artifacts
+      under `data/artifacts/assembly/<session>/`.
+- [ ] Command metadata and review failure context are written as
+      attempt-scoped artifacts under `data/artifacts/assembly/<session>/`.
 - [x] Every attempt-specific artifact is under
       `parameter_attempt_<attempt_id>/`.
 - [x] Attempt entries store path refs and SHA256 integrity fields.

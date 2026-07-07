@@ -1,10 +1,10 @@
 # Task 2: Create hifiasm Parameter Catalog
 
 **Phase**: 10
-**Status**: Implemented; version verification pending
+**Status**: Implemented; runtime binary verification pending
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-06
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -233,5 +233,5 @@ parameters:
 - [x] The catalog covers the currently documented hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
 - [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
 - [x] The prompt payload builder can include all L2 entries.
-- [ ] The integrated recommender node consumes that prompt payload in the main graph.
+- [x] The integrated recommender node consumes that prompt payload in the main graph.
 - [x] The command builder can merge L0/L1/L2 sources into a deterministic hifiasm argv.

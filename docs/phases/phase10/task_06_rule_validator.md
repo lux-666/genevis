@@ -1,10 +1,10 @@
 # Task 6: Implement Rule Validator
 
 **Phase**: 10
-**Status**: Partially implemented
+**Status**: Completed
 **Depends on**: Tasks 1 and 4
 **Created**: 2026-07-02
-**Updated**: 2026-07-04
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -141,5 +141,5 @@ The executor must not run.
 - [x] Validator implemented.
 - [x] Validation result is JSON-serializable.
 - [x] Validator can use complete profile facts for hard constraints without exposing all fields to the LLM.
-- [ ] Validation failure is recorded in `parameter_attempts`.
-- [ ] Command freezing is impossible after validation failure.
+- [x] Validation failure is recorded in `parameter_attempts`.
+- [x] Command freezing is impossible after validation failure.

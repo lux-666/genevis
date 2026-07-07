@@ -1,9 +1,9 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Partial implementation
+**Status**: Mostly integrated; cleanup/docs pending
 **Created**: 2026-07-02
-**Updated**: 2026-07-06
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -39,16 +39,30 @@ Implemented in the current slice:
 - Catalog-driven L0/L1 source derivation and deterministic command building.
 - Validator core for L2-only recommendations, catalog bounds/enums, and profile-backed hard rules.
 - Full/prompt profile helper functions.
-- Freeze metadata now records `parameter_sources`, `argv`, and `full_parameter_profile`.
+- Parameter recommender node writes attempt-scoped input profile, prompt
+  payload, LLM response, and validation artifacts.
+- Typed `parameter_attempts` ledger entries record profile/prompt/response/
+  validation refs, selected cases, validation status, recommended parameters,
+  `parameter_sources`, `argv`, frozen metadata, execution data, and retry
+  context.
+- hifiasm and hifiasm_ont freeze paths use attempt-scoped work and artifact
+  directories.
+- Command-failure and assembly-review quality gates can re-enter parameter
+  recommendation with incremented attempt ids.
+- Assembly LLM decisions are routed through the shared decision boundary instead
+  of stage-local model invocation.
 
 Still missing:
 
-- A full parameter input profile artifact separated from task-scoped prompt profiles.
-- A recommender prompt contract that uses selected cases, rules, skill text, read_qc, and genome_survey.
-- A replayable `parameter_attempts` ledger entry.
-- Retry routing for command failure and assembly_review failure.
-- No-compat cleanup of the old planner method registry, assembly-local LLM calls,
-  loose parameter-loop state, and hash-only runtime artifact refs.
+- Runtime verification of hifiasm and hifiasm_ont catalogs against the
+  project-pinned hifiasm binary/help output.
+- Attempt-scoped command metadata and review failure context artifacts, if kept
+  as separate files in addition to the compact typed attempt entries.
+- No-compat cleanup of the old planner method registry and interactive planner
+  dependencies.
+- Architecture-regression tests proving planner metadata cannot return as a
+  second hardcoded registry.
+- Final methodology, implementation, and user documentation.
 
 ## Existing/New Architecture
 
@@ -170,7 +184,11 @@ Phase10 target contract maintains two related artifacts:
 - `input_profile_ref`: a complete replay/audit artifact with `sample`, `assets`, `read_qc`, `genome_survey`, `previous_attempt`, and `assembly_review` sections.
 - prompt profile: a task-scoped slice of the full profile. The LLM does not receive every field by default.
 
-Current implementation checkpoint: `build_full_parameter_profile()` and `build_prompt_profile()` exist, and freeze functions store `full_parameter_profile` inside `FrozenAttemptSpec.metadata`. Task 8 still needs to write the complete profile as an artifact ref and build/save the task-scoped prompt payload.
+Current implementation checkpoint: the main recommender node writes the complete
+profile and task-scoped prompt payload as attempt-scoped artifacts before
+calling the shared decision boundary. The prompt profile remains a scoped slice
+of the full profile, while the validator can still use the full profile for hard
+rules.
 
 Prompt slicing:
 
