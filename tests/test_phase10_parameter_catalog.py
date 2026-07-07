@@ -678,7 +678,11 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
         self.assertEqual(assembly["status"], "parameters_recommended")
         attempt = assembly["parameter_attempts"][0]
         self.assertEqual(attempt["attempt_id"], 0)
-        self.assertEqual(attempt["method_id"], "hifiasm_ont")
+        self.assertEqual(attempt["method_id"], "assembly.candidate.hifiasm_ont")
+        self.assertEqual(
+            attempt["catalog_ref"],
+            "descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml",
+        )
         self.assertTrue(attempt["validation"]["valid"])
         self.assertIn("parameter_attempt_0/input_profile.json", attempt["input_profile_ref"]["path_ref"])
         self.assertIn("parameter_attempt_0/prompt_payload.json", attempt["prompt_payload_ref"]["path_ref"])
@@ -726,7 +730,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     "parameter_attempts": [
                         {
                             "attempt_id": 0,
-                            "method_id": "hifiasm_ont",
+                            "method_id": "assembly.candidate.hifiasm_ont",
                             "status": "execution_failed",
                             "execution_result": {"return_code": 1, "stderr_path": str(stderr)},
                         }
@@ -749,7 +753,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "assembly": {
                     "status": "draft_ready",
                     "current_parameter_attempt_id": 0,
-                    "parameter_attempts": [{"attempt_id": 0, "method_id": "hifiasm_ont", "status": "executed"}],
+                    "parameter_attempts": [
+                        {"attempt_id": 0, "method_id": "assembly.candidate.hifiasm_ont", "status": "executed"}
+                    ],
                 },
                 "assembly_review": {
                     "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}

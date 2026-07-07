@@ -2,7 +2,7 @@
 
 ## Overview
 
-Phase10 integrates parameter recommendation into the assembly stage, enabling the LLM to recommend L2 (heuristic-tunable) parameters based on input characteristics and prior execution/review failures.
+Phase10 integrates parameter recommendation into the assembly stage, enabling the LLM to recommend L2 (heuristic-tunable) parameters based on input characteristics and prior execution failures. Parameter quality/review gating is handled by the `assembly_review` stage.
 
 ## Key Changes
 
@@ -30,17 +30,17 @@ Phase10 integrates parameter recommendation into the assembly stage, enabling th
 ### 3. Test Compatibility
 
 **Test Status:**
-- **157 passed, 4 skipped**
-- 3 tests in `test_assembly.py` skipped (need Phase10 rewrite)
+- **160 passed, 1 skipped**
+- hifiasm/hifiasm_ont integration tests now run through the Phase10 recommendation flow
 - All Phase10 parameter catalog tests passing
 - All Phase4 Flye tests passing (backward compatible)
 
-**Skipped Tests:**
+**Restored Integration Tests:**
 - `test_local_hifiasm_execution_writes_draft_assembly_and_ledger`
 - `test_local_hifiasm_execution_from_fofn_uses_ont_flag`
 - `test_failed_local_hifiasm_records_failed_attempt`
 
-See `docs/phases/phase10/test_compatibility_notes.md` for details.
+See `docs/phases/phase10/test_compatibility_notes.md` for the resolved compatibility note.
 
 ## Parameter Architecture
 
@@ -78,8 +78,8 @@ Command Builder → Merged argv
 ```
 enter → resolve → infer_profile → select_route → build_candidates → select_primary
   → recommend_parameters → plan_candidate_attempts → {method}_subgraph
-  → freeze_attempt → run_attempt → collect_artifacts → review_quality_gate
-  → (on failure) execution_retry_gate → recommend_parameters (retry)
+  → freeze_attempt → run_attempt → collect_artifacts → execution_retry_gate
+  → (on execution failure) recommend_parameters (retry)
 ```
 
 ### Phase4 Flow (Flye/NextDenovo)
@@ -105,7 +105,7 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 - `app/stages/assembly/decision.py` - Default parameter handling
 
 ### Tests
-- `tests/test_assembly.py` - 3 tests skipped pending rewrite
+- `tests/test_assembly.py` - hifiasm/hifiasm_ont integration tests restored for Phase10
 - `tests/test_phase10_parameter_catalog.py` - All tests passing
 
 ### Documentation
@@ -117,12 +117,12 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 ### Short Term
 1. ✅ All Phase10 tests passing
 2. ✅ Backward compatibility with Phase4 methods maintained
-3. ⏸️ Rewrite 3 skipped hifiasm integration tests
+3. ✅ Restored hifiasm/hifiasm_ont integration tests under Phase10 flow
 
 ### Medium Term
 1. Migrate Flye to Phase10 (add L2 parameters to catalog)
 2. Migrate NextDenovo to Phase10
-3. Add parameter quality gate for more sophisticated retry logic
+3. Extend `assembly_review` parameter quality gate behavior as needed
 
 ### Long Term
 1. Extend to other stages (scaffolding, annotation)
@@ -137,4 +137,4 @@ conda run -n gene_agent pytest tests/test_assembly.py tests/test_ask_plan.py \
   tests/test_phase10_parameter_catalog.py tests/test_registry_executable_invariant.py -v
 ```
 
-Expected: **157 passed, 4 skipped**
+Expected: **160 passed, 1 skipped**

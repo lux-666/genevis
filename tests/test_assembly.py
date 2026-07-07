@@ -692,7 +692,6 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("attempt_failed", event_types)
             self.assertNotIn("attempt_succeeded", event_types)
 
-    @unittest.skip("Phase10: needs rewrite to work with parameter recommendation flow")
     def test_local_hifiasm_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
@@ -717,7 +716,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "hifi",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True, "provide_fallback_defaults": True},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                 }
             }
 
@@ -738,6 +737,10 @@ class AssemblyStageTests(unittest.TestCase):
             candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
+            self.assertEqual(assembly["current_parameter_attempt_id"], 0)
+            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
+            self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
             ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
             events = [
@@ -747,7 +750,6 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("attempt_started", events)
             self.assertIn("attempt_succeeded", events)
 
-    @unittest.skip("Phase10: needs rewrite to work with parameter recommendation flow")
     def test_local_hifiasm_execution_from_fofn_uses_ont_flag(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "ont.fastq"
@@ -763,13 +765,19 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "ont",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True, "provide_fallback_defaults": True},
+                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
+                    "hifiasm_ont_parameters": {"read_type": "ont"},
                 },
             }
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
+            self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             script = (
                 Path(tmpdir)
                 / "work"
@@ -815,7 +823,6 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "blocked_param")
 
-    @unittest.skip("Phase10: needs rewrite to work with parameter recommendation flow")
     def test_failed_local_hifiasm_records_failed_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
@@ -838,13 +845,22 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "hifi",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True, "provide_fallback_defaults": True},
+                    "parameter_recommendation": {
+                        "allow_model_unavailable_defaults": True,
+                        "max_execution_retries": 0,
+                    },
                 }
             }
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
+            assembly = result["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "parameter_retries_exhausted")
+            self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
+            self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
+            self.assertIn("fake hifiasm failed", assembly["execution_failure_log_tail"])
             ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
             events = [
                 json.loads(line)["event_type"]

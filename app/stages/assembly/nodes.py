@@ -686,7 +686,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     selected_case_ids = list(parsed.get("selected_case_ids") or prompt_payload.get("case_selection", {}).get("selected_case_ids") or [])
     attempt = ParameterAttempt(
         attempt_id=attempt_id,
-        method_id=catalog.method_id,
+        method_id=method_name,
         status="recommended" if validation.get("valid") else "validation_failed",
         input_profile_ref=ArtifactRef(
             path_ref=str(prompt_payload["input_profile_ref"]),
