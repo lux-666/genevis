@@ -1,7 +1,7 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Mostly integrated; closed-loop test hardening pending
+**Status**: Complete for current hifiasm/hifiasm_ont scope
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
 
@@ -63,10 +63,13 @@ Implemented in the current slice:
 - ONT review-failure retry is covered by a regression proving L2 changes to
   purge level, `--rl-cut`, and `--sc-cut` can flow into deterministic argv.
 
-Still missing or worth strengthening:
+Post-Phase10 follow-up:
 
 - Broader closed-loop tests that exercise recommendation, freeze, run failure,
   retry, review failure, and retry caps in one scenario.
+- Flye/NextDenovo can be migrated into the same parameter-loop contract in the
+  next phase if the project chooses to expand beyond the current
+  hifiasm/hifiasm_ont scope.
 
 Documentation package:
 

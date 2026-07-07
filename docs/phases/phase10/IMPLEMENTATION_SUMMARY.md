@@ -120,8 +120,8 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 3. ✅ Restored hifiasm/hifiasm_ont integration tests under Phase10 flow
 
 ### Medium Term
-1. Migrate Flye to Phase10 (add L2 parameters to catalog)
-2. Migrate NextDenovo to Phase10
+1. Phase11 candidate: migrate Flye to the parameter loop (add L2 parameters to catalog)
+2. Phase11 candidate: migrate NextDenovo to the parameter loop
 3. Extend `assembly_review` parameter quality gate behavior as needed
 
 ### Long Term

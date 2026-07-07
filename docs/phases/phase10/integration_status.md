@@ -4,7 +4,8 @@
 
 ## Summary
 
-Phase 10 is mostly integrated for the hifiasm and hifiasm_ont parameter loop.
+Phase 10 is complete for the current hifiasm and hifiasm_ont parameter-loop
+scope.
 The catalog, validator, profile helper, knowledge pack, prompt payload builder,
 command-builder foundation, parameter recommender node, session/attempt artifact
 refs, typed parameter attempts, execution retry gate, review-quality retry graph
@@ -107,17 +108,21 @@ focused cleanup regression tests are also in place.
      hifiasm_ont recommendation can adjust `purge_level`, `--rl-cut`, and
      `--sc-cut`, and that those L2 values map into deterministic argv.
 
-## Pending
+## Post-Phase10 Follow-Up
 
-1. **Broader closed-loop coverage**
-   - The focused tests cover the main contracts; a larger end-to-end closed-loop
-     test with mock execution/review can still strengthen confidence.
+These are not blockers for closing Phase 10.
 
-## Next Recommended Slice
+1. **Closed-loop hardening**
+   - The focused tests cover the main contracts. A larger end-to-end test with
+     mock execution/review can still strengthen confidence as the workflow sees
+     more real samples.
 
-**Next: closed-loop test hardening**
+2. **Catalog verification maintenance**
+   - Keep binary-backed catalog verification current when the supported hifiasm
+     version changes.
 
-1. Add or extend closed-loop tests around max retry behavior and attempt
-   artifact refs.
-2. Keep binary-backed catalog verification current when the supported hifiasm
-   version changes.
+3. **Phase11 candidate: Flye/NextDenovo parameter-loop expansion**
+   - If the next phase expands the same contract beyond hifiasm/hifiasm_ont,
+     add Flye and NextDenovo catalogs, route their L2 recommendations through
+     `parameter_attempts`, and then remove the lifecycle compatibility branch
+     that skips typed attempt updates when a method has no `parameter_attempts`.

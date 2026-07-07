@@ -76,4 +76,7 @@ The following cleanup items are complete:
 - architecture-regression tests for the removed planner registry and stage-local assembly model calls;
 - standalone `command.json` and `review_failure.json` attempt artifacts in addition to compact `parameter_attempts`.
 
-Remaining Phase 10 work is narrower: broaden closed-loop regression coverage where useful and keep catalog verification current when the pinned/project-supported hifiasm binary changes.
+Post-Phase10 follow-up is narrower: broaden closed-loop regression coverage
+where useful, keep catalog verification current when the pinned/project-supported
+hifiasm binary changes, and consider Flye/NextDenovo migration as a next-phase
+expansion rather than a Phase 10 blocker.
