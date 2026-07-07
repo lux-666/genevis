@@ -46,10 +46,11 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
         response = model.invoke(messages)
     except Exception as exc:
         if request.kind == "parameter_recommendation" and request.allow_default_on_error:
+            # Return empty L2 params to use all catalog defaults
             return AssemblyDecisionResult(
                 kind=request.kind,
-                raw_response=json.dumps({"params": {}, "reasoning": "model unavailable; using tool defaults", "confidence": 0.0}),
-                parsed={"params": {}, "reasoning": "model unavailable; using tool defaults", "confidence": 0.0},
+                raw_response=json.dumps({"params": {}, "reasoning": "model unavailable; using catalog defaults for all L2 parameters", "confidence": 0.0}),
+                parsed={"params": {}, "reasoning": "model unavailable; using catalog defaults for all L2 parameters", "confidence": 0.0},
                 valid=True,
                 error=f"{type(exc).__name__}: {exc}",
             )

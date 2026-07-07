@@ -23,3 +23,8 @@ resource_hints:
   memory_gb: 128.0
   gpu_required: false
   walltime_hours: 48.0
+planner:
+  required_parameters:
+    - threads
+  parameter_defaults:
+    threads: 4

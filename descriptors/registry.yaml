@@ -36,6 +36,7 @@ methods:
   hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
   t2t.alignment.minimap2: t2t/minimap2_telomere_alignment.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
+  read_qc.length_filter.skip: read_qc/length_filter_skip.yaml
   read_qc.make_fofn.local: read_qc/make_fofn_handoff.yaml
   read_qc.long_read_stats.seqkit_stats: read_qc/seqkit_stats.yaml
   repeat_annotation.masking.repeatmasker: repeat_annotation/repeatmasker_masking.yaml
@@ -43,6 +44,7 @@ by_stage:
   inventory: []
   read_qc:
     - read_qc.long_read_stats.seqkit_stats
+    - read_qc.length_filter.skip
     - read_qc.length_filter.seqkit_seq
     - read_qc.make_fofn.local
   genome_survey:

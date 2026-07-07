@@ -39,6 +39,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_LLM_RESPONSE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ASSEMBLY_PARAMETER_REVIEW_FAILURE,
     ASSEMBLY_PARAMETER_VALIDATION,
     ASSEMBLY_ROUTE_DECISION,
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -922,6 +923,30 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     diagnosis = _review_failure_diagnosis(metrics)
     if diagnosis["passed"]:
         return _update_assembly_output(state, {"status": "parameter_quality_passed", "quality_gate": diagnosis})
+    current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+    previous = _previous_parameter_attempt(assembly_out, current_id + 1)
+    review_failure_ref = _write_attempt_json_artifact(
+        state,
+        current_id,
+        "review_failure.json",
+        {
+            "attempt_id": current_id,
+            "next_attempt_id": current_id + 1,
+            "diagnosis": diagnosis,
+            "review_metrics": metrics,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_REVIEW_FAILURE,
+        method_name="assembly.parameter_quality_gate",
+    )
+    previous = {
+        **previous,
+        "review_failure": diagnosis,
+        "review_failure_ref": review_failure_ref.model_dump(mode="json"),
+    }
+    attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
+    updated_attempts = [previous if item.get("attempt_id") == current_id else item for item in attempts]
+    if previous and not any(item.get("attempt_id") == current_id for item in updated_attempts):
+        updated_attempts.append(previous)
     retry_counts = dict(assembly_out.get("retry_counts") or {})
     used = int(retry_counts.get("review", 0))
     max_retries = _parameter_recommendation_config(state, assembly_out).get("max_review_retries", 2)
@@ -931,11 +956,11 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
             {
                 "status": "parameter_retries_exhausted",
                 "quality_gate": diagnosis,
+                "review_failure": diagnosis,
+                "parameter_attempts": updated_attempts,
                 "reason": f"review parameter retries exhausted after {used} retry attempt(s)",
             },
         )
-    current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
-    previous = _previous_parameter_attempt(assembly_out, current_id + 1)
     retry_counts["review"] = used + 1
     return _update_assembly_output(
         state,
@@ -943,6 +968,7 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
             "status": "retry_parameters_after_review_failure",
             "current_parameter_attempt_id": current_id + 1,
             "previous_parameter_attempt": previous,
+            "parameter_attempts": updated_attempts,
             "retry_counts": retry_counts,
             "review_failure": diagnosis,
             "quality_gate": diagnosis,

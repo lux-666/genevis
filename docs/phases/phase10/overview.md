@@ -1,7 +1,7 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Mostly integrated; cleanup/docs pending
+**Status**: Mostly integrated; closed-loop test hardening pending
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
 
@@ -47,22 +47,34 @@ Implemented in the current slice:
   context.
 - hifiasm and hifiasm_ont freeze paths use attempt-scoped work and artifact
   directories.
+- hifiasm and hifiasm_ont freeze paths write attempt-scoped `command.json`
+  artifacts and store `command_ref`.
 - Command-failure and assembly-review quality gates can re-enter parameter
   recommendation with incremented attempt ids.
+- Review-quality failures write attempt-scoped `review_failure.json` artifacts
+  and store `review_failure_ref`.
 - Assembly LLM decisions are routed through the shared decision boundary instead
   of stage-local model invocation.
+- Planner method metadata is derived from descriptors/catalogs through
+  `app/entrypoints/planner_catalog.py`; the old `_STAGE_METHODS` registry was
+  removed from `ask_planner.py`.
+- Runtime hifiasm help verification is available as a skip-safe test and was
+  completed against local hifiasm `0.25.0-r726`.
+- ONT review-failure retry is covered by a regression proving L2 changes to
+  purge level, `--rl-cut`, and `--sc-cut` can flow into deterministic argv.
 
-Still missing:
+Still missing or worth strengthening:
 
-- Runtime verification of hifiasm and hifiasm_ont catalogs against the
-  project-pinned hifiasm binary/help output.
-- Attempt-scoped command metadata and review failure context artifacts, if kept
-  as separate files in addition to the compact typed attempt entries.
-- No-compat cleanup of the old planner method registry and interactive planner
-  dependencies.
-- Architecture-regression tests proving planner metadata cannot return as a
-  second hardcoded registry.
-- Final methodology, implementation, and user documentation.
+- Broader closed-loop tests that exercise recommendation, freeze, run failure,
+  retry, review failure, and retry caps in one scenario.
+
+Documentation package:
+
+- `docs/methodology/parameter_recommendation_closed_loop.md`
+- `docs/implementation/parameter_recommendation_loop.md`
+- `docs/user_guide/parameter_recommendation.md`
+- `docs/phases/phase10/replay_contract.md`
+- `docs/phases/phase10/no_compat_cleanup_note.md`
 
 ## Existing/New Architecture
 
@@ -114,7 +126,7 @@ genome_survey (EXISTS) ─────────┘        |
                                           |        └──────────────> parameter_recommender retry (NEW)
                                           v
                                       attempt_ledger / parameter_attempts (NEW)
-                                          append-only replay record for every recommend/freeze/run/review attempt
+                                          typed replay record completed across recommend/freeze/run/review
 ```
 
 ## Three-Level Parameter Permission Model
@@ -139,11 +151,12 @@ Operational rule: enumerate the full supported hifiasm CLI surface in the method
 
 ## MVP LangGraph Shape
 
-The architecture diagram above is the canonical Phase10 graph. In implementation terms, insert `recommend_parameters` and `rule_validator` after primary method selection and before method attempt freezing. Add one retry gate after method execution failure and one quality gate after assembly_review metrics. Both retry paths re-enter `parameter_recommender` with `attempt_id + 1` and append a new replay record.
+The architecture diagram above is the canonical Phase10 graph. In implementation terms, insert `recommend_parameters` and `rule_validator` after primary method selection and before method attempt freezing. Add one retry gate after method execution failure and one quality gate after assembly_review metrics. Both retry paths re-enter `parameter_recommender` with `attempt_id + 1` and append a new recommendation attempt.
 
 ## Attempt Replay Contract
 
-Every recommendation/run/review attempt appends a compact immutable entry:
+Every parameter attempt starts as a compact typed recommendation entry and is
+completed as freeze/run/review facts become available:
 
 ```yaml
 attempt_id: 0
@@ -175,7 +188,10 @@ quality_gate:
   failure_mode: under_purged
 ```
 
-Replay rule: a retry never mutates a previous entry. It reads previous attempt refs and writes `attempt_id + 1`.
+Replay rule: a retry does not overwrite earlier recommendation artifacts,
+command artifacts, or attempt directories. The retry gate may complete the
+reviewed/executed attempt entry with execution or review facts, then writes
+`attempt_id + 1` for the next recommendation.
 
 ## Full Profile vs Prompt Profile
 

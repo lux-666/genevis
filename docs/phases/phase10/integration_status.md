@@ -8,9 +8,9 @@ Phase 10 is mostly integrated for the hifiasm and hifiasm_ont parameter loop.
 The catalog, validator, profile helper, knowledge pack, prompt payload builder,
 command-builder foundation, parameter recommender node, session/attempt artifact
 refs, typed parameter attempts, execution retry gate, review-quality retry graph
-edge, and attempt-scoped freeze directories are in place. Planner-registry
-cleanup, runtime catalog verification, standalone command/review artifacts, and
-final documentation are still pending.
+edge, attempt-scoped freeze directories, and command/review attempt artifacts
+are in place. Planner-registry cleanup, runtime catalog verification, and
+focused cleanup regression tests are also in place.
 
 ## Completed
 
@@ -68,36 +68,56 @@ final documentation are still pending.
    - The next recommendation receives prior attempt context and review metrics.
    - Retry caps prevent infinite review loops.
 
+11. **Attempt artifact completion** ✅
+   - hifiasm/hifiasm_ont freeze nodes write `command.json` under the current
+     parameter attempt directory and store `command_ref` on the attempt.
+   - Review-quality failures write `review_failure.json` under the reviewed
+     parameter attempt directory and store `review_failure_ref` on the attempt.
+
+12. **Documentation package** ✅
+   - `docs/methodology/parameter_recommendation_closed_loop.md`
+   - `docs/implementation/parameter_recommendation_loop.md`
+   - `docs/user_guide/parameter_recommendation.md`
+   - `docs/phases/phase10/replay_contract.md`
+   - `docs/phases/phase10/no_compat_cleanup_note.md`
+   - Docs describe the descriptor-derived planner catalog, verified hifiasm
+     runtime help surface, replay contract, and no-compat cleanup.
+
+13. **No-compat planner cleanup** ✅
+   - `app/entrypoints/planner_catalog.py` derives planner method metadata from
+     `DescriptorRegistry`.
+   - Method descriptors carry planner-facing required parameters, defaults,
+     selection roles, display names, and planner-only method markers.
+   - `ask_planner.py` no longer maintains `_STAGE_METHODS`.
+   - `ask_interactive.py` consumes the same descriptor-derived catalog.
+   - Registry executable invariant tests use stage-owned runner declarations
+     and ignore descriptor-declared planner-only methods.
+
+14. **Runtime catalog verification** ✅
+   - hifiasm and hifiasm_ont catalogs were verified against local hifiasm
+     `0.25.0-r726` help output through a skip-safe test that runs when
+     `HIFIASM_BIN` or `hifiasm` on `PATH` is available.
+   - Evidence is recorded in
+     `docs/phases/phase10/hifiasm_runtime_verification_2026-07-07.md`.
+   - Release verification can set `PHASE10_REQUIRE_HIFIASM_RUNTIME=1` so a
+     missing hifiasm binary fails instead of skipping.
+
+15. **ONT retry proof** ✅
+   - Review-failure retry is covered by a regression proving a second
+     hifiasm_ont recommendation can adjust `purge_level`, `--rl-cut`, and
+     `--sc-cut`, and that those L2 values map into deterministic argv.
+
 ## Pending
 
-1. **Attempt artifact completion**
-   - `parameter_attempts` record recommendation/freeze/run/review data, but
-     command metadata and review failure context should also be written as
-     attempt-scoped artifacts if the final replay contract keeps `command.json`
-     and `review_failure.json` as standalone files.
-
-2. **Runtime catalog verification**
-   - Verify hifiasm and hifiasm_ont catalogs against the project-pinned hifiasm binary/help output in the execution environment.
-
-3. **No-compat architecture cleanup**
-   - Derive planner method metadata from descriptors/catalogs.
-   - Delete the planner's duplicate `_STAGE_METHODS` registry.
-   - Delete old compatibility paths rather than preserving wrappers.
-
-4. **Final documentation**
-   - Write the methodology, implementation guide, user guide, replay contract,
-     and no-compat cleanup summary.
+1. **Broader closed-loop coverage**
+   - The focused tests cover the main contracts; a larger end-to-end closed-loop
+     test with mock execution/review can still strengthen confidence.
 
 ## Next Recommended Slice
 
-**Next: planner no-compat cleanup**
+**Next: closed-loop test hardening**
 
-1. Replace `ask_planner.py` `_STAGE_METHODS` with descriptor/catalog-derived
-   planner metadata.
-2. Update `ask_interactive.py` and registry invariant tests to consume the same
-   derived metadata.
-3. Add architecture-regression tests that fail if `_STAGE_METHODS`, old
-   planner constants, stage-local assembly model invocation, or hash-only
-   runtime refs return.
-4. After planner cleanup, add the remaining command/review attempt artifacts and
-   run hifiasm binary/help catalog verification.
+1. Add or extend closed-loop tests around max retry behavior and attempt
+   artifact refs.
+2. Keep binary-backed catalog verification current when the supported hifiasm
+   version changes.

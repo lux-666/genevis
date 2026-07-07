@@ -1,7 +1,7 @@
 # Task 12: Session/Attempt Artifact Reference Design
 
 **Phase**: 10
-**Status**: Implemented for parameter prompt/profile/response/validation artifacts; command/review artifact completion pending
+**Status**: Implemented
 **Depends on**: Tasks 8-10
 **Created**: 2026-07-05
 **Updated**: 2026-07-07
@@ -43,6 +43,10 @@ llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0/llm_resp
 llm_response_hash: <sha256>
 validation_ref: data/artifacts/assembly/<session>/parameter_attempt_0/validation.json
 validation_hash: <sha256>
+command_ref: data/artifacts/assembly/<session>/parameter_attempt_0/command.json
+command_hash: <sha256>
+review_failure_ref: data/artifacts/assembly/<session>/parameter_attempt_0/review_failure.json
+review_failure_hash: <sha256>
 ```
 
 Rules:
@@ -129,7 +133,7 @@ class ArtifactRef(BaseModel):
 
 - [x] Main graph writes profile, prompt, response, and validation artifacts
       under `data/artifacts/assembly/<session>/`.
-- [ ] Command metadata and review failure context are written as
+- [x] Command metadata and review failure context are written as
       attempt-scoped artifacts under `data/artifacts/assembly/<session>/`.
 - [x] Every attempt-specific artifact is under
       `parameter_attempt_<attempt_id>/`.

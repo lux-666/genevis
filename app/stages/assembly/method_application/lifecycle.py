@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
@@ -20,11 +21,15 @@ from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactRef,
     ArtifactMeta,
     AssemblyCandidateBundle,
+    ParameterAttempt,
+    file_sha256,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
+from app.stages.base import absolute_data_dir
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,88 @@ def fail_update(state: TopLevelState, reason: str) -> dict:
     return update_assembly_output(state, {"status": "failed", "reason": reason})
 
 
+def write_parameter_attempt_json_artifact(
+    state: TopLevelState,
+    attempt_id: int,
+    filename: str,
+    payload: dict[str, Any],
+    *,
+    artifact_type: str,
+    method_name: str,
+) -> ArtifactRef:
+    """Write an attempt-scoped assembly parameter artifact and register it."""
+
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = artifact_dir / filename
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        path,
+        stage="assembly",
+        method_name=method_name,
+        artifact_type=artifact_type,
+        metadata={"attempt_id": attempt_id},
+    )
+    append_artifact_records(data_dir, session_id, [artifact])
+    return ArtifactRef(
+        path_ref=f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}",
+        sha256=file_sha256(path),
+        artifact_type=artifact_type,
+    )
+
+
+def current_parameter_attempt(
+    output: dict[str, Any],
+    *,
+    method_id: str,
+    label: str,
+) -> tuple[ParameterAttempt | None, str | None]:
+    """Return the typed current ParameterAttempt for freeze/read paths."""
+
+    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    for item in output.get("parameter_attempts") or []:
+        if not isinstance(item, dict) or item.get("attempt_id") != attempt_id:
+            continue
+        try:
+            attempt = ParameterAttempt.model_validate(item)
+        except ValidationError as exc:
+            return None, f"{label} current parameter attempt is not a valid ParameterAttempt: {exc}"
+        if attempt.method_id != method_id:
+            return None, (
+                f"{label} current parameter attempt method_id {attempt.method_id!r} "
+                f"does not match {method_id!r}"
+            )
+        return attempt, None
+    return None, f"{label} requires a typed current ParameterAttempt with attempt_id={attempt_id}"
+
+
+def update_current_parameter_attempt(
+    output: dict[str, Any],
+    *,
+    method_id: str,
+    label: str,
+    **updates: Any,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Apply lifecycle updates after validating the current attempt shape."""
+
+    attempt, error = current_parameter_attempt(output, method_id=method_id, label=label)
+    if error:
+        return [], error
+    assert attempt is not None
+    updated = ParameterAttempt.model_validate({**attempt.model_dump(mode="json"), **updates}).model_dump(mode="json")
+    attempts: list[dict[str, Any]] = []
+    for item in output.get("parameter_attempts") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("attempt_id") == attempt.attempt_id:
+            attempts.append(updated)
+        else:
+            attempts.append(ParameterAttempt.model_validate(item).model_dump(mode="json"))
+    return attempts, None
+
+
 def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict:
     """Execute the frozen attempt and persist a method-namespaced result."""
     output = assembly_output(state)
@@ -97,25 +184,35 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         fail_label=lifecycle.name,
     )
     result = outcome.result.model_dump(mode="json")
-    parameter_attempts = _update_current_parameter_attempt(
-        output,
-        status="execution_failed" if not outcome.success else "executed",
-        execution_result=result,
-    )
-    if not outcome.success:
-        return update_assembly_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                lifecycle.execution_result_key: result,
-                "parameter_attempts": parameter_attempts,
-            },
+
+    # Phase10: Flye/NextDenovo don't have parameter_attempts yet, skip update for them
+    if output.get("parameter_attempts"):
+        parameter_attempts, attempt_error = update_current_parameter_attempt(
+            output,
+            method_id=lifecycle.method_name,
+            label=lifecycle.name,
+            status="execution_failed" if not outcome.success else "executed",
+            execution_result=result,
         )
-    return update_assembly_output(
-        state,
-        {"status": lifecycle.ran_status, lifecycle.execution_result_key: result, "parameter_attempts": parameter_attempts},
-    )
+        if attempt_error:
+            return fail_update(state, attempt_error)
+    else:
+        parameter_attempts = []
+
+    if not outcome.success:
+        updates = {
+            "status": "failed",
+            "reason": outcome.error,
+            lifecycle.execution_result_key: result,
+        }
+        if parameter_attempts:
+            updates["parameter_attempts"] = parameter_attempts
+        return update_assembly_output(state, updates)
+
+    updates = {"status": lifecycle.ran_status, lifecycle.execution_result_key: result}
+    if parameter_attempts:
+        updates["parameter_attempts"] = parameter_attempts
+    return update_assembly_output(state, updates)
 
 
 def collect_method_artifacts(
@@ -234,25 +331,6 @@ def collect_method_artifacts(
 
 def unique_refs(refs: list[str]) -> list[str]:
     return list(dict.fromkeys(refs))
-
-
-def _update_current_parameter_attempt(output: dict[str, Any], **updates: Any) -> list[dict[str, Any]]:
-    if not output.get("parameter_attempts"):
-        return []
-    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
-    attempts: list[dict[str, Any]] = []
-    found = False
-    for item in output.get("parameter_attempts") or []:
-        if not isinstance(item, dict):
-            continue
-        current = dict(item)
-        if current.get("attempt_id") == attempt_id:
-            current.update(updates)
-            found = True
-        attempts.append(current)
-    if not found:
-        attempts.append({"attempt_id": attempt_id, **updates})
-    return attempts
 
 
 def positive_int(

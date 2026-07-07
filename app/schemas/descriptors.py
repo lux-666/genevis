@@ -29,6 +29,24 @@ class IOSpec(BaseModel):
     required: bool = True
 
 
+class PlannerConditionalRequirement(BaseModel):
+    """Planner parameter requirements triggered by other parameter values."""
+
+    condition: dict[str, Any] = Field(default_factory=dict)
+    required: list[str] = Field(default_factory=list)
+
+
+class PlannerMetadata(BaseModel):
+    """Planner-facing method metadata declared by method descriptors."""
+
+    required_parameters: list[str] = Field(default_factory=list)
+    conditional_required_parameters: list[PlannerConditionalRequirement] = Field(default_factory=list)
+    parameter_defaults: dict[str, Any] = Field(default_factory=dict)
+    selection_role: str | None = None
+    display_name: str | None = None
+    execution_kind: Literal["local", "planner_only"] = "local"
+
+
 class PackageDescriptor(BaseModel):
     """Tool-level capability descriptor."""
 
@@ -66,6 +84,7 @@ class MethodDescriptor(BaseModel):
     review_notes: list[str] = Field(default_factory=list)
     evm: dict[str, str] | None = None
     parameter_catalog: str | None = None
+    planner: PlannerMetadata = Field(default_factory=PlannerMetadata)
 
 
 class FrozenAttemptSpec(BaseModel):

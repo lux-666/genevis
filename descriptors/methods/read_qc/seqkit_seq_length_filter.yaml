@@ -19,3 +19,7 @@ resource_hints:
   memory_gb: 1.0
   gpu_required: false
   walltime_hours: 2.0
+planner:
+  required_parameters:
+    - min_len
+  selection_role: length_filter

@@ -1,7 +1,7 @@
 # Task 2: Create hifiasm Parameter Catalog
 
 **Phase**: 10
-**Status**: Implemented; runtime binary verification pending
+**Status**: Implemented; runtime binary help verified
 **Depends on**: Task 1
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
@@ -210,6 +210,7 @@ parameters:
 ## Implementation Notes
 
 - The current implementation catalog exists at `descriptors/knowledge_packs/assembly/methods/hifiasm/params.yaml` and loads through the shared schema. Before release, verify the catalog against the project-pinned hifiasm binary/help output in the execution environment.
+- Runtime help verification was completed on 2026-07-07 against `/opt/homebrew/Caskroom/miniconda/base/envs/env_geno_exec/bin/hifiasm`, which reports `0.25.0-r726` and satisfies the project-supported `>=0.21.0` constraint in `descriptors/packages/hifiasm.yaml`. The `hifiasm -h` output advertised 66 CLI flags, and every advertised flag is present in both the `hifiasm` and `hifiasm_ont` catalogs. Catalog-only flags remain documented as the upstream help/CommandLines.cpp-derived surface and are not proven by `-h` alone.
 - Defaults are documentation and fallback only. If the recommender omits an L2 parameter, the command builder should usually omit it and let hifiasm defaults apply.
 - L1 values are emitted only when confidently derived. If a factual value is missing, put `unknown` or omit it from L1 prompt context.
 - L0/L1 values are derived through catalog `source_priority`; do not add builder-side hard-coded knowledge for specific parameter names.
@@ -224,6 +225,10 @@ parameters:
 - Assert `hg_size`, `hom_cov`, and `n_hap` are L1.
 - Assert behavior-changing parameters such as `purge_level`, `kmer_length`, and `high_freq_kmer_drop` are L2.
 - Assert the catalog records the supported hifiasm CLI surface rather than only the excerpted MVP examples.
+- Runtime binary verification is skip-safe in normal developer test runs; set
+  `PHASE10_REQUIRE_HIFIASM_RUNTIME=1` with `HIFIASM_BIN` for a release profile
+  where missing hifiasm must fail. The 2026-07-07 verification record is
+  `docs/phases/phase10/hifiasm_runtime_verification_2026-07-07.md`.
 
 ## Acceptance Criteria
 
@@ -231,7 +236,7 @@ parameters:
 - [x] No secondary permission-control fields exist.
 - [x] Catalog loads through the new schema.
 - [x] The catalog covers the currently documented hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
-- [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
+- [x] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
 - [x] The prompt payload builder can include all L2 entries.
 - [x] The integrated recommender node consumes that prompt payload in the main graph.
 - [x] The command builder can merge L0/L1/L2 sources into a deterministic hifiasm argv.

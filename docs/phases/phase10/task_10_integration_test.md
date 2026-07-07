@@ -1,7 +1,7 @@
 # Task 10: Integration Tests for Parameter Closed Loop
 
 **Phase**: 10
-**Status**: Focused tests implemented; planner-registry architecture guard pending
+**Status**: Focused tests implemented; planner-registry architecture guard implemented
 **Depends on**: Tasks 1-9
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
@@ -245,8 +245,9 @@ def test_running_graph_uses_session_attempt_refs():
 - [x] Tests cover validation failure before execution.
 - [x] Tests cover command failure retry with log tail.
 - [x] Tests cover review failure retry.
-- [x] Tests prove attempt entries are append-only and replayable.
+- [x] Tests prove new recommendation attempts are append-only and replayable,
+  while current attempts can be completed with lifecycle refs/results.
 - [x] Tests confirm only the L0/L1/L2 permission model remains.
-- [ ] Tests fail if planner method metadata is maintained as a second hardcoded registry.
+- [x] Tests fail if planner method metadata is maintained as a second hardcoded registry.
 - [x] Tests fail if assembly stage nodes invoke the LLM directly.
 - [x] Tests fail if main-flow prompt/profile refs are hash-only instead of session/attempt paths.

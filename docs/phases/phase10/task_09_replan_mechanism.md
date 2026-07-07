@@ -111,8 +111,10 @@ The LLM still may output only L2 params.
 
 ## Attempt Ledger Rules
 
-- Attempts are append-only.
-- Each retry increments `attempt_id`.
+- New recommendation attempts are append-only.
+- Each retry increments `attempt_id` for the next recommendation.
+- Freeze, execution, and review gates may complete the current attempt entry
+  with lifecycle facts before the next attempt is created.
 - A new attempt may reuse the same selected cases or select new cases, but must record `selected_case_ids`.
 - Previous prompt/response refs remain intact.
 - The command for every attempt is recorded as argv.

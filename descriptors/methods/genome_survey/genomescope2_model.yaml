@@ -20,3 +20,8 @@ resource_hints:
   memory_gb: 8.0
   gpu_required: false
   walltime_hours: 2.0
+planner:
+  required_parameters:
+    - kmer_size
+  parameter_defaults:
+    kmer_size: 21

@@ -30,3 +30,19 @@ resource_hints:
   memory_gb: 128.0
   gpu_required: false
   walltime_hours: 24.0
+planner:
+  required_parameters:
+    - input_mode
+    - chromosome_count
+  conditional_required_parameters:
+    - condition:
+        input_mode: merged_nodups
+      required:
+        - merged_nodups_ref
+    - condition:
+        input_mode: raw_reads
+      required:
+        - restriction_enzyme
+        - chrom_sizes_ref
+  parameter_defaults:
+    input_mode: raw_reads

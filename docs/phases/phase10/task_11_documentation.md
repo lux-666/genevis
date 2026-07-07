@@ -1,7 +1,7 @@
 # Task 11: Documentation for Three-Level Parameter Recommendation
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Completed for current implementation; pending items documented
 **Depends on**: All implementation tasks
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
@@ -58,8 +58,9 @@ failure.
 ## Replay
 
 Every attempt records prompt refs, response refs, parameter sources, argv,
-execution logs, review failure context, and status. Retries append new attempts
-and never mutate old ones.
+execution logs, review failure context, and status. Retries append new
+recommendation attempts; freeze, execution, and review gates may complete the
+current attempt entry with lifecycle facts.
 ```
 
 ## Deliverable 2: Implementation Guide
@@ -132,9 +133,9 @@ Document the final architecture, not the migration path:
 
 ## Acceptance Criteria
 
-- [ ] Methodology doc written.
-- [ ] Implementation guide written.
-- [ ] User guide written.
-- [ ] Docs include the attempt replay contract.
-- [ ] Docs match implementation behavior.
-- [ ] Docs describe the cleanup result without preserving old compatibility paths as supported APIs.
+- [x] Methodology doc written: `docs/methodology/parameter_recommendation_closed_loop.md`.
+- [x] Implementation guide written: `docs/implementation/parameter_recommendation_loop.md`.
+- [x] User guide written: `docs/user_guide/parameter_recommendation.md`.
+- [x] Docs include the attempt replay contract: `docs/phases/phase10/replay_contract.md`.
+- [x] Docs match implementation behavior, including descriptor-derived planner metadata, runtime help verification, and standalone command/review artifacts.
+- [x] Docs describe the cleanup target without preserving old compatibility paths as supported APIs: `docs/phases/phase10/no_compat_cleanup_note.md`.

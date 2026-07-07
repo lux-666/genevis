@@ -17,11 +17,11 @@ from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
-    _STAGE_METHODS,
     _STAGES_NEEDING_METHOD_SELECTION,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
+    _executable_methods_for_stage,
     _fill_draft_default_methods,
     build_initial_plan_draft,
     build_run_plan_summary,
@@ -594,7 +594,7 @@ def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
 
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
-    methods = _STAGE_METHODS.get(stage, [])
+    methods = _executable_methods_for_stage(stage)
     if not methods:
         print(f"\nNo method choices are registered for {stage}.")
         return plan

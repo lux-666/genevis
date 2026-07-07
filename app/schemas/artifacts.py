@@ -24,6 +24,7 @@ ASSEMBLY_PARAMETER_PROMPT_PAYLOAD = "assembly.parameter.prompt_payload"
 ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
 ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
+ASSEMBLY_PARAMETER_REVIEW_FAILURE = "assembly.parameter.review_failure"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
@@ -121,6 +122,8 @@ class ParameterAttempt(BaseModel):
     prompt_payload_ref: ArtifactRef
     llm_response_ref: ArtifactRef | None = None
     validation_ref: ArtifactRef | None = None
+    command_ref: ArtifactRef | None = None
+    review_failure_ref: ArtifactRef | None = None
     catalog_ref: str | None = None
     knowledge_pack_ref: str | None = None
     selected_case_ids: list[str] = Field(default_factory=list)

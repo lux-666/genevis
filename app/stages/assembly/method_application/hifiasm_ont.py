@@ -8,6 +8,7 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
+from app.schemas.artifacts import ASSEMBLY_PARAMETER_COMMAND
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
@@ -18,9 +19,12 @@ from app.stages.assembly.method_application.lifecycle import (
     blocked_parameters,
     build_method_graph,
     collect_method_artifacts,
+    current_parameter_attempt,
     fail_update,
     positive_int,
     update_assembly_output,
+    update_current_parameter_attempt,
+    write_parameter_attempt_json_artifact,
 )
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
@@ -120,6 +124,24 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script.chmod(0o755)
+    command_ref = write_parameter_attempt_json_artifact(
+        state,
+        parameter_attempt_id,
+        "command.json",
+        {
+            "attempt_id": parameter_attempt_id,
+            "method_id": HIFIASM_ONT_METHOD,
+            "argv": argv,
+            "command": command,
+            "script_path": str(script),
+            "working_dir": str(working_dir),
+            "output_dir": str(output_dir),
+            "draft_assembly_path": str(draft),
+            "parameter_sources": parameter_sources,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_COMMAND,
+        method_name=HIFIASM_ONT_METHOD,
+    )
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:assembly:hifiasm_ont:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
@@ -143,13 +165,17 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             "parameter_attempt_id": parameter_attempt_id,
         },
     )
-    parameter_attempts = _update_parameter_attempt(
+    parameter_attempts, attempt_error = update_current_parameter_attempt(
         output,
-        parameter_attempt_id,
+        method_id=HIFIASM_ONT_METHOD,
+        label="Hifiasm ONT",
         status="frozen",
         parameter_sources=parameter_sources,
         argv=argv,
+        command_ref=command_ref.model_dump(mode="json"),
     )
+    if attempt_error:
+        return fail_update(state, attempt_error)
     return update_assembly_output(
         state,
         {
@@ -205,17 +231,33 @@ def _read_paths(input_ref: Any, input_type: Any) -> tuple[list[Path], str | None
 
 
 def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    params = dict(output.get("hifiasm_ont_parameters") or {})
+    """Extract and validate hifiasm_ont parameters (Level 0: from config/priors, not from L2 recommendations)."""
+    # read_type and threads are Level 0 parameters, not Level 2
+    # They come from read_type_prior and hifiasm_ont_parameters, not from recommended_params
     missing: list[str] = []
     invalid: list[dict[str, Any]] = []
-    read_type = params.get("read_type") or dict(output.get("read_type_prior") or {}).get("hifiasm_ont")
+
+    # Get read_type from read_type_prior (set by input resolution) or fallback to hifiasm_ont_parameters
+    read_type = dict(output.get("read_type_prior") or {}).get("hifiasm_ont")
     if not read_type:
-        missing.append("hifiasm_ont_parameters.read_type")
+        # Fallback for tests that don't set read_type_prior
+        params = dict(output.get("hifiasm_ont_parameters") or {})
+        read_type = params.get("read_type")
+    if not read_type:
+        missing.append("read_type (from read_type_prior.hifiasm_ont or hifiasm_ont_parameters.read_type)")
     elif read_type not in HIFIASM_ONT_READ_TYPE_FLAGS:
-        invalid.append({"param": "hifiasm_ont_parameters.read_type", "value": read_type, "accepted": sorted(HIFIASM_ONT_READ_TYPE_FLAGS)})
-    threads = positive_int(params.get("threads"), "hifiasm_ont_parameters.threads", missing, invalid)
+        invalid.append({"param": "read_type", "value": read_type, "accepted": sorted(HIFIASM_ONT_READ_TYPE_FLAGS)})
+
+    # Get threads from hifiasm_ont_parameters (run config) or use catalog default (32)
+    params = dict(output.get("hifiasm_ont_parameters") or {})
+    threads = params.get("threads")
+    if threads is None:
+        threads = 32  # Catalog default
+    else:
+        threads = positive_int(threads, "hifiasm_ont_parameters.threads", missing, invalid)
+
     if missing or invalid:
-        return {}, blocked_parameters("hifiasm_ont_parameters", HIFIASM_ONT_METHOD, missing, invalid)
+        return {}, blocked_parameters("hifiasm_ont level-0 parameters", HIFIASM_ONT_METHOD, missing, invalid)
     return {"read_type": str(read_type), "threads": threads}, None
 
 
@@ -227,27 +269,8 @@ def _load_catalog():
 
 
 def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
-    for attempt in output.get("parameter_attempts") or []:
-        if isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id:
-            raw = attempt.get("recommended_params")
-            if not isinstance(raw, dict):
-                return {}, f"Hifiasm ONT current parameter attempt has invalid recommended_params: {type(raw).__name__}"
-            return dict(raw), None
-    return {}, "Hifiasm ONT recommended parameters must be a mapping in a typed current parameter attempt"
-
-
-def _update_parameter_attempt(output: dict[str, Any], attempt_id: int, **updates: Any) -> list[dict[str, Any]]:
-    attempts: list[dict[str, Any]] = []
-    found = False
-    for item in output.get("parameter_attempts") or []:
-        if not isinstance(item, dict):
-            continue
-        current = dict(item)
-        if current.get("attempt_id") == attempt_id:
-            current.update(updates)
-            found = True
-        attempts.append(current)
-    if not found:
-        attempts.append({"attempt_id": attempt_id, **updates})
-    return attempts
+    attempt, error = current_parameter_attempt(output, method_id=HIFIASM_ONT_METHOD, label="Hifiasm ONT")
+    if error:
+        return {}, error
+    assert attempt is not None
+    return dict(attempt.recommended_params), None

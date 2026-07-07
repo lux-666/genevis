@@ -1,7 +1,7 @@
 # Task 13: No-Compatibility Architecture Cleanup
 
 **Phase**: 10
-**Status**: Partially implemented
+**Status**: Completed for current Phase10 scope
 **Depends on**: Tasks 8-12
 **Created**: 2026-07-06
 **Updated**: 2026-07-07
@@ -90,7 +90,9 @@ Requirements:
 - Freeze nodes read the current `ParameterAttempt`, not old loose keys such as
   `recommended_params` as a parallel API.
 - Validation failures and LLM failures append typed attempts before stopping.
-- Retry gates append typed attempts and never mutate previous attempts.
+- Retry gates append typed attempts for new recommendations and only complete
+  the reviewed/executed attempt in place with lifecycle facts such as
+  execution results, log tails, and review failure refs.
 - Large payloads remain artifact refs; the typed state stores compact refs and
   status only.
 
@@ -116,12 +118,12 @@ Delete, do not wrap:
 
 ## Acceptance Criteria
 
-- [ ] Method metadata has one source of truth.
-- [ ] Interactive planning derives from descriptors/catalogs.
+- [x] Method metadata has one source of truth.
+- [x] Interactive planning derives from descriptors/catalogs.
 - [x] Assembly LLM decisions use the shared decision boundary.
 - [x] Parameter-loop state is typed and compact.
-- [ ] Old compatibility paths listed above are deleted.
-- [ ] Architecture-regression tests fail if any deleted path returns.
+- [x] Old compatibility paths listed above are deleted.
+- [x] Architecture-regression tests fail if any deleted path returns.
 
 ## Current Cleanup State
 
@@ -131,5 +133,8 @@ Delete, do not wrap:
   instead of old ad hoc recommended-parameter state.
 - Done: hash-only prompt/profile runtime artifact paths were removed from the
   parameter-loop writer.
-- Pending: planner `_STAGE_METHODS` and interactive planner dependencies still
-  need migration to descriptor-derived metadata.
+- Done: planner `_STAGE_METHODS` was removed; planner method metadata is
+  derived from descriptors through `app/entrypoints/planner_catalog.py`.
+- Done: `ask_interactive.py` consumes the same descriptor-derived planner
+  catalog.
+- Done: registry executable invariant tests no longer import planner constants.

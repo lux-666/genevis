@@ -1,7 +1,7 @@
 # Task 3: Create hifiasm_ont Parameter Catalog
 
 **Phase**: 10
-**Status**: Implemented; runtime binary verification and ONT retry proof pending
+**Status**: Implemented; runtime binary help and ONT retry proof verified
 **Depends on**: Task 1
 **Created**: 2026-07-02
 **Updated**: 2026-07-07
@@ -230,6 +230,7 @@ parameters:
 ## Prompt Behavior
 
 - The current implementation catalog exists at `descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml` and loads through the shared schema. Before release, verify the ONT-valid surface against the project-pinned hifiasm binary/help output in the execution environment.
+- Runtime help verification was completed on 2026-07-07 against `/opt/homebrew/Caskroom/miniconda/base/envs/env_geno_exec/bin/hifiasm`, which reports `0.25.0-r726` and satisfies the project-supported `>=0.21.0` constraint in `descriptors/packages/hifiasm.yaml`. The committed verification record is `docs/phases/phase10/hifiasm_runtime_verification_2026-07-07.md`. The test remains skip-safe for normal developer runs, but `PHASE10_REQUIRE_HIFIASM_RUNTIME=1` turns missing `HIFIASM_BIN`/PATH hifiasm into a failure for release verification.
 - L0 fields are excluded from prompt payload.
 - L1 fields enter `readonly_facts`.
 - L2 fields enter `modifiable_parameters`.
@@ -252,8 +253,8 @@ parameters:
 - [x] `params.yaml` exists for hifiasm_ont.
 - [x] The catalog validates through the three-level schema.
 - [x] The catalog covers the currently documented ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
-- [ ] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
+- [x] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
 - [x] The prompt payload builder can include all L2 entries.
 - [x] The integrated recommender node consumes that prompt payload in the main graph.
 - [x] The command builder emits `--ont` mechanically from L0 and never from LLM output.
-- [ ] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.
+- [x] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.
