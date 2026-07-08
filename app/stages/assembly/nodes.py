@@ -881,6 +881,8 @@ def execution_retry_gate(state: TopLevelState) -> dict:
     attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
     previous = next((item for item in attempts if item.get("attempt_id") == attempt_id), attempts[-1] if attempts else {})
     execution_result = dict(previous.get("execution_result") or {})
+    if not execution_result:
+        return {}
     failure_log_tail = _failure_log_tail(execution_result)
     if failure_log_tail:
         previous["failure_log_tail"] = failure_log_tail
@@ -1310,10 +1312,10 @@ def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
     ):
         return None
     primary = assembly_out.get("primary_method")
-    if primary in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
+    if isinstance(primary, str):
         return str(primary)
     selection = _selection_from_output(assembly_out)
-    if selection and selection.primary_method in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
+    if selection:
         return selection.primary_method
     return None
 

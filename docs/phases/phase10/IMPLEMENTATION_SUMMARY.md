@@ -16,7 +16,7 @@ Phase10 integrates parameter recommendation into the assembly stage, enabling th
 **Changes:**
 - `_parameters()` functions now get L0 parameters (read_type, threads) from `read_type_prior` and `{method}_parameters`, not from L2 `recommended_params`
 - L2 parameters come from `parameter_attempts[].recommended_params` and are merged by command builder
-- `run_method_attempt()` only updates `parameter_attempts` for methods that have them (hifiasm/hifiasm_ont), skipping Flye/NextDenovo
+- `run_method_attempt()` updates typed `parameter_attempts` for catalog-driven assembly methods
 
 ### 2. Default Parameters for Testing
 
@@ -30,10 +30,9 @@ Phase10 integrates parameter recommendation into the assembly stage, enabling th
 ### 3. Test Compatibility
 
 **Test Status:**
-- **160 passed, 1 skipped**
-- hifiasm/hifiasm_ont integration tests now run through the Phase10 recommendation flow
-- All Phase10 parameter catalog tests passing
-- All Phase4 Flye tests passing (backward compatible)
+- hifiasm/hifiasm_ont integration tests run through the Phase10 recommendation flow
+- Flye/NextDenovo retain local execution coverage and, after Phase11, use typed catalog-driven parameter attempts
+- Phase10 parameter catalog tests cover command building, validation, retry flow, and corrupt replay failure handling
 
 **Restored Integration Tests:**
 - `test_local_hifiasm_execution_writes_draft_assembly_and_ledger`
@@ -82,19 +81,20 @@ enter → resolve → infer_profile → select_route → build_candidates → se
   → (on execution failure) recommend_parameters (retry)
 ```
 
-### Phase4 Flow (Flye/NextDenovo)
+### Phase11 Flow (Flye/NextDenovo)
 ```
 enter → resolve → infer_profile → select_route → build_candidates → select_primary
-  → plan_candidate_attempts → {method}_subgraph
-  → freeze_attempt → run_attempt → collect_artifacts
+  → recommend_parameters → plan_candidate_attempts → {method}_subgraph
+  → freeze_attempt → run_attempt → collect_artifacts → execution_retry_gate
+  → (on execution failure) recommend_parameters (retry)
 ```
 
 ## Backward Compatibility
 
-- **Flye and NextDenovo** continue to use Phase4 flow (no parameter recommendation)
-- `{method}_parameters` still work for explicit parameter setting
-- Tests for Phase4 methods all pass
-- No breaking changes to external interfaces
+- **Flye and NextDenovo** were migrated in Phase11 to the same typed parameter-attempt contract as hifiasm/hifiasm_ont.
+- `{method}_parameters` still provide L0 execution inputs such as read type, genome size, and threads.
+- Behavior knobs live in L2 catalogs and are rendered from `parameter_attempts[].recommended_params` with catalog defaults as fallback.
+- External run configuration remains backward compatible for L0 execution inputs.
 
 ## Files Modified
 
@@ -120,8 +120,8 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 3. ✅ Restored hifiasm/hifiasm_ont integration tests under Phase10 flow
 
 ### Medium Term
-1. Phase11 candidate: migrate Flye to the parameter loop (add L2 parameters to catalog)
-2. Phase11 candidate: migrate NextDenovo to the parameter loop
+1. ✅ Phase11 migrated Flye to the parameter loop with a typed catalog and command artifact.
+2. ✅ Phase11 migrated NextDenovo to the parameter loop with typed run.cfg rendering.
 3. Extend `assembly_review` parameter quality gate behavior as needed
 
 ### Long Term
@@ -137,4 +137,5 @@ conda run -n gene_agent pytest tests/test_assembly.py tests/test_ask_plan.py \
   tests/test_phase10_parameter_catalog.py tests/test_registry_executable_invariant.py -v
 ```
 
-Expected: **160 passed, 1 skipped**
+Expected: the focused assembly and parameter-catalog suites pass; runtime binary
+checks may skip when optional assembler binaries are not installed locally.

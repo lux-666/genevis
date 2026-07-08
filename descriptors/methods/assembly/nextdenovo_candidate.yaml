@@ -1,6 +1,7 @@
 method_name: assembly.candidate.nextdenovo
 stage: assembly
 package_ref: nextdenovo
+parameter_catalog: nextdenovo
 goal: "Execute a NextDenovo candidate assembly from long-read FOFN and genome-size inputs when explicitly selected for local execution."
 required_inputs:
   - name: long_reads_fofn

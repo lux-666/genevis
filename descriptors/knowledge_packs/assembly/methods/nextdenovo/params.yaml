@@ -1,0 +1,97 @@
+method_id: nextdenovo
+tool: nextDenovo
+read_type: ont
+description: "NextDenovo long-read assembly catalog for Phase11 typed parameter attempts."
+
+parameters:
+  read_type:
+    cli: null
+    level: 0
+    source: run_config
+    value_type: string
+    allowed_values: ["ont", "clr", "hifi"]
+    source_priority:
+      - assembly.nextdenovo_parameters.read_type
+      - assembly.read_type_prior.nextdenovo
+    description: "NextDenovo read type used in run.cfg."
+  input_fofn:
+    cli: null
+    level: 0
+    source: executor
+    value_type: path
+    source_priority:
+      - execution.input_fofn
+    description: "Input FOFN path used in run.cfg."
+  work_dir:
+    cli: null
+    level: 0
+    source: executor
+    value_type: path
+    source_priority:
+      - execution.work_dir
+    description: "NextDenovo work directory."
+  genome_size:
+    cli: null
+    level: 0
+    source: run_config
+    value_type: int
+    min: 1
+    source_priority:
+      - assembly.nextdenovo_parameters.genome_size
+      - assembly.genome_size_prior
+      - genome_survey.genome_size_prior
+      - genome_survey.estimates.genome_size_prior
+      - genome_survey.estimates.genome_size
+      - shared_parameters.estimated_genome_size
+    description: "Estimated genome size in bases."
+  threads:
+    cli: null
+    level: 0
+    source: run_config
+    value_type: int
+    default: 32
+    min: 1
+    source_priority:
+      - assembly.nextdenovo_parameters.threads
+    description: "Number of CPU threads."
+
+  read_n50:
+    cli: null
+    level: 1
+    source: read_qc
+    value_type: int
+    min: 1
+    source_priority:
+      - read_qc.read_n50
+      - read_qc.stats.read_n50
+    description: "Readonly read N50 context."
+  estimated_coverage:
+    cli: null
+    level: 1
+    source: read_qc
+    value_type: float
+    min: 0
+    source_priority:
+      - read_qc.estimated_coverage
+      - read_qc.effective_coverage_1kb
+    description: "Readonly sequencing coverage context."
+
+  read_cutoff:
+    cli: null
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 1000
+    min: 1
+    max: 100000
+    description: "Minimum read length cutoff written to run.cfg."
+
+  nextgraph_a:
+    cli: null
+    level: 2
+    source: parameter_recommender
+    value_type: int
+    default: 1
+    min: 1
+    max: 10
+    description: "NextGraph -a assembly graph option written to run.cfg."

@@ -26,7 +26,7 @@ def build_command(
 ) -> list[str]:
     """Merge L0/L1/L2 source groups into a deterministic argv."""
 
-    _validate_groups(catalog, parameter_sources)
+    validate_parameter_sources(catalog, parameter_sources)
     argv = [catalog.tool]
     positional: list[str] = []
 
@@ -42,6 +42,15 @@ def build_command(
 
     argv.extend(positional)
     return argv
+
+
+def validate_parameter_sources(
+    catalog: MethodParameterCatalog,
+    parameter_sources: dict[str, dict[str, Any]],
+) -> None:
+    """Validate that parameter source groups match catalog levels."""
+
+    _validate_groups(catalog, parameter_sources)
 
 
 def build_parameter_sources(
@@ -67,6 +76,8 @@ def build_parameter_sources(
             value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
             if value is not None:
                 l0_fixed[key] = value
+            elif spec.default is not None:
+                l0_fixed[key] = spec.default
         elif spec.level == 1:
             value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
             if value is not None:

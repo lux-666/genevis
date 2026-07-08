@@ -13,7 +13,7 @@ Each attempt is a `ParameterAttempt` with:
 - optional `llm_response_ref` and `validation_ref`;
 - optional `command_ref` and `review_failure_ref`;
 - `catalog_ref`, `knowledge_pack_ref`, and `selected_case_ids`;
-- `recommended_params`, `omitted_parameters`, `parameter_sources`, `argv`, and `validation`;
+- `recommended_params`, `omitted_parameters`, `parameter_sources`, `rendered_parameters`, `argv`, and `validation`;
 - optional `previous_attempt_id`, `execution_result`, `failure_log_tail`, and `review_failure`.
 
 An `ArtifactRef` contains `path_ref`, `sha256`, and `artifact_type`.
@@ -39,6 +39,8 @@ data/artifacts/assembly/<session>/parameter_attempt_<N>/review_failure.json
 2. Verify `input_profile_ref.path_ref` and `prompt_payload_ref.path_ref` against their hashes.
 3. Inspect `llm_response_ref` and `validation_ref`.
 4. Reconstruct the command from recorded `parameter_sources` and compare it with recorded `argv`.
+   Inspect `rendered_parameters` for method-specific config values that are
+   materialized outside the generic argv command builder.
 5. Inspect `command_ref` for the frozen argv/script metadata when present.
 6. For retries, follow `previous_attempt_id` and inspect `failure_log_tail`, `review_failure`, or `review_failure_ref`.
 7. When preparing a retry, keep the earlier attempt's recommendation, command,

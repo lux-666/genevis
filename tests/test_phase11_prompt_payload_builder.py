@@ -917,6 +917,26 @@ class TestEdgeCases:
 class TestRealCatalogCompatibility:
     """Test that knowledge pack examples reference real parameters from catalogs."""
 
+    @pytest.mark.parametrize(
+        "method_id,catalog_id",
+        [
+            ("assembly.candidate.flye", "flye"),
+            ("assembly.candidate.nextdenovo", "nextdenovo"),
+            ("assembly.candidate.hifiasm", "hifiasm"),
+            ("assembly.candidate.hifiasm_ont", "hifiasm_ont"),
+        ],
+    )
+    def test_executable_assembly_methods_have_phase11_catalogs(self, method_id, catalog_id):
+        """All executable assembly methods should use the typed parameter-attempt catalog contract."""
+        from app.stages.assembly.parameter_catalog import load_parameter_catalog
+
+        catalog = load_parameter_catalog(method_id)
+
+        assert catalog.method_id == catalog_id
+        assert sum(1 for p in catalog.parameters.values() if p.level == 0) > 0
+        assert sum(1 for p in catalog.parameters.values() if p.level == 1) > 0
+        assert sum(1 for p in catalog.parameters.values() if p.level == 2) > 0
+
     @pytest.mark.parametrize("method_id", ["hifiasm", "hifiasm_ont"])
     def test_cases_yaml_params_are_l2_in_real_catalog(self, method_id):
         """All observed parameter values in cases.yaml must exist in catalog as L2."""

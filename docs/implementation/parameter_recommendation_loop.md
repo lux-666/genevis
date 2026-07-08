@@ -71,9 +71,31 @@ Prompt tasks are `recommend_initial`, `retry_after_execution_failure`, and `retr
 
 `build_command()` validates that each source group contains only the matching level, emits arguments in catalog order, and appends positional values last. Omitted L2 parameters are not emitted, so the tool default applies unless the method contract supplies a value elsewhere.
 
-Freeze paths for hifiasm and hifiasm_ont store `parameter_sources` and `argv` on the current `parameter_attempts` entry and use `parameter_attempt_<N>` work/artifact directories.
+Freeze paths for catalog-driven assembly methods store `parameter_sources` and
+the rendered execution representation on the current `parameter_attempts` entry
+and use `parameter_attempt_<N>` work/artifact directories. hifiasm,
+hifiasm_ont, and Flye store `argv`; NextDenovo stores `rendered_parameters` for
+the generated `run.cfg` and records `argv` for the `nextDenovo <run.cfg>`
+invocation.
 
-They also write `command.json` under the same attempt directory and store `command_ref` on the current attempt.
+They also write `command.json` under the same attempt directory and store
+`command_ref` on the current attempt.
+
+## Model Availability
+
+After candidate selection, every executable assembly method with a parameter
+catalog enters `recommend_assembly_parameters` before freeze/run. This is the
+same contract for Flye, NextDenovo, hifiasm, and hifiasm_ont.
+
+Model unavailability is treated as a recommendation failure by default. The
+stage records a validation-failed `ParameterAttempt` and stops before local
+execution. `parameter_recommendation.allow_model_unavailable_defaults: true` is
+an explicit test/operator fallback that lets the model boundary return an empty
+L2 recommendation so catalog defaults can render the command.
+
+The intended production recovery is to fix LLM configuration and resume/retry
+from the assembly checkpoint. TUI support for that operator flow is a follow-up;
+the graph contract already avoids rerunning earlier stages unnecessarily.
 
 ## Retry Gates
 

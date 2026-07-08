@@ -185,19 +185,15 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
     )
     result = outcome.result.model_dump(mode="json")
 
-    # Phase10: Flye/NextDenovo don't have parameter_attempts yet, skip update for them
-    if output.get("parameter_attempts"):
-        parameter_attempts, attempt_error = update_current_parameter_attempt(
-            output,
-            method_id=lifecycle.method_name,
-            label=lifecycle.name,
-            status="execution_failed" if not outcome.success else "executed",
-            execution_result=result,
-        )
-        if attempt_error:
-            return fail_update(state, attempt_error)
-    else:
-        parameter_attempts = []
+    parameter_attempts, attempt_error = update_current_parameter_attempt(
+        output,
+        method_id=lifecycle.method_name,
+        label=lifecycle.name,
+        status="execution_failed" if not outcome.success else "executed",
+        execution_result=result,
+    )
+    if attempt_error:
+        return fail_update(state, attempt_error)
 
     if not outcome.success:
         updates = {
@@ -205,13 +201,11 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
             "reason": outcome.error,
             lifecycle.execution_result_key: result,
         }
-        if parameter_attempts:
-            updates["parameter_attempts"] = parameter_attempts
+        updates["parameter_attempts"] = parameter_attempts
         return update_assembly_output(state, updates)
 
     updates = {"status": lifecycle.ran_status, lifecycle.execution_result_key: result}
-    if parameter_attempts:
-        updates["parameter_attempts"] = parameter_attempts
+    updates["parameter_attempts"] = parameter_attempts
     return update_assembly_output(state, updates)
 
 

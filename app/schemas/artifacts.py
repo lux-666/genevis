@@ -130,6 +130,7 @@ class ParameterAttempt(BaseModel):
     recommended_params: dict[str, Any] = Field(default_factory=dict)
     omitted_parameters: list[str] = Field(default_factory=list)
     parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    rendered_parameters: dict[str, Any] = Field(default_factory=dict)
     argv: list[str] = Field(default_factory=list)
     validation: dict[str, Any] = Field(default_factory=dict)
     reasoning: str | None = None

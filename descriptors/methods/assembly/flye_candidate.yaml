@@ -1,6 +1,7 @@
 method_name: assembly.candidate.flye
 stage: assembly
 package_ref: flye
+parameter_catalog: flye
 goal: "Plan a Flye candidate assembly bundle, with explicit opt-in local Flye execution for ONT/CLR draft assembly."
 required_inputs:
   - name: long_reads

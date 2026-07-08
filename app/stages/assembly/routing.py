@@ -88,7 +88,7 @@ def route_after_method_subgraph(state: TopLevelState) -> str:
     output = _output(state)
     status = output.get("status")
     if is_fail_status(status, EXTRA_FAIL_STATUSES):
-        return "retry_gate" if output.get("parameter_attempts") else "fail"
+        return "retry_gate" if _current_attempt_has_execution_result(output) else "fail"
     return "commit"
 
 
@@ -100,3 +100,11 @@ def route_after_execution_retry_gate(state: TopLevelState) -> str:
     if status == "draft_ready":
         return "commit"
     return "fail"
+
+
+def _current_attempt_has_execution_result(output: dict) -> bool:
+    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    for item in output.get("parameter_attempts") or []:
+        if isinstance(item, dict) and item.get("attempt_id") == attempt_id:
+            return bool(item.get("execution_result"))
+    return False

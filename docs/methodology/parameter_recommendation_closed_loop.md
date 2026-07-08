@@ -2,9 +2,9 @@
 
 ## Problem
 
-Assembly tools expose many behavior-changing parameters, but published methods rarely explain why a value was selected for a particular sample. Phase 10 adds a small closed loop that recommends assembly parameters from sample facts and evidence while keeping every attempt auditable, bounded, and replayable.
+Assembly tools expose many behavior-changing parameters, but published methods rarely explain why a value was selected for a particular sample. Phase 10 added a small closed loop that recommends assembly parameters from sample facts and evidence while keeping every attempt auditable, bounded, and replayable.
 
-The first supported surface is hifiasm and hifiasm_ont. The loop is not an exhaustive optimizer. It recommends only justified overrides, lets method defaults stand when evidence is weak, and validates every model output before command freezing.
+The first supported surface was hifiasm and hifiasm_ont. Phase 11 extended the same typed parameter-attempt contract to Flye and NextDenovo. The loop is not an exhaustive optimizer. It recommends only justified overrides, lets method defaults stand when evidence is weak, and validates every model output before command freezing.
 
 ## Three-Level Permission Model
 
@@ -67,16 +67,36 @@ Each artifact ref carries both `path_ref` and `sha256`. The path is the runtime 
 
 ## Current Boundaries
 
-The core hifiasm/hifiasm_ont recommendation, validation, attempt recording, execution retry, review-quality retry, shared decision boundary, and session/attempt artifact paths are integrated.
+The core recommendation, validation, attempt recording, execution retry,
+review-quality retry, shared decision boundary, and session/attempt artifact
+paths are integrated for executable assembly methods with parameter catalogs:
+hifiasm, hifiasm_ont, Flye, and NextDenovo.
+
+All executable assembly methods enter parameter recommendation before method
+freeze/run. L0 run-configuration inputs such as read type, genome size, threads,
+paths, and route-fixed flags are still operator/executor controlled, but they do
+not bypass the recommender. If the LLM or assembly decision backend is
+unavailable, the default behavior is to stop before execution with a
+validation-failed parameter attempt. The
+`allow_model_unavailable_defaults` setting is an explicit test/operator escape
+hatch that allows empty L2 recommendations and catalog defaults; it is not a
+silent production fallback.
+
+When recommendation fails because the model is unavailable, earlier stages have
+already produced reusable state. The intended operator path is to fix LLM
+configuration and resume/retry from the assembly checkpoint. A TUI integration
+should expose that action later.
 
 The following cleanup items are complete:
 
 - runtime help verification of hifiasm and hifiasm_ont catalogs against the local project-supported hifiasm binary;
 - planner no-compat cleanup that removes the duplicate planner method registry and derives planner metadata from descriptors/catalogs;
 - architecture-regression tests for the removed planner registry and stage-local assembly model calls;
-- standalone `command.json` and `review_failure.json` attempt artifacts in addition to compact `parameter_attempts`.
+- standalone `command.json` and `review_failure.json` attempt artifacts in addition to compact `parameter_attempts`;
+- Phase11 Flye/NextDenovo migration to typed catalogs, command artifacts, shared recommendation routing, and retry-gate behavior.
 
-Post-Phase10 follow-up is narrower: broaden closed-loop regression coverage
-where useful, keep catalog verification current when the pinned/project-supported
-hifiasm binary changes, and consider Flye/NextDenovo migration as a next-phase
-expansion rather than a Phase 10 blocker.
+Follow-up is narrower: broaden closed-loop regression coverage where useful,
+keep catalog verification current when pinned/project-supported assembler
+binaries change, add method-specific Flye/NextDenovo evidence/rules as their L2
+surfaces grow, and wire an operator-facing TUI retry/resume action for
+model-unavailable assembly recommendation failures.

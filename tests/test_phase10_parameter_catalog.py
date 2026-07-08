@@ -19,9 +19,12 @@ from app.schemas.artifacts import ParameterAttempt, file_sha256
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
+from app.stages.assembly.constants import FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.hifiasm import freeze_hifiasm_attempt
 from app.stages.assembly.method_application.hifiasm_ont import freeze_hifiasm_ont_attempt
+from app.stages.assembly.method_application.nextdenovo import freeze_nextdenovo_attempt
 from app.stages.assembly.nodes import execution_retry_gate, parameter_quality_gate, recommend_assembly_parameters
+from app.stages.assembly.routing import route_after_method_subgraph
 from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.assembly.parameter_profile import (
@@ -100,6 +103,17 @@ class ParameterCatalogSchemaTests(unittest.TestCase):
         self.assertEqual(catalog.parameters["purge_level"].level, 2)
         self.assertEqual(catalog.parameters["read_length_cutoff"].level, 2)
         self.assertEqual(catalog.parameters["score_cutoff"].level, 2)
+
+    def test_flye_catalog_read_type_values_match_execution_flags(self):
+        catalog = load_parameter_catalog("flye")
+
+        self.assertEqual(catalog.parameters["read_type"].allowed_values, list(FLYE_READ_TYPE_FLAGS))
+
+    def test_nextdenovo_catalog_keeps_behavior_knobs_in_l2(self):
+        catalog = load_parameter_catalog("nextdenovo")
+
+        self.assertEqual(catalog.parameters["read_cutoff"].level, 2)
+        self.assertEqual(catalog.parameters["nextgraph_a"].level, 2)
 
     def test_catalogs_cover_supported_hifiasm_cli_surface(self):
         expected_keys = {
@@ -340,6 +354,20 @@ class ParameterValidationTests(unittest.TestCase):
         reasons = {item["reason"] for item in result["violations"]}
         self.assertIn("value not in allowed_values", reasons)
         self.assertIn("value above catalog maximum", reasons)
+
+    def test_nextdenovo_read_cutoff_is_valid_l2_recommendation(self):
+        catalog = load_parameter_catalog("nextdenovo")
+
+        result = validate_recommended_parameters(
+            method_id="nextdenovo",
+            catalog=catalog,
+            recommended_params={"read_cutoff": 7777, "nextgraph_a": 2},
+            readonly_facts={},
+            rules={},
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["violations"], [])
 
     def test_conditional_rule_violation_fails(self):
         result = validate_recommended_parameters(
@@ -631,6 +659,30 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertEqual(sources["l1_readonly"]["hom_cov"], 30)
         self.assertEqual(sources["l2_recommended"], {"purge_level": 1})
 
+    def test_build_parameter_sources_injects_l0_catalog_defaults_into_hifiasm_argv(self):
+        for method_id, param_key in (
+            ("assembly.candidate.hifiasm", "hifiasm_parameters"),
+            ("assembly.candidate.hifiasm_ont", "hifiasm_ont_parameters"),
+        ):
+            with self.subTest(method_id=method_id):
+                catalog = load_parameter_catalog(method_id)
+                state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+                assembly_out = {param_key: {"read_type": "ont" if method_id.endswith("hifiasm_ont") else "hifi"}}
+
+                sources = build_parameter_sources(
+                    method_id=method_id,
+                    catalog=catalog,
+                    state=state,
+                    assembly_out=assembly_out,
+                    attempt_id=0,
+                    recommended_params={},
+                    execution_context={"output_prefix": "/tmp/hifiasm", "input_reads": ["/tmp/r.fq"]},
+                )
+                argv = build_command(method_id=method_id, catalog=catalog, parameter_sources=sources)
+
+                self.assertEqual(sources["l0_fixed"]["threads"], 32)
+                self.assertEqual(argv[argv.index("-t") + 1], "32")
+
 
 class ParameterRecommendationNodeTests(unittest.TestCase):
     def _state(self, tmpdir: str):
@@ -745,6 +797,25 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
         self.assertEqual(assembly["current_parameter_attempt_id"], 1)
         self.assertNotIn("line 49", assembly["execution_failure_log_tail"])
         self.assertIn("line 149", assembly["execution_failure_log_tail"])
+
+    def test_freeze_failure_without_execution_result_does_not_route_to_execution_retry(self):
+        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+        state["stage_outputs"] = {
+            "assembly": {
+                "status": "failed",
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [
+                    {
+                        "attempt_id": 0,
+                        "method_id": "assembly.candidate.flye",
+                        "status": "recommended",
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(route_after_method_subgraph(state), "fail")
+        self.assertEqual(execution_retry_gate(state), {})
 
     def test_review_quality_gate_classifies_under_purged_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -885,6 +956,31 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         state["stage_outputs"] = {"assembly": assembly}
         return state
 
+    def _nextdenovo_state(self, tmpdir: str, *, recommended_params=None, attempt_payload: dict | None = None):
+        reads = Path(tmpdir) / "reads.fastq"
+        reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        assembly = {
+            "status": "nextdenovo_execution_planned",
+            "input_ref": str(reads),
+            "input_type": "clean_long_reads",
+            "env": {},
+            "method_decision": {"primary": "assembly.candidate.nextdenovo"},
+            "nextdenovo_parameters": {"read_type": "ont", "genome_size": 2_000_000, "threads": 1},
+            "current_parameter_attempt_id": 0,
+        }
+        if attempt_payload is not None:
+            assembly["parameter_attempts"] = [attempt_payload]
+        elif recommended_params is not None:
+            assembly["parameter_attempts"] = [
+                self._parameter_attempt(
+                    method_name="assembly.candidate.nextdenovo",
+                    recommended_params=recommended_params,
+                )
+            ]
+        state["stage_outputs"] = {"assembly": assembly}
+        return state
+
     def test_missing_hifiasm_catalog_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm")
@@ -972,6 +1068,44 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             self.assertEqual(command_payload["method_id"], "assembly.candidate.hifiasm_ont")
             self.assertIn("--ont", command_payload["argv"])
             self.assertIn("assembly.parameter.command", {record["artifact_type"] for record in artifact_records})
+
+    def test_nextdenovo_freeze_rejects_l2_override_of_l0_parameter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._nextdenovo_state(tmpdir, recommended_params={"threads": 64})
+            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+                result = freeze_nextdenovo_attempt(state)
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "failed")
+        self.assertIn("NextDenovo parameter sources are invalid", assembly["reason"])
+        self.assertIn("threads belongs to L0", assembly["reason"])
+
+    def test_nextdenovo_freeze_renders_l2_read_cutoff(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._nextdenovo_state(tmpdir, recommended_params={"read_cutoff": 7777, "nextgraph_a": 2})
+            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+                result = freeze_nextdenovo_attempt(state)
+            run_cfg_text = Path(result["stage_outputs"]["assembly"]["nextdenovo_run_cfg_path"]).read_text(encoding="utf-8")
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "nextdenovo_frozen")
+        attempt = assembly["parameter_attempts"][0]
+        self.assertEqual(attempt["parameter_sources"]["l2_recommended"]["read_cutoff"], 7777)
+        self.assertEqual(attempt["rendered_parameters"]["read_cutoff"], 7777)
+        self.assertEqual(attempt["rendered_parameters"]["nextgraph_a"], 2)
+        self.assertIn("read_cutoff = 7777", run_cfg_text)
+        self.assertIn("nextgraph_options = -a 2", run_cfg_text)
+
+    def test_nextdenovo_freeze_rejects_corrupt_l2_integer_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._nextdenovo_state(tmpdir, recommended_params={"read_cutoff": "bad"})
+            with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
+                result = freeze_nextdenovo_attempt(state)
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "failed")
+        self.assertIn("NextDenovo parameter sources are invalid", assembly["reason"])
+        self.assertIn("read_cutoff must be an integer", assembly["reason"])
 
 
 if __name__ == "__main__":
