@@ -15,16 +15,36 @@ import json
 from pathlib import Path
 from typing import Any
 
-import matplotlib
+try:
+    import matplotlib
 
-matplotlib.use("Agg")
+    matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import nbformat  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
-from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook  # noqa: E402
+    import matplotlib.pyplot as plt  # noqa: E402
+    import numpy as np  # noqa: E402
+    from matplotlib.lines import Line2D  # noqa: E402
+    from matplotlib.patches import Patch  # noqa: E402
+except ModuleNotFoundError as exc:
+    matplotlib = None
+    plt = None
+    np = None
+    Line2D = None
+    Patch = None
+    _FIGURE_IMPORT_ERROR = exc
+else:
+    _FIGURE_IMPORT_ERROR = None
+
+try:
+    import nbformat  # noqa: E402
+    from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook  # noqa: E402
+except ModuleNotFoundError as exc:
+    nbformat = None
+    new_code_cell = None
+    new_markdown_cell = None
+    new_notebook = None
+    _NOTEBOOK_IMPORT_ERROR = exc
+else:
+    _NOTEBOOK_IMPORT_ERROR = None
 
 DISCLAIMER = "Comparative reference only — not an automatic threshold or assembly prior."
 NOTEBOOK_DISCLAIMER_1 = (
@@ -56,8 +76,25 @@ _FIG_SIZE = (5.4, 4.6)          # uniform standalone figure size (inches)
 _SUMMARY_SIZE = (14.5, 9.0)     # multi-panel A–G summary
 
 
+def _require_figure_dependencies() -> None:
+    if _FIGURE_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "assembly_review comparative figure rendering requires matplotlib and numpy. "
+            "Install them in the active environment before running assembly_review."
+        ) from _FIGURE_IMPORT_ERROR
+
+
+def _require_notebook_dependencies() -> None:
+    if _NOTEBOOK_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "assembly_review comparative notebook rendering requires nbformat. "
+            "Install it in the active environment before running assembly_review."
+        ) from _NOTEBOOK_IMPORT_ERROR
+
+
 def _apply_publication_style() -> None:
     """Set global rcParams for a clean, unified, Nature-style look."""
+    _require_figure_dependencies()
     plt.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
@@ -456,6 +493,7 @@ def render_statistics_figures(
     cohort records. Never raises for missing/absent underlying data fields; skips
     individual figures whose data is entirely empty instead.
     """
+    _require_figure_dependencies()
     _apply_publication_style()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -795,6 +833,7 @@ def build_assembly_review_notebook(
     figures_relpaths: dict[str, str],
 ) -> "nbformat.NotebookNode":
     """Build the comparative NCBI metazoa human-review notebook for a session."""
+    _require_notebook_dependencies()
     evidence_pack = evidence_pack or {}
     cells = []
 
@@ -848,6 +887,7 @@ def build_assembly_review_notebook(
 
 def write_notebook(notebook: "nbformat.NotebookNode", path: Path) -> None:
     """Write a notebook to disk, creating parent directories as needed."""
+    _require_notebook_dependencies()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     nbformat.write(notebook, path)
