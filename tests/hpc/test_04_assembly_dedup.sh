@@ -60,9 +60,22 @@ print(f'DomainStage includes assembly_dedup')
 # completed draft is not useful to this integration test unless purge_dups can
 # also run, so missing tools are a fast, explicit test failure.
 case "${ASSEMBLY_METHOD}" in
-    flye|nextdenovo) ;;
+    flye|nextdenovo|hifiasm|hifiasm_ont) ;;
     *)
-        fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected flye or nextdenovo)"
+        fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected hifiasm, hifiasm_ont, flye, or nextdenovo)"
+        summary "Test 04: Assembly + Assembly Dedup"
+        exit 1
+        ;;
+esac
+case "${ASSEMBLY_METHOD}:${PLATFORM}" in
+    hifiasm:pacbio_hifi|hifiasm_ont:ont|hifiasm_ont:cycloneseq|flye:*|nextdenovo:*) ;;
+    hifiasm:*)
+        fail "ASSEMBLY_METHOD=hifiasm expects PLATFORM=pacbio_hifi for this HPC test"
+        summary "Test 04: Assembly + Assembly Dedup"
+        exit 1
+        ;;
+    hifiasm_ont:*)
+        fail "ASSEMBLY_METHOD=hifiasm_ont expects PLATFORM=ont or PLATFORM=cycloneseq for this HPC test"
         summary "Test 04: Assembly + Assembly Dedup"
         exit 1
         ;;
@@ -150,7 +163,15 @@ fi
 ASM_SCRIPT=$(find "${RUN_DIR}/work/assembly/${SID}" -name "*.sh" -type f 2>/dev/null | head -1 || true)
 if [[ -n "$ASM_SCRIPT" ]]; then
     pass "assembly method script generated: $(basename "$ASM_SCRIPT")"
-    assert_file_contains "$ASM_SCRIPT" "published artifact conflicts" "assembly script rejects conflicting replay output"
+    case "${ASSEMBLY_METHOD}" in
+        flye|nextdenovo)
+            assert_file_contains "$ASM_SCRIPT" "published artifact conflicts" "assembly script rejects conflicting replay output"
+            ;;
+        hifiasm|hifiasm_ont)
+            assert_file_contains "$ASM_SCRIPT" "hifiasm" "hifiasm script invokes assembler"
+            assert_file_contains "$ASM_SCRIPT" "awk '/^S/" "hifiasm script converts GFA segments to FASTA"
+            ;;
+    esac
 else
     fail "assembly method script not found"
 fi
@@ -176,6 +197,117 @@ print(f'  draft_assembly_fasta: {fasta}')
 else
     warn "assembly candidate bundle not found (may be at different path)"
 fi
+
+# ---- Parameter recommendation closed-loop artifacts ----
+info "Checking assembly parameter recommendation artifacts"
+cd "${PROJECT_ROOT}"
+python3 - "${RUN_DIR}" "${SID}" "${ASSEMBLY_METHOD}" <<'PY' 2>&1 && \
+    pass "assembly parameter closed-loop artifacts valid" || fail "assembly parameter closed-loop artifacts invalid"
+import json
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+session_id = sys.argv[2]
+method_slug = sys.argv[3]
+method_id = f"assembly.candidate.{method_slug}"
+assembly_dir = run_dir / "artifacts" / "assembly" / session_id
+
+matching_commands = []
+for command_path in sorted(assembly_dir.glob("parameter_attempt_*/command.json")):
+    command = json.loads(command_path.read_text(encoding="utf-8"))
+    if command.get("method_id") == method_id:
+        matching_commands.append((command_path, command))
+assert matching_commands, f"no command.json for {method_id} under {assembly_dir}/parameter_attempt_*"
+command_path, command = matching_commands[-1]
+attempt_dir = command_path.parent
+method_artifact_dir = attempt_dir / method_slug
+assert method_artifact_dir.is_dir(), f"missing method artifact directory: {method_artifact_dir}"
+sources = command.get("parameter_sources")
+assert isinstance(sources, dict), "command.json missing parameter_sources"
+for group in ("l0_fixed", "l1_readonly", "l2_recommended"):
+    assert group in sources and isinstance(sources[group], dict), f"missing parameter source group: {group}"
+
+argv = command.get("argv")
+assert isinstance(argv, list) and argv, "command.json missing argv"
+assert command.get("command"), "command.json missing rendered command string"
+
+if method_slug in {"hifiasm", "hifiasm_ont"}:
+    assert argv[0] == "hifiasm", argv
+    assert "-t" in argv, f"hifiasm argv missing -t threads flag: {argv}"
+    assert "-o" in argv, f"hifiasm argv missing output prefix: {argv}"
+    if method_slug == "hifiasm_ont":
+        assert "--ont" in argv, f"hifiasm_ont argv missing --ont: {argv}"
+    else:
+        assert "--ont" not in argv, f"hifiasm HiFi argv should not contain --ont: {argv}"
+elif method_slug == "nextdenovo":
+    rendered = command.get("rendered_parameters")
+    assert isinstance(rendered, dict) and rendered, "NextDenovo command.json missing rendered_parameters"
+    run_cfg = command.get("run_cfg")
+    assert run_cfg and Path(run_cfg).is_file(), f"NextDenovo run.cfg missing: {run_cfg}"
+else:
+    assert argv[0] == "flye", argv
+
+candidate_paths = sorted(assembly_dir.glob(f"**/*candidate*.json"))
+matching_candidates = []
+for path in candidate_paths:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if data.get("method_name") == method_id:
+        matching_candidates.append((path, data))
+assert matching_candidates, f"no candidate bundle for {method_id}"
+candidate_path, candidate = matching_candidates[-1]
+assert candidate.get("status") == "executed", f"{candidate_path} status is {candidate.get('status')!r}"
+
+events_path = run_dir / "ledger" / "events.jsonl"
+assert events_path.is_file(), f"missing ledger events: {events_path}"
+events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+succeeded = [
+    event for event in events
+    if event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
+]
+assert succeeded, f"ledger has no attempt_succeeded for {method_id}"
+
+checkpoint_path = run_dir / "checkpoints" / "checkpoints.sqlite"
+if checkpoint_path.exists():
+    from app.graph.builder import build_graph
+
+    graph = build_graph(backend="sqlite", data_dir=str(run_dir))
+    try:
+        snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
+        state = dict(snapshot.values or {})
+    finally:
+        checkpointer = getattr(graph, "checkpointer", None)
+        conn = getattr(checkpointer, "conn", None)
+        if conn is not None:
+            conn.close()
+
+    assembly_out = dict((state.get("stage_outputs") or {}).get("assembly") or {})
+    current_id = int(assembly_out.get("current_parameter_attempt_id") or command.get("attempt_id") or 0)
+    attempts = [
+        item for item in assembly_out.get("parameter_attempts") or []
+        if isinstance(item, dict)
+        and item.get("method_id") == method_id
+        and int(item.get("attempt_id", -1)) == current_id
+    ]
+    assert attempts, f"checkpoint state has no current parameter_attempt for {method_id}"
+    assert attempts[-1].get("status") == "executed", attempts[-1]
+    compact_attempt_status = attempts[-1].get("status")
+else:
+    compact_attempt_status = "skipped_no_sqlite_checkpoint"
+
+print(f"  command_json: {command_path}")
+print(f"  method_id: {method_id}")
+print(f"  compact_parameter_attempt_status: {compact_attempt_status}")
+print(f"  parameter_source_groups: {', '.join(sorted(sources))}")
+print(f"  argv_preview: {' '.join(argv[:12])}")
+if method_slug == "nextdenovo":
+    print(f"  rendered_parameters: {sorted(command['rendered_parameters'])}")
+print(f"  candidate_bundle: {candidate_path}")
+PY
+cd "${SCRIPT_DIR}"
 
 # ---- Assembly dedup outputs ----
 info "Checking assembly_dedup outputs"

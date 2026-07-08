@@ -22,6 +22,12 @@ source common.sh
 
 section "Test 05: Assembly Review"
 
+# ---- Lightweight TUI/HPC smoke ----
+cd "${PROJECT_ROOT}"
+python3 -m app.entrypoints.run tui --help 2>&1 && \
+    pass "tui entrypoint help" || fail "tui entrypoint help"
+cd "${SCRIPT_DIR}"
+
 # ---- Check for NCBI Metazoa reference data ----
 info "Checking NCBI Metazoa reference data"
 REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
@@ -269,6 +275,8 @@ GA review \
     --data-dir "$TEST_DATA_ROOT" \
     --dry-run \
     2>&1 && pass "review --dry-run succeeded" || warn "review --dry-run returned non-zero (may need different state)"
+
+info "Manual TUI smoke step: run 'python3 -m app.entrypoints.run tui --data-dir ${TEST_DATA_ROOT}', drive the blocked review gate, and record the operator decision."
 
 # ---- Inspect with trace ----
 cd "${PROJECT_ROOT}"

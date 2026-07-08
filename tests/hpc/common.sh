@@ -301,8 +301,14 @@ stages = [$(printf '"%s",' "$@" | sed 's/,$//')]
 rc = {'local_exec': stages}
 
 # Shared parameters
+platform_to_read_type = {
+    'cycloneseq': 'cyclone',
+    'ont': 'ont_raw',
+    'clr': 'pacbio_clr',
+    'pacbio_hifi': 'pacbio_hifi',
+}
 rc['shared_parameters'] = {
-    'read_type': '${PLATFORM}_raw' if '${PLATFORM}' == 'ont' else '${PLATFORM}',
+    'read_type': platform_to_read_type.get('${PLATFORM}', '${PLATFORM}'),
     'estimated_genome_size': ${GENOME_SIZE_ESTIMATE},
 }
 
@@ -332,23 +338,40 @@ if 'assembly' in stages:
         'cycloneseq': 'cyclone',
         'pacbio_hifi': 'hifi',
     }.get('${PLATFORM}', 'ont')
+    assembly_method = '${ASSEMBLY_METHOD}'
     rc['assembly'] = {
-        'assembly_method': '${ASSEMBLY_METHOD}',
+        'assembly_method': assembly_method,
         'target_level': 'draft',
-        # This is an unattended integration test. An explicit route avoids
-        # the interactive LLM/human route-selection gate before Flye starts.
+        # This is an unattended integration test. An explicit route avoids the
+        # interactive LLM/human route-selection gate before the assembler starts.
         'assembly_route': assembly_route,
     }
-    if '${ASSEMBLY_METHOD}' == 'flye':
+    if assembly_method == 'flye':
         rc['assembly']['flye_parameters'] = {
             'read_type': '${FLYE_READ_TYPE}',
             'estimated_genome_size': ${GENOME_SIZE_ESTIMATE},
             'threads': ${ASSEMBLY_THREADS},
         }
-    elif '${ASSEMBLY_METHOD}' == 'nextdenovo':
+    elif assembly_method == 'nextdenovo':
+        nextdenovo_read_type = {
+            'cycloneseq': 'ont',
+            'ont': 'ont',
+            'clr': 'clr',
+            'pacbio_hifi': 'hifi',
+        }.get('${PLATFORM}', '${PLATFORM}')
         rc['assembly']['nextdenovo_parameters'] = {
-            'read_type': '${PLATFORM}',
+            'read_type': nextdenovo_read_type,
             'genome_size': ${GENOME_SIZE_ESTIMATE},
+            'threads': ${ASSEMBLY_THREADS},
+        }
+    elif assembly_method == 'hifiasm':
+        rc['assembly']['hifiasm_parameters'] = {
+            'read_type': 'hifi',
+            'threads': ${ASSEMBLY_THREADS},
+        }
+    elif assembly_method == 'hifiasm_ont':
+        rc['assembly']['hifiasm_ont_parameters'] = {
+            'read_type': 'ont',
             'threads': ${ASSEMBLY_THREADS},
         }
 

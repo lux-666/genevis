@@ -52,11 +52,16 @@ T2T_ONT_READS=""
 NCBI_REFERENCE_SOURCE_DIR=""
 
 # ---- Assembly method ----
-# Flye is the default end-to-end assembler for the assembly_dedup smoke test.
-# NextDenovo remains available for targeted experiments, but is not required
-# to validate the Flye → purge_dups integration path.
-ASSEMBLY_METHOD="flye"             # flye | nextdenovo
-FLYE_READ_TYPE="nano-raw"         # used only when ASSEMBLY_METHOD=flye
+# Recommended primary coverage:
+#   pacbio_hifi -> ASSEMBLY_METHOD=hifiasm
+#   ont/cycloneseq -> ASSEMBLY_METHOD=hifiasm_ont
+# Flye and NextDenovo are kept as lighter smoke paths while the hifiasm
+# parameter-recommendation loop is the main HPC target.
+#
+# These HPC tests do not enable catalog-default fallback. The LLM/provider
+# configuration must be genuinely usable when testing the recommendation flow.
+ASSEMBLY_METHOD="hifiasm_ont"      # hifiasm | hifiasm_ont | flye | nextdenovo
+FLYE_READ_TYPE="nano-raw"          # used only when ASSEMBLY_METHOD=flye
 ASSEMBLY_THREADS=8
 
 # ---- BUSCO lineage ----
