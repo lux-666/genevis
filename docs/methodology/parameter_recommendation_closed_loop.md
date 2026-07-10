@@ -93,7 +93,8 @@ The following cleanup items are complete:
 - planner no-compat cleanup that removes the duplicate planner method registry and derives planner metadata from descriptors/catalogs;
 - architecture-regression tests for the removed planner registry and stage-local assembly model calls;
 - standalone `command.json` and `review_failure.json` attempt artifacts in addition to compact `parameter_attempts`;
-- Phase11 Flye/NextDenovo migration to typed catalogs, command artifacts, shared recommendation routing, and retry-gate behavior.
+- Phase10 Task14 Flye/NextDenovo expansion to typed catalogs, command artifacts,
+  shared recommendation routing, and retry-gate behavior.
 
 Follow-up is narrower: broaden closed-loop regression coverage where useful,
 keep catalog verification current when pinned/project-supported assembler

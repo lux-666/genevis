@@ -1,9 +1,9 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Complete for current hifiasm/hifiasm_ont scope
+**Status**: Complete for the current executable assembly typed-attempt scope
 **Created**: 2026-07-02
-**Updated**: 2026-07-07
+**Updated**: 2026-07-10
 
 ## Goal
 
@@ -62,14 +62,19 @@ Implemented in the current slice:
   completed against local hifiasm `0.25.0-r726`.
 - ONT review-failure retry is covered by a regression proving L2 changes to
   purge level, `--rl-cut`, and `--sc-cut` can flow into deterministic argv.
+- Flye and NextDenovo now declare L0/L1/L2 parameter catalogs, enter the shared
+  recommendation path before freeze/run, write attempt-scoped command
+  artifacts, and update the same typed parameter-attempt lifecycle as hifiasm.
+- Execution failures from every executable assembly method route through the
+  shared parameter retry gate.
 
 Post-Phase10 follow-up:
 
 - Broader closed-loop tests that exercise recommendation, freeze, run failure,
   retry, review failure, and retry caps in one scenario.
-- Flye/NextDenovo can be migrated into the same parameter-loop contract in the
-  next phase if the project chooses to expand beyond the current
-  hifiasm/hifiasm_ont scope.
+- Method-specific evidence cases and hard-rule shards can be added for Flye and
+  NextDenovo if their L2 recommender surfaces grow beyond the initial safe
+  knobs.
 
 Documentation package:
 
@@ -243,6 +248,7 @@ The first closed loop should cover:
 11. Document the methodology.
 12. Use session/attempt-scoped artifact refs as the only runtime ref scheme.
 13. Remove old compatibility paths and enforce single-source architecture.
+14. Extend the typed parameter-attempt contract to Flye and NextDenovo.
 
 ## Acceptance Criteria
 

@@ -1,25 +1,22 @@
-# Phase 11: Assembly Parameter Attempts And Hifiasm Evidence Retrieval
+# Phase 11: Hifiasm Evidence Retrieval And Methods-Aware Recommendation
 
 **Phase**: 11
-**Status**: Task 1 complete; Tasks 2-4 hifiasm MVP implemented; Tasks 5-6 designed
+**Status**: Tasks 2-4 in progress; Tasks 5-6 designed
 **Created**: 2026-07-07
 **Updated**: 2026-07-10
 
 ## Goal
 
-Phase11 has two ordered goals:
+Replace the hifiasm recommender's production seed/bucket selection with a
+manually curated, source-grounded, numerically continuous EvidenceCase
+pipeline.
 
-1. carry the Phase10 typed parameter-attempt contract across executable assembly
-   methods; and
-2. replace the hifiasm recommender's production seed/bucket selection with a
-   manually curated, source-grounded, numerically continuous EvidenceCase
-   pipeline.
-
-Task 1 completed the cross-method typed-attempt expansion for Flye and
-NextDenovo. Tasks 2-4 now provide the first PacBio HiFi hifiasm vertical slice:
-validated V2 cases, source-grounded excerpts, continuous numeric retrieval, and
-an optional-evidence prompt path. Tasks 5-6 retain retry/evaluation work before
-any broader rollout.
+The cross-method typed-attempt expansion for Flye and NextDenovo belongs to
+[Phase10 Task14](../phase10/task_14_flye_nextdenovo_parameter_attempts.md) and
+is a completed prerequisite, not a Phase11 task. The current implementation
+provides groundwork for Tasks 2-4, but those tasks remain incomplete until
+their documented acceptance criteria are closed. Tasks 5-6 remain later
+retry/evaluation work and must not start before Tasks 2-4 are complete.
 
 ## Confirmed Evidence Boundary
 
@@ -61,7 +58,10 @@ Phase11 Tasks 2-6 do not introduce:
 - automatic promotion of runtime records into production evidence;
 - one universal scalar assembly-quality score.
 
-## Task 1 Completed Scope
+## Completed Phase10 Prerequisite
+
+[Phase10 Task14](../phase10/task_14_flye_nextdenovo_parameter_attempts.md)
+provides the shared executable-method typed-attempt foundation:
 
 - Flye and NextDenovo declare parameter catalogs.
 - Both methods build catalog-driven parameter sources and attempt-scoped command
@@ -98,17 +98,16 @@ Phase11 Tasks 2-6 do not introduce:
 
 ## Task Index
 
-- [Task 1: Flye and NextDenovo Typed Parameter Attempts](task_01_flye_nextdenovo_parameter_attempts.md) - Completed
-- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - MVP implemented
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - MVP implemented
-- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - MVP implemented
+- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - In progress
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - In progress; begins after Task 2 acceptance
+- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - In progress; begins after Task 3 acceptance
 - [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
 - [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
 
 ## Dependency Order
 
 ```text
-Task 1
+[Phase10 Task14 typed parameter-attempt prerequisite]
   -> Task 2 EvidenceCase/source contract
       -> Task 3 deterministic numeric retrieval
           -> Task 4 Methods-aware recommendation

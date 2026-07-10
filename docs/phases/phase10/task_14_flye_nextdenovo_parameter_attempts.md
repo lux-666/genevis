@@ -1,10 +1,10 @@
-# Task 1: Flye and NextDenovo Typed Parameter Attempts
+# Task 14: Flye and NextDenovo Typed Parameter Attempts
 
-**Phase**: 11
+**Phase**: 10
 **Status**: Completed
-**Depends on**: Phase10 typed parameter-attempt contract
+**Depends on**: Phase10 Tasks 1-13 typed parameter-attempt contract
 **Created**: 2026-07-07
-**Updated**: 2026-07-08
+**Updated**: 2026-07-10
 
 ## Goal
 
@@ -92,7 +92,7 @@ L2 recommendation and let catalog defaults render the method command or
 live model.
 
 This behavior matches hifiasm/hifiasm_ont. There is no silent method-local
-fallback for Flye or NextDenovo after Phase11.
+fallback for Flye or NextDenovo after this Phase10 expansion.
 
 When a run stops at assembly because the model is unavailable, the intended
 operator flow is to fix the LLM configuration and resume from the assembly
@@ -132,8 +132,8 @@ Updated coverage:
   failure log tail, and fails through the retry gate when retries are exhausted.
 - NextDenovo successful local execution records a typed parameter attempt with
   `method_id`, `status: executed`, and `command_ref`.
-- All executable assembly methods must load Phase11-compatible parameter
-  catalogs with at least one L0, one L1, and one L2 parameter:
+- All executable assembly methods must load shared typed-attempt-compatible
+  parameter catalogs with at least one L0, one L1, and one L2 parameter:
   - `assembly.candidate.flye`
   - `assembly.candidate.nextdenovo`
   - `assembly.candidate.hifiasm`

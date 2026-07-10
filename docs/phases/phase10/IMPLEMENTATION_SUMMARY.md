@@ -81,7 +81,7 @@ enter → resolve → infer_profile → select_route → build_candidates → se
   → (on execution failure) recommend_parameters (retry)
 ```
 
-### Phase11 Flow (Flye/NextDenovo)
+### Phase10 Task14 Flow (Flye/NextDenovo)
 ```
 enter → resolve → infer_profile → select_route → build_candidates → select_primary
   → recommend_parameters → plan_candidate_attempts → {method}_subgraph
@@ -91,7 +91,8 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 
 ## Backward Compatibility
 
-- **Flye and NextDenovo** were migrated in Phase11 to the same typed parameter-attempt contract as hifiasm/hifiasm_ont.
+- **Flye and NextDenovo** were migrated in Phase10 Task14 to the same typed
+  parameter-attempt contract as hifiasm/hifiasm_ont.
 - `{method}_parameters` still provide L0 execution inputs such as read type, genome size, and threads.
 - Behavior knobs live in L2 catalogs and are rendered from `parameter_attempts[].recommended_params` with catalog defaults as fallback.
 - External run configuration remains backward compatible for L0 execution inputs.
@@ -120,8 +121,10 @@ enter → resolve → infer_profile → select_route → build_candidates → se
 3. ✅ Restored hifiasm/hifiasm_ont integration tests under Phase10 flow
 
 ### Medium Term
-1. ✅ Phase11 migrated Flye to the parameter loop with a typed catalog and command artifact.
-2. ✅ Phase11 migrated NextDenovo to the parameter loop with typed run.cfg rendering.
+1. ✅ Phase10 Task14 migrated Flye to the parameter loop with a typed catalog
+   and command artifact.
+2. ✅ Phase10 Task14 migrated NextDenovo to the parameter loop with typed
+   run.cfg rendering.
 3. Extend `assembly_review` parameter quality gate behavior as needed
 
 ### Long Term

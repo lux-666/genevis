@@ -1,7 +1,7 @@
 # Task 4: Hifiasm Methods-Aware Evidence Recommendation
 
 **Phase**: 11
-**Status**: MVP implemented; richer case-assessment response and artifact split pending
+**Status**: In progress; prompt foundation implemented, acceptance work remains
 **Depends on**: Task 2 EvidenceCase contract; Task 3 numeric retrieval
 **Created**: 2026-07-10
 **Updated**: 2026-07-10

@@ -1,8 +1,8 @@
 # Task 2: Hifiasm EvidenceCase And Manual Source Contract
 
 **Phase**: 11
-**Status**: MVP implemented; real curated cases and standalone validation CLI pending
-**Depends on**: Task 1 typed parameter-attempt contract
+**Status**: In progress; foundation implemented, acceptance work remains
+**Depends on**: Phase10 Task14 typed parameter-attempt contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
 

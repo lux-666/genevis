@@ -1,7 +1,7 @@
 # Task 3: Hifiasm Continuous Numeric Case Retrieval
 
 **Phase**: 11
-**Status**: MVP implemented; attempt-scoped retrieval artifact split pending
+**Status**: In progress; retrieval foundation implemented, acceptance work remains
 **Depends on**: Task 2 EvidenceCase contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
