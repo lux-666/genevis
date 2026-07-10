@@ -1,6 +1,6 @@
 version: 2
-description: "Mixed-rollout evidence manifest. Hifiasm consumes only approved EvidenceCase V2 shards; other methods temporarily retain V1 observations."
-case_schema: assembly_evidence_case_v2
+description: "Hifiasm consumes only approved EvidenceCase shards; other methods retain their current observations until separately curated."
+case_schema: assembly_evidence_case
 case_files:
   - cases/hifiasm/initial.yaml
   - cases/hifiasm/retry.yaml

@@ -1,4 +1,4 @@
-"""Canonical query adapter for hifiasm EvidenceCase V2 retrieval."""
+"""Canonical query adapter for hifiasm evidence retrieval."""
 
 from __future__ import annotations
 

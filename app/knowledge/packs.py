@@ -9,6 +9,8 @@ import yaml
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_KNOWLEDGE_ROOT = _PROJECT_ROOT / "descriptors" / "knowledge_packs"
+ASSEMBLY_EVIDENCE_CASE_SCHEMA = "assembly_evidence_case"
+_ASSEMBLY_EVIDENCE_MANIFEST_VERSION = 2
 
 
 def load_knowledge_pack(
@@ -72,11 +74,18 @@ def _empty_pack() -> dict[str, Any]:
 
 def _load_cases(pack_dir: Path, manifest_path: Path) -> list[dict[str, Any]]:
     manifest = _load_yaml_mapping(manifest_path)
+    _validate_case_manifest(manifest, source_path=manifest_path)
     cases: list[dict[str, Any]] = []
-    cases.extend(_case_list(manifest))
-    for rel_path in manifest.get("case_files") or []:
+    cases.extend(_case_list(manifest, source_path=manifest_path, required=False))
+    for rel_path in _case_files(manifest, source_path=manifest_path):
         case_path = _resolve_pack_path(pack_dir, rel_path)
-        cases.extend(_case_list(_load_yaml_mapping(case_path)))
+        cases.extend(
+            _case_list(
+                _load_yaml_mapping(case_path),
+                source_path=case_path,
+                required=True,
+            )
+        )
     return cases
 
 
@@ -115,9 +124,50 @@ def _resolve_pack_path(pack_dir: Path, rel_path: str) -> Path:
     return path
 
 
-def _case_list(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    cases = raw.get("cases", [])
-    return cases if isinstance(cases, list) else []
+def _validate_case_manifest(manifest: dict[str, Any], *, source_path: Path) -> None:
+    schema = manifest.get("case_schema")
+    if schema is None:
+        return
+    if schema != ASSEMBLY_EVIDENCE_CASE_SCHEMA:
+        raise ValueError(f"Unsupported case_schema {schema!r} in {source_path}")
+    if manifest.get("version") != _ASSEMBLY_EVIDENCE_MANIFEST_VERSION:
+        raise ValueError(
+            f"Unsupported evidence manifest version {manifest.get('version')!r} in {source_path}"
+        )
+    if "case_files" not in manifest:
+        raise ValueError(f"Evidence manifest case_files is required in {source_path}")
+    if not manifest["case_files"]:
+        raise TypeError(
+            f"case_files must be a list of non-empty strings with at least one entry in {source_path}"
+        )
+
+
+def _case_files(manifest: dict[str, Any], *, source_path: Path) -> list[str]:
+    raw = manifest.get("case_files", [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+        raise TypeError(
+            f"case_files must be a list of non-empty strings in {source_path}"
+        )
+    return raw
+
+
+def _case_list(
+    raw: dict[str, Any],
+    *,
+    source_path: Path,
+    required: bool,
+) -> list[dict[str, Any]]:
+    if "cases" not in raw:
+        if required:
+            raise ValueError(f"cases list is required in {source_path}")
+        return []
+    cases = raw["cases"]
+    if not isinstance(cases, list):
+        raise TypeError(f"cases must be a list in {source_path}")
+    invalid_indexes = [index for index, case in enumerate(cases) if not isinstance(case, dict)]
+    if invalid_indexes:
+        raise TypeError(f"cases entries must be mappings in {source_path}: {invalid_indexes}")
+    return cases
 
 
 def _rule_list(raw: dict[str, Any]) -> list[dict[str, Any]]:

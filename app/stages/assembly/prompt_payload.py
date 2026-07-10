@@ -120,17 +120,17 @@ def build_prompt_payload(
         source_root=knowledge_pack.get("pack_root"),
     )
 
-    uses_hifiasm_v2 = case_selection.get("retrieval_backend") == "hifiasm_numeric_v2"
-    evidence_cases = selected_cases if uses_hifiasm_v2 else []
-    legacy_selected_cases = [] if uses_hifiasm_v2 else selected_cases
+    uses_hifiasm_evidence = case_selection.get("retrieval_backend") == "hifiasm_numeric"
+    evidence_cases = selected_cases if uses_hifiasm_evidence else []
+    legacy_selected_cases = [] if uses_hifiasm_evidence else selected_cases
 
     # Defensive validation: verify all selected cases match profile read_type
     profile_read_type = prompt_profile.get("assets", {}).get("read_type")
     if profile_read_type:
-        for case in evidence_cases if uses_hifiasm_v2 else legacy_selected_cases:
+        for case in evidence_cases if uses_hifiasm_evidence else legacy_selected_cases:
             case_read_type = (
                 (case.get("applicability") or {}).get("read_type")
-                if uses_hifiasm_v2
+                if uses_hifiasm_evidence
                 else (case.get("features") or {}).get("read_type")
             )
             if case_read_type and not evidence_read_type_matches(profile_read_type, case_read_type):
@@ -150,7 +150,7 @@ def build_prompt_payload(
         "rules": knowledge_pack["rules"],
         "selected_cases": legacy_selected_cases,
         "case_selection": case_selection,
-        "case_retrieval": case_selection if uses_hifiasm_v2 else None,
+        "case_retrieval": case_selection if uses_hifiasm_evidence else None,
         "evidence_cases": evidence_cases,
         "recommendation_policy": {
             "parameter_levels": {

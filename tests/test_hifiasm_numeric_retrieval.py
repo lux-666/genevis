@@ -24,6 +24,7 @@ def _case(case_id: str, **facts: float) -> dict:
         "rationale_claims": [],
         "outcomes": {},
         "source_excerpts": [],
+        "retrieval_eligible": True,
         "curation": {"status": "approved"},
     }
 
@@ -107,6 +108,16 @@ def test_no_approved_cases_returns_non_blocking_fallback_metadata():
     assert "readonly L1 facts" in result.metadata["warning"]
 
 
+def test_approved_case_without_validated_sources_has_distinct_filter_reason():
+    case = _case("unvalidated", coverage=30)
+    case["retrieval_eligible"] = False
+
+    result = HifiasmNumericCaseRetriever().select([case], query=_query(coverage=30))
+
+    assert result.selected_cases == []
+    assert result.trace[0]["hard_filter_reasons"] == ["source_not_validated"]
+
+
 def test_hifiasm_prompt_succeeds_without_cases_and_preserves_level_contract():
     from app.stages.assembly.parameter_catalog import load_parameter_catalog
     from app.stages.assembly.prompt_payload import build_prompt_payload
@@ -130,7 +141,7 @@ def test_hifiasm_prompt_succeeds_without_cases_and_preserves_level_contract():
 
     assert payload["selected_cases"] == []
     assert payload["evidence_cases"] == []
-    assert payload["case_retrieval"]["retrieval_backend"] == "hifiasm_numeric_v2"
+    assert payload["case_retrieval"]["retrieval_backend"] == "hifiasm_numeric"
     assert payload["case_retrieval"]["evidence_available"] is False
     assert payload["recommendation_policy"]["case_evidence_required"] is False
     assert all(spec["level"] == 1 for spec in payload["readonly_params"].values())

@@ -183,11 +183,11 @@ execution gate.
 
 ## Prompt Contract Changes
 
-`build_prompt_payload` adds ref-backed sections for hifiasm V2:
+`build_prompt_payload` adds ref-backed sections for hifiasm evidence:
 
 ```yaml
 case_retrieval:
-  backend: hifiasm_numeric_v2
+  backend: hifiasm_numeric
   query_ref: .../retrieval_query.json
   result_ref: .../numeric_retrieval.json
   candidate_case_ids: []
@@ -203,9 +203,9 @@ evidence_cases:
     outcomes: {}
 ```
 
-The old `selected_cases` payload remains the contract for methods still using
-V1. Hifiasm uses one V2 payload path after cutover; it must not receive both V1
-and V2 case representations.
+The existing `selected_cases` payload remains the contract for methods that have
+not adopted curated evidence. Hifiasm uses one evidence payload path and must
+not receive both legacy and curated case representations.
 
 ## Validation
 
@@ -245,7 +245,7 @@ data/artifacts/assembly/<session>/parameter_attempt_<n>/
 Compact `parameter_attempts` state stores refs and summaries:
 
 ```yaml
-case_retrieval_backend: hifiasm_numeric_v2
+case_retrieval_backend: hifiasm_numeric
 candidate_case_ids: []
 selected_case_ids: []
 retrieval_result_ref: ...
@@ -281,7 +281,7 @@ Add tests for:
 - every cataloged hifiasm L2 parameter remains visible;
 - invalid values still fail existing parameter validation;
 - selected case IDs and artifact refs are persisted on the typed attempt;
-- V1 and V2 case payloads are not both used for hifiasm;
+- legacy and curated case payloads are not both used for hifiasm;
 - model-unavailable behavior remains strict.
 
 ## Acceptance Criteria

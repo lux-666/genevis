@@ -8,7 +8,7 @@ def _payload() -> dict:
         "task": "recommend_initial",
         "prompt_profile": {"genome_survey": {"heterozygosity": 0.012}},
         "case_selection": {
-            "retrieval_backend": "hifiasm_numeric_v2",
+            "retrieval_backend": "hifiasm_numeric",
             "selected_case_ids": ["case_a"],
         },
         "evidence_cases": [

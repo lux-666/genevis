@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.domains.assembly.evidence_case import validate_hifiasm_v2_cases
+from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
 from app.domains.assembly.selection import parameter_case_read_type
@@ -142,11 +142,11 @@ def select_evidence_cases(
     strategy: dict[str, Any] | None = None,
     source_root: Path | str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Dispatch hifiasm to V2 numeric retrieval and keep V1 for other methods."""
+    """Dispatch hifiasm to numeric evidence retrieval and preserve other methods."""
 
     if _tool_name(method_id) == "hifiasm":
         pack_root = Path(source_root) if source_root is not None else None
-        validated_cases = validate_hifiasm_v2_cases(cases, pack_root=pack_root)
+        validated_cases = validate_hifiasm_evidence_cases(cases, pack_root=pack_root)
         query = build_hifiasm_retrieval_query(
             prompt_profile,
             method_id=method_id,

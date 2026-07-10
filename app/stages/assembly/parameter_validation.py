@@ -217,8 +217,11 @@ def validate_parameter_evidence(
 
     violations: list[dict[str, Any]] = []
     selected_ids = set((prompt_payload.get("case_selection") or {}).get("selected_case_ids") or [])
-    hifiasm_v2 = (prompt_payload.get("case_selection") or {}).get("retrieval_backend") == "hifiasm_numeric_v2"
-    if hifiasm_v2 and declared_selected_case_ids is not None:
+    uses_hifiasm_evidence = (
+        (prompt_payload.get("case_selection") or {}).get("retrieval_backend")
+        == "hifiasm_numeric"
+    )
+    if uses_hifiasm_evidence and declared_selected_case_ids is not None:
         if not isinstance(declared_selected_case_ids, list) or not all(
             isinstance(case_id, str) for case_id in declared_selected_case_ids
         ):

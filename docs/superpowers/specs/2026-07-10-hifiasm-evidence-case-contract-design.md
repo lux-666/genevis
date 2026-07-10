@@ -2,11 +2,11 @@
 
 **Date:** 2026-07-10  
 **Phase:** Phase 11 Task 2  
-**Status:** Approved for implementation
+**Status:** Implemented
 
 ## Objective
 
-Complete Phase 11 Task 2 by turning the existing hifiasm EvidenceCase V2
+Complete Phase 11 Task 2 by turning the existing hifiasm EvidenceCase
 foundation into a strict, auditable input boundary for later numeric retrieval
 and Methods-aware recommendation.
 
@@ -17,7 +17,7 @@ production hifiasm selector.
 
 ## Scope
 
-This design covers PacBio HiFi `hifiasm` EvidenceCase V2 only.
+This design covers PacBio HiFi `hifiasm` EvidenceCase inputs only.
 
 It includes:
 
@@ -25,7 +25,7 @@ It includes:
 - assembly-specific initial and retry case validation;
 - source path, hash, span, and provenance validation;
 - deterministic eligibility of approved cases;
-- exclusion of draft, rejected, V1, and source-invalid cases from production
+- exclusion of draft, rejected, legacy, and source-invalid cases from production
   retrieval;
 - compact prompt/retrieval views that do not contain full source documents;
 - focused tests and Phase 11 documentation handoff.
@@ -44,10 +44,10 @@ promotion.
 - validate confined relative paths;
 - reject malformed manifest and shard containers instead of silently treating
   them as empty;
-- preserve mixed rollout support for non-hifiasm V1 cases;
+- preserve mixed rollout support for non-hifiasm cases;
 - avoid reading `body.md` or `methods.md`.
 
-For a V2 manifest, the loader validates `version`, `case_schema`, and
+For an evidence manifest, the loader validates `version`, `case_schema`, and
 `case_files`. This boundary returns structured case metadata and the pack root.
 It does not decide whether a case is scientifically or operationally eligible.
 
@@ -68,7 +68,7 @@ semantics.
 
 ### Assembly EvidenceCase validation
 
-`app/domains/assembly/evidence_case.py` owns hifiasm V2 semantics:
+`app/domains/assembly/evidence_case.py` owns hifiasm evidence semantics:
 
 - schema version and unique case identity;
 - source identity;
@@ -95,17 +95,17 @@ The production hifiasm path selects only cases that are both:
 - EvidenceCase schema version 2; and
 - approved and fully source-validated.
 
-Other assembly methods retain their existing V1 path until separately migrated.
+Other assembly methods retain their existing path until separately migrated.
 
 ## Contract Details
 
 ### Manifest and shard contract
 
-A V2 manifest declares:
+An evidence manifest declares:
 
 ```yaml
 version: 2
-case_schema: assembly_evidence_case_v2
+case_schema: assembly_evidence_case
 case_files:
   - cases/hifiasm/initial.yaml
   - cases/hifiasm/retry.yaml
@@ -113,11 +113,12 @@ case_files:
 
 `case_files` must be a list of non-empty relative strings. Referenced files must
 remain inside the pack root and must contain a mapping with a `cases` list.
-Malformed V2 manifests or shards are configuration errors, not empty evidence.
+Malformed evidence manifests or shards are configuration errors, not empty
+evidence.
 
 Mixed manifests may continue referencing legacy shards for non-hifiasm methods.
-A hifiasm V1 record is never adapted into V2 and never used by the production
-hifiasm selector.
+A legacy hifiasm record is never silently adapted and never used by the
+production hifiasm selector.
 
 ### Initial case contract
 
@@ -171,9 +172,9 @@ No invalid approved case is silently skipped.
 
 ## Testing Strategy
 
-Focused deterministic tests will cover:
+Focused deterministic tests cover:
 
-1. valid V2 manifest and shard loading;
+1. valid evidence manifest and shard loading;
 2. invalid manifest version, schema, `case_files`, and shard `cases` container;
 3. absolute paths, traversal, missing files, and symlink escape;
 4. missing, duplicate, unknown, absent, and ambiguous spans;
@@ -182,7 +183,7 @@ Focused deterministic tests will cover:
 7. reported parameters citing Methods spans;
 8. explicit rationale citing Methods and inferred rationale remaining labeled;
 9. draft and rejected exclusion from production retrieval;
-10. hifiasm V1 exclusion without compatibility conversion;
+10. legacy hifiasm exclusion without compatibility conversion;
 11. one complete manual case/body/Methods bundle through the production loading
     boundary;
 12. absence of full source documents and `source_documents` metadata from the
@@ -193,7 +194,7 @@ assembly regression tests will run before documentation is marked complete.
 
 ## Documentation And Handoff
 
-After implementation and verification:
+Implementation and verification completed the following handoff:
 
 - mark Phase 11 Task 2 complete and check its acceptance criteria;
 - remove duplicated wording in the Task 2 source-hash section;

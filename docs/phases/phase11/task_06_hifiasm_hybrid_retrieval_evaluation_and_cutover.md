@@ -10,8 +10,8 @@
 
 Build a reproducible offline evaluation for hifiasm evidence retrieval and
 recommendation, compare it with the existing bucket/weight selector, and cut the
-hifiasm production path over to the V2 EvidenceCase pipeline only after the new
-contract is demonstrably safer and more useful.
+hifiasm production path over to the curated EvidenceCase pipeline only after the
+new contract is demonstrably safer and more useful.
 
 ## Evaluation Corpus
 
@@ -91,7 +91,7 @@ Measure:
 - non-default parameter evidence rate;
 - default-preservation rate under weak evidence;
 - catalog/rule violation rate;
-- expert pairwise preference between V1 and V2 outputs;
+- expert pairwise preference between baseline and curated-evidence outputs;
 - abstention/stop correctness when retry is not evidence-supported.
 
 The primary safety requirements are:
@@ -103,7 +103,7 @@ The primary safety requirements are:
 
 ## Baseline
 
-Run the existing `structured_v1` bucket/weight selector against the same query
+Run the existing `structured_default` bucket/weight selector against the same query
 set and record:
 
 - selected cases;
@@ -113,7 +113,8 @@ set and record:
 - recommendation output under the same mocked or fixed decision backend where
   possible.
 
-V2 does not need to win every ranking metric. It must demonstrate:
+The curated evidence path does not need to win every ranking metric. It must
+demonstrate:
 
 - no regression in hard compatibility;
 - improved numeric continuity;
@@ -125,11 +126,11 @@ V2 does not need to win every ranking metric. It must demonstrate:
 
 After acceptance:
 
-- `assembly.candidate.hifiasm` uses `hifiasm_evidence_v2` only;
-- its prompt contains V2 evidence payloads only;
-- hifiasm no longer reads bucket fields or `structured_v1` weights;
-- V1 tests that assert hifiasm bucket scores are removed or rewritten as V2
-  behavior tests;
+- `assembly.candidate.hifiasm` uses the curated evidence selector only;
+- its prompt contains curated evidence payloads only;
+- hifiasm no longer reads bucket fields or `structured_default` weights;
+- tests that assert hifiasm bucket scores are removed or rewritten as curated
+  evidence behavior tests;
 - Flye, NextDenovo, and hifiasm-ont may remain on their existing selector until
   a later explicitly scoped task migrates them.
 
@@ -164,14 +165,16 @@ The full repository regression suite runs after focused tests pass.
 ## Acceptance Criteria
 
 - [ ] A version-controlled hifiasm initial/retry evaluation corpus exists.
-- [ ] V1 and V2 run against the same golden queries with recorded metrics.
-- [ ] V2 has no bucket-boundary discontinuity and exposes missingness explicitly.
+- [ ] Baseline and curated evidence paths run against the same golden queries
+  with recorded metrics.
+- [ ] Curated evidence retrieval has no bucket-boundary discontinuity and exposes
+  missingness explicitly.
 - [ ] All case-backed recommendations cite valid approved evidence; non-case
   recommendations name another allowed evidence basis.
 - [ ] Weak evidence increases conservative/default-preserving behavior at the
   expected rate, while no-case queries still complete through L1/SKILL/default
   evidence bases.
-- [ ] Hifiasm uses one V2 selector/prompt contract after cutover.
+- [ ] Hifiasm uses one selector/prompt contract after cutover.
 - [ ] Existing typed attempt, validation, freeze, execution, and retry behavior
   remains regression-covered.
 - [ ] Deferred GraphRAG/LLM Wiki/vector/cross-tool work is not introduced by

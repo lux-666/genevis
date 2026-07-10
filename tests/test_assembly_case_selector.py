@@ -301,7 +301,7 @@ def test_unknown_or_missing_profile_read_type_does_not_leak_cases_by_method_scor
     }
 
 
-def test_hifiasm_v2_dispatch_does_not_fall_back_to_v1_seed_cases():
+def test_hifiasm_dispatch_does_not_fall_back_to_legacy_seed_cases():
     cases = [
         {
             "case_id": "legacy_hifiasm_seed",
@@ -318,6 +318,6 @@ def test_hifiasm_v2_dispatch_does_not_fall_back_to_v1_seed_cases():
     )
 
     assert selected == []
-    assert metadata["retrieval_backend"] == "hifiasm_numeric_v2"
+    assert metadata["retrieval_backend"] == "hifiasm_numeric"
     assert metadata["evidence_available"] is False
     assert metadata["selected_case_ids"] == []

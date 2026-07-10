@@ -1,7 +1,7 @@
 version: 1
-default_strategy: structured_v1
+default_strategy: structured_default
 strategies:
-  structured_v1:
+  structured_default:
     hard_filters:
       read_type_mismatch: true
       exclude_failure_cases_for_initial: true

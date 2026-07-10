@@ -165,7 +165,7 @@ A retry attempt stores:
 task: retry_after_review_failure
 previous_attempt_id: 0
 failure_signature: under_purged
-case_retrieval_backend: hifiasm_retry_v2
+case_retrieval_backend: hifiasm_retry
 candidate_case_ids: []
 selected_case_ids: []
 retrieval_result_ref: ...

@@ -1,4 +1,4 @@
-"""Tests for source-grounded hifiasm EvidenceCase V2 validation."""
+"""Tests for source-grounded hifiasm EvidenceCase validation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import hashlib
 from pathlib import Path
 
 import pytest
+import yaml
 
-from app.domains.assembly.evidence_case import validate_hifiasm_v2_cases
+from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
 from app.knowledge.evidence_cases import EvidenceCaseValidationError
+from app.knowledge.packs import load_knowledge_pack
 
 
 def _write_document(path: Path, text: str) -> str:
@@ -75,7 +77,7 @@ def _approved_case(pack_root: Path) -> dict:
 def test_approved_case_validates_hashes_and_returns_exact_excerpts_only(tmp_path):
     case = _approved_case(tmp_path)
 
-    validated = validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
     assert len(validated) == 1
     assert {span["span_id"] for span in validated[0]["source_excerpts"]} == {
@@ -85,6 +87,8 @@ def test_approved_case_validates_hashes_and_returns_exact_excerpts_only(tmp_path
     }
     assert all(set(span) == {"span_id", "document", "quote"} for span in validated[0]["source_excerpts"])
     assert "Study body" not in str(validated[0]["source_excerpts"])
+    assert validated[0]["retrieval_eligible"] is True
+    assert "source_documents" not in validated[0]
 
 
 def test_approved_case_rejects_checksum_mismatch(tmp_path):
@@ -92,7 +96,15 @@ def test_approved_case_rejects_checksum_mismatch(tmp_path):
     case["source_documents"]["methods"]["sha256"] = "0" * 64
 
     with pytest.raises(EvidenceCaseValidationError, match="checksum mismatch"):
-        validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_requires_source_hashes(tmp_path):
+    case = _approved_case(tmp_path)
+    case["source_documents"]["body"]["sha256"] = None
+
+    with pytest.raises(EvidenceCaseValidationError, match="sha256 is required"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 def test_approved_case_rejects_ambiguous_quote(tmp_path):
@@ -103,7 +115,39 @@ def test_approved_case_rejects_ambiguous_quote(tmp_path):
     case["source_documents"]["methods"]["sha256"] = hashlib.sha256(methods_path.read_bytes()).hexdigest()
 
     with pytest.raises(EvidenceCaseValidationError, match="ambiguous"):
-        validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_missing_quote(tmp_path):
+    case = _approved_case(tmp_path)
+    case["source_documents"]["spans"][0]["quote"] = "Text absent from body."
+
+    with pytest.raises(EvidenceCaseValidationError, match="was not found"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_duplicate_span_ids(tmp_path):
+    case = _approved_case(tmp_path)
+    case["source_documents"]["spans"][1]["span_id"] = "body.genome"
+
+    with pytest.raises(EvidenceCaseValidationError, match="duplicate span_id"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_unknown_referenced_span(tmp_path):
+    case = _approved_case(tmp_path)
+    case["observed_facts"]["coverage"]["evidence_span_ids"] = ["methods.unknown"]
+
+    with pytest.raises(EvidenceCaseValidationError, match="methods.unknown"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_numeric_fact_requires_at_least_one_evidence_span(tmp_path):
+    case = _approved_case(tmp_path)
+    case["observed_facts"]["coverage"].pop("evidence_span_ids")
+
+    with pytest.raises(EvidenceCaseValidationError, match="numeric observed_facts.coverage"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 def test_approved_case_rejects_path_traversal(tmp_path):
@@ -111,7 +155,29 @@ def test_approved_case_rejects_path_traversal(tmp_path):
     case["source_documents"]["body"]["path"] = "../outside.md"
 
     with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
-        validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_absolute_source_path(tmp_path):
+    case = _approved_case(tmp_path)
+    case["source_documents"]["body"]["path"] = str(
+        (tmp_path / "sources" / "case_001" / "body.md").resolve()
+    )
+
+    with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_symlink_escape(tmp_path):
+    case = _approved_case(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}_outside.md"
+    outside.write_text("External body.", encoding="utf-8")
+    link = tmp_path / "sources" / "case_001" / "body_link.md"
+    link.symlink_to(outside)
+    case["source_documents"]["body"]["path"] = "sources/case_001/body_link.md"
+
+    with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 def test_draft_case_can_remain_incomplete_but_is_not_approved(tmp_path):
@@ -119,22 +185,108 @@ def test_draft_case_can_remain_incomplete_but_is_not_approved(tmp_path):
     case["curation"]["status"] = "draft"
     case.pop("source_documents")
 
-    validated = validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
     assert validated[0]["curation"]["status"] == "draft"
     assert validated[0]["source_excerpts"] == []
+    assert validated[0]["retrieval_eligible"] is False
+    assert "source_documents" not in validated[0]
+
+
+def test_rejected_case_is_retained_for_audit_but_not_retrieval(tmp_path):
+    case = _approved_case(tmp_path)
+    case["curation"]["status"] = "rejected"
+    case.pop("source_documents")
+
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0]["curation"]["status"] == "rejected"
+    assert validated[0]["retrieval_eligible"] is False
+
+
+def test_initial_case_rejects_retry_only_context(tmp_path):
+    case = _approved_case(tmp_path)
+    case["previous_attempt"] = {"parameters": {}, "failure_mode": "under_purged"}
+
+    with pytest.raises(EvidenceCaseValidationError, match="must not define previous_attempt"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_retry_case_requires_failure_context_and_parameter_changes(tmp_path):
+    case = _approved_case(tmp_path)
+    case["case_type"] = "retry"
+    case["previous_attempt"] = {"parameters": {"purge_level": 2}}
+    case["intervention"]["parameter_changes"] = {"purge_level": {"from": 2, "to": 1}}
+
+    with pytest.raises(EvidenceCaseValidationError, match="failure_mode or execution_failure_class"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_retry_case_accepts_complete_change_contract(tmp_path):
+    case = _approved_case(tmp_path)
+    case["case_type"] = "retry"
+    case["previous_attempt"] = {
+        "parameters": {"purge_level": 2},
+        "failure_mode": "under_purged",
+        "review_metrics": {},
+    }
+    case["intervention"]["parameter_changes"] = {"purge_level": {"from": 2, "to": 1}}
+
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0]["case_type"] == "retry"
+    assert validated[0]["retrieval_eligible"] is True
+
+
+def test_reported_parameter_must_cite_methods(tmp_path):
+    case = _approved_case(tmp_path)
+    case["intervention"]["parameters"]["purge_level"]["evidence_span_ids"] = ["body.genome"]
+
+    with pytest.raises(EvidenceCaseValidationError, match="must cite methods spans"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_explicit_rationale_must_cite_methods_while_inference_remains_labeled(tmp_path):
+    case = _approved_case(tmp_path)
+    case["rationale_claims"] = [
+        {
+            "claim_id": "curator_inference",
+            "statement": "Lower purge may preserve alternate sequence.",
+            "explicitness": "inferred",
+            "effect_area": "haplotype_preservation",
+            "evidence_span_ids": ["body.genome"],
+        }
+    ]
+
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0]["rationale_claims"][0]["explicitness"] == "inferred"
+
+    case["rationale_claims"][0]["explicitness"] = "explicit"
+    with pytest.raises(EvidenceCaseValidationError, match="must cite methods spans"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(tmp_path):
-    import yaml
-
     from app.stages.assembly.parameter_catalog import load_parameter_catalog
     from app.stages.assembly.prompt_payload import build_prompt_payload
 
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     pack_dir.mkdir(parents=True, exist_ok=True)
-    (pack_dir / "cases.yaml").write_text(yaml.safe_dump({"version": 2, "cases": [case]}), encoding="utf-8")
+    shard = pack_dir / "cases" / "hifiasm" / "initial.yaml"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    shard.write_text(yaml.safe_dump({"cases": [case]}), encoding="utf-8")
+    (pack_dir / "cases.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "case_schema": "assembly_evidence_case",
+                "case_files": ["cases/hifiasm/initial.yaml"],
+            }
+        ),
+        encoding="utf-8",
+    )
     (pack_dir / "rules.yaml").write_text("rules: []\n", encoding="utf-8")
     (pack_dir / "SKILL.md").write_text("Recommend only L2 parameters; cases are optional.\n", encoding="utf-8")
 
@@ -162,9 +314,80 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     assert "source_documents" not in payload["evidence_cases"][0]
 
 
-def test_declared_hifiasm_schema_version_other_than_v2_is_rejected(tmp_path):
+def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
     case = _approved_case(tmp_path)
     case["schema_version"] = 3
 
     with pytest.raises(EvidenceCaseValidationError, match="unsupported hifiasm schema_version"):
-        validate_hifiasm_v2_cases([case], pack_root=tmp_path)
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def _write_case_pack(tmp_path: Path, manifest: dict, shard: object = None) -> None:
+    pack_dir = tmp_path / "parameter_recommender"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "cases.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    (pack_dir / "rules.yaml").write_text("rules: []\n", encoding="utf-8")
+    (pack_dir / "SKILL.md").write_text("Use curated evidence.\n", encoding="utf-8")
+    if shard is not None:
+        shard_path = pack_dir / "cases" / "hifiasm" / "initial.yaml"
+        shard_path.parent.mkdir(parents=True)
+        shard_path.write_text(yaml.safe_dump(shard), encoding="utf-8")
+
+
+def test_evidence_manifest_and_shard_load_as_one_case_collection(tmp_path):
+    manifest = {
+        "version": 2,
+        "case_schema": "assembly_evidence_case",
+        "case_files": ["cases/hifiasm/initial.yaml"],
+    }
+    _write_case_pack(tmp_path, manifest, {"cases": [{"case_id": "case_from_shard"}]})
+
+    pack = load_knowledge_pack("parameter_recommender", root=tmp_path)
+
+    assert pack["cases"] == [{"case_id": "case_from_shard"}]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("version", 3, "Unsupported evidence manifest version"),
+        ("case_schema", "unknown_schema", "Unsupported case_schema"),
+        ("case_files", "cases/hifiasm/initial.yaml", "case_files must be a list"),
+        ("case_files", [], "case_files must be a list"),
+    ],
+)
+def test_evidence_manifest_rejects_invalid_contract(tmp_path, field, value, message):
+    manifest = {
+        "version": 2,
+        "case_schema": "assembly_evidence_case",
+        "case_files": ["cases/hifiasm/initial.yaml"],
+    }
+    manifest[field] = value
+    _write_case_pack(tmp_path, manifest, {"cases": []})
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        load_knowledge_pack("parameter_recommender", root=tmp_path)
+
+
+def test_evidence_manifest_rejects_malformed_shard_cases(tmp_path):
+    manifest = {
+        "version": 2,
+        "case_schema": "assembly_evidence_case",
+        "case_files": ["cases/hifiasm/initial.yaml"],
+    }
+    _write_case_pack(tmp_path, manifest, {"cases": {"case_id": "not-a-list"}})
+
+    with pytest.raises(TypeError, match="cases must be a list"):
+        load_knowledge_pack("parameter_recommender", root=tmp_path)
+
+
+def test_evidence_manifest_rejects_shard_path_escape(tmp_path):
+    manifest = {
+        "version": 2,
+        "case_schema": "assembly_evidence_case",
+        "case_files": ["../outside.yaml"],
+    }
+    _write_case_pack(tmp_path, manifest)
+
+    with pytest.raises(ValueError, match="escapes pack root"):
+        load_knowledge_pack("parameter_recommender", root=tmp_path)

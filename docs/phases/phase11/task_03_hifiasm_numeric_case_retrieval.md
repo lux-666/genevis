@@ -25,7 +25,7 @@ quality.
 - separate numeric distance and evidence coverage;
 - missing-value trace, stable ranking, weak-evidence warning, and deterministic
   no-case fallback metadata;
-- method-scoped dispatch so non-hifiasm methods keep V1 behavior.
+- method-scoped dispatch so non-hifiasm methods keep their current behavior.
 
 ## Scope
 
@@ -86,6 +86,7 @@ retriever sees one canonical unit per feature.
 For the first hifiasm release, an eligible case must satisfy:
 
 - `curation.status == approved`;
+- `retrieval_eligible == true` from Task 2 source validation;
 - `case_type == initial` for `recommend_initial`;
 - `applicability.read_type == hifi`;
 - target method includes `assembly.candidate.hifiasm`;
@@ -194,7 +195,7 @@ calibrated without changing the query/result interfaces.
 ## Result Contract
 
 ```yaml
-retrieval_backend: hifiasm_numeric_v2
+retrieval_backend: hifiasm_numeric
 query_ref: data/artifacts/assembly/<session>/parameter_attempt_<n>/retrieval_query.json
 eligible_case_count: 14
 candidate_case_ids:
@@ -250,7 +251,7 @@ app/domains/assembly/numeric_case_retriever.py
     Applies hard filters, numeric distances, ranking, and trace generation.
 
 app/domains/assembly/case_selector.py
-    Remains a thin method-aware dispatch boundary while hifiasm moves to V2.
+    Remains a thin method-aware dispatch boundary for hifiasm evidence retrieval.
 ```
 
 The numeric retriever must be pure with respect to LLM calls and filesystem
@@ -271,7 +272,7 @@ Required deterministic tests:
 - stable tie-breaking by case ID;
 - result trace explains every included, missing, and excluded feature;
 - no `coverage_bucket`, `genome_size_bucket`, or bucket-boundary dependency in
-  hifiasm V2 retrieval.
+  hifiasm evidence retrieval.
 
 ## Acceptance Criteria
 

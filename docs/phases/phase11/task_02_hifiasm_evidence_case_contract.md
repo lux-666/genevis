@@ -1,7 +1,7 @@
 # Task 2: Hifiasm EvidenceCase And Manual Source Contract
 
 **Phase**: 11
-**Status**: In progress; foundation implemented, acceptance work remains
+**Status**: Complete
 **Depends on**: Phase10 Task14 typed parameter-attempt contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -21,17 +21,21 @@ inputs:
 The runtime consumes those prepared inputs, validates their references, and
 uses only approved evidence cases for hifiasm recommendation.
 
-## Implemented MVP
+## Implemented Contract
 
-- hifiasm V1 seed observations are ignored by the hifiasm production selector;
-- V2 case IDs, case type, applicability, source identity, intervention, and
+- legacy hifiasm seed observations are ignored by the production selector;
+- case IDs, case type, applicability, source identity, intervention, and
   curation status are validated;
+- manifest and shard structure is validated without silently turning malformed
+  inputs into empty evidence;
 - approved body/Methods paths are confined to the knowledge-pack root;
 - approved source hashes and exact, unambiguous quotes are verified;
 - numeric facts, reported parameters, and explicit rationale claims validate
   their span provenance;
 - only prompt-safe exact excerpts are returned, never complete documents;
-- empty initial/retry V2 shards provide the manual curation landing point.
+- initial and retry contracts are validated separately;
+- draft and rejected cases are retained as ineligible audit records;
+- empty initial/retry shards provide the manual curation landing point.
 
 ## Scope
 
@@ -39,7 +43,7 @@ This task covers the PacBio HiFi `hifiasm` method only.
 
 In scope:
 
-- EvidenceCase schema version 2;
+- the current EvidenceCase schema;
 - one-to-one case/body/Methods source references;
 - stable evidence excerpts with source validation;
 - initial and retry case types;
@@ -74,12 +78,12 @@ descriptors/knowledge_packs/assembly/parameter_recommender/
 ```
 
 `cases.yaml` remains a manifest. It identifies the schema version and case
-shards. Source documents are not placed directly in prompt state and are not
-loaded until a shortlisted case needs them.
+shards. Approved source documents are read only during source validation and
+are never retained in compact graph state or prompt payloads.
 
 ```yaml
 version: 2
-case_schema: assembly_evidence_case_v2
+case_schema: assembly_evidence_case
 case_files:
   - cases/hifiasm/initial.yaml
   - cases/hifiasm/retry.yaml
@@ -88,7 +92,7 @@ case_files:
 The runtime must reject absolute paths, `..` traversal, symlink escape, or any
 source reference outside the knowledge-pack root.
 
-## EvidenceCase V2
+## EvidenceCase
 
 ```yaml
 cases:
@@ -290,11 +294,12 @@ The production selector consumes only `approved` cases.
 The current 2026 `internal seed case` records are not treated as scientific
 evidence. During implementation they must be either:
 
-1. migrated to V2 as `draft` fixtures and excluded from production retrieval; or
+1. migrated to the current contract as `draft` fixtures and excluded from
+   production retrieval; or
 2. moved into test fixtures.
 
-There must not be a silent V1-to-V2 compatibility reader for hifiasm production
-selection. Hifiasm uses one case schema after Task 2.
+There must not be a silent compatibility conversion for hifiasm production
+selection. Hifiasm uses one current case schema after Task 2.
 
 Other assembly methods may continue using their existing selector until their
 own future migration; that is a method-scoped rollout, not two active hifiasm
@@ -337,9 +342,9 @@ ordering.
 
 ## Tests
 
-Add focused coverage for:
+Implemented coverage includes:
 
-- V2 manifest and shard loading;
+- evidence manifest and shard loading;
 - source path confinement;
 - exact quote validation;
 - missing, duplicate, and ambiguous span IDs;
@@ -353,14 +358,14 @@ Add focused coverage for:
 
 ## Acceptance Criteria
 
-- [ ] A manually prepared case, body document, and Methods document load as one
+- [x] A manually prepared case, body document, and Methods document load as one
   validated EvidenceCase.
-- [ ] Approved cases have verified source hashes and valid exact-quote spans.
-- [ ] Initial and retry cases have distinct validated contracts.
-- [ ] Draft, rejected, V1, and source-invalid cases cannot enter hifiasm
+- [x] Approved cases have verified source hashes and valid exact-quote spans.
+- [x] Initial and retry cases have distinct validated contracts.
+- [x] Draft, rejected, legacy, and source-invalid cases cannot enter hifiasm
   production retrieval.
-- [ ] Full source documents remain ref-backed and out of compact graph state.
-- [ ] Existing synthetic seed cases are no longer production evidence for
+- [x] Full source documents remain ref-backed and out of compact graph state.
+- [x] Existing synthetic seed cases are no longer production evidence for
   hifiasm.
-- [ ] No PDF ingestion, GraphRAG, LLM Wiki, embedding, or cross-tool mapping is
+- [x] No PDF ingestion, GraphRAG, LLM Wiki, embedding, or cross-tool mapping is
   introduced.

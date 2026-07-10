@@ -102,7 +102,7 @@ class HifiasmNumericCaseRetriever:
         warning = None
         if not evidence_available:
             warning = (
-                "No compatible approved hifiasm V2 evidence cases; use readonly L1 facts, "
+                "No compatible approved hifiasm evidence cases; use readonly L1 facts, "
                 "SKILL guidance, retry context, and catalog defaults conservatively."
             )
         elif weak_selected:
@@ -112,12 +112,12 @@ class HifiasmNumericCaseRetriever:
             )
 
         metadata = {
-            "retrieval_backend": "hifiasm_numeric_v2",
+            "retrieval_backend": "hifiasm_numeric",
             "selected_case_ids": [case["case_id"] for case in selected_cases],
             "candidate_case_ids": [case["case_id"] for case in selected_cases],
             "selected_count": len(selected_cases),
             "eligible_case_count": len(ranked),
-            "total_v2_cases": len(cases),
+            "total_cases": len(cases),
             "evidence_available": evidence_available,
             "case_evidence_required": False,
             "warning": warning,
@@ -216,6 +216,8 @@ def _hard_filter_reasons(case: dict[str, Any], query: dict[str, Any]) -> list[st
     expected_case_type = "initial" if query.get("task") == "recommend_initial" else "retry"
     if curation.get("status") != "approved":
         reasons.append("curation_not_approved")
+    elif case.get("retrieval_eligible") is not True:
+        reasons.append("source_not_validated")
     if case.get("case_type") != expected_case_type:
         reasons.append("case_type_mismatch")
     if applicability.get("read_type") != "hifi" or query.get("read_type") not in {None, "hifi", "pacbio_hifi"}:

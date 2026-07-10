@@ -1,7 +1,7 @@
 # Phase 11: Hifiasm Evidence Retrieval And Methods-Aware Recommendation
 
 **Phase**: 11
-**Status**: Tasks 2-4 in progress; Tasks 5-6 designed
+**Status**: Task 2 complete; Tasks 3-4 in progress; Tasks 5-6 designed
 **Created**: 2026-07-07
 **Updated**: 2026-07-10
 
@@ -13,10 +13,11 @@ pipeline.
 
 The cross-method typed-attempt expansion for Flye and NextDenovo belongs to
 [Phase10 Task14](../phase10/task_14_flye_nextdenovo_parameter_attempts.md) and
-is a completed prerequisite, not a Phase11 task. The current implementation
-provides groundwork for Tasks 2-4, but those tasks remain incomplete until
-their documented acceptance criteria are closed. Tasks 5-6 remain later
-retry/evaluation work and must not start before Tasks 2-4 are complete.
+is a completed prerequisite, not a Phase11 task. Task 2 now provides the
+validated EvidenceCase input boundary consumed by Tasks 3-4. Those later tasks
+remain incomplete until their own documented acceptance criteria are closed.
+Tasks 5-6 remain later retry/evaluation work and must not start before Tasks
+3-4 are complete.
 
 ## Confirmed Evidence Boundary
 
@@ -98,8 +99,8 @@ provides the shared executable-method typed-attempt foundation:
 
 ## Task Index
 
-- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - In progress
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - In progress; begins after Task 2 acceptance
+- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Complete
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - In progress; consumes validated Task 2 cases
 - [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - In progress; begins after Task 3 acceptance
 - [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
 - [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
@@ -116,15 +117,17 @@ provides the shared executable-method typed-attempt foundation:
 ```
 
 Tasks are intentionally sequential because each later contract consumes
-artifacts and invariants established by the earlier task.
+artifacts and invariants established by the earlier task. Task 3 receives
+normalized, retrieval-eligible cases and does not repeat manifest, filesystem,
+checksum, quote, or provenance validation.
 
 ## Phase Completion Criteria
 
 Phase11 is complete when:
 
-- Task1 typed parameter attempts remain green for all executable assembly
+- Phase10 Task14 typed parameter attempts remain green for all executable assembly
   methods;
-- hifiasm production recommendation consumes only approved V2 EvidenceCases;
+- hifiasm production recommendation consumes only approved EvidenceCases;
 - hifiasm case ranking is continuous and missing-aware rather than bucket-based;
 - hifiasm recommendations preserve L0/L1/L2 permissions and record their
   evidence basis; case-backed claims are traceable to case IDs and exact source
@@ -133,6 +136,6 @@ Phase11 is complete when:
   parameter recommender;
 - initial and retry evidence remain separate;
 - runtime draft cases require manual promotion;
-- the golden evaluation demonstrates safety and usefulness over the V1
+- the golden evaluation demonstrates safety and usefulness over the legacy
   baseline;
 - deferred graph/wiki/vector/cross-tool work remains outside the phase.
