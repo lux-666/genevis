@@ -1,7 +1,7 @@
 # Task 3: Hifiasm Continuous Numeric Case Retrieval
 
 **Phase**: 11
-**Status**: In progress; retrieval foundation implemented, acceptance work remains
+**Status**: Complete
 **Depends on**: Task 2 EvidenceCase contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -15,7 +15,7 @@ This task decides which cases are numerically and operationally plausible. It
 does not ask an LLM to recommend parameters and does not score final assembly
 quality.
 
-## Implemented MVP
+## Implemented Contract
 
 - canonical profile-to-query unit conversion for genome size, coverage, read
   N50, heterozygosity, and ploidy;
@@ -25,6 +25,11 @@ quality.
 - separate numeric distance and evidence coverage;
 - missing-value trace, stable ranking, weak-evidence warning, and deterministic
   no-case fallback metadata;
+- configuration-backed tolerance scales, feature weights, distance clipping,
+  epsilon, and candidate budget under `strategies.yaml:hifiasm_numeric`;
+- attempt-scoped `retrieval_query.json` and `retrieval_trace.json` artifacts,
+  with compact refs/hashes, backend, query ID, candidate IDs, eligible count,
+  and warning summary handed to the prompt and typed parameter attempt;
 - method-scoped dispatch so non-hifiasm methods keep their current behavior.
 
 ## Scope
@@ -61,19 +66,19 @@ assembly_goal: primary
 numeric_features:
   genome_size_mb:
     value: 1200
-    source_ref: data/artifacts/genome_survey/.../result.json
+    source_ref: prompt_profile.genome_survey.estimated_genome_size
   coverage:
     value: 31.4
-    source_ref: data/artifacts/read_qc/.../result.json
+    source_ref: prompt_profile.read_qc.effective_coverage_1kb
   read_n50_kb:
     value: 18.7
-    source_ref: data/artifacts/read_qc/.../result.json
+    source_ref: prompt_profile.read_qc.read_n50
   heterozygosity:
     value: 0.011
-    source_ref: data/artifacts/genome_survey/.../result.json
+    source_ref: prompt_profile.genome_survey.heterozygosity
   ploidy:
     value: 2
-    source_ref: manifest
+    source_ref: prompt_profile.sample.ploidy
 categorical_context:
   clade: vertebrate
 ```
@@ -176,7 +181,7 @@ ranking uses distance and never treats the display value as assembly quality.
 
 ## Scales And Weights
 
-The first release uses configuration-backed domain tolerances, not learned
+The implementation uses configuration-backed domain tolerances, not learned
 standard deviations from the small seed corpus.
 
 Initial weights should be equal among present numeric features. Biological
@@ -194,13 +199,29 @@ calibrated without changing the query/result interfaces.
 
 ## Result Contract
 
+The prompt payload and `ParameterAttempt` retain compact replay metadata:
+
 ```yaml
 retrieval_backend: hifiasm_numeric
+query_id: <session>:parameter_attempt_<n>
 query_ref: data/artifacts/assembly/<session>/parameter_attempt_<n>/retrieval_query.json
+query_hash: <sha256>
+trace_ref: data/artifacts/assembly/<session>/parameter_attempt_<n>/retrieval_trace.json
+trace_hash: <sha256>
 eligible_case_count: 14
 candidate_case_ids:
   - case_a
   - case_b
+warning: null
+```
+
+The trace artifact contains the replayable ranking details:
+
+```yaml
+retrieval_backend: hifiasm_numeric
+query_id: <session>:parameter_attempt_<n>
+selected_case_ids: [case_a, case_b]
+eligible_case_count: 14
 warning: null
 trace:
   - case_id: case_a
@@ -224,10 +245,18 @@ trace:
   - case_id: case_x
     decision: excluded
     hard_filter_reasons: [read_type_mismatch]
+    feature_distances:
+      coverage:
+        query: 31.4
+        case: 60
+        distance: null
+        status: not_compared_hard_filter
 ```
 
-The trace is an attempt-scoped artifact. Compact parameter-attempt state stores
-only its ref, selected IDs, backend version, and warning summary.
+Both artifacts are attempt-scoped. They contain normalized numeric inputs,
+ranking decisions, refs, hashes, IDs, and warning summaries, but not complete
+body/Methods documents. The retriever remains filesystem-pure; the assembly
+prompt orchestration owns artifact materialization.
 
 ## Candidate Budget
 
@@ -241,7 +270,7 @@ Recommended first defaults:
 - when fewer cases pass, keep all eligible cases and emit a warning;
 - when evidence coverage is weak, Task 4 must prefer catalog defaults.
 
-## Proposed Code Boundaries
+## Code Boundaries
 
 ```text
 app/domains/assembly/retrieval_query.py
@@ -259,7 +288,7 @@ writes. Artifact writing belongs to the assembly stage orchestration layer.
 
 ## Tests
 
-Required deterministic tests:
+Implemented deterministic coverage:
 
 - 29.9x and 30.1x coverage rank nearly identically;
 - doubling a value produces the same raw log-ratio distance regardless of base
@@ -271,18 +300,29 @@ Required deterministic tests:
 - clade cannot overcome major numeric mismatch;
 - stable tie-breaking by case ID;
 - result trace explains every included, missing, and excluded feature;
+- configured scales and weights change distance deterministically;
+- non-finite profile values are treated as missing and non-finite retrieval
+  configuration is rejected;
+- query precedence, units, query ID, and source paths are recorded;
+- the configured 12-case candidate budget is not capped by the legacy
+  selector's 8-case prompt limit;
+- fewer eligible cases than the configured candidate budget produce an
+  explicit conservative warning;
+- any selected weak-coverage case produces an explicit warning;
+- retrieval query/trace artifacts are attempt-scoped, indexed, and handed to
+  `ParameterAttempt` by ref and hash;
 - no `coverage_bucket`, `genome_size_bucket`, or bucket-boundary dependency in
   hifiasm evidence retrieval.
 
 ## Acceptance Criteria
 
-- [ ] Hifiasm initial retrieval uses continuous numeric distances rather than
+- [x] Hifiasm initial retrieval uses continuous numeric distances rather than
   bucket matches.
-- [ ] Every candidate has feature-level distance and missingness trace.
-- [ ] Similarity and evidence coverage are separate values.
-- [ ] Hard compatibility filters are deterministic and run before ranking.
-- [ ] Weak evidence produces an explicit warning instead of false confidence.
-- [ ] Retrieval artifacts are replayable and do not contain full source
+- [x] Every candidate has feature-level distance and missingness trace.
+- [x] Similarity and evidence coverage are separate values.
+- [x] Hard compatibility filters are deterministic and run before ranking.
+- [x] Weak evidence produces an explicit warning instead of false confidence.
+- [x] Retrieval artifacts are replayable and do not contain full source
   documents.
-- [ ] The implementation performs no LLM, embedding, GraphRAG, or quality-score
+- [x] The implementation performs no LLM, embedding, GraphRAG, or quality-score
   operation.

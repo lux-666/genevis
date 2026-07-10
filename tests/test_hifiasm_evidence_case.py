@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -314,6 +315,62 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     assert "source_documents" not in payload["evidence_cases"][0]
 
 
+def test_hifiasm_retrieval_query_and_trace_are_attempt_scoped_artifacts(tmp_path):
+    from app.stages.assembly.parameter_catalog import load_parameter_catalog
+    from app.stages.assembly.prompt_payload import build_prompt_payload
+
+    pack_dir = tmp_path / "parameter_recommender"
+    case = _approved_case(pack_dir)
+    _write_case_pack(
+        tmp_path,
+        {
+            "version": 2,
+            "case_schema": "assembly_evidence_case",
+            "case_files": ["cases/hifiasm/initial.yaml"],
+        },
+        {"cases": [case]},
+    )
+    data_dir = tmp_path / "data"
+    payload = build_prompt_payload(
+        method_id="hifiasm",
+        catalog=load_parameter_catalog("hifiasm"),
+        full_profile={
+            "sample": {"sample_id": "case_match", "ploidy": 2},
+            "assets": {"read_type": "hifi"},
+            "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
+            "genome_survey": {"estimated_genome_size": 1200000000},
+            "previous_attempt": {},
+            "assembly_review": {},
+        },
+        task="recommend_initial",
+        knowledge_root=tmp_path,
+        write_artifacts=True,
+        session_id="session_a",
+        attempt_id=2,
+        data_dir=data_dir,
+    )
+
+    retrieval = payload["case_retrieval"]
+    assert retrieval == payload["case_selection"]
+    assert "query" not in retrieval
+    assert "trace" not in retrieval
+    assert retrieval["query_id"] == "session_a:parameter_attempt_2"
+    assert retrieval["query_ref"].endswith("parameter_attempt_2/retrieval_query.json")
+    assert retrieval["trace_ref"].endswith("parameter_attempt_2/retrieval_trace.json")
+
+    query_path = data_dir / retrieval["query_ref"].removeprefix("data/")
+    trace_path = data_dir / retrieval["trace_ref"].removeprefix("data/")
+    query_artifact = json.loads(query_path.read_text(encoding="utf-8"))
+    trace_artifact = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert query_artifact["query_id"] == retrieval["query_id"]
+    assert trace_artifact["selected_case_ids"] == ["case_001"]
+    assert trace_artifact["trace"][0]["feature_distances"]["coverage"]["status"] == "compared"
+    artifact_text = query_path.read_text(encoding="utf-8") + trace_path.read_text(encoding="utf-8")
+    assert "source_documents" not in artifact_text
+    assert "Study body" not in artifact_text
+    assert "Methods." not in artifact_text
+
+
 def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
     case = _approved_case(tmp_path)
     case["schema_version"] = 3
@@ -324,13 +381,13 @@ def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
 
 def _write_case_pack(tmp_path: Path, manifest: dict, shard: object = None) -> None:
     pack_dir = tmp_path / "parameter_recommender"
-    pack_dir.mkdir(parents=True)
+    pack_dir.mkdir(parents=True, exist_ok=True)
     (pack_dir / "cases.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     (pack_dir / "rules.yaml").write_text("rules: []\n", encoding="utf-8")
     (pack_dir / "SKILL.md").write_text("Use curated evidence.\n", encoding="utf-8")
     if shard is not None:
         shard_path = pack_dir / "cases" / "hifiasm" / "initial.yaml"
-        shard_path.parent.mkdir(parents=True)
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
         shard_path.write_text(yaml.safe_dump(shard), encoding="utf-8")
 
 

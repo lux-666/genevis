@@ -7,6 +7,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.domains.assembly.methods_evidence import (
+    normalize_hifiasm_methods_response,
+    uses_hifiasm_methods_contract,
+)
 from app.llm.factory import build_chat_model
 
 AssemblyDecisionKind = Literal["route_selection", "parameter_recommendation"]
@@ -46,11 +50,11 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
         response = model.invoke(messages)
     except Exception as exc:
         if request.kind == "parameter_recommendation" and request.allow_default_on_error:
-            # Return empty L2 params to use all catalog defaults
+            fallback = _default_parameter_recommendation(request.prompt_payload)
             return AssemblyDecisionResult(
                 kind=request.kind,
-                raw_response=json.dumps({"params": {}, "reasoning": "model unavailable; using catalog defaults for all L2 parameters", "confidence": 0.0}),
-                parsed={"params": {}, "reasoning": "model unavailable; using catalog defaults for all L2 parameters", "confidence": 0.0},
+                raw_response=json.dumps(fallback),
+                parsed=fallback,
                 valid=True,
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -69,7 +73,7 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
         if request.kind == "route_selection":
             _validate_route_selection(parsed, request.allowed_actions)
         elif request.kind == "parameter_recommendation":
-            _validate_parameter_recommendation(parsed)
+            parsed = _validate_parameter_recommendation(parsed, request.prompt_payload)
         return AssemblyDecisionResult(
             kind=request.kind,
             raw_response=raw_content,
@@ -93,10 +97,31 @@ def _validate_route_selection(parsed: dict[str, Any], allowed_actions: list[str]
         raise ValueError(f"recommended_route {recommended!r} not in allowed actions")
 
 
-def _validate_parameter_recommendation(parsed: dict[str, Any]) -> None:
+def _validate_parameter_recommendation(
+    parsed: dict[str, Any],
+    prompt_payload: dict[str, Any],
+) -> dict[str, Any]:
+    if uses_hifiasm_methods_contract(prompt_payload):
+        return normalize_hifiasm_methods_response(parsed, prompt_payload)
     if "params" not in parsed:
         raise ValueError("parameter recommendation requires params")
     if not isinstance(parsed.get("params"), dict):
         raise ValueError("params must be an object")
     if "parameter_evidence" in parsed and not isinstance(parsed.get("parameter_evidence"), dict):
         raise ValueError("parameter_evidence must be an object")
+    return parsed
+
+
+def _default_parameter_recommendation(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    reason = "model unavailable; using catalog defaults for all L2 parameters"
+    if uses_hifiasm_methods_contract(prompt_payload):
+        return normalize_hifiasm_methods_response(
+            {
+                "case_assessments": [],
+                "recommendation": {"adjustable_params": {}},
+                "selected_case_ids": [],
+                "summary": reason,
+            },
+            prompt_payload,
+        )
+    return {"params": {}, "reasoning": reason, "confidence": 0.0}
