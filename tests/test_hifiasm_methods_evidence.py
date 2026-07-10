@@ -150,6 +150,22 @@ def test_methods_response_normalizes_assessments_and_parameter_decisions():
     assert normalized["reasoning"] == normalized["summary"]
 
 
+def test_methods_response_rejects_legacy_params_only_contract():
+    with pytest.raises(ValueError, match="case_assessments"):
+        normalize_hifiasm_methods_response(
+            {"params": {"purge_level": 1}},
+            _prompt_payload(),
+        )
+
+
+def test_methods_response_requires_one_decision_for_every_l2_parameter():
+    response = _response()
+    response["recommendation"]["adjustable_params"].pop("kmer_length")
+
+    with pytest.raises(ValueError, match="exactly one decision.*kmer_length"):
+        normalize_hifiasm_methods_response(response, _prompt_payload())
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -189,7 +205,16 @@ def test_no_case_response_can_use_profile_skill_or_catalog_default():
                     "supporting_span_ids": [],
                     "confidence": "medium",
                     "reason": "Use readonly heterozygosity and conservative SKILL guidance.",
-                }
+                },
+                "kmer_length": {
+                    "action": "keep_default",
+                    "value": 51,
+                    "basis": "catalog_default",
+                    "supporting_case_ids": [],
+                    "supporting_span_ids": [],
+                    "confidence": "weak",
+                    "reason": "Keep the catalog default without case evidence.",
+                },
             }
         },
         "selected_case_ids": [],
@@ -200,3 +225,29 @@ def test_no_case_response_can_use_profile_skill_or_catalog_default():
 
     assert normalized["params"] == {"purge_level": 1}
     assert normalized["selected_case_ids"] == []
+
+
+def test_case_basis_requires_a_span_from_each_supporting_case():
+    prompt = _prompt_payload()
+    case_b = _case("case_b")
+    case_b["source_excerpts"][0]["span_id"] = "methods.case_b"
+    prompt["case_retrieval"]["candidate_case_ids"] = ["case_a", "case_b"]
+    prompt["evidence_cases"].append(case_b)
+
+    response = _response()
+    response["case_assessments"].append(
+        {
+            "case_id": "case_b",
+            "relevance": "medium",
+            "transferable_findings": [],
+            "conflicts_or_limits": [],
+            "accepted_as_support": True,
+        }
+    )
+    response["selected_case_ids"] = ["case_a", "case_b"]
+    purge = response["recommendation"]["adjustable_params"]["purge_level"]
+    purge["supporting_case_ids"] = ["case_a", "case_b"]
+    purge["supporting_span_ids"] = ["methods.rationale"]
+
+    with pytest.raises(ValueError, match="cases without a span.*case_b"):
+        normalize_hifiasm_methods_response(response, prompt)

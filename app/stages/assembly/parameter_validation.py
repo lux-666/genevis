@@ -213,14 +213,23 @@ def validate_parameter_evidence(
     prompt_payload: dict[str, Any],
     declared_selected_case_ids: Any = None,
 ) -> dict[str, Any]:
-    """Validate optional per-parameter evidence bases against the visible prompt."""
+    """Validate per-parameter evidence bases against the visible prompt.
+
+    Evidence remains optional for legacy recommendation contracts, but Task 4's
+    hifiasm Methods-aware contract requires it for every rendered L2 value.
+    """
 
     violations: list[dict[str, Any]] = []
-    selected_ids = set((prompt_payload.get("case_selection") or {}).get("selected_case_ids") or [])
-    uses_hifiasm_evidence = (
-        (prompt_payload.get("case_selection") or {}).get("retrieval_backend")
-        == "hifiasm_numeric"
+    case_selection = prompt_payload.get("case_selection") or {}
+    case_retrieval = prompt_payload.get("case_retrieval") or case_selection
+    selected_ids = set(
+        case_retrieval.get("evidence_case_ids")
+        or case_retrieval.get("candidate_case_ids")
+        or case_retrieval.get("selected_case_ids")
+        or []
     )
+    uses_hifiasm_evidence = case_retrieval.get("retrieval_backend") == "hifiasm_numeric"
+    declared_selected_ids: set[str] | None = None
     if uses_hifiasm_evidence and declared_selected_case_ids is not None:
         if not isinstance(declared_selected_case_ids, list) or not all(
             isinstance(case_id, str) for case_id in declared_selected_case_ids
@@ -233,6 +242,7 @@ def validate_parameter_evidence(
                 }
             )
         else:
+            declared_selected_ids = set(declared_selected_case_ids)
             unsupported_selected = sorted(set(declared_selected_case_ids) - selected_ids)
             if unsupported_selected:
                 violations.append(
@@ -243,16 +253,36 @@ def validate_parameter_evidence(
                     }
                 )
     if parameter_evidence is None:
+        if uses_hifiasm_evidence and recommended_params:
+            violations.extend(
+                {
+                    "param": parameter,
+                    "reason": "every recommended hifiasm parameter requires an evidence basis",
+                    "severity": "critical",
+                }
+                for parameter in sorted(recommended_params)
+            )
         return {
             "valid": not violations,
             "violations": violations,
-            "warnings": [{"reason": "parameter_evidence not provided"}],
+            "warnings": [] if violations else [{"reason": "parameter_evidence not provided"}],
         }
     if not isinstance(parameter_evidence, dict):
         violations.append(
             {"param": None, "reason": "parameter_evidence must be an object", "severity": "critical"}
         )
         return {"valid": False, "violations": violations, "warnings": []}
+
+    if uses_hifiasm_evidence:
+        missing_evidence = sorted(set(recommended_params) - set(parameter_evidence))
+        violations.extend(
+            {
+                "param": parameter,
+                "reason": "every recommended hifiasm parameter requires an evidence basis",
+                "severity": "critical",
+            }
+            for parameter in missing_evidence
+        )
 
     spans_by_case = {
         str(case.get("case_id")): {
@@ -319,7 +349,8 @@ def validate_parameter_evidence(
                     }
                 )
             else:
-                invalid_cases = sorted(set(case_ids) - selected_ids)
+                allowed_case_ids = declared_selected_ids if declared_selected_ids is not None else selected_ids
+                invalid_cases = sorted(set(case_ids) - allowed_case_ids)
                 if invalid_cases:
                     violations.append(
                         {
@@ -335,6 +366,22 @@ def validate_parameter_evidence(
                         {
                             "param": parameter,
                             "reason": f"case evidence cites spans absent from the prompt: {invalid_spans}",
+                            "severity": "critical",
+                        }
+                    )
+                cases_without_cited_span = sorted(
+                    case_id
+                    for case_id in case_ids
+                    if not (spans_by_case.get(str(case_id), set()) & set(span_ids))
+                )
+                if cases_without_cited_span:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": (
+                                "case evidence cites cases without a span from that case: "
+                                f"{cases_without_cited_span}"
+                            ),
                             "severity": "critical",
                         }
                     )

@@ -96,3 +96,47 @@ def test_selected_case_ids_cannot_invent_non_shortlisted_case_without_parameter_
 
     assert result["valid"] is False
     assert "non-shortlisted" in result["violations"][0]["reason"]
+
+
+def test_hifiasm_recommended_parameter_requires_parameter_evidence():
+    prompt_payload = _payload()
+    prompt_payload["case_retrieval"] = prompt_payload.pop("case_selection")
+    result = validate_parameter_evidence(
+        parameter_evidence=None,
+        recommended_params={"purge_level": 1},
+        prompt_payload=prompt_payload,
+        declared_selected_case_ids=[],
+    )
+
+    assert result["valid"] is False
+    assert result["violations"][0]["param"] == "purge_level"
+    assert "requires an evidence basis" in result["violations"][0]["reason"]
+
+
+def test_each_cited_case_requires_its_own_visible_span():
+    payload = _payload()
+    payload["case_selection"]["selected_case_ids"] = ["case_a", "case_b"]
+    payload["evidence_cases"].append(
+        {
+            "case_id": "case_b",
+            "source_excerpts": [
+                {"span_id": "methods.case_b", "document": "methods", "quote": "Case B rationale."}
+            ],
+        }
+    )
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "purge_level": {
+                "basis": "case",
+                "case_ids": ["case_a", "case_b"],
+                "span_ids": ["methods.rationale"],
+            }
+        },
+        recommended_params={"purge_level": 1},
+        prompt_payload=payload,
+        declared_selected_case_ids=["case_a", "case_b"],
+    )
+
+    assert result["valid"] is False
+    assert "cases without a span" in result["violations"][0]["reason"]
+    assert "case_b" in result["violations"][0]["reason"]

@@ -20,6 +20,7 @@ HIFIASM_EFFECT_AREAS = (
     "purging",
     "performance_and_memory",
 )
+HIFIASM_METHODS_EVIDENCE_CASE_LIMIT = 8
 
 _ALLOWED_RELEVANCE = {"strong", "medium", "weak", "not_relevant"}
 _ALLOWED_ACTIONS = {"set", "keep_default", "omit"}
@@ -63,13 +64,28 @@ def build_hifiasm_evidence_payload(
 
     if case_retrieval.get("retrieval_backend") != "hifiasm_numeric":
         raise ValueError("hifiasm evidence payload requires retrieval_backend=hifiasm_numeric")
-    candidate_ids = _string_list(
+    retrieval_candidate_ids = _string_list(
         case_retrieval.get("candidate_case_ids") or [],
         field="candidate_case_ids",
     )
-    if len(candidate_ids) != len(set(candidate_ids)):
+    if len(retrieval_candidate_ids) != len(set(retrieval_candidate_ids)):
         raise ValueError("candidate_case_ids must not contain duplicates")
-    candidate_set = set(candidate_ids)
+    declared_evidence_ids = case_retrieval.get("evidence_case_ids")
+    if declared_evidence_ids is None:
+        evidence_case_ids = retrieval_candidate_ids[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
+    else:
+        evidence_case_ids = _string_list(
+            declared_evidence_ids,
+            field="evidence_case_ids",
+        )
+    if len(evidence_case_ids) > HIFIASM_METHODS_EVIDENCE_CASE_LIMIT:
+        raise ValueError(
+            "hifiasm Methods evidence payload may contain at most "
+            f"{HIFIASM_METHODS_EVIDENCE_CASE_LIMIT} cases"
+        )
+    if evidence_case_ids != retrieval_candidate_ids[: len(evidence_case_ids)]:
+        raise ValueError("evidence_case_ids must be the leading numeric retrieval candidates")
+    candidate_set = set(evidence_case_ids)
 
     cases: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -93,15 +109,16 @@ def build_hifiasm_evidence_payload(
         ]
         cases.append(case)
 
-    ordered_cases = sorted(cases, key=lambda case: candidate_ids.index(case["case_id"]))
-    if [case["case_id"] for case in ordered_cases] != candidate_ids:
-        missing = [case_id for case_id in candidate_ids if case_id not in seen]
+    ordered_cases = sorted(cases, key=lambda case: evidence_case_ids.index(case["case_id"]))
+    if [case["case_id"] for case in ordered_cases] != evidence_case_ids:
+        missing = [case_id for case_id in evidence_case_ids if case_id not in seen]
         raise ValueError(f"numeric shortlist cases missing from evidence payload: {missing}")
 
     return {
         "retrieval_backend": "hifiasm_numeric",
         "query_id": case_retrieval.get("query_id"),
-        "candidate_case_ids": candidate_ids,
+        "candidate_case_ids": evidence_case_ids,
+        "retrieval_candidate_case_ids": retrieval_candidate_ids,
         "warning": case_retrieval.get("warning"),
         "effect_areas": list(HIFIASM_EFFECT_AREAS),
         "cases": ordered_cases,
@@ -130,8 +147,10 @@ def normalize_hifiasm_methods_response(
         for case in evidence_cases
         if isinstance(case, dict) and case.get("case_id")
     }
+    case_retrieval = prompt_payload.get("case_retrieval") or {}
     shortlist_ids = set(
-        ((prompt_payload.get("case_retrieval") or {}).get("candidate_case_ids"))
+        case_retrieval.get("evidence_case_ids")
+        or case_retrieval.get("candidate_case_ids")
         or ((prompt_payload.get("case_selection") or {}).get("selected_case_ids"))
         or []
     )
@@ -179,6 +198,14 @@ def normalize_hifiasm_methods_response(
         raise ValueError("recommendation.adjustable_params must be an object")
 
     allowed_parameters = set((prompt_payload.get("adjustable_params") or {}).keys())
+    decision_parameters = set(raw_decisions)
+    if decision_parameters != allowed_parameters:
+        missing = sorted(allowed_parameters - decision_parameters)
+        unexpected = sorted(decision_parameters - allowed_parameters)
+        raise ValueError(
+            "recommendation.adjustable_params must contain exactly one decision for every "
+            f"catalog adjustable L2 parameter; missing={missing}, unexpected={unexpected}"
+        )
     params: dict[str, Any] = {}
     omitted_parameters: list[str] = []
     parameter_evidence: dict[str, dict[str, Any]] = {}

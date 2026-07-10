@@ -86,6 +86,50 @@ def _fake_artifact_ref(name: str) -> dict[str, str]:
     }
 
 
+def _complete_hifiasm_methods_response(*, purge_level: int = 1) -> dict:
+    catalog = load_parameter_catalog("assembly.candidate.hifiasm")
+    decisions = {}
+    for parameter, spec in catalog.parameters.items():
+        if spec.level != 2:
+            continue
+        if parameter == "purge_level":
+            decisions[parameter] = {
+                "action": "set",
+                "value": purge_level,
+                "basis": "skill_heuristic",
+                "heuristic_labels": ["conservative HiFi purging"],
+                "supporting_case_ids": [],
+                "supporting_span_ids": [],
+                "confidence": "weak",
+                "reason": "Use conservative SKILL guidance for purging.",
+            }
+        elif spec.default is not None:
+            decisions[parameter] = {
+                "action": "keep_default",
+                "value": spec.default,
+                "basis": "catalog_default",
+                "supporting_case_ids": [],
+                "supporting_span_ids": [],
+                "confidence": "weak",
+                "reason": "No specific evidence supports changing the catalog default.",
+            }
+        else:
+            decisions[parameter] = {
+                "action": "omit",
+                "basis": "catalog_default",
+                "supporting_case_ids": [],
+                "supporting_span_ids": [],
+                "confidence": "weak",
+                "reason": "No specific evidence supports rendering this optional parameter.",
+            }
+    return {
+        "case_assessments": [],
+        "recommendation": {"adjustable_params": decisions},
+        "selected_case_ids": [],
+        "summary": "Conservative HiFi parameters without case support.",
+    }
+
+
 class ParameterCatalogSchemaTests(unittest.TestCase):
     def test_load_hifiasm_ont_catalog(self):
         catalog = load_parameter_catalog("hifiasm_ont")
@@ -766,25 +810,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     },
                 }
             )
-            payload = {
-                "case_assessments": [],
-                "recommendation": {
-                    "adjustable_params": {
-                        "purge_level": {
-                            "action": "set",
-                            "value": 1,
-                            "basis": "skill_heuristic",
-                            "heuristic_labels": ["conservative HiFi purging"],
-                            "supporting_case_ids": [],
-                            "supporting_span_ids": [],
-                            "confidence": "weak",
-                            "reason": "No compatible case is available; use conservative SKILL guidance.",
-                        }
-                    }
-                },
-                "selected_case_ids": [],
-                "summary": "Conservative HiFi parameters without case support.",
-            }
+            payload = _complete_hifiasm_methods_response()
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
                 result = recommend_assembly_parameters(state)
             artifact_records = read_artifact_records(Path(tmpdir), "s1")
@@ -813,6 +839,65 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertIn("assembly.parameter.retrieval_query", artifact_types)
             self.assertIn("assembly.parameter.retrieval_trace", artifact_types)
             self.assertIn("assembly.parameter.evidence_payload", artifact_types)
+
+    def test_invalid_hifiasm_response_does_not_persist_retrieval_candidates_as_selected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            assembly = state["stage_outputs"]["assembly"]
+            assembly.update(
+                {
+                    "primary_method": "assembly.candidate.hifiasm",
+                    "selected_route": "hifi",
+                    "assembly_route": "hifi",
+                    "input_profile": {"recommended_route": "hifi", "has_ont": False, "has_hifi": True},
+                    "assembly_selection": {
+                        "read_type": "hifi",
+                        "primary_method": "assembly.candidate.hifiasm",
+                        "source": "recommendation",
+                        "rationale": "test",
+                        "metadata": {},
+                    },
+                }
+            )
+            evidence_case = {
+                "case_id": "case_a",
+                "applicability": {"read_type": "hifi"},
+                "source": {"kind": "paper", "title": "Example"},
+                "numeric_match": {"distance": 0.1},
+                "observed_facts": {"coverage": {"value": 30}},
+                "intervention": {"tool": "hifiasm", "parameters": {}},
+                "rationale_claims": [],
+                "source_excerpts": [
+                    {"span_id": "methods.a", "document": "methods", "quote": "Exact excerpt."}
+                ],
+                "outcomes": {},
+            }
+            selection = {
+                "retrieval_backend": "hifiasm_numeric",
+                "selected_case_ids": ["case_a"],
+                "candidate_case_ids": ["case_a"],
+                "eligible_case_count": 1,
+                "warning": None,
+                "query": {"query_id": "s1:parameter_attempt_0", "method_id": "hifiasm"},
+                "trace": [{"case_id": "case_a", "decision": "candidate"}],
+            }
+            with (
+                patch(
+                    "app.stages.assembly.prompt_payload.select_evidence_cases",
+                    return_value=([evidence_case], selection),
+                ),
+                patch(
+                    "app.stages.assembly.decision.build_chat_model",
+                    return_value=_FakeModel({"params": {"purge_level": 1}}),
+                ),
+            ):
+                result = recommend_assembly_parameters(state)
+
+        attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+        self.assertEqual(attempt["status"], "validation_failed")
+        self.assertEqual(attempt["retrieval_candidate_case_ids"], ["case_a"])
+        self.assertEqual(attempt["selected_case_ids"], [])
+        self.assertIn("case_assessments", attempt["validation"]["violations"][0]["reason"])
 
     def test_model_unavailable_fails_before_execution_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:

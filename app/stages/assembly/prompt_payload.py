@@ -20,6 +20,7 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.domains.assembly.case_selector import evidence_read_type_matches, select_evidence_cases
 from app.domains.assembly.methods_evidence import (
     HIFIASM_EFFECT_AREAS,
+    HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
     build_hifiasm_evidence_payload,
 )
 
@@ -141,12 +142,20 @@ def build_prompt_payload(
             attempt_id=attempt_id,
             data_dir=data_dir,
         )
-    evidence_cases = selected_cases if uses_hifiasm_evidence else []
+    evidence_cases = (
+        selected_cases[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
+        if uses_hifiasm_evidence
+        else []
+    )
     legacy_selected_cases = [] if uses_hifiasm_evidence else selected_cases
     evidence_payload_ref = None
     evidence_payload_hash = None
     methods_evidence = None
     if uses_hifiasm_evidence:
+        case_selection = {
+            **case_selection,
+            "evidence_case_ids": [case["case_id"] for case in evidence_cases],
+        }
         evidence_payload = build_hifiasm_evidence_payload(
             evidence_cases=evidence_cases,
             case_retrieval=case_selection,
@@ -169,6 +178,7 @@ def build_prompt_payload(
         }
         methods_evidence = {
             "effect_areas": list(HIFIASM_EFFECT_AREAS),
+            "max_evidence_cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
             "response_contract": "case_assessments_and_recommendation",
             "assessment_rule": "assess only numeric-shortlist cases and cite only visible spans",
             "recommendation_rule": (

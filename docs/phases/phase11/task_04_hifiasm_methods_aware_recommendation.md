@@ -21,10 +21,16 @@ and auditable.
   SKILL heuristics, retry context, and catalog defaults;
 - the prompt publishes the L0/L1/L2 permission contract and allowed evidence
   bases;
-- optional `parameter_evidence` is validated when present, including visible
-  profile fact paths and case/span citations;
+- the response must contain both `case_assessments` and `recommendation`, and
+  must provide one `set`, `keep_default`, or `omit` decision for every visible
+  L2 parameter;
+- every rendered value has mandatory `parameter_evidence`, including visible
+  profile fact paths or per-case span citations as applicable;
+- Task 3 retains up to 12 retrieval candidates while the final Methods evidence
+  payload is limited to the leading 8 cases;
 - catalog/rule validation still rejects any L0/L1 output or invalid L2 value;
-- compact `ParameterAttempt` can retain the optional parameter evidence map.
+- compact `ParameterAttempt` retains retrieval candidates separately from cases
+  actually selected by the validated model response.
 
 The MVP uses sequential hybrid retrieval:
 
@@ -94,7 +100,7 @@ recommendation:
       basis: catalog_default
       supporting_case_ids: []
       supporting_span_ids: []
-      confidence: low
+      confidence: weak
       reason: "No sufficiently specific evidence supports changing the catalog default."
 
 selected_case_ids: [case_a]
@@ -194,6 +200,7 @@ case_retrieval:
   trace_ref: .../retrieval_trace.json
   evidence_payload_ref: .../evidence_payload.json
   candidate_case_ids: []
+  evidence_case_ids: []  # leading at most 8 cases visible to Task 4
   warning: null
 
 evidence_cases:
@@ -214,9 +221,13 @@ not receive both legacy and curated case representations.
 
 Deterministic post-LLM validation must verify:
 
+- the top-level response contains both explicit sections and does not accept the
+  legacy `params`-only shape;
 - all assessed case IDs were in the numeric shortlist;
 - all selected case IDs were accepted in `case_assessments`;
 - all cited span IDs belong to the cited case;
+- every cited case has at least one cited span belonging to that same case;
+- every visible L2 parameter has exactly one explicit decision;
 - every parameter names an allowed evidence basis;
 - case-backed parameters cite only shortlisted case IDs and visible span IDs;
 - profile-fact-backed parameters cite readonly prompt facts rather than writing
@@ -298,14 +309,14 @@ Add tests for:
 
 ## Acceptance Criteria
 
-- [ ] Hifiasm recommendation consumes a numeric shortlist plus validated Methods
+- [x] Hifiasm recommendation consumes a numeric shortlist plus validated Methods
   excerpts.
-- [ ] LLM output separates case assessment from parameter recommendation.
-- [ ] Every value records an allowed evidence basis; case-backed values are
+- [x] LLM output separates case assessment from parameter recommendation.
+- [x] Every value records an allowed evidence basis; case-backed values are
   traceable to selected case IDs and source span IDs.
-- [ ] Missing cases do not block recommendation, and weak evidence causes more
+- [x] Missing cases do not block recommendation, and weak evidence causes more
   conservative use of L1/SKILL/default guidance.
-- [ ] Existing catalog/rule validation remains the execution gate.
-- [ ] Full source documents remain ref-backed and outside compact state.
-- [ ] No embedding service, vector database, GraphRAG, LLM Wiki, or cross-tool
+- [x] Existing catalog/rule validation remains the execution gate.
+- [x] Full source documents remain ref-backed and outside compact state.
+- [x] No embedding service, vector database, GraphRAG, LLM Wiki, or cross-tool
   adapter is introduced.

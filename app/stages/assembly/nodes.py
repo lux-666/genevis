@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
+from app.domains.assembly.methods_evidence import uses_hifiasm_methods_contract
 from app.domains.assembly.selection import (
     AssemblySelection,
     compatible_methods,
@@ -702,7 +703,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     )
 
     parsed = decision.parsed or {}
-    if "selected_case_ids" in parsed:
+    if uses_hifiasm_methods_contract(prompt_payload):
+        selected_case_ids = list(parsed.get("selected_case_ids") or [])
+    elif "selected_case_ids" in parsed:
         selected_case_ids = list(parsed.get("selected_case_ids") or [])
     else:
         selected_case_ids = list(
@@ -1422,9 +1425,10 @@ def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
     return (
         "You are a hifiasm Methods-aware parameter advisor. Return only JSON with four top-level "
         "fields: case_assessments, recommendation, selected_case_ids, and summary. Assess only cases "
-        "in case_retrieval.candidate_case_ids. transferable_findings must use one published "
+        "in case_retrieval.evidence_case_ids. transferable_findings must use one published "
         "methods_evidence.effect_areas value and cite span IDs visible in that same case. "
-        "recommendation.adjustable_params keys must be catalog L2 names. Each returned decision must "
+        "recommendation.adjustable_params must contain exactly one decision for every catalog L2 "
+        "parameter. Each decision must "
         "choose action set, keep_default, or omit; include confidence strong, medium, or weak; include "
         "a non-empty reason; and declare at least one evidence basis. basis=case requires selected, "
         "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts, "

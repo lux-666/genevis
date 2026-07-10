@@ -115,10 +115,24 @@ def _validate_parameter_recommendation(
 def _default_parameter_recommendation(prompt_payload: dict[str, Any]) -> dict[str, Any]:
     reason = "model unavailable; using catalog defaults for all L2 parameters"
     if uses_hifiasm_methods_contract(prompt_payload):
+        decisions: dict[str, dict[str, Any]] = {}
+        for parameter, spec in (prompt_payload.get("adjustable_params") or {}).items():
+            has_default = isinstance(spec, dict) and spec.get("default") is not None
+            decision = {
+                "action": "keep_default" if has_default else "omit",
+                "basis": "catalog_default",
+                "supporting_case_ids": [],
+                "supporting_span_ids": [],
+                "confidence": "weak",
+                "reason": reason,
+            }
+            if has_default:
+                decision["value"] = spec["default"]
+            decisions[parameter] = decision
         return normalize_hifiasm_methods_response(
             {
                 "case_assessments": [],
-                "recommendation": {"adjustable_params": {}},
+                "recommendation": {"adjustable_params": decisions},
                 "selected_case_ids": [],
                 "summary": reason,
             },
