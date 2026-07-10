@@ -129,6 +129,7 @@ class ParameterAttempt(BaseModel):
     selected_case_ids: list[str] = Field(default_factory=list)
     recommended_params: dict[str, Any] = Field(default_factory=dict)
     omitted_parameters: list[str] = Field(default_factory=list)
+    parameter_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
     parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
     rendered_parameters: dict[str, Any] = Field(default_factory=dict)
     argv: list[str] = Field(default_factory=list)

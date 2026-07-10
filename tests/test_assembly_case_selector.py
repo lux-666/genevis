@@ -26,12 +26,13 @@ def test_case_selector_filters_read_type_and_records_trace():
     ]
     profile = {"assets": {"read_type": "hifi"}}
 
-    selected, metadata = select_evidence_cases(
+    result = EvidenceBasedCaseSelector().select(
         cases,
         method_id="hifiasm",
         task="recommend_initial",
         prompt_profile=profile,
     )
+    selected, metadata = result.selected_cases, result.metadata
 
     assert [case["case_id"] for case in selected] == ["hifi_case"]
     assert metadata["selected_case_ids"] == ["hifi_case"]
@@ -111,13 +112,13 @@ def test_case_selector_matches_descriptor_method_id_to_short_tool_name():
     ]
     profile = {"assets": {"read_type": "hifi"}}
 
-    selected, metadata = select_evidence_cases(
+    result = EvidenceBasedCaseSelector(max_cases=1).select(
         cases,
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
         prompt_profile=profile,
-        max_cases=1,
     )
+    selected, metadata = result.selected_cases, result.metadata
 
     assert [case["case_id"] for case in selected] == ["hifi_case"]
     selected_trace = [entry for entry in metadata["trace"] if entry["decision"] == "selected"]
@@ -298,3 +299,25 @@ def test_unknown_or_missing_profile_read_type_does_not_leak_cases_by_method_scor
         "unknown_read_type": ["read_type_mismatch"],
         "ont_case": ["read_type_mismatch"],
     }
+
+
+def test_hifiasm_v2_dispatch_does_not_fall_back_to_v1_seed_cases():
+    cases = [
+        {
+            "case_id": "legacy_hifiasm_seed",
+            "features": {"read_type": "hifi", "coverage": 30},
+            "params": {"tool": "hifiasm"},
+        }
+    ]
+
+    selected, metadata = select_evidence_cases(
+        cases,
+        method_id="hifiasm",
+        task="recommend_initial",
+        prompt_profile={"assets": {"read_type": "hifi"}},
+    )
+
+    assert selected == []
+    assert metadata["retrieval_backend"] == "hifiasm_numeric_v2"
+    assert metadata["evidence_available"] is False
+    assert metadata["selected_case_ids"] == []

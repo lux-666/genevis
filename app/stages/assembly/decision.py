@@ -98,3 +98,5 @@ def _validate_parameter_recommendation(parsed: dict[str, Any]) -> None:
         raise ValueError("parameter recommendation requires params")
     if not isinstance(parsed.get("params"), dict):
         raise ValueError("params must be an object")
+    if "parameter_evidence" in parsed and not isinstance(parsed.get("parameter_evidence"), dict):
+        raise ValueError("parameter_evidence must be an object")

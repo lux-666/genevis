@@ -1,7 +1,7 @@
 # Task 2: Hifiasm EvidenceCase And Manual Source Contract
 
 **Phase**: 11
-**Status**: Designed; implementation pending
+**Status**: MVP implemented; real curated cases and standalone validation CLI pending
 **Depends on**: Task 1 typed parameter-attempt contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -20,6 +20,18 @@ inputs:
 
 The runtime consumes those prepared inputs, validates their references, and
 uses only approved evidence cases for hifiasm recommendation.
+
+## Implemented MVP
+
+- hifiasm V1 seed observations are ignored by the hifiasm production selector;
+- V2 case IDs, case type, applicability, source identity, intervention, and
+  curation status are validated;
+- approved body/Methods paths are confined to the knowledge-pack root;
+- approved source hashes and exact, unambiguous quotes are verified;
+- numeric facts, reported parameters, and explicit rationale claims validate
+  their span provenance;
+- only prompt-safe exact excerpts are returned, never complete documents;
+- empty initial/retry V2 shards provide the manual curation landing point.
 
 ## Scope
 

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from app.domains.assembly.evidence_case import validate_hifiasm_v2_cases
+from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
+from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
 from app.domains.assembly.selection import parameter_case_read_type
 from app.knowledge.selectors import SelectionResult
 
@@ -136,8 +140,20 @@ def select_evidence_cases(
     min_cases: int = 3,
     max_cases: int = 8,
     strategy: dict[str, Any] | None = None,
+    source_root: Path | str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Compatibility wrapper returning the legacy tuple shape."""
+    """Dispatch hifiasm to V2 numeric retrieval and keep V1 for other methods."""
+
+    if _tool_name(method_id) == "hifiasm":
+        pack_root = Path(source_root) if source_root is not None else None
+        validated_cases = validate_hifiasm_v2_cases(cases, pack_root=pack_root)
+        query = build_hifiasm_retrieval_query(
+            prompt_profile,
+            method_id=method_id,
+            task=task,
+        )
+        result = HifiasmNumericCaseRetriever(max_cases=max_cases).select(validated_cases, query=query)
+        return result.selected_cases, {**result.metadata, "query": query}
 
     selector = EvidenceBasedCaseSelector(min_cases=min_cases, max_cases=max_cases, strategy=strategy)
     result = selector.select(cases, method_id=method_id, task=task, prompt_profile=prompt_profile)

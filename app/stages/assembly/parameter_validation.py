@@ -195,3 +195,188 @@ def _rule_violation(rule: dict[str, Any], param: str, value: Any, **extra: Any) 
         "severity": "critical",
         **extra,
     }
+
+
+_ALLOWED_EVIDENCE_BASES = {
+    "case",
+    "profile_fact",
+    "skill_heuristic",
+    "retry_failure",
+    "catalog_default",
+}
+
+
+def validate_parameter_evidence(
+    *,
+    parameter_evidence: Any,
+    recommended_params: dict[str, Any],
+    prompt_payload: dict[str, Any],
+    declared_selected_case_ids: Any = None,
+) -> dict[str, Any]:
+    """Validate optional per-parameter evidence bases against the visible prompt."""
+
+    violations: list[dict[str, Any]] = []
+    selected_ids = set((prompt_payload.get("case_selection") or {}).get("selected_case_ids") or [])
+    hifiasm_v2 = (prompt_payload.get("case_selection") or {}).get("retrieval_backend") == "hifiasm_numeric_v2"
+    if hifiasm_v2 and declared_selected_case_ids is not None:
+        if not isinstance(declared_selected_case_ids, list) or not all(
+            isinstance(case_id, str) for case_id in declared_selected_case_ids
+        ):
+            violations.append(
+                {
+                    "param": None,
+                    "reason": "selected_case_ids must be a list of strings",
+                    "severity": "critical",
+                }
+            )
+        else:
+            unsupported_selected = sorted(set(declared_selected_case_ids) - selected_ids)
+            if unsupported_selected:
+                violations.append(
+                    {
+                        "param": None,
+                        "reason": f"selected_case_ids contains non-shortlisted cases: {unsupported_selected}",
+                        "severity": "critical",
+                    }
+                )
+    if parameter_evidence is None:
+        return {
+            "valid": not violations,
+            "violations": violations,
+            "warnings": [{"reason": "parameter_evidence not provided"}],
+        }
+    if not isinstance(parameter_evidence, dict):
+        violations.append(
+            {"param": None, "reason": "parameter_evidence must be an object", "severity": "critical"}
+        )
+        return {"valid": False, "violations": violations, "warnings": []}
+
+    spans_by_case = {
+        str(case.get("case_id")): {
+            str(span.get("span_id"))
+            for span in case.get("source_excerpts") or []
+            if isinstance(span, dict) and span.get("span_id")
+        }
+        for case in prompt_payload.get("evidence_cases") or []
+        if isinstance(case, dict)
+    }
+
+    for parameter, evidence in parameter_evidence.items():
+        if parameter not in recommended_params:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": "parameter_evidence key is not present in params",
+                    "severity": "critical",
+                }
+            )
+            continue
+        if not isinstance(evidence, dict):
+            violations.append(
+                {"param": parameter, "reason": "parameter evidence must be an object", "severity": "critical"}
+            )
+            continue
+        raw_bases = evidence.get("bases", evidence.get("basis"))
+        bases = [raw_bases] if isinstance(raw_bases, str) else raw_bases
+        if not isinstance(bases, list) or not bases:
+            violations.append(
+                {"param": parameter, "reason": "at least one evidence basis is required", "severity": "critical"}
+            )
+            continue
+        if not all(isinstance(basis, str) for basis in bases):
+            violations.append(
+                {"param": parameter, "reason": "evidence bases must be strings", "severity": "critical"}
+            )
+            continue
+        unknown_bases = sorted(set(bases) - _ALLOWED_EVIDENCE_BASES)
+        if unknown_bases:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": f"unknown evidence bases: {unknown_bases}",
+                    "severity": "critical",
+                }
+            )
+        if "case" in bases:
+            case_ids = evidence.get("case_ids") or []
+            span_ids = evidence.get("span_ids") or []
+            if (
+                not isinstance(case_ids, list)
+                or not case_ids
+                or not all(isinstance(case_id, str) for case_id in case_ids)
+                or not isinstance(span_ids, list)
+                or not span_ids
+                or not all(isinstance(span_id, str) for span_id in span_ids)
+            ):
+                violations.append(
+                    {
+                        "param": parameter,
+                        "reason": "basis=case requires non-empty case_ids and span_ids",
+                        "severity": "critical",
+                    }
+                )
+            else:
+                invalid_cases = sorted(set(case_ids) - selected_ids)
+                if invalid_cases:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": f"case evidence cites non-shortlisted cases: {invalid_cases}",
+                            "severity": "critical",
+                        }
+                    )
+                visible_spans = set().union(*(spans_by_case.get(str(case_id), set()) for case_id in case_ids))
+                invalid_spans = sorted(set(span_ids) - visible_spans)
+                if invalid_spans:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": f"case evidence cites spans absent from the prompt: {invalid_spans}",
+                            "severity": "critical",
+                        }
+                    )
+        if "profile_fact" in bases:
+            fact_paths = evidence.get("fact_paths") or []
+            if not isinstance(fact_paths, list) or not fact_paths:
+                violations.append(
+                    {
+                        "param": parameter,
+                        "reason": "basis=profile_fact requires fact_paths",
+                        "severity": "critical",
+                    }
+                )
+            else:
+                missing_paths = [
+                    path
+                    for path in fact_paths
+                    if not isinstance(path, str) or _lookup_path(prompt_payload.get("prompt_profile") or {}, path) is None
+                ]
+                if missing_paths:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": f"profile_fact paths are absent from the prompt: {missing_paths}",
+                            "severity": "critical",
+                        }
+                    )
+        if "retry_failure" in bases and prompt_payload.get("task") == "recommend_initial":
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": "retry_failure evidence is not valid for recommend_initial",
+                    "severity": "critical",
+                }
+            )
+
+    return {"valid": not violations, "violations": violations, "warnings": []}
+
+
+def _lookup_path(values: Any, path: str) -> Any:
+    current = values
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+        if current is None:
+            return None
+    return current

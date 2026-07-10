@@ -1,7 +1,7 @@
 # Phase 11: Assembly Parameter Attempts And Hifiasm Evidence Retrieval
 
 **Phase**: 11
-**Status**: Task 1 complete; Tasks 2-6 designed
+**Status**: Task 1 complete; Tasks 2-4 hifiasm MVP implemented; Tasks 5-6 designed
 **Created**: 2026-07-07
 **Updated**: 2026-07-10
 
@@ -16,9 +16,10 @@ Phase11 has two ordered goals:
    pipeline.
 
 Task 1 completed the cross-method typed-attempt expansion for Flye and
-NextDenovo. Tasks 2-6 deliberately return to PacBio HiFi hifiasm first so the
-new evidence contract can be implemented and evaluated in one bounded method
-before any broader rollout.
+NextDenovo. Tasks 2-4 now provide the first PacBio HiFi hifiasm vertical slice:
+validated V2 cases, source-grounded excerpts, continuous numeric retrieval, and
+an optional-evidence prompt path. Tasks 5-6 retain retry/evaluation work before
+any broader rollout.
 
 ## Confirmed Evidence Boundary
 
@@ -81,18 +82,26 @@ Phase11 Tasks 2-6 do not introduce:
 - Only approved cases with verified source documents and exact source excerpts
   are eligible.
 - The Methods-aware LLM sees only a bounded numeric shortlist.
-- Every non-default hifiasm parameter change cites selected cases and source
-  spans.
-- Weak evidence preserves catalog defaults.
+- The existing L0/L1/L2 contract remains authoritative: cases and the LLM may
+  explain L1 facts, but only cataloged L2 parameters may be recommended and L0
+  remains fixed by execution/configuration code.
+- Every recommendation records an auditable evidence basis. A case ID and exact
+  source span are required only when the recommendation claims case evidence;
+  L1 profile facts, SKILL heuristics, retry failures, and catalog defaults are
+  also valid bases.
+- Cases are optional evidence, not a recommendation prerequisite. No eligible
+  case produces an explicit warning and a more conservative recommendation,
+  while the existing L1 facts, SKILL guidance, and catalog defaults remain
+  usable.
 - Existing deterministic catalog/rule validation remains the execution gate.
 - Real runs produce draft artifacts; humans decide whether to promote them.
 
 ## Task Index
 
 - [Task 1: Flye and NextDenovo Typed Parameter Attempts](task_01_flye_nextdenovo_parameter_attempts.md) - Completed
-- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Designed
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Designed
-- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - Designed
+- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - MVP implemented
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - MVP implemented
+- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - MVP implemented
 - [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
 - [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
 
@@ -118,7 +127,11 @@ Phase11 is complete when:
   methods;
 - hifiasm production recommendation consumes only approved V2 EvidenceCases;
 - hifiasm case ranking is continuous and missing-aware rather than bucket-based;
-- non-default hifiasm values are traceable to case IDs and exact source spans;
+- hifiasm recommendations preserve L0/L1/L2 permissions and record their
+  evidence basis; case-backed claims are traceable to case IDs and exact source
+  spans;
+- no-case operation succeeds with an empty evidence set instead of blocking the
+  parameter recommender;
 - initial and retry evidence remain separate;
 - runtime draft cases require manual promotion;
 - the golden evaluation demonstrates safety and usefulness over the V1

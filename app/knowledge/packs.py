@@ -55,6 +55,7 @@ def load_knowledge_pack(
         "skill_text": skill,
         "strategies": strategies,
         "allowed_actions": allowed_actions,
+        "pack_root": str(pack_dir.resolve()),
     }
 
 
@@ -102,7 +103,13 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
 
 
 def _resolve_pack_path(pack_dir: Path, rel_path: str) -> Path:
-    path = pack_dir / rel_path
+    relative = Path(rel_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Knowledge pack path escapes pack root: {rel_path}")
+    root = pack_dir.resolve()
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"Knowledge pack path escapes pack root: {rel_path}")
     if not path.exists():
         raise FileNotFoundError(f"Knowledge pack referenced file not found: {path}")
     return path
@@ -116,4 +123,3 @@ def _case_list(raw: dict[str, Any]) -> list[dict[str, Any]]:
 def _rule_list(raw: dict[str, Any]) -> list[dict[str, Any]]:
     rules = raw.get("rules", [])
     return rules if isinstance(rules, list) else []
-

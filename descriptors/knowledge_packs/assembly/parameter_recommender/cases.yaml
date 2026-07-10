@@ -1,6 +1,9 @@
-version: 1
-description: "Evidence-case manifest. Case files contain observations only; they do not encode recommendation rules."
+version: 2
+description: "Mixed-rollout evidence manifest. Hifiasm consumes only approved EvidenceCase V2 shards; other methods temporarily retain V1 observations."
+case_schema: assembly_evidence_case_v2
 case_files:
+  - cases/hifiasm/initial.yaml
+  - cases/hifiasm/retry.yaml
   - cases/initial_hifi.yaml
   - cases/initial_ont.yaml
   - cases/retry_failures.yaml

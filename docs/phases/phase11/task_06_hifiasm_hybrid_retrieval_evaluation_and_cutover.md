@@ -166,9 +166,11 @@ The full repository regression suite runs after focused tests pass.
 - [ ] A version-controlled hifiasm initial/retry evaluation corpus exists.
 - [ ] V1 and V2 run against the same golden queries with recorded metrics.
 - [ ] V2 has no bucket-boundary discontinuity and exposes missingness explicitly.
-- [ ] All accepted non-default recommendations cite valid approved evidence.
-- [ ] Weak evidence preserves defaults at the expected rate defined by the
-  golden set.
+- [ ] All case-backed recommendations cite valid approved evidence; non-case
+  recommendations name another allowed evidence basis.
+- [ ] Weak evidence increases conservative/default-preserving behavior at the
+  expected rate, while no-case queries still complete through L1/SKILL/default
+  evidence bases.
 - [ ] Hifiasm uses one V2 selector/prompt contract after cutover.
 - [ ] Existing typed attempt, validation, freeze, execution, and retry behavior
   remains regression-covered.

@@ -58,7 +58,10 @@ from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_T
 from app.schemas.state import TopLevelState
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.assembly.parameter_profile import build_full_parameter_profile, flatten_profile_facts
-from app.stages.assembly.parameter_validation import validate_recommended_parameters
+from app.stages.assembly.parameter_validation import (
+    validate_parameter_evidence,
+    validate_recommended_parameters,
+)
 from app.stages.assembly.prompt_payload import build_prompt_payload
 
 ROUTE_DECISION_MAP = {
@@ -659,6 +662,15 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             rules=prompt_payload.get("rules") or {},
             full_profile=full_profile,
         )
+        evidence_validation = validate_parameter_evidence(
+            parameter_evidence=(decision.parsed or {}).get("parameter_evidence"),
+            recommended_params=recommended_params,
+            prompt_payload=prompt_payload,
+            declared_selected_case_ids=(decision.parsed or {}).get("selected_case_ids"),
+        )
+        validation["violations"].extend(evidence_validation["violations"])
+        validation["warnings"].extend(evidence_validation["warnings"])
+        validation["valid"] = not validation["violations"]
     else:
         validation = {
             "valid": False,
@@ -709,6 +721,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         selected_case_ids=selected_case_ids,
         recommended_params=recommended_params,
         omitted_parameters=list(parsed.get("omitted_parameters") or []),
+        parameter_evidence=dict(parsed.get("parameter_evidence") or {}),
         validation=validation,
         reasoning=parsed.get("reasoning"),
         confidence=parsed.get("confidence"),
@@ -1347,7 +1360,12 @@ def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> l
 def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
     return (
         "You are an assembly parameter advisor. Return only JSON matching the required output. "
-        "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts.\n\n"
+        "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts. "
+        "Evidence cases are optional, not a prerequisite. If no compatible case is available, "
+        "continue from readonly L1 facts, SKILL heuristics, retry context, and catalog defaults. "
+        "Prefer conservative changes under weak evidence. When parameter_evidence is returned, "
+        "use only the allowed evidence bases in recommendation_policy and cite case/span IDs only "
+        "for basis=case.\n\n"
         + str(prompt_payload.get("skill_instructions") or "")
     )
 

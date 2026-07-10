@@ -1,7 +1,7 @@
 # Task 3: Hifiasm Continuous Numeric Case Retrieval
 
 **Phase**: 11
-**Status**: Designed; implementation pending
+**Status**: MVP implemented; attempt-scoped retrieval artifact split pending
 **Depends on**: Task 2 EvidenceCase contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -14,6 +14,18 @@ missing-aware retrieval over approved HiFi EvidenceCases.
 This task decides which cases are numerically and operationally plausible. It
 does not ask an LLM to recommend parameters and does not score final assembly
 quality.
+
+## Implemented MVP
+
+- canonical profile-to-query unit conversion for genome size, coverage, read
+  N50, heterozygosity, and ploidy;
+- approved/case-type/read-type/tool/target/goal hard filters;
+- continuous log-ratio distance with interval and near-zero heterozygosity
+  handling;
+- separate numeric distance and evidence coverage;
+- missing-value trace, stable ranking, weak-evidence warning, and deterministic
+  no-case fallback metadata;
+- method-scoped dispatch so non-hifiasm methods keep V1 behavior.
 
 ## Scope
 

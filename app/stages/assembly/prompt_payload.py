@@ -35,6 +35,7 @@ def build_prompt_payload(
     session_id: str | None = None,
     attempt_id: int | None = None,
     data_dir: Path | None = None,
+    knowledge_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build complete LLM prompt payload with references for audit trail.
 
@@ -94,7 +95,7 @@ def build_prompt_payload(
     prompt_profile = build_prompt_profile(full_profile, task)
 
     # 3. Load knowledge pack
-    knowledge_pack = load_knowledge_pack(knowledge_pack_id)
+    knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
 
     # 4. Filter catalog to L1 (readonly) + L2 (adjustable)
     readonly_params = {}
@@ -116,13 +117,22 @@ def build_prompt_payload(
         task=task,
         prompt_profile=prompt_profile,
         strategy=knowledge_pack.get("strategies"),
+        source_root=knowledge_pack.get("pack_root"),
     )
+
+    uses_hifiasm_v2 = case_selection.get("retrieval_backend") == "hifiasm_numeric_v2"
+    evidence_cases = selected_cases if uses_hifiasm_v2 else []
+    legacy_selected_cases = [] if uses_hifiasm_v2 else selected_cases
 
     # Defensive validation: verify all selected cases match profile read_type
     profile_read_type = prompt_profile.get("assets", {}).get("read_type")
     if profile_read_type:
-        for case in selected_cases:
-            case_read_type = (case.get("features") or {}).get("read_type")
+        for case in evidence_cases if uses_hifiasm_v2 else legacy_selected_cases:
+            case_read_type = (
+                (case.get("applicability") or {}).get("read_type")
+                if uses_hifiasm_v2
+                else (case.get("features") or {}).get("read_type")
+            )
             if case_read_type and not evidence_read_type_matches(profile_read_type, case_read_type):
                 raise ValueError(
                     f"Case selector failed: case {case.get('case_id')} has read_type={case_read_type} "
@@ -138,8 +148,32 @@ def build_prompt_payload(
         "prompt_profile": prompt_profile,
         "catalog_subset": catalog_subset,
         "rules": knowledge_pack["rules"],
-        "selected_cases": selected_cases,
+        "selected_cases": legacy_selected_cases,
         "case_selection": case_selection,
+        "case_retrieval": case_selection if uses_hifiasm_v2 else None,
+        "evidence_cases": evidence_cases,
+        "recommendation_policy": {
+            "parameter_levels": {
+                "L0": "fixed by executor/run configuration; never recommend or modify",
+                "L1": "readonly facts; use only as recommendation context",
+                "L2": "the only parameters allowed in params",
+            },
+            "case_evidence_required": False,
+            "allowed_evidence_bases": [
+                "case",
+                "profile_fact",
+                "skill_heuristic",
+                "retry_failure",
+                "catalog_default",
+            ],
+            "case_citation_rule": (
+                "case_ids and span_ids are required only when evidence basis is case"
+            ),
+            "no_case_behavior": (
+                "continue with readonly L1 facts, SKILL heuristics, retry context, and catalog defaults; "
+                "prefer conservative L2 changes"
+            ),
+        },
         "skill_instructions": knowledge_pack["skill"],
         "readonly_params": readonly_params,
         "adjustable_params": adjustable_params,

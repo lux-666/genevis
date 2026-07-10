@@ -22,9 +22,9 @@ This pack is not an optimizer. It should choose a small, explainable parameter a
 
 ## Initial Recommendation Heuristics
 
-Compare the current sample with selected cases by method, read type, coverage bucket, genome-size bucket, heterozygosity or ploidy signal, clade, read N50, and available quality summaries. Prefer exact method/read-type matches over broad biological similarity.
+For hifiasm, compare the current sample with approved cases using continuous numeric distance for genome size, coverage, read N50, heterozygosity, and ploidy. Treat evidence coverage separately from numeric similarity: missing values never make a case more similar. Prefer exact method/read-type compatibility over broad biological similarity. Methods excerpts may guide parameter choices only when they are present in the selected evidence payload.
 
-Under weak evidence, keep the default. A parameter override should be tied to at least one of: a strong input fact, a close evidence case, or a known failure mode from a previous attempt.
+Cases are optional evidence, not a prerequisite for recommendation. When no compatible case exists, continue from readonly L1 facts, these curated heuristics, retry context, and catalog defaults. Under weak combined evidence, prefer the default. A parameter override should be tied to at least one of: a strong input fact, a close evidence case, an applicable curated heuristic, or a known failure mode from a previous attempt.
 
 Coverage and read length affect graph connectivity. Low coverage or shorter reads usually argue against aggressive filtering or unusually large k-mer/window choices. High coverage and long reads make stricter overlap or graph-cleaning choices more plausible, but only within catalog and rule boundaries.
 
@@ -49,4 +49,4 @@ Use review metrics as diagnosis rather than as a new blind search space.
 
 ## Output Discipline
 
-Return JSON only. Put only L2 keys under `params`. Keep reasoning short and tied to current facts, selected case IDs, rules, or retry context. Include every selected case you used in `selected_case_ids`; leave it empty if none were informative.
+Return JSON only. Put only L2 keys under `params`. Keep reasoning short and tied to current facts, selected case IDs, rules, curated heuristics, or retry context. Include every selected case you used in `selected_case_ids`; leave it empty if none were informative. When returning `parameter_evidence`, use only `case`, `profile_fact`, `skill_heuristic`, `retry_failure`, or `catalog_default`; case/span citations are required only for `case` evidence.
