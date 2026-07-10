@@ -36,6 +36,7 @@ from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_LLM_RESPONSE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
@@ -604,11 +605,13 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     retrieval_metadata = prompt_payload.get("case_retrieval") or {}
     retrieval_query_ref = retrieval_metadata.get("query_ref")
     retrieval_trace_ref = retrieval_metadata.get("trace_ref")
+    evidence_payload_ref = prompt_payload.get("evidence_payload_ref")
     artifact_specs = (
         (profile_ref, ASSEMBLY_PARAMETER_INPUT_PROFILE),
         (prompt_ref, ASSEMBLY_PARAMETER_PROMPT_PAYLOAD),
         (retrieval_query_ref, ASSEMBLY_PARAMETER_RETRIEVAL_QUERY),
         (retrieval_trace_ref, ASSEMBLY_PARAMETER_RETRIEVAL_TRACE),
+        (evidence_payload_ref, ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD),
     )
     resolved_paths: dict[str, Path] = {}
     for ref, artifact_type in artifact_specs:
@@ -699,7 +702,12 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     )
 
     parsed = decision.parsed or {}
-    selected_case_ids = list(parsed.get("selected_case_ids") or prompt_payload.get("case_selection", {}).get("selected_case_ids") or [])
+    if "selected_case_ids" in parsed:
+        selected_case_ids = list(parsed.get("selected_case_ids") or [])
+    else:
+        selected_case_ids = list(
+            prompt_payload.get("case_selection", {}).get("selected_case_ids") or []
+        )
     attempt = ParameterAttempt(
         attempt_id=attempt_id,
         method_id=method_name,
@@ -738,6 +746,15 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             if retrieval_trace_ref
             else None
         ),
+        evidence_payload_ref=(
+            ArtifactRef(
+                path_ref=str(evidence_payload_ref),
+                sha256=str(prompt_payload["evidence_payload_hash"]),
+                artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+            )
+            if evidence_payload_ref
+            else None
+        ),
         retrieval_candidate_case_ids=list(
             retrieval_metadata.get("candidate_case_ids") or []
         ),
@@ -751,6 +768,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         recommended_params=recommended_params,
         omitted_parameters=list(parsed.get("omitted_parameters") or []),
         parameter_evidence=dict(parsed.get("parameter_evidence") or {}),
+        case_assessments=list(parsed.get("case_assessments") or []),
+        parameter_decisions=dict(parsed.get("parameter_decisions") or {}),
+        recommendation_summary=parsed.get("summary"),
         validation=validation,
         reasoning=parsed.get("reasoning"),
         confidence=parsed.get("confidence"),
@@ -1387,7 +1407,7 @@ def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> l
 
 
 def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
-    return (
+    base = (
         "You are an assembly parameter advisor. Return only JSON matching the required output. "
         "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts. "
         "Evidence cases are optional, not a prerequisite. If no compatible case is available, "
@@ -1395,6 +1415,22 @@ def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
         "Prefer conservative changes under weak evidence. When parameter_evidence is returned, "
         "use only the allowed evidence bases in recommendation_policy and cite case/span IDs only "
         "for basis=case.\n\n"
+        + str(prompt_payload.get("skill_instructions") or "")
+    )
+    if (prompt_payload.get("case_retrieval") or {}).get("retrieval_backend") != "hifiasm_numeric":
+        return base
+    return (
+        "You are a hifiasm Methods-aware parameter advisor. Return only JSON with four top-level "
+        "fields: case_assessments, recommendation, selected_case_ids, and summary. Assess only cases "
+        "in case_retrieval.candidate_case_ids. transferable_findings must use one published "
+        "methods_evidence.effect_areas value and cite span IDs visible in that same case. "
+        "recommendation.adjustable_params keys must be catalog L2 names. Each returned decision must "
+        "choose action set, keep_default, or omit; include confidence strong, medium, or weak; include "
+        "a non-empty reason; and declare at least one evidence basis. basis=case requires selected, "
+        "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts, "
+        "SKILL heuristics, retry signals, or catalog defaults. Never invent cases, spans, parameters, "
+        "effect areas, or profile facts. Weak or absent case evidence is not a hard blocker; prefer "
+        "conservative defaults.\n\n"
         + str(prompt_payload.get("skill_instructions") or "")
     )
 

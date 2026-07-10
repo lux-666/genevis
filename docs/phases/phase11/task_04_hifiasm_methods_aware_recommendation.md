@@ -1,7 +1,7 @@
 # Task 4: Hifiasm Methods-Aware Evidence Recommendation
 
 **Phase**: 11
-**Status**: In progress; prompt foundation implemented, acceptance work remains
+**Status**: Complete; Methods-aware response, evidence artifact, deterministic validation, and replay state implemented
 **Depends on**: Task 2 EvidenceCase contract; Task 3 numeric retrieval
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -83,6 +83,7 @@ recommendation:
     purge_level:
       action: set
       value: 1
+      basis: case
       supporting_case_ids: [case_a]
       supporting_span_ids: [methods.parameter_rationale]
       confidence: medium
@@ -90,6 +91,7 @@ recommendation:
     kmer_length:
       action: keep_default
       value: 51
+      basis: catalog_default
       supporting_case_ids: []
       supporting_span_ids: []
       confidence: low
@@ -187,9 +189,10 @@ execution gate.
 
 ```yaml
 case_retrieval:
-  backend: hifiasm_numeric
+  retrieval_backend: hifiasm_numeric
   query_ref: .../retrieval_query.json
-  result_ref: .../numeric_retrieval.json
+  trace_ref: .../retrieval_trace.json
+  evidence_payload_ref: .../evidence_payload.json
   candidate_case_ids: []
   warning: null
 
@@ -235,7 +238,7 @@ Each hifiasm attempt writes:
 data/artifacts/assembly/<session>/parameter_attempt_<n>/
 ├── input_profile.json
 ├── retrieval_query.json
-├── numeric_retrieval.json
+├── retrieval_trace.json
 ├── evidence_payload.json
 ├── prompt_payload.json
 ├── llm_response.json
@@ -248,10 +251,19 @@ Compact `parameter_attempts` state stores refs and summaries:
 case_retrieval_backend: hifiasm_numeric
 candidate_case_ids: []
 selected_case_ids: []
-retrieval_result_ref: ...
+retrieval_trace_ref: ...
 evidence_payload_ref: ...
 evidence_warning: null
+case_assessments: []
+parameter_decisions: {}
+recommendation_summary: ...
 ```
+
+The focused `app/domains/assembly/methods_evidence.py` module owns evidence
+payload assembly and Methods-aware response normalization. The assembly node
+only coordinates artifact indexing, the shared decision call, catalog/rule
+validation, and compact attempt persistence. Legacy methods continue using the
+existing `params` response contract.
 
 ## Error Handling
 

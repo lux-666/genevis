@@ -1102,3 +1102,64 @@ class TestRealCatalogCompatibility:
                 f"Case {case['case_id']} has params.tool={case_method!r}, "
                 f"expected {method_id!r} for method {method_id}"
             )
+
+
+def test_hifiasm_writes_ref_backed_methods_evidence_payload(
+    sample_catalog, sample_full_profile, tmp_path, monkeypatch
+):
+    evidence_case = {
+        "case_id": "case_a",
+        "applicability": {"read_type": "hifi"},
+        "source": {"kind": "paper", "title": "Example"},
+        "numeric_match": {"distance": 0.1},
+        "observed_facts": {"coverage": {"value": 30}},
+        "intervention": {"tool": "hifiasm", "parameters": {}},
+        "rationale_claims": [],
+        "source_excerpts": [
+            {"span_id": "methods.a", "document": "methods", "quote": "Exact excerpt."}
+        ],
+        "outcomes": {},
+    }
+    selection = {
+        "retrieval_backend": "hifiasm_numeric",
+        "selected_case_ids": ["case_a"],
+        "candidate_case_ids": ["case_a"],
+        "eligible_case_count": 1,
+        "warning": None,
+        "query": {"query_id": "s1:parameter_attempt_0", "method_id": "hifiasm"},
+        "trace": [{"case_id": "case_a", "decision": "candidate"}],
+    }
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.load_knowledge_pack",
+        lambda *_args, **_kwargs: {
+            "cases": [],
+            "rules": {"rules": []},
+            "skill": "Use conservative evidence.",
+            "strategies": {},
+            "pack_root": tmp_path,
+        },
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.select_evidence_cases",
+        lambda *_args, **_kwargs: ([evidence_case], selection),
+    )
+
+    payload = build_prompt_payload(
+        method_id="hifiasm",
+        catalog=sample_catalog.model_copy(update={"method_id": "hifiasm"}),
+        full_profile=sample_full_profile,
+        task="recommend_initial",
+        write_artifacts=True,
+        session_id="s1",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+
+    evidence_path = tmp_path / payload["evidence_payload_ref"].removeprefix("data/")
+    assert evidence_path.name == "evidence_payload.json"
+    assert evidence_path.exists()
+    assert payload["case_retrieval"]["evidence_payload_ref"] == payload["evidence_payload_ref"]
+    assert payload["methods_evidence"]["response_contract"] == "case_assessments_and_recommendation"
+    loaded = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert loaded["candidate_case_ids"] == ["case_a"]
+    assert loaded["cases"][0]["source_excerpts"][0]["quote"] == "Exact excerpt."

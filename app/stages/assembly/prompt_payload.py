@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
     ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
@@ -17,6 +18,10 @@ from app.schemas.artifacts import (
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.domains.assembly.case_selector import evidence_read_type_matches, select_evidence_cases
+from app.domains.assembly.methods_evidence import (
+    HIFIASM_EFFECT_AREAS,
+    build_hifiasm_evidence_payload,
+)
 
 # Avoid circular import by using local import in function
 ParameterPromptTask = Literal[
@@ -138,6 +143,38 @@ def build_prompt_payload(
         )
     evidence_cases = selected_cases if uses_hifiasm_evidence else []
     legacy_selected_cases = [] if uses_hifiasm_evidence else selected_cases
+    evidence_payload_ref = None
+    evidence_payload_hash = None
+    methods_evidence = None
+    if uses_hifiasm_evidence:
+        evidence_payload = build_hifiasm_evidence_payload(
+            evidence_cases=evidence_cases,
+            case_retrieval=case_selection,
+        )
+        evidence_payload_hash = _canonical_json_hash(evidence_payload)
+        evidence_payload_ref = evidence_payload_hash
+        if write_artifacts:
+            evidence_artifact = write_evidence_payload_artifact(
+                payload=evidence_payload,
+                session_id=str(session_id),
+                attempt_id=int(attempt_id),
+                data_dir=data_dir,
+            )
+            evidence_payload_ref = evidence_artifact.path_ref
+            evidence_payload_hash = evidence_artifact.sha256
+        case_selection = {
+            **case_selection,
+            "evidence_payload_ref": evidence_payload_ref,
+            "evidence_payload_hash": evidence_payload_hash,
+        }
+        methods_evidence = {
+            "effect_areas": list(HIFIASM_EFFECT_AREAS),
+            "response_contract": "case_assessments_and_recommendation",
+            "assessment_rule": "assess only numeric-shortlist cases and cite only visible spans",
+            "recommendation_rule": (
+                "return L2 decisions with set, keep_default, or omit actions and at least one evidence basis"
+            ),
+        }
 
     # Defensive validation: verify all selected cases match profile read_type
     profile_read_type = prompt_profile.get("assets", {}).get("read_type")
@@ -193,6 +230,14 @@ def build_prompt_payload(
         "readonly_params": readonly_params,
         "adjustable_params": adjustable_params,
     }
+    if uses_hifiasm_evidence:
+        payload.update(
+            {
+                "evidence_payload_ref": evidence_payload_ref,
+                "evidence_payload_hash": evidence_payload_hash,
+                "methods_evidence": methods_evidence,
+            }
+        )
 
     # 6. Generate prompt payload reference (for audit)
     # CANONICAL HASH SEMANTICS: We compute the hash by excluding self-referential
@@ -376,6 +421,25 @@ def write_payload_artifact(
         attempt_id=attempt_id,
         filename="prompt_payload.json",
         artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+        data_dir=data_dir,
+    )
+
+
+def write_evidence_payload_artifact(
+    *,
+    payload: dict[str, Any],
+    session_id: str,
+    attempt_id: int,
+    data_dir: Path | None = None,
+) -> ArtifactRef:
+    """Write the bounded hifiasm Methods evidence payload for replay."""
+
+    return _write_json_artifact(
+        value=payload,
+        session_id=session_id,
+        attempt_id=attempt_id,
+        filename="evidence_payload.json",
+        artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
         data_dir=data_dir,
     )
 

@@ -1,7 +1,7 @@
 # Phase 11: Hifiasm Evidence Retrieval And Methods-Aware Recommendation
 
 **Phase**: 11
-**Status**: Tasks 2-3 complete; Task 4 in progress; Tasks 5-6 designed
+**Status**: Tasks 2-4 complete; Tasks 5-6 designed
 **Created**: 2026-07-07
 **Updated**: 2026-07-10
 
@@ -101,7 +101,7 @@ provides the shared executable-method typed-attempt foundation:
 
 - [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Complete
 - [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Complete; writes attempt-scoped query/trace artifacts and a prompt-safe numeric shortlist
-- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - In progress; consumes Task 3 shortlisted cases and retrieval refs without repeating numeric ranking or source validation
+- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - Complete; persists bounded Methods evidence, validates explicit assessments and parameter decisions, and preserves the legacy method contract
 - [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
 - [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
 

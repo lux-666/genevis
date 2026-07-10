@@ -767,12 +767,23 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 }
             )
             payload = {
-                "params": {"purge_level": 1},
-                "reasoning": "conservative HiFi parameters",
-                "confidence": 0.8,
+                "case_assessments": [],
+                "recommendation": {
+                    "adjustable_params": {
+                        "purge_level": {
+                            "action": "set",
+                            "value": 1,
+                            "basis": "skill_heuristic",
+                            "heuristic_labels": ["conservative HiFi purging"],
+                            "supporting_case_ids": [],
+                            "supporting_span_ids": [],
+                            "confidence": "weak",
+                            "reason": "No compatible case is available; use conservative SKILL guidance.",
+                        }
+                    }
+                },
                 "selected_case_ids": [],
-                "omitted_parameters": [],
-                "uncertainty_notes": [],
+                "summary": "Conservative HiFi parameters without case support.",
             }
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
                 result = recommend_assembly_parameters(state)
@@ -788,7 +799,12 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertEqual(attempt["retrieval_candidate_case_ids"], [])
             self.assertEqual(attempt["retrieval_eligible_case_count"], 0)
             self.assertIn("No compatible approved", attempt["retrieval_warning"])
-            for ref in (query_ref, trace_ref):
+            evidence_ref = attempt["evidence_payload_ref"]
+            self.assertIsNotNone(evidence_ref)
+            self.assertEqual(attempt["case_assessments"], [])
+            self.assertEqual(attempt["parameter_decisions"]["purge_level"]["action"], "set")
+            self.assertEqual(attempt["recommendation_summary"], payload["summary"])
+            for ref in (query_ref, trace_ref, evidence_ref):
                 artifact_path = Path(tmpdir) / ref["path_ref"].removeprefix("data/")
                 self.assertTrue(artifact_path.exists())
                 self.assertEqual(ref["sha256"], file_sha256(artifact_path))
@@ -796,6 +812,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             artifact_types = {record["artifact_type"] for record in artifact_records}
             self.assertIn("assembly.parameter.retrieval_query", artifact_types)
             self.assertIn("assembly.parameter.retrieval_trace", artifact_types)
+            self.assertIn("assembly.parameter.evidence_payload", artifact_types)
 
     def test_model_unavailable_fails_before_execution_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
