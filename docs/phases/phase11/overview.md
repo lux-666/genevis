@@ -1,58 +1,126 @@
-# Phase 11: Expand Parameter Attempts Across Assembly Methods
+# Phase 11: Assembly Parameter Attempts And Hifiasm Evidence Retrieval
 
 **Phase**: 11
-**Status**: Task 1 complete
+**Status**: Task 1 complete; Tasks 2-6 designed
 **Created**: 2026-07-07
-**Updated**: 2026-07-08
+**Updated**: 2026-07-10
 
 ## Goal
 
-Carry the Phase10 typed parameter-attempt contract beyond the initial
-hifiasm/hifiasm_ont slice so every executable assembly method can use the same
-catalog, command artifact, lifecycle update, and retry-gate behavior.
+Phase11 has two ordered goals:
 
-Phase11 starts with Flye and NextDenovo because they were still using
-method-specific run-configuration paths while hifiasm already used cataloged
-parameter attempts.
+1. carry the Phase10 typed parameter-attempt contract across executable assembly
+   methods; and
+2. replace the hifiasm recommender's production seed/bucket selection with a
+   manually curated, source-grounded, numerically continuous EvidenceCase
+   pipeline.
 
-## Current Scope
+Task 1 completed the cross-method typed-attempt expansion for Flye and
+NextDenovo. Tasks 2-6 deliberately return to PacBio HiFi hifiasm first so the
+new evidence contract can be implemented and evaluated in one bounded method
+before any broader rollout.
 
-Implemented in Task 1:
+## Confirmed Evidence Boundary
 
-- Flye has a method parameter catalog and descriptor `parameter_catalog` wiring.
-- NextDenovo has a method parameter catalog and descriptor `parameter_catalog`
-  wiring.
-- Flye freeze builds `parameter_sources` through the shared catalog-driven
-  builder, writes an attempt-scoped `command.json`, and records typed
-  `parameter_attempts` lifecycle state.
-- NextDenovo freeze builds `parameter_sources` through the shared catalog-driven
-  builder, writes an attempt-scoped `command.json`, and records typed
-  `parameter_attempts` lifecycle state.
-- Shared method execution lifecycle now updates the current parameter attempt
-  for success and failure instead of skipping Flye/NextDenovo.
-- After candidate selection, Flye and NextDenovo now enter the same
-  `recommend_assembly_parameters` path as hifiasm/hifiasm_ont before freeze/run.
-- Model unavailable is not silently bypassed. By default, recommendation
-  failure stops before local execution; `allow_model_unavailable_defaults` is an
-  explicit test/operator fallback that lets catalog defaults stand.
-- Assembly retry routing now sends method execution failures through the
-  parameter retry gate consistently.
-- Tests cover catalog presence for all executable assembly methods and typed
-  attempt lifecycle records for Flye and NextDenovo local execution.
+PDF acquisition and document preparation happen outside this project for the
+current phase. A human curator supplies:
 
-## Operator Contract
+```text
+structured EvidenceCase YAML
++ matching normalized body.md
++ matching normalized methods.md
+```
 
-For real runs, all executable assembly methods require a successful typed
-parameter recommendation attempt before freeze/run. Supplying
-`{method}_parameters` still provides L0 execution inputs, but it no longer skips
-the recommender for Flye or NextDenovo.
+The project validates and consumes those inputs. It does not parse PDFs or run
+GROBID.
 
-If the LLM or assembly decision backend is unavailable, the assembly stage stops
-with a validation-failed parameter attempt before launching local execution.
-Operators should fix LLM configuration and resume/retry the session from the
-assembly checkpoint. A future TUI integration should make that resume action
-explicit; Phase11 only standardizes the graph contract.
+The hifiasm-first pipeline is:
+
+```text
+manual case/body/Methods bundle
+  -> schema and source validation
+  -> hard compatibility filters
+  -> continuous numeric shortlist
+  -> Methods-aware LLM assessment and parameter recommendation
+  -> deterministic catalog/rule validation
+  -> typed freeze/run/review attempt
+  -> retry-specific evidence retrieval when needed
+  -> curator-reviewable draft case artifact
+```
+
+## Explicit Non-Goals
+
+Phase11 Tasks 2-6 do not introduce:
+
+- PDF download, OCR, GROBID, or automatic Methods extraction;
+- GraphRAG, graph databases, or LLM Wiki;
+- embedding services, vector databases, or a generic RRF stack;
+- Flye/NextDenovo/hifiasm-ont evidence migration;
+- cross-tool parameter translation;
+- automatic promotion of runtime records into production evidence;
+- one universal scalar assembly-quality score.
+
+## Task 1 Completed Scope
+
+- Flye and NextDenovo declare parameter catalogs.
+- Both methods build catalog-driven parameter sources and attempt-scoped command
+  artifacts.
+- Shared execution lifecycle updates typed parameter attempts for success and
+  failure.
+- All executable assembly methods enter parameter recommendation before
+  freeze/run.
+- Model-unavailable behavior remains strict unless the explicit operator/test
+  fallback is configured.
+- Method execution failure routes through the retry gate.
+
+## Hifiasm Evidence Design Principles
+
+- Initial and retry cases are separate retrieval spaces.
+- Numeric similarity and evidence coverage are separate values.
+- Bucket matching is replaced by continuous, feature-level numeric distance.
+- Only approved cases with verified source documents and exact source excerpts
+  are eligible.
+- The Methods-aware LLM sees only a bounded numeric shortlist.
+- Every non-default hifiasm parameter change cites selected cases and source
+  spans.
+- Weak evidence preserves catalog defaults.
+- Existing deterministic catalog/rule validation remains the execution gate.
+- Real runs produce draft artifacts; humans decide whether to promote them.
 
 ## Task Index
 
 - [Task 1: Flye and NextDenovo Typed Parameter Attempts](task_01_flye_nextdenovo_parameter_attempts.md) - Completed
+- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Designed
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Designed
+- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - Designed
+- [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
+- [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
+
+## Dependency Order
+
+```text
+Task 1
+  -> Task 2 EvidenceCase/source contract
+      -> Task 3 deterministic numeric retrieval
+          -> Task 4 Methods-aware recommendation
+              -> Task 5 retry evidence and curated retention
+                  -> Task 6 evaluation and hifiasm cutover
+```
+
+Tasks are intentionally sequential because each later contract consumes
+artifacts and invariants established by the earlier task.
+
+## Phase Completion Criteria
+
+Phase11 is complete when:
+
+- Task1 typed parameter attempts remain green for all executable assembly
+  methods;
+- hifiasm production recommendation consumes only approved V2 EvidenceCases;
+- hifiasm case ranking is continuous and missing-aware rather than bucket-based;
+- non-default hifiasm values are traceable to case IDs and exact source spans;
+- initial and retry evidence remain separate;
+- runtime draft cases require manual promotion;
+- the golden evaluation demonstrates safety and usefulness over the V1
+  baseline;
+- deferred graph/wiki/vector/cross-tool work remains outside the phase.
