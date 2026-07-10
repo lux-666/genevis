@@ -6,6 +6,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+MAX_SOURCE_EXCERPT_CHARS = 2_000
+
 
 class EvidenceCaseValidationError(ValueError):
     """Raised when an evidence case or one of its source documents is invalid."""
@@ -67,9 +69,18 @@ def validate_source_bundle(
                 f"{case_id}: span {span_id!r} references unknown document {document_name!r}"
             )
         quote = span.get("quote")
-        if not isinstance(quote, str) or not quote:
+        if not isinstance(quote, str) or not quote.strip():
             raise EvidenceCaseValidationError(f"{case_id}: span {span_id!r} quote is required")
-        occurrence_count = contents[str(document_name)].count(quote)
+        document_content = contents[str(document_name)]
+        if quote.strip() == document_content.strip():
+            raise EvidenceCaseValidationError(
+                f"{case_id}: span {span_id!r} quote must not contain the complete source document"
+            )
+        if len(quote) > MAX_SOURCE_EXCERPT_CHARS:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: span {span_id!r} quote exceeds the {MAX_SOURCE_EXCERPT_CHARS}-character limit"
+            )
+        occurrence_count = document_content.count(quote)
         if occurrence_count == 0:
             raise EvidenceCaseValidationError(
                 f"{case_id}: span {span_id!r} quote was not found in {document_name}.md"

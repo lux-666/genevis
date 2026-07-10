@@ -1,5 +1,22 @@
 version: 1
 default_strategy: structured_default
+hifiasm_numeric:
+  candidate_budget: 12
+  weak_coverage_threshold: 0.6
+  distance_clip: 4.0
+  epsilon: 0.000001
+  scales:
+    genome_size_mb: 0.6931471805599453
+    coverage: 0.6931471805599453
+    read_n50_kb: 0.6931471805599453
+    heterozygosity: 0.6931471805599453
+    ploidy: 1.0
+  weights:
+    genome_size_mb: 1.0
+    coverage: 1.0
+    read_n50_kb: 1.0
+    heterozygosity: 1.0
+    ploidy: 1.0
 strategies:
   structured_default:
     hard_filters:

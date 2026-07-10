@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,17 +13,19 @@ HIFIASM_EVIDENCE_SCHEMA_VERSION = 2
 _ALLOWED_CASE_TYPES = {"initial", "retry"}
 _ALLOWED_CURATION_STATUSES = {"draft", "approved", "rejected"}
 _ALLOWED_EXPLICITNESS = {"explicit", "inferred"}
+_NUMERIC_OBSERVED_FACTS = (
+    "genome_size_mb",
+    "coverage",
+    "read_n50_kb",
+    "heterozygosity",
+    "ploidy",
+)
 
 
 def is_hifiasm_evidence_case(case: dict[str, Any]) -> bool:
-    """Return whether a case declares the current hifiasm evidence contract."""
+    """Return whether a case must satisfy the current hifiasm contract."""
 
-    if case.get("schema_version") != HIFIASM_EVIDENCE_SCHEMA_VERSION:
-        return False
-    applicability = case.get("applicability") or {}
-    intervention = case.get("intervention") or {}
-    source_tool = applicability.get("source_tool") or intervention.get("tool")
-    return _short_method_name(source_tool) == "hifiasm"
+    return case.get("schema_version") == HIFIASM_EVIDENCE_SCHEMA_VERSION
 
 
 def validate_hifiasm_evidence_cases(
@@ -36,24 +39,19 @@ def validate_hifiasm_evidence_cases(
     cases are retained for audit but remain ineligible for retrieval.
     """
 
+    candidates: list[dict[str, Any]] = []
     for case in cases:
-        if not isinstance(case, dict) or case.get("schema_version") is None:
+        if not isinstance(case, dict):
             continue
-        applicability = case.get("applicability") or {}
-        intervention = case.get("intervention") or {}
-        source_tool = applicability.get("source_tool") or intervention.get("tool")
-        if (
-            _short_method_name(source_tool) == "hifiasm"
-            and case.get("schema_version") != HIFIASM_EVIDENCE_SCHEMA_VERSION
-        ):
+        if is_hifiasm_evidence_case(case):
+            candidates.append(case)
+            continue
+        if _declares_hifiasm_contract(case):
             raise EvidenceCaseValidationError(
                 f"{case.get('case_id') or '<missing-case-id>'}: unsupported hifiasm schema_version "
                 f"{case.get('schema_version')!r}"
             )
 
-    candidates = [
-        case for case in cases if isinstance(case, dict) and is_hifiasm_evidence_case(case)
-    ]
     seen: set[str] = set()
     normalized: list[dict[str, Any]] = []
     for case in candidates:
@@ -102,7 +100,9 @@ def _validate_case(case: dict[str, Any], *, pack_root: Path | None) -> dict[str,
         raise EvidenceCaseValidationError(f"{case_id}: applicability.target_methods must include hifiasm")
 
     intervention = case.get("intervention")
-    if not isinstance(intervention, dict) or _short_method_name(intervention.get("tool")) != "hifiasm":
+    if not isinstance(intervention, dict):
+        raise EvidenceCaseValidationError(f"{case_id}: intervention must be a mapping")
+    if _short_method_name(intervention.get("tool")) != "hifiasm":
         raise EvidenceCaseValidationError(f"{case_id}: intervention.tool must be hifiasm")
     _validate_case_type_contract(case, intervention=intervention)
 
@@ -112,6 +112,7 @@ def _validate_case(case: dict[str, Any], *, pack_root: Path | None) -> dict[str,
     result["retrieval_eligible"] = False
     if status != "approved":
         return result
+    _validate_approved_numeric_facts(case)
     if pack_root is None:
         raise EvidenceCaseValidationError(f"{case_id}: pack_root is required to validate approved sources")
 
@@ -269,8 +270,140 @@ def _short_method_name(value: Any) -> str | None:
     return value.rsplit(".", 1)[-1]
 
 
+def _declares_hifiasm_contract(case: dict[str, Any]) -> bool:
+    applicability = case.get("applicability")
+    if isinstance(applicability, dict):
+        if _short_method_name(applicability.get("source_tool")) == "hifiasm":
+            return True
+        target_methods = applicability.get("target_methods")
+        if isinstance(target_methods, list) and any(
+            _short_method_name(method) == "hifiasm" for method in target_methods
+        ):
+            return True
+    intervention = case.get("intervention")
+    return bool(
+        isinstance(intervention, dict)
+        and _short_method_name(intervention.get("tool")) == "hifiasm"
+    )
+
+
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _validate_approved_numeric_facts(case: dict[str, Any]) -> None:
+    case_id = str(case["case_id"])
+    observed_facts = case.get("observed_facts")
+    if observed_facts is None:
+        observed_facts = {}
+    if not isinstance(observed_facts, dict):
+        raise EvidenceCaseValidationError(f"{case_id}: observed_facts must be a mapping")
+    for field_name in _NUMERIC_OBSERVED_FACTS:
+        if field_name not in observed_facts:
+            continue
+        fact = observed_facts[field_name]
+        if not isinstance(fact, dict):
+            raise EvidenceCaseValidationError(
+                f"{case_id}: observed_facts.{field_name} must be a mapping"
+            )
+        _validate_numeric_fact(
+            fact,
+            case_id=case_id,
+            field_path=f"observed_facts.{field_name}",
+            field_name=field_name,
+        )
+
+    outcomes = case.get("outcomes")
+    if outcomes is None:
+        outcomes = {}
+    if not isinstance(outcomes, dict):
+        raise EvidenceCaseValidationError(f"{case_id}: outcomes must be a mapping")
+    for field_name, fact in outcomes.items():
+        if not isinstance(fact, dict):
+            raise EvidenceCaseValidationError(f"{case_id}: outcomes.{field_name} must be a mapping")
+        _validate_numeric_fact(
+            fact,
+            case_id=case_id,
+            field_path=f"outcomes.{field_name}",
+            field_name=field_name,
+        )
+
+
+def _validate_numeric_fact(
+    fact: dict[str, Any],
+    *,
+    case_id: str,
+    field_path: str,
+    field_name: str,
+) -> None:
+    value = fact.get("value")
+    uncertainty = fact.get("uncertainty")
+    interval: tuple[float, float] | None = None
+
+    if uncertainty is not None:
+        if not isinstance(uncertainty, dict):
+            raise EvidenceCaseValidationError(f"{case_id}: {field_path}.uncertainty must be a mapping")
+        kind = uncertainty.get("kind")
+        if kind not in {"point", "interval"}:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path}.uncertainty.kind must be point or interval"
+            )
+        if kind == "point" and any(bound in uncertainty for bound in ("min", "max")):
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path}.uncertainty point must not define min or max"
+            )
+        if kind == "interval":
+            if field_name == "ploidy":
+                raise EvidenceCaseValidationError(
+                    f"{case_id}: {field_path} does not support interval uncertainty"
+                )
+            missing = [bound for bound in ("min", "max") if bound not in uncertainty]
+            if missing:
+                raise EvidenceCaseValidationError(
+                    f"{case_id}: {field_path}.uncertainty interval requires {', '.join(missing)}"
+                )
+            lower = uncertainty.get("min")
+            upper = uncertainty.get("max")
+            if not _is_number(lower) or not _is_number(upper):
+                raise EvidenceCaseValidationError(
+                    f"{case_id}: {field_path}.uncertainty min and max must be finite numbers"
+                )
+            if lower > upper:
+                raise EvidenceCaseValidationError(
+                    f"{case_id}: {field_path}.uncertainty min must be <= max"
+                )
+            interval = (float(lower), float(upper))
+
+    if value is None and interval is None:
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path} requires a finite numeric value or interval"
+        )
+    if value is not None and not _is_number(value):
+        raise EvidenceCaseValidationError(f"{case_id}: {field_path}.value must be a finite number")
+    if value is not None and interval is not None and not interval[0] <= float(value) <= interval[1]:
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path}.value must fall within its uncertainty interval"
+        )
+
+    values = [float(value)] if value is not None else []
+    if interval is not None:
+        values.extend(interval)
+    if field_name in {"genome_size_mb", "coverage", "read_n50_kb"} and any(
+        item <= 0 for item in values
+    ):
+        raise EvidenceCaseValidationError(f"{case_id}: {field_path} values must be positive")
+    if field_name == "heterozygosity" and any(not 0 <= item <= 1 for item in values):
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path} values must be fractions between 0 and 1"
+        )
+    if field_name == "ploidy" and any(item <= 0 or not item.is_integer() for item in values):
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path}.value must be a positive integer"
+        )
 
 
 def _has_numeric_evidence(fact: dict[str, Any]) -> bool:

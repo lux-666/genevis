@@ -39,6 +39,8 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_LLM_RESPONSE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+    ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
     ASSEMBLY_PARAMETER_REVIEW_FAILURE,
     ASSEMBLY_PARAMETER_VALIDATION,
     ASSEMBLY_ROUTE_DECISION,
@@ -595,36 +597,38 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     except Exception as exc:
         return _fail_update(state, f"Assembly parameter prompt payload failed: {exc}")
 
-    # Append profile and prompt artifacts to artifact index
-    profile_artifacts = []
+    # Append replay inputs to the artifact index.
+    replay_artifacts = []
     profile_ref = prompt_payload.get("input_profile_ref")
     prompt_ref = prompt_payload.get("prompt_payload_ref")
-    profile_path = _resolve_data_path_ref(data_dir, str(profile_ref)) if profile_ref else None
-    prompt_path = _resolve_data_path_ref(data_dir, str(prompt_ref)) if prompt_ref else None
-    if profile_ref:
-        if profile_path and profile_path.exists():
-            profile_artifacts.append(
+    retrieval_metadata = prompt_payload.get("case_retrieval") or {}
+    retrieval_query_ref = retrieval_metadata.get("query_ref")
+    retrieval_trace_ref = retrieval_metadata.get("trace_ref")
+    artifact_specs = (
+        (profile_ref, ASSEMBLY_PARAMETER_INPUT_PROFILE),
+        (prompt_ref, ASSEMBLY_PARAMETER_PROMPT_PAYLOAD),
+        (retrieval_query_ref, ASSEMBLY_PARAMETER_RETRIEVAL_QUERY),
+        (retrieval_trace_ref, ASSEMBLY_PARAMETER_RETRIEVAL_TRACE),
+    )
+    resolved_paths: dict[str, Path] = {}
+    for ref, artifact_type in artifact_specs:
+        if not ref:
+            continue
+        artifact_path = _resolve_data_path_ref(data_dir, str(ref))
+        if artifact_path and artifact_path.exists():
+            resolved_paths[artifact_type] = artifact_path
+            replay_artifacts.append(
                 ArtifactMeta.from_file(
-                    profile_path,
+                    artifact_path,
                     stage="assembly",
                     method_name="assembly.parameter_recommender",
-                    artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+                    artifact_type=artifact_type,
                     metadata={"attempt_id": attempt_id},
                 )
             )
-    if prompt_ref:
-        if prompt_path and prompt_path.exists():
-            profile_artifacts.append(
-                ArtifactMeta.from_file(
-                    prompt_path,
-                    stage="assembly",
-                    method_name="assembly.parameter_recommender",
-                    artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
-                    metadata={"attempt_id": attempt_id},
-                )
-            )
-    if profile_artifacts:
-        append_artifact_records(data_dir, session_id, profile_artifacts)
+    if replay_artifacts:
+        append_artifact_records(data_dir, session_id, replay_artifacts)
+    prompt_path = resolved_paths.get(ASSEMBLY_PARAMETER_PROMPT_PAYLOAD)
 
     decision = make_assembly_decision(
         AssemblyDecisionRequest(
@@ -714,6 +718,31 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             ),
             artifact_type="assembly.parameter.prompt_payload",
         ),
+        retrieval_backend=retrieval_metadata.get("retrieval_backend"),
+        retrieval_query_id=retrieval_metadata.get("query_id"),
+        retrieval_query_ref=(
+            ArtifactRef(
+                path_ref=str(retrieval_query_ref),
+                sha256=str(retrieval_metadata["query_hash"]),
+                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+            )
+            if retrieval_query_ref
+            else None
+        ),
+        retrieval_trace_ref=(
+            ArtifactRef(
+                path_ref=str(retrieval_trace_ref),
+                sha256=str(retrieval_metadata["trace_hash"]),
+                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
+            )
+            if retrieval_trace_ref
+            else None
+        ),
+        retrieval_candidate_case_ids=list(
+            retrieval_metadata.get("candidate_case_ids") or []
+        ),
+        retrieval_eligible_case_count=retrieval_metadata.get("eligible_case_count"),
+        retrieval_warning=retrieval_metadata.get("warning"),
         llm_response_ref=llm_response_ref,
         validation_ref=validation_ref,
         catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",

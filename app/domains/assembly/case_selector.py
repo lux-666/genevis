@@ -138,9 +138,10 @@ def select_evidence_cases(
     task: str,
     prompt_profile: dict[str, Any],
     min_cases: int = 3,
-    max_cases: int = 8,
+    max_cases: int | None = None,
     strategy: dict[str, Any] | None = None,
     source_root: Path | str | None = None,
+    query_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Dispatch hifiasm to numeric evidence retrieval and preserve other methods."""
 
@@ -151,11 +152,22 @@ def select_evidence_cases(
             prompt_profile,
             method_id=method_id,
             task=task,
+            query_id=query_id,
         )
-        result = HifiasmNumericCaseRetriever(max_cases=max_cases).select(validated_cases, query=query)
+        if strategy is not None and not isinstance(strategy, dict):
+            raise ValueError("strategy must be a mapping")
+        numeric_config = (strategy or {}).get("hifiasm_numeric")
+        result = HifiasmNumericCaseRetriever.from_config(
+            numeric_config,
+            max_cases=max_cases,
+        ).select(validated_cases, query=query)
         return result.selected_cases, {**result.metadata, "query": query}
 
-    selector = EvidenceBasedCaseSelector(min_cases=min_cases, max_cases=max_cases, strategy=strategy)
+    selector = EvidenceBasedCaseSelector(
+        min_cases=min_cases,
+        max_cases=8 if max_cases is None else max_cases,
+        strategy=strategy,
+    )
     result = selector.select(cases, method_id=method_id, task=task, prompt_profile=prompt_profile)
     return result.selected_cases, result.metadata
 

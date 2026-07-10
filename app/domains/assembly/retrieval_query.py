@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -10,27 +11,50 @@ def build_hifiasm_retrieval_query(
     *,
     method_id: str,
     task: str,
+    query_id: str | None = None,
 ) -> dict[str, Any]:
     """Normalize profile paths and units before deterministic retrieval."""
 
     genome_size_bp = _lookup(prompt_profile, "genome_survey.estimated_genome_size")
     read_n50_bp = _lookup(prompt_profile, "read_qc.read_n50")
-    coverage = _first_number(
-        _lookup(prompt_profile, "read_qc.effective_coverage_1kb"),
-        _lookup(prompt_profile, "read_qc.effective_coverage_5kb"),
-        _lookup(prompt_profile, "genome_survey.kmer_peak_coverage"),
+    coverage, coverage_ref = _first_number_with_ref(
+        (
+            _lookup(prompt_profile, "read_qc.effective_coverage_1kb"),
+            "prompt_profile.read_qc.effective_coverage_1kb",
+        ),
+        (
+            _lookup(prompt_profile, "read_qc.effective_coverage_5kb"),
+            "prompt_profile.read_qc.effective_coverage_5kb",
+        ),
+        (
+            _lookup(prompt_profile, "genome_survey.kmer_peak_coverage"),
+            "prompt_profile.genome_survey.kmer_peak_coverage",
+        ),
     )
     return {
+        "query_id": query_id,
         "method_id": method_id,
         "task": task,
         "read_type": _lookup(prompt_profile, "assets.read_type"),
         "assembly_goal": _lookup(prompt_profile, "sample.assembly_goal") or "primary",
         "numeric_features": {
-            "genome_size_mb": _number_record(_scale(genome_size_bp, 1_000_000)),
-            "coverage": _number_record(coverage),
-            "read_n50_kb": _number_record(_scale(read_n50_bp, 1_000)),
-            "heterozygosity": _number_record(_lookup(prompt_profile, "genome_survey.heterozygosity")),
-            "ploidy": _number_record(_lookup(prompt_profile, "sample.ploidy")),
+            "genome_size_mb": _number_record(
+                _scale(genome_size_bp, 1_000_000),
+                "prompt_profile.genome_survey.estimated_genome_size",
+            ),
+            "coverage": _number_record(coverage, coverage_ref),
+            "read_n50_kb": _number_record(
+                _scale(read_n50_bp, 1_000),
+                "prompt_profile.read_qc.read_n50",
+            ),
+            "heterozygosity": _number_record(
+                _lookup(prompt_profile, "genome_survey.heterozygosity"),
+                "prompt_profile.genome_survey.heterozygosity",
+            ),
+            "ploidy": _number_record(
+                _lookup(prompt_profile, "sample.ploidy"),
+                "prompt_profile.sample.ploidy",
+            ),
         },
         "categorical_context": {"clade": _lookup(prompt_profile, "sample.clade")},
     }
@@ -47,20 +71,27 @@ def _lookup(values: Any, path: str) -> Any:
     return current
 
 
-def _number_record(value: Any) -> dict[str, float | None]:
-    return {"value": float(value) if _is_number(value) else None}
+def _number_record(value: Any, source_ref: str | None) -> dict[str, float | str | None]:
+    return {
+        "value": float(value) if _is_number(value) else None,
+        "source_ref": source_ref,
+    }
 
 
 def _scale(value: Any, denominator: float) -> float | None:
     return float(value) / denominator if _is_number(value) else None
 
 
-def _first_number(*values: Any) -> float | None:
-    for value in values:
+def _first_number_with_ref(*values: tuple[Any, str]) -> tuple[float | None, str | None]:
+    for value, source_ref in values:
         if _is_number(value):
-            return float(value)
-    return None
+            return float(value), source_ref
+    return None, None
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )

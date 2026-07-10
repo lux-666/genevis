@@ -21,6 +21,8 @@ ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 ASSEMBLY_PARAMETER_INPUT_PROFILE = "assembly.parameter.input_profile"
 ASSEMBLY_PARAMETER_PROMPT_PAYLOAD = "assembly.parameter.prompt_payload"
+ASSEMBLY_PARAMETER_RETRIEVAL_QUERY = "assembly.parameter.retrieval_query"
+ASSEMBLY_PARAMETER_RETRIEVAL_TRACE = "assembly.parameter.retrieval_trace"
 ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
 ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
@@ -120,6 +122,13 @@ class ParameterAttempt(BaseModel):
     status: str
     input_profile_ref: ArtifactRef
     prompt_payload_ref: ArtifactRef
+    retrieval_backend: str | None = None
+    retrieval_query_id: str | None = None
+    retrieval_query_ref: ArtifactRef | None = None
+    retrieval_trace_ref: ArtifactRef | None = None
+    retrieval_candidate_case_ids: list[str] = Field(default_factory=list)
+    retrieval_eligible_case_count: int | None = None
+    retrieval_warning: str | None = None
     llm_response_ref: ArtifactRef | None = None
     validation_ref: ArtifactRef | None = None
     command_ref: ArtifactRef | None = None

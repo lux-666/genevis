@@ -231,6 +231,8 @@ The validator must verify that:
 - every referenced `span_id` exists;
 - each quote occurs in the declared source document;
 - an exact quote expected to identify a single passage is not ambiguous;
+- a quote is at most 2,000 characters and cannot equal the complete source
+  document after trimming surrounding whitespace;
 - every evidence-bearing numeric fact cites at least one span;
 - every reported source parameter cites at least one Methods span;
 - every explicit rationale claim cites at least one Methods span;
@@ -345,11 +347,16 @@ ordering.
 Implemented coverage includes:
 
 - evidence manifest and shard loading;
+- fail-closed validation for every schema-v2 record and any current-shape
+  hifiasm record with a missing/unsupported schema version;
 - source path confinement;
-- exact quote validation;
+- exact quote validation, complete-document rejection, and a 2,000-character
+  excerpt ceiling;
 - missing, duplicate, and ambiguous span IDs;
 - missing source hashes on approved cases;
 - checksum mismatch;
+- finite point/interval validation for approved numeric facts and outcomes,
+  plus biological domain constraints for the five retrieval facts;
 - initial/retry required fields;
 - reported parameter provenance;
 - inferred rationale labeling;
@@ -361,6 +368,10 @@ Implemented coverage includes:
 - [x] A manually prepared case, body document, and Methods document load as one
   validated EvidenceCase.
 - [x] Approved cases have verified source hashes and valid exact-quote spans.
+- [x] Malformed schema-v2 cases fail validation instead of being silently
+  discarded.
+- [x] Approved numeric retrieval facts have finite, interval-consistent schema
+  validation.
 - [x] Initial and retry cases have distinct validated contracts.
 - [x] Draft, rejected, legacy, and source-invalid cases cannot enter hifiasm
   production retrieval.

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 import yaml
 
 from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
-from app.knowledge.evidence_cases import EvidenceCaseValidationError
+from app.knowledge.evidence_cases import (
+    EvidenceCaseValidationError,
+    MAX_SOURCE_EXCERPT_CHARS,
+)
 from app.knowledge.packs import load_knowledge_pack
 
 
@@ -123,6 +127,32 @@ def test_approved_case_rejects_missing_quote(tmp_path):
     case["source_documents"]["spans"][0]["quote"] = "Text absent from body."
 
     with pytest.raises(EvidenceCaseValidationError, match="was not found"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_span_containing_complete_document(tmp_path):
+    case = _approved_case(tmp_path)
+    body_path = tmp_path / "sources" / "case_001" / "body.md"
+    quote = case["source_documents"]["spans"][0]["quote"]
+    body_path.write_text(quote, encoding="utf-8")
+    case["source_documents"]["body"]["sha256"] = hashlib.sha256(body_path.read_bytes()).hexdigest()
+
+    with pytest.raises(EvidenceCaseValidationError, match="body.genome.*complete source document"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_approved_case_rejects_oversized_source_excerpt(tmp_path):
+    case = _approved_case(tmp_path)
+    methods_path = tmp_path / "sources" / "case_001" / "methods.md"
+    oversized_quote = "A" * (MAX_SOURCE_EXCERPT_CHARS + 1)
+    command_quote = case["source_documents"]["spans"][2]["quote"]
+    methods_path.write_text(f"{oversized_quote}\n\n{command_quote}\n", encoding="utf-8")
+    case["source_documents"]["methods"]["sha256"] = hashlib.sha256(
+        methods_path.read_bytes()
+    ).hexdigest()
+    case["source_documents"]["spans"][1]["quote"] = oversized_quote
+
+    with pytest.raises(EvidenceCaseValidationError, match="methods.reads.*character limit"):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -314,6 +344,62 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     assert "source_documents" not in payload["evidence_cases"][0]
 
 
+def test_hifiasm_retrieval_query_and_trace_are_attempt_scoped_artifacts(tmp_path):
+    from app.stages.assembly.parameter_catalog import load_parameter_catalog
+    from app.stages.assembly.prompt_payload import build_prompt_payload
+
+    pack_dir = tmp_path / "parameter_recommender"
+    case = _approved_case(pack_dir)
+    _write_case_pack(
+        tmp_path,
+        {
+            "version": 2,
+            "case_schema": "assembly_evidence_case",
+            "case_files": ["cases/hifiasm/initial.yaml"],
+        },
+        {"cases": [case]},
+    )
+    data_dir = tmp_path / "data"
+    payload = build_prompt_payload(
+        method_id="hifiasm",
+        catalog=load_parameter_catalog("hifiasm"),
+        full_profile={
+            "sample": {"sample_id": "case_match", "ploidy": 2},
+            "assets": {"read_type": "hifi"},
+            "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
+            "genome_survey": {"estimated_genome_size": 1200000000},
+            "previous_attempt": {},
+            "assembly_review": {},
+        },
+        task="recommend_initial",
+        knowledge_root=tmp_path,
+        write_artifacts=True,
+        session_id="session_a",
+        attempt_id=2,
+        data_dir=data_dir,
+    )
+
+    retrieval = payload["case_retrieval"]
+    assert retrieval == payload["case_selection"]
+    assert "query" not in retrieval
+    assert "trace" not in retrieval
+    assert retrieval["query_id"] == "session_a:parameter_attempt_2"
+    assert retrieval["query_ref"].endswith("parameter_attempt_2/retrieval_query.json")
+    assert retrieval["trace_ref"].endswith("parameter_attempt_2/retrieval_trace.json")
+
+    query_path = data_dir / retrieval["query_ref"].removeprefix("data/")
+    trace_path = data_dir / retrieval["trace_ref"].removeprefix("data/")
+    query_artifact = json.loads(query_path.read_text(encoding="utf-8"))
+    trace_artifact = json.loads(trace_path.read_text(encoding="utf-8"))
+    assert query_artifact["query_id"] == retrieval["query_id"]
+    assert trace_artifact["selected_case_ids"] == ["case_001"]
+    assert trace_artifact["trace"][0]["feature_distances"]["coverage"]["status"] == "compared"
+    artifact_text = query_path.read_text(encoding="utf-8") + trace_path.read_text(encoding="utf-8")
+    assert "source_documents" not in artifact_text
+    assert "Study body" not in artifact_text
+    assert "Methods." not in artifact_text
+
+
 def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
     case = _approved_case(tmp_path)
     case["schema_version"] = 3
@@ -322,15 +408,118 @@ def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("applicability", None, "applicability must be a mapping"),
+        ("applicability", [], "applicability must be a mapping"),
+        ("intervention", None, "intervention must be a mapping"),
+        ("intervention", [], "intervention must be a mapping"),
+    ],
+)
+def test_malformed_v2_cases_fail_closed_instead_of_being_discarded(
+    tmp_path, field, value, message
+):
+    case = _approved_case(tmp_path)
+    if value is None:
+        case.pop(field)
+    else:
+        case[field] = value
+
+    with pytest.raises(EvidenceCaseValidationError, match=message):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_v2_case_missing_source_tool_fails_closed(tmp_path):
+    case = _approved_case(tmp_path)
+    case["applicability"].pop("source_tool")
+
+    with pytest.raises(EvidenceCaseValidationError, match="applicability.source_tool"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_current_shape_hifiasm_case_requires_schema_version(tmp_path):
+    case = _approved_case(tmp_path)
+    case.pop("schema_version")
+
+    with pytest.raises(EvidenceCaseValidationError, match="unsupported hifiasm schema_version None"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+def test_legacy_seed_case_with_nested_hifiasm_tool_remains_ignored(tmp_path):
+    legacy = {
+        "case_id": "legacy_seed",
+        "source": {"kind": "seed_observation"},
+        "params": {"tool": "hifiasm", "values": {"purge_level": 1}},
+    }
+
+    assert validate_hifiasm_evidence_cases([legacy], pack_root=tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("field_name", "fact", "message"),
+    [
+        ("coverage", {"value": True}, "coverage.value must be a finite number"),
+        ("coverage", {"value": "30"}, "coverage.value must be a finite number"),
+        ("coverage", {"value": float("nan")}, "coverage.value must be a finite number"),
+        ("coverage", {"value": float("inf")}, "coverage.value must be a finite number"),
+        (
+            "coverage",
+            {"value": None, "uncertainty": {"kind": "interval", "min": 20}},
+            "interval requires max",
+        ),
+        (
+            "coverage",
+            {"value": None, "uncertainty": {"kind": "interval", "min": 20, "max": "40"}},
+            "min and max must be finite numbers",
+        ),
+        (
+            "coverage",
+            {"value": None, "uncertainty": {"kind": "interval", "min": 40, "max": 20}},
+            "min must be <= max",
+        ),
+        (
+            "coverage",
+            {"value": 30, "uncertainty": {"kind": "point", "min": 20, "max": 40}},
+            "point must not define min or max",
+        ),
+        ("genome_size_mb", {"value": -1}, "genome_size_mb values must be positive"),
+        ("heterozygosity", {"value": 1.1}, "fractions between 0 and 1"),
+        ("ploidy", {"value": 2.5}, "ploidy.value must be a positive integer"),
+    ],
+)
+def test_approved_case_numeric_features_require_valid_schema(tmp_path, field_name, fact, message):
+    case = _approved_case(tmp_path)
+    case["observed_facts"][field_name] = {
+        **fact,
+        "evidence_span_ids": ["body.genome"],
+    }
+
+    with pytest.raises(EvidenceCaseValidationError, match=message):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
+@pytest.mark.parametrize("value", [True, "1188", float("nan"), float("inf")])
+def test_approved_case_outcomes_require_finite_numeric_values(tmp_path, value):
+    case = _approved_case(tmp_path)
+    case["outcomes"]["assembly_size_mb"] = {
+        "value": value,
+        "evidence_span_ids": ["body.genome"],
+    }
+
+    with pytest.raises(EvidenceCaseValidationError, match="outcomes.assembly_size_mb.value"):
+        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+
 def _write_case_pack(tmp_path: Path, manifest: dict, shard: object = None) -> None:
     pack_dir = tmp_path / "parameter_recommender"
-    pack_dir.mkdir(parents=True)
+    pack_dir.mkdir(parents=True, exist_ok=True)
     (pack_dir / "cases.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     (pack_dir / "rules.yaml").write_text("rules: []\n", encoding="utf-8")
     (pack_dir / "SKILL.md").write_text("Use curated evidence.\n", encoding="utf-8")
     if shard is not None:
         shard_path = pack_dir / "cases" / "hifiasm" / "initial.yaml"
-        shard_path.parent.mkdir(parents=True)
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
         shard_path.write_text(yaml.safe_dump(shard), encoding="utf-8")
 
 

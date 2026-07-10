@@ -11,6 +11,8 @@ from app.knowledge.packs import load_knowledge_pack
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+    ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
     ArtifactRef,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
@@ -118,9 +120,22 @@ def build_prompt_payload(
         prompt_profile=prompt_profile,
         strategy=knowledge_pack.get("strategies"),
         source_root=knowledge_pack.get("pack_root"),
+        query_id=(
+            f"{session_id}:parameter_attempt_{attempt_id}"
+            if session_id is not None and attempt_id is not None
+            else None
+        ),
     )
 
     uses_hifiasm_evidence = case_selection.get("retrieval_backend") == "hifiasm_numeric"
+    if uses_hifiasm_evidence:
+        case_selection = _materialize_retrieval_artifacts(
+            case_selection,
+            write_artifacts=write_artifacts,
+            session_id=session_id,
+            attempt_id=attempt_id,
+            data_dir=data_dir,
+        )
     evidence_cases = selected_cases if uses_hifiasm_evidence else []
     legacy_selected_cases = [] if uses_hifiasm_evidence else selected_cases
 
@@ -219,8 +234,7 @@ def generate_profile_ref(full_profile: dict[str, Any]) -> str:
     Returns:
         Hex string hash (64 chars)
     """
-    canonical = json.dumps(full_profile, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _canonical_json_hash(full_profile)
 
 
 def generate_payload_ref(prompt_payload: dict[str, Any]) -> str:
@@ -246,7 +260,67 @@ def generate_payload_ref(prompt_payload: dict[str, Any]) -> str:
     Returns:
         Hex string hash (64 chars) - canonical hash of semantic content
     """
-    canonical = json.dumps(prompt_payload, sort_keys=True, separators=(",", ":"))
+    return _canonical_json_hash(prompt_payload)
+
+
+def _materialize_retrieval_artifacts(
+    selection: dict[str, Any],
+    *,
+    write_artifacts: bool,
+    session_id: str | None,
+    attempt_id: int | None,
+    data_dir: Path | None,
+) -> dict[str, Any]:
+    compact = dict(selection)
+    query = dict(compact.pop("query", {}) or {})
+    trace_entries = list(compact.pop("trace", []) or [])
+    trace_payload = {
+        "retrieval_backend": compact.get("retrieval_backend"),
+        "query_id": query.get("query_id"),
+        "selected_case_ids": list(compact.get("selected_case_ids") or []),
+        "eligible_case_count": compact.get("eligible_case_count", 0),
+        "warning": compact.get("warning"),
+        "trace": trace_entries,
+    }
+
+    query_ref = _canonical_json_hash(query)
+    trace_ref = _canonical_json_hash(trace_payload)
+    query_hash = query_ref
+    trace_hash = trace_ref
+    if write_artifacts:
+        query_artifact = _write_json_artifact(
+            value=query,
+            session_id=str(session_id),
+            attempt_id=int(attempt_id),
+            filename="retrieval_query.json",
+            artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+            data_dir=data_dir,
+        )
+        trace_artifact = _write_json_artifact(
+            value=trace_payload,
+            session_id=str(session_id),
+            attempt_id=int(attempt_id),
+            filename="retrieval_trace.json",
+            artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
+            data_dir=data_dir,
+        )
+        query_ref, query_hash = query_artifact.path_ref, query_artifact.sha256
+        trace_ref, trace_hash = trace_artifact.path_ref, trace_artifact.sha256
+
+    compact.update(
+        {
+            "query_id": query.get("query_id"),
+            "query_ref": query_ref,
+            "query_hash": query_hash,
+            "trace_ref": trace_ref,
+            "trace_hash": trace_hash,
+        }
+    )
+    return compact
+
+
+def _canonical_json_hash(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -268,20 +342,14 @@ def write_profile_artifact(
     Returns:
         Path ref plus SHA256 integrity field.
     """
-    if data_dir is None:
-        data_dir = Path("data")
-
-    profile_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    profile_path = profile_dir / "input_profile.json"
-    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/input_profile.json"
-
-    with profile_path.open("w") as f:
-        json.dump(profile, f, indent=2)
-
-    # Use actual file hash for integrity verification
-    from app.schemas.artifacts import file_sha256
-    return ArtifactRef(path_ref=path_ref, sha256=file_sha256(profile_path), artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE)
+    return _write_json_artifact(
+        value=profile,
+        session_id=session_id,
+        attempt_id=attempt_id,
+        filename="input_profile.json",
+        artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+        data_dir=data_dir,
+    )
 
 
 def write_payload_artifact(
@@ -302,20 +370,42 @@ def write_payload_artifact(
     Returns:
         Path ref plus SHA256 integrity field.
     """
-    if data_dir is None:
-        data_dir = Path("data")
+    return _write_json_artifact(
+        value=payload,
+        session_id=session_id,
+        attempt_id=attempt_id,
+        filename="prompt_payload.json",
+        artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+        data_dir=data_dir,
+    )
 
-    payload_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
-    payload_dir.mkdir(parents=True, exist_ok=True)
-    payload_path = payload_dir / "prompt_payload.json"
-    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/prompt_payload.json"
 
-    with payload_path.open("w") as f:
-        json.dump(payload, f, indent=2)
+def _write_json_artifact(
+    *,
+    value: Any,
+    session_id: str,
+    attempt_id: int,
+    filename: str,
+    artifact_type: str,
+    data_dir: Path | None = None,
+) -> ArtifactRef:
+    """Write one immutable attempt-scoped JSON artifact."""
 
-    # Use actual file hash for integrity verification
+    root = data_dir or Path("data")
+    artifact_dir = root / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / filename
+    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}"
+    with artifact_path.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2)
+
     from app.schemas.artifacts import file_sha256
-    return ArtifactRef(path_ref=path_ref, sha256=file_sha256(payload_path), artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD)
+
+    return ArtifactRef(
+        path_ref=path_ref,
+        sha256=file_sha256(artifact_path),
+        artifact_type=artifact_type,
+    )
 
 
 def load_profile_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any]:
