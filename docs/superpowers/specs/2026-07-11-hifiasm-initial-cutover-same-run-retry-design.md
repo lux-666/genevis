@@ -9,19 +9,23 @@
 
 Split Phase 11 completion into two independent concerns:
 
-- **Task 6A — initial evidence cutover:** validate and enable the curated paper-backed path only for `recommend_initial`.
+- **Task 6A — initial top-5 cutover:** enable the numeric evidence path only for `recommend_initial`, with deterministic top-5 selection and no evaluation gate.
 - **Task 6B — same-run retry:** retry one sample from its own recorded attempt history. It is an ordinary run branch, not a knowledge-base feature.
 
-The retry path must not retrieve historical successful or failed runs. It inherits the immutable evidence, profile, and parameter basis selected for attempt 0, then reacts to the immediately preceding execution or review failure. Execution retry and review retry remain owned by different nodes/stages and have independent budgets.
+The retry path must not retrieve historical successful or failed runs. It
+inherits the actual immutable profile, selector/evidence, policy, and parameter
+snapshot recorded for attempt 0, then reacts to the immediately preceding
+execution or review failure. Execution retry and review retry remain owned by
+different nodes/stages and have independent budgets.
 
 This design deliberately deletes the retry database/retriever/backend/corpus and runtime-to-`EvidenceCase` promotion path. It does not preserve them as dormant extension points.
 
 ## Goals
 
-1. Permit production cutover of paper-grounded initial hifiasm recommendation once the initial-only scientific and recorded-decision gate passes.
+1. Permit `initial_cutover_enabled` to select the deterministic numeric initial path without a corpus-size, score, coverage, evaluation, or approval gate.
 2. Preserve a complete, inspectable chain for one sample across initial execution and any retries.
-3. Distinguish assembly execution failures from post-assembly review failures, with separate routing, classifiers, budgets, and exhaustion outcomes.
-4. Reuse attempt 0's evidence snapshot without re-retrieval or evidence drift.
+3. Distinguish assembly execution failures from post-assembly review failures, with separate routing, budgets, and exhaustion outcomes.
+4. Reuse attempt 0's actual snapshot without re-retrieval or policy drift.
 5. Keep the implementation smaller than the current retry-evidence design by removing entities that no longer serve the product behavior.
 
 ## Scope
@@ -30,58 +34,32 @@ This design deliberately deletes the retry database/retriever/backend/corpus and
 
 Task 6A covers:
 
-- approved paper-derived hifiasm initial `EvidenceCase` records;
+- all initial cases eligible under the existing loader and compatibility filters;
 - initial query construction, continuous numeric retrieval, Methods-aware recommendation, catalog validation, and parameter freeze;
-- baseline-versus-curated offline evaluation for initial recommendation;
-- recorded recommendation evaluation;
-- production activation through an explicit initial-only gate.
+- deterministic selection with fixed `top_k = 5`;
+- observational offline evaluation that never blocks selection, recommendation, or activation;
+- production activation through the existing `initial_cutover_enabled` switch.
 
-The activation contract has an operator switch plus a derived, immutable
-cutover-decision artifact:
+The complete activation contract is:
 
 ```yaml
 initial_cutover_enabled: true
-initial_cutover_decision_ref: <artifact ref>
-initial_cutover_decision_hash: sha256:<digest>
 ```
 
-The evaluator, not configuration or runtime code, derives
-`initial_cutover_permitted`. The signed/hashed decision artifact contains:
+When enabled, rank every eligible initial case by the existing numeric score.
+The ordering must be stable: descending numeric score, followed by one explicit
+deterministic tie-break key (`case_id` ascending). Select exactly as follows:
 
-```yaml
-decision: initial_cutover_permitted
-permitted: true
-corpus_manifest_ref: <versioned manifest>
-corpus_manifest_hash: sha256:<digest>
-golden_query_set_ref: <versioned query set>
-golden_query_set_hash: sha256:<digest>
-recorded_recommendation_outputs_ref: <fixed outputs>
-recorded_recommendation_outputs_hash: sha256:<digest>
-evaluator_version: <version>
-evaluation_policy_version: <version>
-thresholds: <fully materialized threshold map>
-thresholds_hash: sha256:<digest>
-metrics_ref: <immutable report>
-metrics_hash: sha256:<digest>
-created_at: <timestamp>
-```
+- 5 or more eligible cases: select the first 5;
+- 1-4 eligible cases: select all of them;
+- 0 eligible cases: use the existing no-case behavior unchanged.
 
-`permitted: true` may be derived only when all of these are satisfied:
-
-- at least 20 approved, paper-backed initial hifiasm cases;
-- at least 10 curator-labeled initial golden queries;
-- the recorded recommendation evaluation has run against the fixed corpus and its required safety/usefulness thresholds pass;
-- all initial retrieval, citation, catalog, default-preservation, and recommendation acceptance checks pass.
-
-Runtime configuration pins the expected decision artifact hash and all input
-hashes it was evaluated against. Runtime recomputes/verifies those hashes before
-activation. Run state stores only the verified decision artifact ref/hash, not a
-manually editable permission boolean. A stale, forged, missing, malformed, or
-hash-mismatched decision fails closed.
-
-`initial_cutover_enabled` remains the operator decision to activate an already
-verified permitted path. Enabling without a valid permitted artifact must not
-silently fall back or partially activate.
+There is no minimum numeric score, evidence coverage, eligible-case count,
+corpus size, query-set size, scientific approval, recorded recommendation,
+threshold, non-inferiority, or default-preservation requirement for activation
+or forward progress. Evaluation may report any of these measurements for
+operator visibility, but its presence, absence, or result cannot change
+`initial_cutover_enabled` or block the run.
 
 ### Task 6B: Same-sample retry
 
@@ -114,7 +92,9 @@ Task 6B covers:
 ```text
 sample + input profile
   -> initial hifiasm query
-  -> approved paper EvidenceCase retrieval
+  -> all eligible initial cases scored by existing numeric score
+  -> stable sort by score desc, case_id asc
+  -> fixed top_k=5 selection (or all 1-4; existing no-case path for 0)
   -> bounded Methods evidence payload
   -> initial parameter recommendation
   -> catalog/hard-rule validation and freeze
@@ -128,15 +108,20 @@ After cutover, hifiasm has one declared initial selector/prompt contract. Retry 
 
 ```text
 assembly execution fails
-  -> assembly-stage execution failure classifier
-  -> decide parameter-repairable vs non-repairable
+  -> record raw structured execution failure facts
   -> check execution retry budget
   -> build next attempt from attempt 0 snapshot + previous attempt + failure signal
   -> validate/freeze changed parameters
   -> rerun assembly
 ```
 
-Examples of execution signals include OOM/resource exhaustion, invalid or conflicting parameters, process exit/signal, and bounded stdout/stderr tails. Missing inputs, permissions, corrupt files, unavailable executables, and other non-parameter-repairable failures stop directly without consuming a fabricated parameter retry.
+Execution failure input consists only of the recorded exit code/signal, bounded
+stdout/stderr or log references, resource facts, rendered command, and other
+existing structured execution-result fields. This design adds no failure
+classifier, repairability label, or pre-retry repairability gate. If
+`max_execution_retries` has budget, the execution stage creates a typed retry
+request from those facts. If it is exhausted, terminate with
+`execution_parameter_retries_exhausted`.
 
 ### Task 6B review-failure path
 
@@ -159,11 +144,11 @@ Review signals remain directional constraints, not a universal quality score. Ex
 Every retry recommendation may use only:
 
 1. the immutable attempt 0 snapshot: `catalog_ref`, `knowledge_pack_ref`,
-   hard-rule/policy ref, method-capability ref, profile ref, selected paper
-   cases, Methods spans, citations, retrieval trace, and recommendation
+   hard-rule/policy ref, method-capability ref, profile ref, selected initial
+   cases, available Methods spans/citations, retrieval trace, and recommendation
    rationale;
 2. the immediately preceding attempt's rendered parameters and command;
-3. that attempt's execution result or review result and classified failure signal;
+3. that attempt's raw structured execution result or review result and failure signal;
 4. the attempt 0 retry limits and the appropriate remaining domain budget.
 
 Current runtime observations may only veto or block execution for safety. They
@@ -191,8 +176,6 @@ Reuse the existing typed parameter-attempt lifecycle and artifact references. Ad
 
 ```yaml
 initial_cutover_enabled: false
-initial_cutover_decision_ref: <verified immutable ref or null>
-initial_cutover_decision_hash: <verified hash or null>
 initial_recommendation_contract: curated_initial_v1 # or legacy_initial
 current_parameter_attempt_id: 1
 retry_counts:
@@ -220,12 +203,12 @@ catalog_ref: <immutable ref>
 knowledge_pack_ref: <immutable ref>
 hard_rule_policy_ref: <immutable ref>
 method_capability_ref: <immutable ref>
-retry_policy_ref: <immutable ref>
+retry_limits_ref: <immutable ref>
 initial_query_ref: <immutable ref>
 retrieval_result_ref: <immutable ref>
 evidence_payload_ref: <immutable ref>
 recommendation_rationale_ref: <immutable ref>
-selected_case_ids: [<approved paper case ids>]
+selected_case_ids: [<0-5 stable top-ranked eligible case ids>]
 frozen_parameters_ref: <immutable ref>
 command_ref: <immutable ref>
 execution_result_ref: <append-once ref or null>
@@ -236,13 +219,12 @@ seal_hash: <hash or null>
 
 The exact storage may retain currently embedded typed values where the repository already does so. The required property is immutability and stable reference, not conversion of every value into a new artifact type.
 
-For `legacy_initial`, the cutover decision ref/hash and curated-only evidence
-fields are nullable, while the actual legacy profile, selector output,
-recommendation rationale, catalog, hard rules, capabilities, and frozen
-parameters are still snapshotted. For `curated_initial_v1`, the verified cutover
-decision and curated evidence fields are required. Retry inherits whichever
-actual attempt 0 contract was recorded; it never upgrades, reinterprets, or
-guesses the contract.
+For `legacy_initial`, curated-only evidence fields are nullable, while the
+actual legacy profile, selector output, recommendation rationale, catalog, hard
+rules, capabilities, and frozen parameters are still snapshotted. For
+`curated_initial_v1`, the actual top-5/all/no-case retrieval result and evidence
+fields are snapshotted. Retry inherits whichever actual attempt 0 contract was
+recorded; it never upgrades, reinterprets, or guesses the contract.
 
 ### Retry attempt
 
@@ -304,8 +286,6 @@ run_id: <run id>
 sample_id: <sample id>
 method_id: assembly.candidate.hifiasm
 initial_recommendation_contract: curated_initial_v1 # or legacy_initial
-initial_cutover_decision_ref: <verified ref or null for legacy_initial>
-initial_cutover_decision_hash: <verified hash or null for legacy_initial>
 entries:
   - sequence: 0
     attempt_id: 0
@@ -340,11 +320,10 @@ inherited initial snapshot ref, and seal hash. `terminal` is required for both
 success and failure. Rendering or reloading the same sealed chain must produce
 the same semantic timeline and `source_attempt_chain_hash`.
 
-The renderer reads `initial_recommendation_contract` from attempt 0. It requires
-and renders the verified decision ref/hash for `curated_initial_v1`, and renders
-both as null for `legacy_initial`. It must reject missing/unknown contract values
-or contradictory field combinations; it must never infer the contract from the
-presence of evidence fields.
+The renderer reads `initial_recommendation_contract` from attempt 0 and renders
+the actual attempt 0 snapshot. It must reject missing/unknown contract values or
+contradictory field combinations; it must never infer the contract from case
+count or the presence of evidence fields.
 
 Successful example:
 
@@ -363,7 +342,10 @@ attempt 1: assembly succeeded; review failed (low_completeness)
 final: review_parameter_retries_exhausted
 ```
 
-Each entry exposes the frozen parameters, rendered command, outcome, failure classification or review diagnosis, parameter delta, and inherited initial snapshot references. Failed attempts remain visible inside an ultimately successful chain.
+Each entry exposes the frozen parameters, rendered command, outcome, raw
+execution failure facts or review diagnosis, parameter delta, and inherited
+initial snapshot references. Failed attempts remain visible inside an
+ultimately successful chain.
 
 ## Error Handling and Terminal States
 
@@ -371,14 +353,13 @@ Execution and review have domain-specific terminal states. Do not collapse them 
 
 ### Closed status and reason vocabulary
 
-Only these retry-transition statuses are valid:
+This design defines only these retry-routing statuses:
 
 ```text
 retry_parameters_after_execution_failure
 retry_parameters_after_review_failure
 execution_parameter_retries_exhausted
 review_parameter_retries_exhausted
-parameter_retry_expert_review
 parameter_retry_validation_failed
 parameter_retry_invalid_transition
 policy_snapshot_mismatch
@@ -386,57 +367,33 @@ assembly_succeeded
 assembly_failed
 ```
 
-Only these retry-transition reasons are valid:
+Execution exit/log/resource facts and review measurements remain structured
+payloads, not classifier or repairability enums. The retry router uses only the
+generic transition reasons `execution_failed`, `review_failed`,
+`execution_retry_budget_exhausted`, `review_retry_budget_exhausted`,
+`retry_delta_invalid`, `missing_failure_signal`,
+`contradictory_failure_signal`, `unsealed_previous_attempt`,
+`previous_attempt_seal_hash_mismatch`, `policy_snapshot_hash_mismatch`, and
+`completed`.
 
-```text
-out_of_memory
-resource_exhaustion
-invalid_parameters
-process_failed
-environment_or_input_failure
-unclassified_execution_failure
-under_purged
-over_purged
-fragmented
-low_completeness
-unexpected_duplication
-assembly_size_ratio_low
-assembly_size_ratio_high
-execution_retry_budget_exhausted
-review_retry_budget_exhausted
-retry_delta_invalid
-operator_policy_requires_review
-missing_failure_signal
-contradictory_failure_signal
-unsealed_previous_attempt
-previous_attempt_seal_hash_mismatch
-policy_snapshot_hash_mismatch
-completed
-```
-
-Schema validation rejects unknown values. A stage-specific diagnostic may carry
-additional structured details, but it cannot create ad hoc status/reason
-strings.
-
-`parameter_repairable: false` and `no_supported_delta` may appear as diagnostic
-facts, but are not terminal reason enums. Unless snapshotted operator policy
-requires manual review, termination retains the concrete execution/review
-reason under `assembly_failed`.
+If the existing recommendation model contract already supports stop or expert
+review, those outcomes remain valid with their existing status/reason schema.
+This design neither adds a repairability policy nor invents a new stop/expert
+status. Schema validation rejects unknown retry-routing values.
 
 Valid terminal/transition pairings are closed as follows:
 
 | Status | Allowed reason family | Counter effect |
 |---|---|---|
-| `retry_parameters_after_execution_failure` | Repairable execution reason | Increment `execution` only after validated/frozen attempt append |
-| `retry_parameters_after_review_failure` | Review diagnosis reason | Increment `review` only after validated/frozen attempt append |
+| `retry_parameters_after_execution_failure` | `execution_failed` | Increment `execution` only after validated/frozen attempt append |
+| `retry_parameters_after_review_failure` | `review_failed` | Increment `review` only after validated/frozen attempt append |
 | `execution_parameter_retries_exhausted` | `execution_retry_budget_exhausted` | None |
 | `review_parameter_retries_exhausted` | `review_retry_budget_exhausted` | None |
-| `parameter_retry_expert_review` | `operator_policy_requires_review` only, and only when the snapshotted operator policy explicitly requires manual review | None |
 | `parameter_retry_validation_failed` | `retry_delta_invalid` | None |
 | `parameter_retry_invalid_transition` | `missing_failure_signal`, `contradictory_failure_signal`, `unsealed_previous_attempt`, or `previous_attempt_seal_hash_mismatch` | None |
 | `policy_snapshot_mismatch` | `policy_snapshot_hash_mismatch` | None |
 | `assembly_succeeded` | `completed` | None |
-| `assembly_failed` | A concrete execution or review failure reason when no retry transition is legal | None |
+| `assembly_failed` | Existing terminal reason outside an execution/review budget transition | None |
 
 Tests must enumerate this pairing table, reject every invalid pairing, and
 assert both counters before and after each accepted and rejected transition.
@@ -445,9 +402,9 @@ assert both counters before and after each accepted and rejected transition.
 
 | Owner | Input | May emit | Next route |
 |---|---|---|---|
-| Assembly execution retry node (`app/stages/assembly/*`) | Execution-failed attempt with exactly-once result and classified failure signal | seal attempt, then emit retry request referencing its seal hash; or emit execution exhaustion/direct failure/invalid transition | Assembly parameter recommendation/freeze or terminal |
-| Assembly parameter recommendation/freeze | Typed retry request + attempt 0 snapshot | validated/frozen retry attempt or validation/expert-review terminal | Append attempt, increment owning counter, then assembly execution |
-| Assembly review retry node (`app/stages/assembly_review/*`) | Execution-succeeded attempt + exactly-once review result/diagnosis and failure signal | seal attempt, then emit typed review retry request referencing its seal hash; or emit review exhaustion/expert review/invalid transition | Assembly parameter recommendation/freeze or terminal |
+| Assembly execution retry node (`app/stages/assembly/*`) | Execution-failed attempt with exactly-once raw structured execution result and failure signal | seal attempt; if budget remains emit retry request referencing its seal hash, otherwise emit execution exhaustion | Assembly parameter recommendation/freeze or terminal |
+| Assembly parameter recommendation/freeze | Typed retry request + attempt 0 snapshot | validated/frozen retry attempt or an existing model-contract stop/expert outcome | Append attempt, increment owning counter, then assembly execution; or existing terminal route |
+| Assembly review retry node (`app/stages/assembly_review/*`) | Execution-succeeded attempt + exactly-once review result/diagnosis and failure signal | seal attempt; if budget remains emit typed review retry request referencing its seal hash, otherwise emit review exhaustion | Assembly parameter recommendation/freeze or terminal |
 | Assembly execution | Typed frozen attempt only | exactly-once execution result | Review on success; execution retry node on failure |
 | Assembly review | Successful execution result | exactly-once review result/diagnosis | Success terminal or review retry node |
 
@@ -467,21 +424,19 @@ owner writes result/diagnosis and failure signal exactly once
   -> increment only the owning domain counter
 ```
 
-Any mutation or reclassification after sealing is rejected. Recommendation
+Any mutation or alteration of recorded failure facts/diagnosis after sealing is rejected. Recommendation
 must not seal the previous attempt; it only verifies the request's seal hash.
 
 | Condition | Required result |
 |---|---|
-| Execution failure is parameter-repairable and execution budget remains | Execution owner writes/classifies/seals and emits seal-bound request; validate/freeze, append an `assembly_execution` retry attempt, then increment execution counter |
-| Execution failure is not parameter-repairable | Seal the attempt and terminate directly as `assembly_failed` with its concrete execution reason; never emit expert-review status and do not consume budget |
+| Execution fails and execution budget remains | Execution owner writes raw structured facts/signal, seals, and emits a seal-bound request; recommendation may choose a valid delta or an existing stop/expert outcome; append and increment only for a validated/frozen retry attempt |
 | Execution budget is exhausted | `execution_parameter_retries_exhausted` with the last execution failure |
 | Execution succeeds and review passes | Finalize success |
 | Review fails and review budget remains | Review owner writes diagnosis/signal, seals, and emits a seal-bound typed request; proposal is validated/frozen; append an `assembly_review` retry attempt, increment review counter, and route back to assembly |
 | Review budget is exhausted | `review_parameter_retries_exhausted` with the last review diagnosis |
 | Failure signal is missing or contradictory | Fail closed as an invalid attempt transition; preserve artifacts |
-| Retry recommendation has no safe supported delta | Stop without a retry; use expert-review status only when the snapshotted operator policy explicitly requires manual review |
+| Retry recommendation chooses stop/expert under an existing model contract | Preserve that existing outcome; do not append an attempt or consume either budget |
 | Retry parameter validation fails | Preserve the rejected recommendation artifact, do not append an attempt or increment a counter, and terminate that branch without execution |
-| Initial cutover is enabled but decision artifact is absent/stale/forged/mismatched/not permitted | Configuration error; do not activate curated initial selection |
 
 A run may consume both budgets in sequence because the nodes are independent. For example, one execution retry followed by one review retry yields three attempts. A future total-attempt cap may wrap both routes without changing their ownership or counters.
 
@@ -497,10 +452,10 @@ A run may consume both budgets in sequence because the nodes are independent. Fo
 | Initial/retry cross-contamination metrics | Delete if they exist only for the removed retry corpus | A retry retrieval space no longer exists |
 | Runtime `candidate_evidence_case` artifact | Delete | Attempts are operational history, not evidence candidates |
 | Candidate `EvidenceCase` curation/promotion workflow for completed runs | Delete | No runtime-to-knowledge-base path is in scope |
-| Approved paper-backed initial `EvidenceCase` corpus | Retain | It grounds attempt 0 recommendation |
+| Eligible initial case collection | Retain | All eligible cases participate in numeric ranking; no minimum count or scientific-approval gate is added |
 | Initial numeric retriever and Methods-aware payload | Retain | They implement Task 6A |
-| Initial baseline/curated evaluation | Retain and narrow | Gate only initial retrieval and recorded recommendation behavior |
-| Execution failure classifier and repairability decision | Retain | It drives the assembly-stage retry transition |
+| Initial baseline/curated evaluation | Retain as observational only | Metrics may inform operators but never gate activation or forward progress |
+| Execution failure classifier, repairability label, and repairability gate | Delete | Execution retry eligibility depends only on failure plus `max_execution_retries` budget |
 | Review failure diagnosis and directional metrics | Retain | They drive the review-stage retry transition |
 | Typed `ParameterAttempt`, parameter delta, command, execution, and review artifacts | Retain | They are the source of truth for the same-run chain |
 | Separate execution/review retry counters and limits | Retain | They preserve stage ownership and future composability |
@@ -518,14 +473,14 @@ Implementation should follow existing boundaries and avoid new modules unless de
 | `app/domains/assembly/retrieval_query.py` | Keep initial query building; remove retry retrieval-query contracts and projections |
 | `app/domains/assembly/case_selector.py` | Remove retry backend registration/dispatch; declare only the initial hifiasm evidence selector where applicable |
 | `app/domains/assembly/methods_evidence.py` | Keep initial Methods payload validation/budgeting; remove retry-case/candidate-promotion assumptions |
-| `app/domains/assembly/hifiasm_evaluation.py` | Narrow corpus requirements and reports to initial-only 20/10 plus recorded recommendation evaluation; emit an immutable derived decision artifact with fully pinned input/policy/metrics hashes |
+| `app/domains/assembly/hifiasm_evaluation.py` | Keep optional observational reports; remove cutover permission, minimum corpus/query requirements, pass/fail thresholds, and any ability to block activation or recommendation |
 | `app/schemas/artifacts.py` | Remove candidate `EvidenceCase` and retry-retrieval-only fields/types; retain or minimally extend the typed attempt chain |
 | `app/stages/assembly/nodes.py` | Keep execution retry at the assembly failure boundary; remove candidate-case emission and retry retrieval; emit execution-specific exhaustion |
 | `app/stages/assembly_review/*` | Own review diagnosis, review counter/limit, typed retry-request construction, and review-specific exhaustion; route the request to assembly, which must not reconstruct review semantics |
 | `app/stages/assembly/parameter_profile.py` | Build retry context from attempt 0 snapshot plus immediately preceding attempt and failure signal; do not construct retrieval queries |
 | `app/stages/assembly/decision.py`, `prompt_payload.py`, `parameter_validation.py` | Express the inherited-basis retry prompt/decision and enforce delta, catalog, hard rules, and citation semantics without a retry case shortlist |
 | `app/stages/assembly/routing.py`, `builder.py` | Preserve distinct execution and review nodes/routes; remove routing assumptions tied to a retry selector backend |
-| Descriptor knowledge packs and fixtures | Retain approved paper initial cases; remove retry case types/shards/fixtures and candidate-promotion metadata |
+| Descriptor knowledge packs and fixtures | Retain eligible initial cases; remove retry case types/shards/fixtures and candidate-promotion metadata; add no minimum case count |
 | Phase 11/operator docs | Rewrite Task 5/6 and cutover guidance to Task 6A/6B; remove retry corpus creation/promotion instructions |
 | Tests | Delete retry-retrieval/candidate-promotion assertions; add the acceptance coverage below |
 
@@ -541,24 +496,25 @@ keys. In neither case may normalization keep the old runtime behavior reachable.
 
 | Area | Required tests | Acceptance |
 |---|---|---|
-| Initial corpus validation | Approved status, source spans, Methods, case type, invalid/draft rejection | At least 20 valid paper-backed initial cases; no rejected/draft case is eligible |
-| Initial golden evaluation | Fixed 10+ initial queries, Recall/nDCG/rank, missingness, compatibility, numeric continuity | Initial retrieval thresholds pass and artifacts are replayable |
-| Recorded recommendation evaluation | Fixed decision backend or recorded outputs, valid citations, supported non-defaults, weak-evidence default preservation, expert usefulness | Required safety metrics are zero-violation and usefulness threshold passes |
-| Initial cutover decision | Derivation from initial 20/10 and recorded outputs; artifact input/policy/threshold/metrics hashes; stale, forged, malformed, configured-hash mismatch, enabled-without-valid-decision, method scoping | Permission is derived and immutable; runtime activates only a configured, hash-verified permitted artifact |
+| Initial stable top-5 | More than 5 cases, tied scores, shuffled input order, exactly 5, 1-4, and 0 eligible cases | Sort is score descending then `case_id` ascending; select first 5, all 1-4, or existing no-case behavior for 0 |
+| Initial no-gate behavior | Low/negative scores, low/missing coverage, any case count, absent evaluation, failing observational metrics, no recorded recommendation set | No score/coverage/count/evaluation/approval threshold blocks selection, activation, or forward progress |
+| Observational evaluation | Run and omit evaluation; vary reported retrieval/recommendation metrics | Reports remain replayable when produced and never alter `initial_cutover_enabled`, selected cases, or control flow |
 | Absence of retry retrieval | Config/schema rejection of retry backend; no retry query/case fixture; no retrieval call during retry | Retry works with no retry database and does not emit a retrieval artifact |
 | Attempt 0 snapshot | Stable hashes/refs before and after retries; assert no catalog/knowledge pack/hard-rule/capability/profile/evidence reload; policy hash changes mid-run | Full basis is immutable; mismatch fails closed and requires a new run |
 | Runtime resource isolation | Change current resource observations after the preceding execution result; replay the same retry; exercise safety veto | Frozen delta and rationale are identical; current observations can only block execution; resource deltas use only facts recorded in the immediately preceding execution result |
-| Sealing lifecycle | Exactly-once result/diagnosis/signal population, overwrite rejection, post-seal mutation/reclassification rejection, artifact overwrite rejection, append-before-seal rejection, terminal-before-seal rejection, request seal-hash match/mismatch, serialization/reload | Owner seals before request; request binds the exact seal hash; membership is append-only and sealed values never change |
-| Execution retry routing | Every execution reason/status, repairable/non-repairable, missing/contradictory signal, remaining/exhausted budget, accepted/rejected proposal; assert non-repairable always maps directly to `assembly_failed` with concrete reason | Only a successfully frozen and appended execution retry increments execution counter; non-repairable never consumes budget or becomes expert-review status |
+| Sealing lifecycle | Exactly-once result/diagnosis/signal population, overwrite rejection, post-seal failure-fact/diagnosis mutation rejection, artifact overwrite rejection, append-before-seal rejection, terminal-before-seal rejection, request seal-hash match/mismatch, serialization/reload | Owner seals before request; request binds the exact seal hash; membership is append-only and sealed values never change |
+| Execution retry routing | Raw exit/signal/log/resource fact variants, remaining/exhausted budget, accepted/rejected/stop/expert recommendation outcomes; assert no classifier or repairability gate is invoked | Any execution failure gets a retry request while budget remains; exhaustion is domain-specific; only a successfully frozen and appended retry increments the counter |
 | Review retry routing | Every review reason/status, execution success + failed review, directional diagnoses, remaining/exhausted budget, accepted/rejected proposal | Review stage owns diagnosis/request/terminal; only a successfully frozen and appended review retry increments review counter |
 | Mixed chain | Execution failure -> execution retry -> review failure -> review retry -> pass | Both budgets remain independent and ordered attempts produce final success |
 | Parameter delta validation | Changed, unchanged, coupled, unsupported, invalid-catalog, hard-rule violation | Every change is failure-linked and validated; unsafe/unsupported deltas never execute |
-| Derived timeline | Successful and failed integration chains under both `legacy_initial` and `curated_initial_v1`; nullable/required decision refs by contract; required entry/terminal fields; render/reload determinism; chain hash; missing/unsealed/unknown-contract/contradictory-input rejection | Timeline uses the recorded attempt 0 contract without inference and includes every sealed attempt plus terminal summary |
+| Derived timeline | Successful and failed integration chains under both `legacy_initial` and `curated_initial_v1`; required entry/terminal fields; absence of cutover decision fields; render/reload determinism; chain hash; missing/unsealed/unknown-contract/contradictory-input rejection | Timeline records the actual attempt 0 contract/snapshot without inference and includes every sealed attempt plus terminal summary |
 | Candidate promotion removal | Search/config/schema and regression tests | No candidate `EvidenceCase` is emitted or promoted from runtime history |
 | Legacy migration | Persisted-artifact/config inventory; idempotent read normalization when required, otherwise explicit no-data record; old schema/config rejection | Deleted retry evidence behavior cannot be re-enabled through legacy input |
 | Regression | Other assemblers, existing typed lifecycle, full repository suite | No selector or retry behavior changes outside scoped hifiasm paths |
 
-Task 6A is complete when the scientific initial corpus, fixed initial queries, recorded recommendation evaluation, and initial-only activation gate all pass and production activation is explicit.
+Task 6A is complete when `initial_cutover_enabled` activates the stable numeric
+top-5 contract, including 1-4 and existing zero-case behavior, without an
+evaluation or corpus gate.
 
 Task 6B is complete when both same-run failure branches produce immutable, replayable attempt chains with independent budgets and domain-specific terminal outcomes, without any retry corpus, retriever, backend, or candidate evidence promotion.
 
@@ -566,7 +522,7 @@ Task 6B is complete when both same-run failure branches produce immutable, repla
 
 ### Evidence drift across attempts
 
-**Risk:** A retry silently re-runs retrieval and changes the scientific basis.
+**Risk:** A retry silently re-runs retrieval and changes the attempt 0 basis.
 **Mitigation:** Attempt 0 owns one immutable evidence snapshot; retries inherit its references and retrieval is prohibited on retry routes.
 
 ### Misrepresenting paper evidence as retry proof
@@ -592,7 +548,10 @@ Task 6B is complete when both same-run failure branches produce immutable, repla
 ### Overfitting retry policy without historical cases
 
 **Risk:** Failure-based parameter adjustment becomes unconstrained trial and error.
-**Mitigation:** Require a classified current-run signal, inherited Methods/profile basis, catalog/hard rules, explicit delta, limited per-domain budget, and conservative stop/expert review when support is insufficient.
+**Mitigation:** Require recorded current-run failure facts, inherited
+Methods/profile basis, catalog/hard rules, explicit delta, limited per-domain
+budget, and any conservative stop/expert outcome already supported by the model
+contract.
 
 ### Scope expansion
 
