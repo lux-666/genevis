@@ -162,11 +162,20 @@ If any configured policy hash differs from attempt 0, retry fails closed with
 `policy_snapshot_mismatch`; an operator must start a new run to use the new
 policy.
 
-The failure signal justifies the delta. The inherited initial Methods evidence
+The failure signal informs the delta. The inherited initial Methods evidence
 explains parameter semantics and safe context; it is not falsely cited as
-evidence that this exact retry succeeded elsewhere. If this basis does not
-support a safe change, the branch stops or requests expert review rather than
-inventing a parameter change.
+evidence that this exact retry succeeded elsewhere. For an execution-origin
+retry request with budget remaining, recommendation must return a candidate
+parameter set (which may preserve previous values), validation/freeze must run,
+and a valid frozen attempt must be appended and executed. Only an actual
+recommendation error or parameter-validation error may terminate that required
+execution retry before append. Neither insufficient evidence nor a model
+stop/expert choice may skip it. Review-origin retries retain the existing review
+recommendation behavior.
+
+For an execution-origin request, a returned stop/expert action is invalid under
+the recommendation schema and follows the existing recommendation-error route;
+it is not a successful decision outcome.
 
 ## State and Artifact Contract
 
@@ -262,7 +271,7 @@ seal_hash: <hash or null>
 4. Immutable referenced artifacts are content-addressed or hash-verified and are never overwritten in place.
 5. Attempt 0's evidence/policy snapshot is immutable and shared by reference. Retry creates no new retrieval result, case shortlist, evidence payload, or policy reload.
 6. All attempts belong to the same sample, method, run, input identity, and attempt 0 profile/policy snapshot.
-7. A domain counter increments only after a retry proposal passes recommendation validation, catalog/hard-rule validation, parameter freeze, and the new attempt is successfully appended. Rejected or malformed proposals do not consume budget.
+7. A domain counter increments only after a retry proposal passes recommendation validation, catalog/hard-rule validation, parameter freeze, and the new attempt is successfully appended. Recommendation or validation errors do not consume budget.
 8. An execution retry increments only `retry_counts.execution`; a review retry increments only `retry_counts.review`.
 9. A retry attempt records exactly one origin and one preceding failure signal.
 10. Every changed parameter has a delta and failure-linked reason; unchanged parameters remain at the preceding frozen value unless a catalog dependency requires a documented coupled change.
@@ -376,10 +385,12 @@ generic transition reasons `execution_failed`, `review_failed`,
 `previous_attempt_seal_hash_mismatch`, `policy_snapshot_hash_mismatch`, and
 `completed`.
 
-If the existing recommendation model contract already supports stop or expert
-review, those outcomes remain valid with their existing status/reason schema.
-This design neither adds a repairability policy nor invents a new stop/expert
-status. Schema validation rejects unknown retry-routing values.
+If the existing review recommendation contract supports stop or expert review,
+those outcomes remain valid for review-origin requests with their existing
+status/reason schema. They are not valid outcomes for an execution-origin
+request while `max_execution_retries` budget remains. This design neither adds
+a repairability policy nor invents a new stop/expert status. Schema validation
+rejects unknown retry-routing values.
 
 Valid terminal/transition pairings are closed as follows:
 
@@ -403,7 +414,8 @@ assert both counters before and after each accepted and rejected transition.
 | Owner | Input | May emit | Next route |
 |---|---|---|---|
 | Assembly execution retry node (`app/stages/assembly/*`) | Execution-failed attempt with exactly-once raw structured execution result and failure signal | seal attempt; if budget remains emit retry request referencing its seal hash, otherwise emit execution exhaustion | Assembly parameter recommendation/freeze or terminal |
-| Assembly parameter recommendation/freeze | Typed retry request + attempt 0 snapshot | validated/frozen retry attempt or an existing model-contract stop/expert outcome | Append attempt, increment owning counter, then assembly execution; or existing terminal route |
+| Assembly parameter recommendation/freeze (execution origin) | Typed execution retry request + attempt 0 snapshot | validated/frozen retry attempt, or actual recommendation/validation error | Append attempt, increment execution counter, then execute; error route only on recommendation/validation error |
+| Assembly parameter recommendation/freeze (review origin) | Typed review retry request + attempt 0 snapshot | validated/frozen retry attempt or an existing review-contract terminal outcome | Append attempt, increment review counter, then execute; or existing review terminal route |
 | Assembly review retry node (`app/stages/assembly_review/*`) | Execution-succeeded attempt + exactly-once review result/diagnosis and failure signal | seal attempt; if budget remains emit typed review retry request referencing its seal hash, otherwise emit review exhaustion | Assembly parameter recommendation/freeze or terminal |
 | Assembly execution | Typed frozen attempt only | exactly-once execution result | Review on success; execution retry node on failure |
 | Assembly review | Successful execution result | exactly-once review result/diagnosis | Success terminal or review retry node |
@@ -429,14 +441,15 @@ must not seal the previous attempt; it only verifies the request's seal hash.
 
 | Condition | Required result |
 |---|---|
-| Execution fails and execution budget remains | Execution owner writes raw structured facts/signal, seals, and emits a seal-bound request; recommendation may choose a valid delta or an existing stop/expert outcome; append and increment only for a validated/frozen retry attempt |
+| Execution fails and execution budget remains | Execution owner writes raw structured facts/signal, seals, and emits a seal-bound request; recommend, validate, freeze, append, increment execution counter, and execute are mandatory |
 | Execution budget is exhausted | `execution_parameter_retries_exhausted` with the last execution failure |
+| Execution retry recommendation or parameter validation errors | Preserve the error artifact and terminate through the existing recommendation/validation error route; do not append or increment; an attempted stop/expert action is a recommendation contract error, not a decision outcome |
 | Execution succeeds and review passes | Finalize success |
 | Review fails and review budget remains | Review owner writes diagnosis/signal, seals, and emits a seal-bound typed request; proposal is validated/frozen; append an `assembly_review` retry attempt, increment review counter, and route back to assembly |
 | Review budget is exhausted | `review_parameter_retries_exhausted` with the last review diagnosis |
 | Failure signal is missing or contradictory | Fail closed as an invalid attempt transition; preserve artifacts |
-| Retry recommendation chooses stop/expert under an existing model contract | Preserve that existing outcome; do not append an attempt or consume either budget |
-| Retry parameter validation fails | Preserve the rejected recommendation artifact, do not append an attempt or increment a counter, and terminate that branch without execution |
+| Review retry recommendation chooses stop/expert under an existing review contract | Preserve that existing outcome; do not append an attempt or consume review budget |
+| Review retry parameter validation fails | Preserve the rejected recommendation artifact, do not append an attempt or increment review counter, and terminate that branch without execution |
 
 A run may consume both budgets in sequence because the nodes are independent. For example, one execution retry followed by one review retry yields three attempts. A future total-attempt cap may wrap both routes without changing their ownership or counters.
 
@@ -503,7 +516,7 @@ keys. In neither case may normalization keep the old runtime behavior reachable.
 | Attempt 0 snapshot | Stable hashes/refs before and after retries; assert no catalog/knowledge pack/hard-rule/capability/profile/evidence reload; policy hash changes mid-run | Full basis is immutable; mismatch fails closed and requires a new run |
 | Runtime resource isolation | Change current resource observations after the preceding execution result; replay the same retry; exercise safety veto | Frozen delta and rationale are identical; current observations can only block execution; resource deltas use only facts recorded in the immediately preceding execution result |
 | Sealing lifecycle | Exactly-once result/diagnosis/signal population, overwrite rejection, post-seal failure-fact/diagnosis mutation rejection, artifact overwrite rejection, append-before-seal rejection, terminal-before-seal rejection, request seal-hash match/mismatch, serialization/reload | Owner seals before request; request binds the exact seal hash; membership is append-only and sealed values never change |
-| Execution retry routing | Raw exit/signal/log/resource fact variants, remaining/exhausted budget, accepted/rejected/stop/expert recommendation outcomes; assert no classifier or repairability gate is invoked | Any execution failure gets a retry request while budget remains; exhaustion is domain-specific; only a successfully frozen and appended retry increments the counter |
+| Execution retry routing | Raw exit/signal/log/resource fact variants; remaining/exhausted budget; successful recommendation; recommendation error; validation error; attempted model stop/expert; assert no classifier or repairability gate is invoked | With budget, every execution failure must emit a request and every valid recommendation must validate/freeze, append, increment, and execute; stop/expert fails the execution recommendation contract; exhaustion is domain-specific; errors terminate without append/increment |
 | Review retry routing | Every review reason/status, execution success + failed review, directional diagnoses, remaining/exhausted budget, accepted/rejected proposal | Review stage owns diagnosis/request/terminal; only a successfully frozen and appended review retry increments review counter |
 | Mixed chain | Execution failure -> execution retry -> review failure -> review retry -> pass | Both budgets remain independent and ordered attempts produce final success |
 | Parameter delta validation | Changed, unchanged, coupled, unsupported, invalid-catalog, hard-rule violation | Every change is failure-linked and validated; unsafe/unsupported deltas never execute |
@@ -516,7 +529,12 @@ Task 6A is complete when `initial_cutover_enabled` activates the stable numeric
 top-5 contract, including 1-4 and existing zero-case behavior, without an
 evaluation or corpus gate.
 
-Task 6B is complete when both same-run failure branches produce immutable, replayable attempt chains with independent budgets and domain-specific terminal outcomes, without any retry corpus, retriever, backend, or candidate evidence promotion.
+Task 6B is complete when execution failures obligatorily progress through a
+new validated/frozen/executed attempt while execution budget remains (except
+for actual recommendation/validation errors), review retains its independent
+budget and existing logic, and both branches produce immutable, replayable
+attempt chains with domain-specific exhaustion outcomes and no retry corpus,
+retriever, backend, or candidate evidence promotion.
 
 ## Risks and Mitigations
 
@@ -550,8 +568,8 @@ Task 6B is complete when both same-run failure branches produce immutable, repla
 **Risk:** Failure-based parameter adjustment becomes unconstrained trial and error.
 **Mitigation:** Require recorded current-run failure facts, inherited
 Methods/profile basis, catalog/hard rules, explicit delta, limited per-domain
-budget, and any conservative stop/expert outcome already supported by the model
-contract.
+budget, mandatory execution retry while its budget remains, and only the
+existing review-contract stop/expert outcomes on the review branch.
 
 ### Scope expansion
 
