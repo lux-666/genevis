@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from app.domains.assembly import numeric_case_retriever as numeric_retriever_module
+from app.domains.assembly.evidence_case import (
+    _rank_hifiasm_prompt_case,
+    validate_hifiasm_evidence_cases,
+)
 from app.execution.artifacts import read_artifact_records
+from app.knowledge.packs import load_knowledge_pack
 from app.schemas.artifacts import ParameterAttempt, file_sha256
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
@@ -32,6 +39,7 @@ from app.stages.assembly.parameter_profile import (
     build_prompt_profile,
     flatten_profile_facts,
 )
+from app.stages.assembly.prompt_payload import generate_payload_ref
 from app.stages.assembly.parameter_validation import validate_recommended_parameters
 
 
@@ -43,8 +51,10 @@ class _FakeResponse:
 class _FakeModel:
     def __init__(self, payload: dict):
         self.payload = payload
+        self.messages = None
 
-    def invoke(self, _messages):
+    def invoke(self, messages):
+        self.messages = messages
         return _FakeResponse(json.dumps(self.payload))
 
 
@@ -128,6 +138,110 @@ def _complete_hifiasm_methods_response(*, purge_level: int = 1) -> dict:
         "selected_case_ids": [],
         "summary": "Conservative HiFi parameters without case support.",
     }
+
+
+def _validated_hifiasm_case(root: Path, *, with_budget_omission: bool = False) -> dict:
+    case_id = "case_budget_omission" if with_budget_omission else "case_a"
+    spans = (
+        [
+            {
+                "span_id": f"methods.s{index}",
+                "document": "methods",
+                "quote": char * 2_000,
+            }
+            for index, char in enumerate("abcd")
+        ]
+        if with_budget_omission
+        else [
+            {
+                "span_id": "methods.a",
+                "document": "methods",
+                "quote": "Exact excerpt.",
+            }
+        ]
+    )
+    source_root = root / "task4_case_sources"
+    source_root.mkdir(parents=True, exist_ok=True)
+    body_path = source_root / "body.md"
+    methods_path = source_root / "methods.md"
+    body_path.write_text("Unquoted study body.", encoding="utf-8")
+    methods_path.write_text(
+        ("private-prefix\n" * 100)
+        + "\n".join(span["quote"] for span in spans)
+        + ("\nprivate-suffix" * 100),
+        encoding="utf-8",
+    )
+    raw_case = {
+        "schema_version": 2,
+        "case_id": case_id,
+        "case_type": "initial",
+        "source": {"kind": "paper", "title": "Task 4 validated case"},
+        "applicability": {
+            "read_type": "hifi",
+            "source_tool": "hifiasm",
+            "target_methods": ["hifiasm"],
+        },
+        "observed_facts": {
+            "coverage": {
+                "value": 30,
+                "evidence_span_ids": [span["span_id"] for span in spans],
+            }
+        },
+        "intervention": {"tool": "hifiasm", "parameters": {}},
+        "rationale_claims": [],
+        "outcomes": {},
+        "curation": {"status": "approved", "curator": "test"},
+        "source_documents": {
+            "body": {
+                "path": body_path.name,
+                "sha256": hashlib.sha256(body_path.read_bytes()).hexdigest(),
+            },
+            "methods": {
+                "path": methods_path.name,
+                "sha256": hashlib.sha256(methods_path.read_bytes()).hexdigest(),
+            },
+            "spans": spans,
+        },
+    }
+    validated = validate_hifiasm_evidence_cases([raw_case], pack_root=source_root)[0]
+    return _rank_hifiasm_prompt_case(
+        validated,
+        numeric_match={"distance": 0.1, "weak_evidence": False},
+    )
+
+
+def _attested_numeric_selection(cases: list[dict], *, query_id: str) -> dict:
+    case_ids = [case["case_id"] for case in cases]
+    trace = [
+        {
+            "case_id": case["case_id"],
+            "decision": "candidate",
+            "hard_filter_reasons": [],
+            **case["numeric_match"],
+        }
+        for case in cases
+    ]
+    selection = {
+        "retrieval_backend": "hifiasm_numeric",
+        "selected_case_ids": case_ids,
+        "candidate_case_ids": case_ids,
+        "selected_count": len(case_ids),
+        "eligible_case_count": len(case_ids),
+        "total_cases": len(case_ids),
+        "evidence_available": bool(case_ids),
+        "case_evidence_required": False,
+        "warning": None,
+        "query": {"query_id": query_id, "method_id": "hifiasm"},
+        "trace": trace,
+    }
+    selection[numeric_retriever_module._RANKED_SELECTION_FIELD] = (
+        numeric_retriever_module._attest_hifiasm_ranked_selection(
+            selected_cases=cases,
+            metadata=selection,
+            trace=trace,
+        )
+    )
+    return selection
 
 
 class ParameterCatalogSchemaTests(unittest.TestCase):
@@ -729,6 +843,30 @@ class CommandBuilderTests(unittest.TestCase):
 
 
 class ParameterRecommendationNodeTests(unittest.TestCase):
+    def _numeric_cutover_knowledge_root(self, tmpdir: str) -> Path:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "descriptors"
+            / "knowledge_packs"
+            / "assembly"
+            / "parameter_recommender"
+        )
+        knowledge_root = Path(tmpdir) / "knowledge_packs" / "assembly"
+        pack_root = knowledge_root / "parameter_recommender"
+        shutil.copytree(source, pack_root)
+        strategy_path = pack_root / "strategies.yaml"
+        strategy_text = strategy_path.read_text(encoding="utf-8")
+        self.assertIn("production_cutover_enabled: false", strategy_text)
+        strategy_path.write_text(
+            strategy_text.replace(
+                "production_cutover_enabled: false",
+                "production_cutover_enabled: true",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        return knowledge_root
+
     def _state(self, tmpdir: str):
         state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
         state["shared_parameters"] = {"organism": "Example species", "target_level": "draft"}
@@ -793,6 +931,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
     def test_hifiasm_recommendation_indexes_numeric_retrieval_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            knowledge_root = self._numeric_cutover_knowledge_root(tmpdir)
             state = self._state(tmpdir)
             assembly = state["stage_outputs"]["assembly"]
             assembly.update(
@@ -811,11 +950,32 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 }
             )
             payload = _complete_hifiasm_methods_response()
-            with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
+            purge_decision = payload["recommendation"]["adjustable_params"]["purge_level"]
+            purge_decision["basis"] = "catalog_default"
+            purge_decision.pop("heuristic_labels", None)
+            model = _FakeModel(payload)
+            with patch(
+                "app.stages.assembly.prompt_payload.load_knowledge_pack",
+                side_effect=lambda pack_id, **_kwargs: load_knowledge_pack(
+                    pack_id,
+                    root=knowledge_root,
+                ),
+            ), patch(
+                "app.stages.assembly.nodes.load_knowledge_pack",
+                side_effect=lambda pack_id, **_kwargs: load_knowledge_pack(
+                    pack_id,
+                    root=knowledge_root,
+                ),
+            ), patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=model,
+            ):
                 result = recommend_assembly_parameters(state)
             artifact_records = read_artifact_records(Path(tmpdir), "s1")
 
-            attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+            result_assembly = result["stage_outputs"]["assembly"]
+            self.assertIn("parameter_attempts", result_assembly, result_assembly)
+            attempt = result_assembly["parameter_attempts"][0]
             query_ref = attempt["retrieval_query_ref"]
             trace_ref = attempt["retrieval_trace_ref"]
             self.assertIsNotNone(query_ref)
@@ -827,9 +987,30 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertIn("No compatible approved", attempt["retrieval_warning"])
             evidence_ref = attempt["evidence_payload_ref"]
             self.assertIsNotNone(evidence_ref)
+            self.assertTrue(attempt["validation"]["valid"], attempt["validation"])
             self.assertEqual(attempt["case_assessments"], [])
             self.assertEqual(attempt["parameter_decisions"]["purge_level"]["action"], "set")
             self.assertEqual(attempt["recommendation_summary"], payload["summary"])
+            prompt_path = Path(tmpdir) / attempt["prompt_payload_ref"]["path_ref"].removeprefix(
+                "data/"
+            )
+            replay_prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
+            model_prompt = json.loads(model.messages[1]["content"])
+            self.assertEqual(model_prompt, replay_prompt)
+            self.assertEqual(
+                model_prompt["methods_evidence"]["evidence_budget"],
+                replay_prompt["methods_evidence"]["evidence_budget"],
+            )
+            self.assertEqual(
+                replay_prompt["prompt_payload_hash"],
+                generate_payload_ref(
+                    {
+                        key: value
+                        for key, value in replay_prompt.items()
+                        if key not in {"prompt_payload_ref", "prompt_payload_hash"}
+                    }
+                ),
+            )
             for ref in (query_ref, trace_ref, evidence_ref):
                 artifact_path = Path(tmpdir) / ref["path_ref"].removeprefix("data/")
                 self.assertTrue(artifact_path.exists())
@@ -840,7 +1021,100 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertIn("assembly.parameter.retrieval_trace", artifact_types)
             self.assertIn("assembly.parameter.evidence_payload", artifact_types)
 
-    def test_invalid_hifiasm_response_does_not_persist_retrieval_candidates_as_selected(self):
+    def test_hifiasm_canonical_prompt_artifact_model_and_hash_preserve_omitted_spans(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            knowledge_root = self._numeric_cutover_knowledge_root(tmpdir)
+            state = self._state(tmpdir)
+            assembly = state["stage_outputs"]["assembly"]
+            assembly.update(
+                {
+                    "primary_method": "assembly.candidate.hifiasm",
+                    "selected_route": "hifi",
+                    "assembly_route": "hifi",
+                    "input_profile": {
+                        "recommended_route": "hifi",
+                        "has_ont": False,
+                        "has_hifi": True,
+                    },
+                    "assembly_selection": {
+                        "read_type": "hifi",
+                        "primary_method": "assembly.candidate.hifiasm",
+                        "source": "recommendation",
+                        "rationale": "test",
+                        "metadata": {},
+                    },
+                }
+            )
+            evidence_case = _validated_hifiasm_case(Path(tmpdir), with_budget_omission=True)
+            selection = _attested_numeric_selection(
+                [evidence_case],
+                query_id="s1:parameter_attempt_0",
+            )
+            response = _complete_hifiasm_methods_response()
+            purge_decision = response["recommendation"]["adjustable_params"]["purge_level"]
+            purge_decision["basis"] = "catalog_default"
+            purge_decision.pop("heuristic_labels", None)
+            model = _FakeModel(response)
+            with patch(
+                "app.stages.assembly.prompt_payload.load_knowledge_pack",
+                side_effect=lambda pack_id, **_kwargs: load_knowledge_pack(
+                    pack_id,
+                    root=knowledge_root,
+                ),
+            ), patch(
+                "app.stages.assembly.nodes.load_knowledge_pack",
+                side_effect=lambda pack_id, **_kwargs: load_knowledge_pack(
+                    pack_id,
+                    root=knowledge_root,
+                ),
+            ), patch(
+                "app.stages.assembly.prompt_payload.select_evidence_cases",
+                return_value=([evidence_case], selection),
+            ), patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=model,
+            ):
+                result = recommend_assembly_parameters(state)
+
+            attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+            self.assertTrue(attempt["validation"]["valid"], attempt["validation"])
+            prompt_path = Path(tmpdir) / attempt["prompt_payload_ref"]["path_ref"].removeprefix(
+                "data/"
+            )
+            replay_prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
+            model_prompt = json.loads(model.messages[1]["content"])
+            omitted_spans = replay_prompt["methods_evidence"]["evidence_budget"][
+                "omitted_spans"
+            ]
+
+            self.assertEqual(model_prompt, replay_prompt)
+            self.assertNotIn("prompt_contract", replay_prompt)
+            self.assertEqual(
+                omitted_spans,
+                [
+                    {
+                        "case_id": evidence_case["case_id"],
+                        "span_id": "methods.s3",
+                        "reason": "excerpt_chars_per_case",
+                    }
+                ],
+            )
+            self.assertEqual(
+                model_prompt["methods_evidence"]["evidence_budget"]["omitted_spans"],
+                omitted_spans,
+            )
+            self.assertEqual(
+                replay_prompt["prompt_payload_hash"],
+                generate_payload_ref(
+                    {
+                        key: value
+                        for key, value in replay_prompt.items()
+                        if key not in {"prompt_payload_ref", "prompt_payload_hash"}
+                    }
+                ),
+            )
+
+    def test_hifiasm_recommendation_default_gate_off_writes_no_numeric_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             assembly = state["stage_outputs"]["assembly"]
@@ -859,29 +1133,84 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     },
                 }
             )
-            evidence_case = {
-                "case_id": "case_a",
-                "applicability": {"read_type": "hifi"},
-                "source": {"kind": "paper", "title": "Example"},
-                "numeric_match": {"distance": 0.1},
-                "observed_facts": {"coverage": {"value": 30}},
-                "intervention": {"tool": "hifiasm", "parameters": {}},
-                "rationale_claims": [],
-                "source_excerpts": [
-                    {"span_id": "methods.a", "document": "methods", "quote": "Exact excerpt."}
-                ],
-                "outcomes": {},
+            payload = {
+                "params": {"purge_level": 1},
+                "reasoning": "Use the pre-cutover compatibility backend conservatively.",
+                "confidence": 0.8,
+                "selected_case_ids": [],
+                "omitted_parameters": [],
+                "uncertainty_notes": [],
             }
-            selection = {
-                "retrieval_backend": "hifiasm_numeric",
-                "selected_case_ids": ["case_a"],
-                "candidate_case_ids": ["case_a"],
-                "eligible_case_count": 1,
-                "warning": None,
-                "query": {"query_id": "s1:parameter_attempt_0", "method_id": "hifiasm"},
-                "trace": [{"case_id": "case_a", "decision": "candidate"}],
-            }
+            model = _FakeModel(payload)
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=model,
+            ):
+                result = recommend_assembly_parameters(state)
+            artifact_records = read_artifact_records(Path(tmpdir), "s1")
+
+            attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+            self.assertIsNone(attempt["retrieval_backend"])
+            self.assertIsNone(attempt["retrieval_query_id"])
+            self.assertIsNone(attempt["retrieval_query_ref"])
+            self.assertIsNone(attempt["retrieval_trace_ref"])
+            self.assertIsNone(attempt["evidence_payload_ref"])
+
+            prompt_path = Path(tmpdir) / attempt["prompt_payload_ref"]["path_ref"].removeprefix("data/")
+            prompt_payload = json.loads(prompt_path.read_text(encoding="utf-8"))
+            self.assertNotIn("prompt_contract", prompt_payload)
+            self.assertIsNone(prompt_payload["case_retrieval"])
+            self.assertEqual(
+                prompt_payload["case_selection"]["retrieval_backend"],
+                "structured_default",
+            )
+            self.assertEqual(
+                prompt_payload["case_selection"]["hifiasm_numeric_gate"]["reason"],
+                "production_cutover_disabled",
+            )
+            self.assertNotIn(
+                "prompt_contract",
+                json.loads(model.messages[1]["content"]),
+            )
+
+            artifact_types = {record["artifact_type"] for record in artifact_records}
+            self.assertNotIn("assembly.parameter.retrieval_query", artifact_types)
+            self.assertNotIn("assembly.parameter.retrieval_trace", artifact_types)
+            self.assertNotIn("assembly.parameter.evidence_payload", artifact_types)
+
+    def test_invalid_hifiasm_response_does_not_persist_retrieval_candidates_as_selected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            knowledge_root = self._numeric_cutover_knowledge_root(tmpdir)
+            state = self._state(tmpdir)
+            assembly = state["stage_outputs"]["assembly"]
+            assembly.update(
+                {
+                    "primary_method": "assembly.candidate.hifiasm",
+                    "selected_route": "hifi",
+                    "assembly_route": "hifi",
+                    "input_profile": {"recommended_route": "hifi", "has_ont": False, "has_hifi": True},
+                    "assembly_selection": {
+                        "read_type": "hifi",
+                        "primary_method": "assembly.candidate.hifiasm",
+                        "source": "recommendation",
+                        "rationale": "test",
+                        "metadata": {},
+                    },
+                }
+            )
+            evidence_case = _validated_hifiasm_case(Path(tmpdir))
+            selection = _attested_numeric_selection(
+                [evidence_case],
+                query_id="s1:parameter_attempt_0",
+            )
             with (
+                patch(
+                    "app.stages.assembly.nodes.load_knowledge_pack",
+                    side_effect=lambda pack_id, **_kwargs: load_knowledge_pack(
+                        pack_id,
+                        root=knowledge_root,
+                    ),
+                ),
                 patch(
                     "app.stages.assembly.prompt_payload.select_evidence_cases",
                     return_value=([evidence_case], selection),

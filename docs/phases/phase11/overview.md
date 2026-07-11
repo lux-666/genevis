@@ -100,7 +100,7 @@ provides the shared executable-method typed-attempt foundation:
 ## Task Index
 
 - [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Complete
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Complete; writes attempt-scoped query/trace artifacts and a prompt-safe numeric shortlist
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Complete as an initial-only backend; production cutover remains default-disabled pending Task 6, while the compatibility backend consumes legacy non-v2 records only
 - [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - Complete; persists bounded Methods evidence, validates explicit assessments and parameter decisions, and preserves the legacy method contract
 - [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
 - [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed

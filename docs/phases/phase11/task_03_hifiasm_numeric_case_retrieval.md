@@ -1,15 +1,16 @@
 # Task 3: Hifiasm Continuous Numeric Case Retrieval
 
 **Phase**: 11
-**Status**: Complete
+**Status**: Complete; production cutover pending Task 6
 **Depends on**: Task 2 EvidenceCase contract
 **Created**: 2026-07-10
-**Updated**: 2026-07-10
+**Updated**: 2026-07-11
 
 ## Goal
 
-Replace bucket-based hifiasm case scoring with deterministic, continuous,
-missing-aware retrieval over approved HiFi EvidenceCases.
+Implement the deterministic, continuous, missing-aware hifiasm initial-case
+retrieval backend that replaces bucket scoring after the Task 6 production
+cutover.
 
 This task decides which cases are numerically and operationally plausible. It
 does not ask an LLM to recommend parameters and does not score final assembly
@@ -27,6 +28,13 @@ quality.
   no-case fallback metadata;
 - configuration-backed tolerance scales, feature weights, distance clipping,
   epsilon, and candidate budget under `strategies.yaml:hifiasm_numeric`;
+- an explicit, default-disabled `production_cutover_enabled` gate owned by Task
+  6; enabling it selects the numeric backend only for `recommend_initial`;
+- explicit rejection of non-initial queries by both the query adapter and the
+  numeric retriever;
+- retry dispatch remains on `structured_default` with
+  `retry_pending_task_5` metadata until Task 5 implements its separate query and
+  failure-family contract;
 - attempt-scoped `retrieval_query.json` and `retrieval_trace.json` artifacts,
   with compact refs/hashes, backend, query ID, candidate IDs, eligible count,
   and warning summary handed to the prompt and typed parameter attempt;
@@ -51,6 +59,50 @@ Out of scope:
 - parameter recommendation;
 - cross-tool cases;
 - multi-objective assembly outcome selection.
+
+## Dispatch And Release Gates
+
+Task 3 does not reinterpret every non-initial task as retry. The dispatch
+contract names all supported tasks explicitly:
+
+| Task | `production_cutover_enabled` | Backend in Task 3 |
+|---|---:|---|
+| `recommend_initial` | `false` or absent | `structured_default` |
+| `recommend_initial` | `true` | `hifiasm_numeric` |
+| `retry_after_execution_failure` | either | `structured_default` pending Task 5 |
+| `retry_after_review_failure` | either | `structured_default` pending Task 5 |
+| any other hifiasm task | either | rejected as unsupported |
+
+The production knowledge pack keeps the cutover flag `false`. Task 6 owns
+changing it only after the curated corpus and golden evaluation pass. Flye,
+NextDenovo, hifiasm-ont, and other methods do not consult this gate and retain
+their existing selector behavior.
+
+Before Task 6, `structured_default` is a compatibility backend for legacy
+hifiasm seed records only. Its input corpus is explicitly partitioned before
+selection: every `schema_version: 2` EvidenceCase is excluded regardless of
+curation status, schema validity, or whether it also carries legacy-looking
+`features`/`params` fields. The compatibility path does not validate those v2
+records and cannot expose them in legacy selection results or trace metadata.
+Only an explicitly enabled numeric initial backend may validate and consume the
+curated v2 corpus. Retry remains legacy-only until Task 5 supplies its own
+curated retrieval contract.
+
+The gate is the only backend switch. There is no second corpus-size switch:
+after an explicit cutover, an empty validated initial corpus remains on
+`hifiasm_numeric` and returns its normal no-case metadata and conservative
+fallback guidance. It does not silently fall back to legacy seed cases.
+
+Configuration also fails safely:
+
+- a missing or false cutover flag cannot activate numeric retrieval;
+- a non-boolean cutover flag is rejected;
+- when cutover is active for `recommend_initial`, invalid numeric configuration
+  is rejected before corpus loading;
+- retry never validates, queries, or ranks curated Task 3 cases before Task 5;
+- default-off initial and pre-Task-5 retry compatibility selection receive only
+  non-v2 legacy records, so draft, rejected, or malformed v2 records cannot be
+  reinterpreted as legacy evidence.
 
 ## Query Contract
 
@@ -262,6 +314,43 @@ ranking decisions, refs, hashes, IDs, and warning summaries, but not complete
 body/Methods documents. The retriever remains filesystem-pure; the assembly
 prompt orchestration owns artifact materialization.
 
+### Validation-owned ranked selection envelope
+
+Task 3 does not hand Task 4 a collection of independently trusted IDs and
+dictionaries. After ranking, it mints a private validation-owned selection
+envelope that binds the complete ordered transition result:
+
+- retrieval backend;
+- ordered `candidate_case_ids`, `selected_case_ids`, and
+  `evidence_case_ids`;
+- selected count and evidence-availability state;
+- eligible/total case counts, conservative warning, and normalized query;
+- every selected case's Task 3-owned ranked identity and semantic snapshot;
+- each case's complete `numeric_match`, including `rank_numeric` in production
+  retrieval output;
+- the full ranking trace and its candidate order.
+
+Envelope creation verifies that candidate IDs, selected IDs, ranked-case
+order, candidate trace order, and per-case numeric metadata agree. Controlled
+`copy.copy()` and `copy.deepcopy()` preserve the in-process attestation, while
+plain-dict conversion or semantic mutation loses or invalidates it. The
+envelope is an internal transition proof, not a new public EvidenceCase type,
+and it is removed at Task 4's canonical prompt boundary.
+
+Task 4 must validate this envelope before consuming caller-visible shortlist
+IDs, ordering, or retrieval metadata. Its caller must provide exactly the first
+`min(8, candidate_count)` attested ranked cases before Task 4 applies span,
+character, or serialized-byte budgets; an empty, shortened, exchanged, or
+reordered prefix fails rather than being reclassified as a budget omission.
+Consequently, swapping cases and IDs, changing candidate/evidence order,
+replacing a ranked case's numeric metadata, changing trace distances, replacing
+the query/warning/counts, or appending an unattested candidate fails closed.
+Retrieval query/trace artifacts are built only from a projected view of this
+registered envelope, after the corresponding caller-visible fields compare
+equal; no retrieval artifact is written before that check succeeds. This is an
+in-process integrity boundary, not a claim of protection against arbitrary
+same-process Python reflection or code execution.
+
 ## Candidate Budget
 
 The numeric retriever may return a configurable shortlist, initially sized for
@@ -306,6 +395,13 @@ Implemented deterministic coverage:
 - clade cannot overcome major numeric mismatch;
 - stable tie-breaking by case ID;
 - result trace explains every included, missing, and excluded feature;
+- ranked output binds ordered candidate/selected/evidence IDs, ranked case
+  semantics, each `numeric_match`, and trace rank in one validation-owned
+  selection envelope;
+- reordered cases/IDs, altered numeric metadata, appended unattested
+  candidates, and plain-dict ranked entries fail before Task 4 budgeting;
+- legitimate ranked output and its copy/deepcopy forms remain valid, including
+  the empty no-case selection;
 - configured scales and weights change distance deterministically;
 - non-finite profile values are treated as missing and non-finite retrieval
   configuration is rejected;
@@ -318,7 +414,31 @@ Implemented deterministic coverage:
 - retrieval query/trace artifacts are attempt-scoped, indexed, and handed to
   `ParameterAttempt` by ref and hash;
 - no `coverage_bucket`, `genome_size_bucket`, or bucket-boundary dependency in
-  hifiasm evidence retrieval.
+  hifiasm evidence retrieval;
+- query construction and the numeric retriever both reject retry and unknown
+  tasks instead of treating every non-initial task as retry;
+- the production cutover gate defaults closed, active invalid configuration
+  fails before corpus loading, and an explicitly cut-over empty corpus produces
+  numeric no-case output without a hidden legacy fallback;
+- mixed corpora cannot leak draft, rejected, or malformed v2 records carrying
+  legacy-looking fields into either initial or retry `structured_default`
+  selection;
+- both named retry tasks stay on `structured_default` pending Task 5;
+- the Phase10 parameter-attempt integration explicitly enables cutover through
+  a temporary knowledge root when asserting numeric query/trace artifacts, and
+  separately verifies that the production default writes no numeric artifacts;
+- non-hifiasm selector tests remain unchanged and green.
+
+Focused verification command:
+
+```bash
+conda run -n gene_agent python -m pytest \
+  tests/test_assembly_case_selector.py \
+  tests/test_hifiasm_numeric_retrieval.py \
+  tests/test_phase10_parameter_catalog.py -q
+```
+
+Verified on 2026-07-10: `97 passed, 1 skipped, 2 subtests passed`.
 
 ## Acceptance Criteria
 
@@ -332,3 +452,12 @@ Implemented deterministic coverage:
   documents.
 - [x] The implementation performs no LLM, embedding, GraphRAG, or quality-score
   operation.
+- [x] Task 3 numeric query construction and ranking serve only
+  `recommend_initial`; retry integration remains pending Task 5.
+- [x] Production numeric cutover is explicit, defaults disabled, and remains
+  pending Task 6 evaluation.
+- [x] Empty-corpus and invalid-active-configuration behavior fail safely without
+  silently selecting a different backend.
+- [x] The pre-cutover compatibility backend excludes every v2 EvidenceCase
+  before legacy scoring, including malformed records with legacy-looking
+  fields.

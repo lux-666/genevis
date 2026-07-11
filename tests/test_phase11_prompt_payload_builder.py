@@ -7,19 +7,120 @@ Running with unittest will give false-positive (0 tests).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import stat
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
+from app.domains.assembly import numeric_case_retriever as numeric_retriever_module
+from app.domains.assembly.evidence_case import (
+    _rank_hifiasm_prompt_case,
+    validate_hifiasm_evidence_cases,
+)
+from app.knowledge.evidence_cases import EvidenceCaseValidationError
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
 from app.schemas.artifacts import file_sha256
+from app.stages.assembly import prompt_payload as prompt_payload_module
 from app.stages.assembly.prompt_payload import (
     ParameterPromptTask,
     build_prompt_payload,
     generate_payload_ref,
     generate_profile_ref,
+    write_payload_artifact,
 )
+
+
+_HIFIASM_SOURCE_DIR = tempfile.TemporaryDirectory(prefix="phase11_prompt_hifiasm_")
+_HIFIASM_SOURCE_ROOT = Path(_HIFIASM_SOURCE_DIR.name)
+
+
+def _legal_hifiasm_case(case_id: str, *, quote: str, distance: float) -> dict:
+    span_id = f"methods.{case_id}"
+    source_path = _HIFIASM_SOURCE_ROOT / f"{case_id}.methods.md"
+    body_path = _HIFIASM_SOURCE_ROOT / f"{case_id}.body.md"
+    source_path.write_text(f"Private context.\n{quote}\nPrivate trailing context.", encoding="utf-8")
+    body_path.write_text("Unquoted study body.", encoding="utf-8")
+    validated = validate_hifiasm_evidence_cases(
+        [
+            {
+                "schema_version": 2,
+                "case_id": case_id,
+                "case_type": "initial",
+                "source": {"kind": "paper", "title": f"Example {case_id}"},
+                "applicability": {
+                    "read_type": "hifi",
+                    "source_tool": "hifiasm",
+                    "target_methods": ["hifiasm"],
+                },
+                "observed_facts": {
+                    "coverage": {"value": 30, "evidence_span_ids": [span_id]},
+                },
+                "intervention": {"tool": "hifiasm", "parameters": {}},
+                "rationale_claims": [],
+                "outcomes": {},
+                "curation": {"status": "approved", "curator": "test"},
+                "source_documents": {
+                    "body": {
+                        "path": body_path.name,
+                        "sha256": hashlib.sha256(body_path.read_bytes()).hexdigest(),
+                    },
+                    "methods": {
+                        "path": source_path.name,
+                        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    },
+                    "spans": [
+                        {"span_id": span_id, "document": "methods", "quote": quote}
+                    ],
+                },
+            }
+        ],
+        pack_root=_HIFIASM_SOURCE_ROOT,
+    )[0]
+    return _rank_hifiasm_prompt_case(
+        validated,
+        numeric_match={"distance": distance},
+    )
+
+
+def _attested_numeric_selection(cases: list[dict], *, query_id: str) -> dict:
+    case_ids = [case["case_id"] for case in cases]
+    trace = [
+        {
+            "case_id": case["case_id"],
+            "decision": "candidate",
+            "hard_filter_reasons": [],
+            **case["numeric_match"],
+        }
+        for case in cases
+    ]
+    selection = {
+        "retrieval_backend": "hifiasm_numeric",
+        "selected_case_ids": case_ids,
+        "candidate_case_ids": case_ids,
+        "selected_count": len(case_ids),
+        "eligible_case_count": len(case_ids),
+        "total_cases": len(case_ids),
+        "evidence_available": bool(case_ids),
+        "case_evidence_required": False,
+        "warning": None,
+        "query": {"query_id": query_id, "method_id": "hifiasm"},
+        "trace": trace,
+    }
+    selection[numeric_retriever_module._RANKED_SELECTION_FIELD] = (
+        numeric_retriever_module._attest_hifiasm_ranked_selection(
+            selected_cases=cases,
+            metadata=selection,
+            trace=trace,
+        )
+    )
+    return selection
 
 
 # Test fixtures
@@ -1107,28 +1208,15 @@ class TestRealCatalogCompatibility:
 def test_hifiasm_writes_ref_backed_methods_evidence_payload(
     sample_catalog, sample_full_profile, tmp_path, monkeypatch
 ):
-    evidence_case = {
-        "case_id": "case_a",
-        "applicability": {"read_type": "hifi"},
-        "source": {"kind": "paper", "title": "Example"},
-        "numeric_match": {"distance": 0.1},
-        "observed_facts": {"coverage": {"value": 30}},
-        "intervention": {"tool": "hifiasm", "parameters": {}},
-        "rationale_claims": [],
-        "source_excerpts": [
-            {"span_id": "methods.a", "document": "methods", "quote": "Exact excerpt."}
-        ],
-        "outcomes": {},
-    }
-    selection = {
-        "retrieval_backend": "hifiasm_numeric",
-        "selected_case_ids": ["case_a"],
-        "candidate_case_ids": ["case_a"],
-        "eligible_case_count": 1,
-        "warning": None,
-        "query": {"query_id": "s1:parameter_attempt_0", "method_id": "hifiasm"},
-        "trace": [{"case_id": "case_a", "decision": "candidate"}],
-    }
+    evidence_case = _legal_hifiasm_case(
+        "case_a",
+        quote="Exact excerpt.",
+        distance=0.1,
+    )
+    selection = _attested_numeric_selection(
+        [evidence_case],
+        query_id="s1:parameter_attempt_0",
+    )
     monkeypatch.setattr(
         "app.stages.assembly.prompt_payload.load_knowledge_pack",
         lambda *_args, **_kwargs: {
@@ -1156,51 +1244,770 @@ def test_hifiasm_writes_ref_backed_methods_evidence_payload(
     )
 
     evidence_path = tmp_path / payload["evidence_payload_ref"].removeprefix("data/")
+    prompt_path = tmp_path / payload["prompt_payload_ref"].removeprefix("data/")
     assert evidence_path.name == "evidence_payload.json"
     assert evidence_path.exists()
+    assert prompt_path.exists()
     assert payload["case_retrieval"]["evidence_payload_ref"] == payload["evidence_payload_ref"]
     assert payload["methods_evidence"]["response_contract"] == "case_assessments_and_recommendation"
     loaded = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert loaded["candidate_case_ids"] == ["case_a"]
     assert loaded["cases"][0]["source_excerpts"][0]["quote"] == "Exact excerpt."
+    assert json.loads(prompt_path.read_text(encoding="utf-8")) == payload
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda selection: selection["trace"][0].update({"distance": 999}),
+        lambda selection: selection["candidate_case_ids"].append("forged-case"),
+        lambda selection: selection.update({"eligible_case_count": 999}),
+        lambda selection: selection.update({"warning": "forged warning"}),
+        lambda selection: selection["query"].update({"query_id": "forged-query"}),
+    ],
+    ids=[
+        "trace-distance",
+        "appended-candidate",
+        "eligible-count",
+        "warning",
+        "query",
+    ],
+)
+def test_hifiasm_retrieval_artifacts_require_task3_attested_audit_fields(
+    sample_catalog,
+    sample_full_profile,
+    tmp_path,
+    monkeypatch,
+    mutate,
+):
+    evidence_case = _legal_hifiasm_case(
+        "case_a",
+        quote="Exact excerpt.",
+        distance=0.1,
+    )
+    selection = _attested_numeric_selection(
+        [evidence_case],
+        query_id="s1:parameter_attempt_0",
+    )
+    mutate(selection)
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.load_knowledge_pack",
+        lambda *_args, **_kwargs: {
+            "cases": [],
+            "rules": {"rules": []},
+            "skill": "Use conservative evidence.",
+            "strategies": {},
+            "pack_root": tmp_path,
+        },
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.select_evidence_cases",
+        lambda *_args, **_kwargs: ([evidence_case], selection),
+    )
+    publications = []
+    original_publish = prompt_payload_module._publish_prepared_json_artifact
+
+    def _track_publications(**kwargs):
+        publications.append(kwargs["filename"])
+        return original_publish(**kwargs)
+
+    monkeypatch.setattr(
+        prompt_payload_module,
+        "_publish_prepared_json_artifact",
+        _track_publications,
+    )
+
+    with pytest.raises(EvidenceCaseValidationError, match="Task 3 selection attestation"):
+        build_prompt_payload(
+            method_id="hifiasm",
+            catalog=sample_catalog.model_copy(update={"method_id": "hifiasm"}),
+            full_profile=sample_full_profile,
+            task="recommend_initial",
+            write_artifacts=True,
+            session_id="s1",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert publications == []
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_hifiasm_malformed_case_fails_before_any_artifact_publication(
+    sample_catalog,
+    sample_full_profile,
+    tmp_path,
+    monkeypatch,
+):
+    evidence_case = _legal_hifiasm_case(
+        "case_a",
+        quote="Exact excerpt.",
+        distance=0.1,
+    )
+    selection = _attested_numeric_selection(
+        [evidence_case],
+        query_id="s1:parameter_attempt_0",
+    )
+    malformed_case = dict(evidence_case)
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.load_knowledge_pack",
+        lambda *_args, **_kwargs: {
+            "cases": [],
+            "rules": {"rules": []},
+            "skill": "Use conservative evidence.",
+            "strategies": {},
+            "pack_root": tmp_path,
+        },
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.select_evidence_cases",
+        lambda *_args, **_kwargs: ([malformed_case], selection),
+    )
+
+    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+        build_prompt_payload(
+            method_id="hifiasm",
+            catalog=sample_catalog.model_copy(update={"method_id": "hifiasm"}),
+            full_profile=sample_full_profile,
+            task="recommend_initial",
+            write_artifacts=True,
+            session_id="s1",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.parametrize("failure_point", ["canonicalization", "canonical_write"])
+def test_hifiasm_prompt_artifact_is_absent_if_canonical_build_is_interrupted(
+    sample_catalog, sample_full_profile, tmp_path, monkeypatch, failure_point
+):
+    evidence_case = _legal_hifiasm_case(
+        "case_a",
+        quote="Exact excerpt.",
+        distance=0.1,
+    )
+    selection = _attested_numeric_selection(
+        [evidence_case],
+        query_id="s1:parameter_attempt_0",
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.load_knowledge_pack",
+        lambda *_args, **_kwargs: {
+            "cases": [],
+            "rules": {"rules": []},
+            "skill": "Use conservative evidence.",
+            "strategies": {},
+            "pack_root": tmp_path,
+        },
+    )
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload.select_evidence_cases",
+        lambda *_args, **_kwargs: ([evidence_case], selection),
+    )
+
+    if failure_point == "canonicalization":
+        def _interrupt(_payload):
+            raise RuntimeError("interrupted before canonical write")
+
+        monkeypatch.setattr(
+            "app.stages.assembly.prompt_payload.sanitize_hifiasm_methods_prompt_payload",
+            _interrupt,
+        )
+        error = "interrupted before canonical write"
+    else:
+        original_publish = prompt_payload_module._publish_prepared_json_artifact
+
+        def _fail_canonical_write(**kwargs):
+            if kwargs["filename"] != "prompt_payload.json":
+                return original_publish(**kwargs)
+            payload = json.loads(kwargs["serialized"])
+            assert payload["hifiasm_methods_prompt_schema_version"] == 1
+            assert payload["prompt_payload_hash"] == generate_payload_ref(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"prompt_payload_ref", "prompt_payload_hash"}
+                }
+            )
+            raise RuntimeError("canonical prompt write failed")
+
+        monkeypatch.setattr(
+            prompt_payload_module,
+            "_publish_prepared_json_artifact",
+            _fail_canonical_write,
+        )
+        error = "canonical prompt write failed"
+
+    with pytest.raises(RuntimeError, match=error):
+        build_prompt_payload(
+            method_id="hifiasm",
+            catalog=sample_catalog.model_copy(update={"method_id": "hifiasm"}),
+            full_profile=sample_full_profile,
+            task="recommend_initial",
+            write_artifacts=True,
+            session_id="s1",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    attempt_dir = tmp_path / "artifacts" / "assembly" / "s1" / "parameter_attempt_0"
+    if failure_point == "canonicalization":
+        assert not (tmp_path / "artifacts").exists()
+    else:
+        assert (attempt_dir / "input_profile.json").exists()
+        assert (attempt_dir / "evidence_payload.json").exists()
+    assert not (attempt_dir / "prompt_payload.json").exists()
+
+
+def test_prompt_artifact_partial_write_preserves_previous_file_and_cleans_temp(
+    tmp_path, monkeypatch
+):
+    previous = {"version": "complete-previous"}
+    artifact = write_payload_artifact(
+        payload=previous,
+        session_id="s1",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+    artifact_path = tmp_path / artifact.path_ref.removeprefix("data/")
+
+    def _fail_after_first_byte(handle, serialized):
+        handle.write(serialized[:1])
+        handle.flush()
+        raise OSError("simulated partial write")
+
+    monkeypatch.setattr(
+        "app.stages.assembly.prompt_payload._write_and_sync_json",
+        _fail_after_first_byte,
+    )
+
+    with pytest.raises(OSError, match="simulated partial write"):
+        write_payload_artifact(
+            payload={"version": "incomplete-new"},
+            session_id="s1",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert json.loads(artifact_path.read_text(encoding="utf-8")) == previous
+    assert not list(artifact_path.parent.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_artifact_writer_repeated_write_is_idempotent_but_never_clobbers(tmp_path):
+    original = {"version": "immutable"}
+    first_ref = write_payload_artifact(
+        payload=original,
+        session_id="repeated",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+    repeated_ref = write_payload_artifact(
+        payload=original,
+        session_id="repeated",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+
+    assert repeated_ref == first_ref
+    with pytest.raises(FileExistsError, match="different content"):
+        write_payload_artifact(
+            payload={"version": "replacement"},
+            session_id="repeated",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    artifact_path = tmp_path / first_ref.path_ref.removeprefix("data/")
+    assert artifact_path.read_bytes() == json.dumps(original, indent=2).encode("utf-8")
+    assert not list(artifact_path.parent.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_artifact_writer_concurrent_identical_content_is_idempotent(tmp_path, monkeypatch):
+    payload = {"version": "same", "items": [1, 2, 3]}
+    barrier = threading.Barrier(2)
+    original_write = prompt_payload_module._write_and_sync_json
+
+    def _write_then_wait(handle, serialized):
+        original_write(handle, serialized)
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(prompt_payload_module, "_write_and_sync_json", _write_then_wait)
+
+    def _write():
+        return write_payload_artifact(
+            payload=payload,
+            session_id="concurrent-same",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(_write), executor.submit(_write)]
+        refs = [future.result(timeout=10) for future in futures]
+
+    assert refs[0] == refs[1]
+    artifact_path = tmp_path / refs[0].path_ref.removeprefix("data/")
+    expected_bytes = json.dumps(payload, indent=2).encode("utf-8")
+    assert artifact_path.read_bytes() == expected_bytes
+    assert refs[0].sha256 == hashlib.sha256(expected_bytes).hexdigest()
+    assert not list(artifact_path.parent.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_artifact_writer_concurrent_different_content_never_clobbers(tmp_path, monkeypatch):
+    payloads = [{"writer": "a"}, {"writer": "b"}]
+    barrier = threading.Barrier(2)
+    original_write = prompt_payload_module._write_and_sync_json
+
+    def _write_then_wait(handle, serialized):
+        original_write(handle, serialized)
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(prompt_payload_module, "_write_and_sync_json", _write_then_wait)
+
+    def _write(payload):
+        return write_payload_artifact(
+            payload=payload,
+            session_id="concurrent-different",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    refs = []
+    errors = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(_write, payload) for payload in payloads]
+        for future in futures:
+            try:
+                refs.append(future.result(timeout=10))
+            except BaseException as exc:
+                errors.append(exc)
+
+    assert len(refs) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], FileExistsError)
+    assert "different content" in str(errors[0])
+    artifact_path = tmp_path / refs[0].path_ref.removeprefix("data/")
+    final_bytes = artifact_path.read_bytes()
+    expected_bytes = {
+        json.dumps(payload, indent=2).encode("utf-8") for payload in payloads
+    }
+    assert final_bytes in expected_bytes
+    assert refs[0].sha256 == hashlib.sha256(final_bytes).hexdigest()
+    assert not list(artifact_path.parent.glob(".prompt_payload.json.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["/tmp/escape", ".", "..", "../escape", "nested/session", r"nested\session"],
+)
+def test_artifact_writer_rejects_unsafe_session_path_components(tmp_path, session_id):
+    with pytest.raises(ValueError, match="session_id"):
+        write_payload_artifact(
+            payload={"safe": True},
+            session_id=session_id,
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not list(tmp_path.rglob("prompt_payload.json"))
+
+
+@pytest.mark.parametrize(
+    "attempt_id",
+    [True, False, -1, "0", "../escape", 0.0, None],
+)
+def test_artifact_writer_rejects_invalid_attempt_ids_before_path_creation(
+    tmp_path, attempt_id
+):
+    with pytest.raises(ValueError, match="attempt_id"):
+        write_payload_artifact(
+            payload={"safe": True},
+            session_id="safe-session",
+            attempt_id=attempt_id,
+            data_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.parametrize(
+    "symlink_level",
+    ["data-root", "artifacts", "assembly", "attempt"],
+)
+def test_artifact_writer_rejects_preexisting_directory_symlinks(
+    tmp_path, symlink_level
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data_root = tmp_path / "data-root"
+
+    if symlink_level == "data-root":
+        data_root.symlink_to(outside, target_is_directory=True)
+    elif symlink_level == "artifacts":
+        data_root.mkdir()
+        (data_root / "artifacts").symlink_to(outside, target_is_directory=True)
+    elif symlink_level == "assembly":
+        (data_root / "artifacts").mkdir(parents=True)
+        (data_root / "artifacts" / "assembly").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+    else:
+        session_dir = data_root / "artifacts" / "assembly" / "safe-session"
+        session_dir.mkdir(parents=True)
+        (session_dir / "parameter_attempt_0").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+
+    with pytest.raises(ValueError, match="symlink|non-directory"):
+        write_payload_artifact(
+            payload={"safe": True},
+            session_id="safe-session",
+            attempt_id=0,
+            data_dir=data_root,
+        )
+
+    assert not (outside / "prompt_payload.json").exists()
+
+
+def test_artifact_writer_rejects_resolved_session_symlink_escape(tmp_path):
+    artifact_base = tmp_path / "artifacts" / "assembly"
+    artifact_base.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (artifact_base / "linked").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="session_id"):
+        write_payload_artifact(
+            payload={"safe": True},
+            session_id="linked",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not (outside / "parameter_attempt_0" / "prompt_payload.json").exists()
+
+
+def test_artifact_writer_attempt_directory_swap_is_detected_and_rolled_back(
+    tmp_path, monkeypatch
+):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    attempt_dir = (
+        tmp_path
+        / "artifacts"
+        / "assembly"
+        / "swap-session"
+        / "parameter_attempt_0"
+    )
+    displaced_dir = tmp_path / "displaced-attempt"
+    original_link = os.link
+    swapped = False
+
+    def _swap_path_then_publish_anchored(source, destination, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            attempt_dir.rename(displaced_dir)
+            attempt_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(
+        prompt_payload_module.os,
+        "link",
+        _swap_path_then_publish_anchored,
+    )
+
+    with pytest.raises(ValueError, match="artifact namespace changed"):
+        write_payload_artifact(
+            payload={"anchored": True},
+            session_id="swap-session",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not (outside / "prompt_payload.json").exists()
+    assert not (displaced_dir / "prompt_payload.json").exists()
+    assert not list(displaced_dir.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_artifact_writer_rejects_existing_final_symlink_without_following(tmp_path):
+    attempt_dir = (
+        tmp_path
+        / "artifacts"
+        / "assembly"
+        / "final-symlink"
+        / "parameter_attempt_0"
+    )
+    attempt_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("sentinel", encoding="utf-8")
+    final_path = attempt_dir / "prompt_payload.json"
+    final_path.symlink_to(outside)
+
+    with pytest.raises(FileExistsError, match="not a regular file"):
+        write_payload_artifact(
+            payload={"replacement": True},
+            session_id="final-symlink",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert final_path.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+    assert not list(attempt_dir.glob(".prompt_payload.json.*.tmp"))
+
+
+@pytest.mark.parametrize("node_kind", ["fifo", "directory"])
+def test_artifact_writer_rejects_existing_nonregular_final_node(tmp_path, node_kind):
+    attempt_dir = (
+        tmp_path
+        / "artifacts"
+        / "assembly"
+        / f"final-{node_kind}"
+        / "parameter_attempt_0"
+    )
+    attempt_dir.mkdir(parents=True)
+    final_path = attempt_dir / "prompt_payload.json"
+    if node_kind == "fifo":
+        os.mkfifo(final_path)
+    else:
+        final_path.mkdir()
+
+    with pytest.raises(FileExistsError, match="not a regular file"):
+        write_payload_artifact(
+            payload={"replacement": True},
+            session_id=f"final-{node_kind}",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not list(attempt_dir.glob(".prompt_payload.json.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [KeyboardInterrupt("writer interrupted"), SystemExit("writer exiting")],
+    ids=["keyboard-interrupt", "system-exit"],
+)
+def test_artifact_writer_base_exception_preserves_previous_and_cleans_temp(
+    tmp_path, monkeypatch, failure
+):
+    previous = {"version": "complete-previous"}
+    artifact = write_payload_artifact(
+        payload=previous,
+        session_id="base-exception",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+    artifact_path = tmp_path / artifact.path_ref.removeprefix("data/")
+
+    def _fail_after_first_byte(handle, serialized):
+        handle.write(serialized[:1])
+        handle.flush()
+        raise failure
+
+    monkeypatch.setattr(
+        prompt_payload_module,
+        "_write_and_sync_json",
+        _fail_after_first_byte,
+    )
+
+    with pytest.raises(type(failure)) as caught:
+        write_payload_artifact(
+            payload={"version": "incomplete-new"},
+            session_id="base-exception",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert str(caught.value) == str(failure)
+    assert artifact_path.read_bytes() == json.dumps(previous, indent=2).encode("utf-8")
+    assert not list(artifact_path.parent.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_open_unique_temp_file_fsyncs_unlink_after_fdopen_keyboard_interrupt(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    original_unlink = os.unlink
+    original_sync = prompt_payload_module._fsync_directory
+
+    def _interrupt_fdopen(_fd, _mode):
+        raise KeyboardInterrupt("fdopen interrupted")
+
+    def _tracked_unlink(path, **kwargs):
+        events.append(("unlink", path))
+        return original_unlink(path, **kwargs)
+
+    def _tracked_sync(directory_fd):
+        events.append(("fsync", directory_fd))
+        return original_sync(directory_fd)
+
+    monkeypatch.setattr(prompt_payload_module.os, "fdopen", _interrupt_fdopen)
+    monkeypatch.setattr(prompt_payload_module.os, "unlink", _tracked_unlink)
+    monkeypatch.setattr(prompt_payload_module, "_fsync_directory", _tracked_sync)
+
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="fdopen interrupted"):
+            prompt_payload_module._open_unique_temp_file(
+                directory_fd,
+                "prompt_payload.json",
+            )
+    finally:
+        os.close(directory_fd)
+
+    assert [event[0] for event in events] == ["unlink", "fsync"]
+    assert not list(tmp_path.glob(".prompt_payload.json.*.tmp"))
+
+
+def test_artifact_ref_validation_finishes_before_publication(tmp_path, monkeypatch):
+    def _reject_ref(**_kwargs):
+        raise RuntimeError("invalid artifact ref")
+
+    monkeypatch.setattr(prompt_payload_module, "ArtifactRef", _reject_ref)
+
+    with pytest.raises(RuntimeError, match="invalid artifact ref"):
+        write_payload_artifact(
+            payload={"value": 1},
+            session_id="prepublish-validation",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+
+    assert not list(tmp_path.rglob("prompt_payload.json"))
+    assert not list(tmp_path.rglob(".prompt_payload.json.*.tmp"))
+
+
+def test_new_artifact_publication_does_not_read_shared_final_path(tmp_path, monkeypatch):
+    def _reject_final_read(_path):
+        raise AssertionError("new publication must not read the shared final path")
+
+    monkeypatch.setattr(Path, "read_bytes", _reject_final_read)
+
+    artifact = write_payload_artifact(
+        payload={"hash_source": "prepublication-bytes"},
+        session_id="no-final-read",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+
+    expected = json.dumps({"hash_source": "prepublication-bytes"}, indent=2).encode(
+        "utf-8"
+    )
+    assert artifact.sha256 == hashlib.sha256(expected).hexdigest()
+    artifact_path = tmp_path / artifact.path_ref.removeprefix("data/")
+    with artifact_path.open("rb") as handle:
+        assert handle.read() == expected
+
+
+def test_artifact_writer_syncs_file_then_publishes_then_syncs_parent(
+    tmp_path, monkeypatch
+):
+    attempt_dir = (
+        tmp_path
+        / "artifacts"
+        / "assembly"
+        / "sync-order"
+        / "parameter_attempt_0"
+    )
+    attempt_dir.mkdir(parents=True)
+    events = []
+    original_fsync = os.fsync
+    original_link = os.link
+    original_unlink = os.unlink
+
+    def _tracked_fsync(fd):
+        event = "directory_fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file_fsync"
+        events.append(event)
+        return original_fsync(fd)
+
+    def _tracked_link(source, destination, **kwargs):
+        events.append("publish_link")
+        return original_link(source, destination, **kwargs)
+
+    def _tracked_unlink(path, **kwargs):
+        if str(path).startswith(".prompt_payload.json."):
+            events.append("temp_unlink")
+        return original_unlink(path, **kwargs)
+
+    monkeypatch.setattr(prompt_payload_module.os, "fsync", _tracked_fsync)
+    monkeypatch.setattr(prompt_payload_module.os, "link", _tracked_link)
+    monkeypatch.setattr(prompt_payload_module.os, "unlink", _tracked_unlink)
+
+    write_payload_artifact(
+        payload={"durable": True},
+        session_id="sync-order",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+
+    assert events == [
+        "file_fsync",
+        "publish_link",
+        "directory_fsync",
+        "temp_unlink",
+        "directory_fsync",
+    ]
+
+
+def test_artifact_writer_fsyncs_parent_after_each_new_directory(tmp_path, monkeypatch):
+    events = []
+    original_mkdir = os.mkdir
+    original_sync = prompt_payload_module._fsync_directory
+
+    def _tracked_mkdir(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        events.append(f"mkdir:{path}")
+        return result
+
+    def _tracked_sync(directory_fd):
+        events.append("parent_fsync")
+        return original_sync(directory_fd)
+
+    monkeypatch.setattr(prompt_payload_module.os, "mkdir", _tracked_mkdir)
+    monkeypatch.setattr(prompt_payload_module, "_fsync_directory", _tracked_sync)
+
+    write_payload_artifact(
+        payload={"durable_directories": True},
+        session_id="mkdir-sync",
+        attempt_id=0,
+        data_dir=tmp_path,
+    )
+
+    assert events[:8] == [
+        "mkdir:artifacts",
+        "parent_fsync",
+        "mkdir:assembly",
+        "parent_fsync",
+        "mkdir:mkdir-sync",
+        "parent_fsync",
+        "mkdir:parameter_attempt_0",
+        "parent_fsync",
+    ]
 
 
 def test_hifiasm_limits_final_methods_evidence_to_eight_cases(
     sample_catalog, sample_full_profile, tmp_path, monkeypatch
 ):
     evidence_cases = [
-        {
-            "case_id": f"case_{index:02d}",
-            "applicability": {"read_type": "hifi"},
-            "source": {"kind": "paper", "title": f"Example {index}"},
-            "numeric_match": {"distance": index / 100},
-            "observed_facts": {"coverage": {"value": 30 + index}},
-            "intervention": {"tool": "hifiasm", "parameters": {}},
-            "rationale_claims": [],
-            "source_excerpts": [
-                {
-                    "span_id": f"methods.{index}",
-                    "document": "methods",
-                    "quote": f"Exact excerpt {index}.",
-                }
-            ],
-            "outcomes": {},
-        }
+        _legal_hifiasm_case(
+            f"case_{index:02d}",
+            quote=f"Exact excerpt {index}.",
+            distance=index / 100,
+        )
         for index in range(12)
     ]
     candidate_ids = [case["case_id"] for case in evidence_cases]
-    selection = {
-        "retrieval_backend": "hifiasm_numeric",
-        "selected_case_ids": candidate_ids,
-        "candidate_case_ids": candidate_ids,
-        "eligible_case_count": 12,
-        "warning": None,
-        "query": {"query_id": "s1:parameter_attempt_0", "method_id": "hifiasm"},
-        "trace": [
-            {"case_id": case_id, "decision": "candidate"}
-            for case_id in candidate_ids
-        ],
-    }
+    selection = _attested_numeric_selection(
+        evidence_cases,
+        query_id="s1:parameter_attempt_0",
+    )
     monkeypatch.setattr(
         "app.stages.assembly.prompt_payload.load_knowledge_pack",
         lambda *_args, **_kwargs: {

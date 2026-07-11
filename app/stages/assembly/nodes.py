@@ -32,7 +32,11 @@ from app.stages.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
-from app.stages.assembly.decision import AssemblyDecisionRequest, make_assembly_decision
+from app.stages.assembly.decision import (
+    AssemblyDecisionRequest,
+    AssemblyPromptContract,
+    make_assembly_decision,
+)
 from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
@@ -586,6 +590,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     session_id = state["session_id"]
 
     try:
+        prompt_contract = _parameter_prompt_contract(method_name, task)
         prompt_payload = build_prompt_payload(
             method_id=catalog.method_id,
             catalog=catalog,
@@ -638,8 +643,12 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         AssemblyDecisionRequest(
             kind="parameter_recommendation",
             session_id=session_id,
+            prompt_contract=prompt_contract,
             prompt_payload=prompt_payload,
-            system_prompt=_parameter_recommender_system_prompt(prompt_payload),
+            system_prompt=_parameter_recommender_system_prompt(
+                prompt_payload,
+                prompt_contract,
+            ),
             allow_default_on_error=bool(
                 _parameter_recommendation_config(state, assembly_out).get("allow_model_unavailable_defaults", False)
             ),
@@ -1409,7 +1418,10 @@ def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> l
     return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
 
 
-def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
+def _parameter_recommender_system_prompt(
+    prompt_payload: dict[str, Any],
+    prompt_contract: AssemblyPromptContract,
+) -> str:
     base = (
         "You are an assembly parameter advisor. Return only JSON matching the required output. "
         "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts. "
@@ -1420,7 +1432,7 @@ def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
         "for basis=case.\n\n"
         + str(prompt_payload.get("skill_instructions") or "")
     )
-    if (prompt_payload.get("case_retrieval") or {}).get("retrieval_backend") != "hifiasm_numeric":
+    if prompt_contract != "hifiasm_methods_v1":
         return base
     return (
         "You are a hifiasm Methods-aware parameter advisor. Return only JSON with four top-level "
@@ -1431,12 +1443,37 @@ def _parameter_recommender_system_prompt(prompt_payload: dict[str, Any]) -> str:
         "parameter. Each decision must "
         "choose action set, keep_default, or omit; include confidence strong, medium, or weak; include "
         "a non-empty reason; and declare at least one evidence basis. basis=case requires selected, "
-        "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts, "
-        "SKILL heuristics, retry signals, or catalog defaults. Never invent cases, spans, parameters, "
-        "effect areas, or profile facts. Weak or absent case evidence is not a hard blocker; prefer "
-        "conservative defaults.\n\n"
+        "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts or "
+        "catalog defaults. Never invent cases, spans, parameters, effect areas, or profile facts. "
+        "Weak or absent case evidence is not a hard blocker; prefer conservative defaults. No "
+        "structured prompt-visible heuristic registry is available, so do not use skill_heuristic "
+        "or heuristic_labels. retry_signals must be visible structured retry_evidence signal IDs or "
+        "paths; if none are present, do not use retry_failure as an evidence basis.\n\n"
         + str(prompt_payload.get("skill_instructions") or "")
     )
+
+
+def _parameter_prompt_contract(
+    method_name: str,
+    task: str,
+) -> AssemblyPromptContract:
+    """Choose the decision contract from trusted routing and pack configuration."""
+
+    if method_name != HIFIASM_METHOD or task != "recommend_initial":
+        return "legacy"
+    pack = load_knowledge_pack("parameter_recommender")
+    strategies = pack.get("strategies") or {}
+    if not isinstance(strategies, dict):
+        raise ValueError("parameter recommender strategies must be a mapping")
+    numeric = strategies.get("hifiasm_numeric")
+    if numeric is None:
+        return "legacy"
+    if not isinstance(numeric, dict):
+        raise ValueError("hifiasm_numeric strategy must be a mapping")
+    cutover_enabled = numeric.get("production_cutover_enabled", False)
+    if not isinstance(cutover_enabled, bool):
+        raise ValueError("hifiasm_numeric.production_cutover_enabled must be a bool")
+    return "hifiasm_methods_v1" if cutover_enabled else "legacy"
 
 
 def _failure_log_tail(execution_result: dict[str, Any]) -> str:
@@ -1566,6 +1603,7 @@ def _recommend_route_with_decision_boundary(
         AssemblyDecisionRequest(
             kind="route_selection",
             session_id=state["session_id"],
+            prompt_contract="legacy",
             prompt_payload=prompt_payload,
             system_prompt="You are an expert genome assembly route selector.\n\n" + str(ctx.get("skill_text") or ""),
             allowed_actions=list(ctx.get("allowed_actions") or []),

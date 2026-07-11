@@ -301,7 +301,7 @@ def test_unknown_or_missing_profile_read_type_does_not_leak_cases_by_method_scor
     }
 
 
-def test_hifiasm_dispatch_does_not_fall_back_to_legacy_seed_cases():
+def test_hifiasm_dispatch_defaults_to_legacy_until_numeric_cutover():
     cases = [
         {
             "case_id": "legacy_hifiasm_seed",
@@ -317,7 +317,10 @@ def test_hifiasm_dispatch_does_not_fall_back_to_legacy_seed_cases():
         prompt_profile={"assets": {"read_type": "hifi"}},
     )
 
-    assert selected == []
-    assert metadata["retrieval_backend"] == "hifiasm_numeric"
-    assert metadata["evidence_available"] is False
-    assert metadata["selected_case_ids"] == []
+    assert [case["case_id"] for case in selected] == ["legacy_hifiasm_seed"]
+    assert metadata["retrieval_backend"] == "structured_default"
+    assert metadata["hifiasm_numeric_gate"] == {
+        "production_cutover_enabled": False,
+        "decision": "structured_default",
+        "reason": "production_cutover_disabled",
+    }

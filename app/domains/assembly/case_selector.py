@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
+from app.domains.assembly.evidence_case import (
+    is_hifiasm_evidence_case,
+    validate_hifiasm_evidence_cases,
+)
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
 from app.domains.assembly.selection import parameter_case_read_type
@@ -33,6 +36,14 @@ DEFAULT_STRATEGY = {
         "read_n50_kb": [15, 30, 50],
     },
 }
+
+_HIFIASM_INITIAL_TASK = "recommend_initial"
+_HIFIASM_RETRY_TASKS = {
+    "retry_after_execution_failure",
+    "retry_after_review_failure",
+}
+_HIFIASM_PARAMETER_TASKS = {_HIFIASM_INITIAL_TASK, *_HIFIASM_RETRY_TASKS}
+_HIFIASM_NUMERIC_CUTOVER_KEY = "production_cutover_enabled"
 
 
 class EvidenceBasedCaseSelector:
@@ -143,25 +154,64 @@ def select_evidence_cases(
     source_root: Path | str | None = None,
     query_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Dispatch hifiasm to numeric evidence retrieval and preserve other methods."""
+    """Dispatch the explicitly enabled hifiasm initial backend and preserve defaults."""
 
     if _tool_name(method_id) == "hifiasm":
-        pack_root = Path(source_root) if source_root is not None else None
-        validated_cases = validate_hifiasm_evidence_cases(cases, pack_root=pack_root)
-        query = build_hifiasm_retrieval_query(
-            prompt_profile,
+        if task not in _HIFIASM_PARAMETER_TASKS:
+            raise ValueError(f"unsupported hifiasm parameter task: {task!r}")
+
+        cutover_enabled, numeric_config = _hifiasm_numeric_settings(strategy)
+        if task == _HIFIASM_INITIAL_TASK and cutover_enabled:
+            retriever = HifiasmNumericCaseRetriever.from_config(
+                numeric_config,
+                max_cases=max_cases,
+            )
+            pack_root = Path(source_root) if source_root is not None else None
+            validated_cases = validate_hifiasm_evidence_cases(cases, pack_root=pack_root)
+            query = build_hifiasm_retrieval_query(
+                prompt_profile,
+                method_id=method_id,
+                task=task,
+                query_id=query_id,
+            )
+            result = retriever.select(validated_cases, query=query)
+            return result.selected_cases, {
+                **result.metadata,
+                "query": query,
+                "hifiasm_numeric_gate": {
+                    "production_cutover_enabled": True,
+                    "decision": "hifiasm_numeric",
+                    "reason": "production_cutover_enabled",
+                },
+            }
+
+        gate_reason = (
+            "retry_pending_task_5"
+            if task in _HIFIASM_RETRY_TASKS
+            else "production_cutover_disabled"
+        )
+
+        selector = EvidenceBasedCaseSelector(
+            min_cases=min_cases,
+            max_cases=8 if max_cases is None else max_cases,
+            strategy=_structured_default_strategy(strategy),
+        )
+        legacy_cases = [case for case in cases if not is_hifiasm_evidence_case(case)]
+        result = selector.select(
+            legacy_cases,
             method_id=method_id,
             task=task,
-            query_id=query_id,
+            prompt_profile=prompt_profile,
         )
-        if strategy is not None and not isinstance(strategy, dict):
-            raise ValueError("strategy must be a mapping")
-        numeric_config = (strategy or {}).get("hifiasm_numeric")
-        result = HifiasmNumericCaseRetriever.from_config(
-            numeric_config,
-            max_cases=max_cases,
-        ).select(validated_cases, query=query)
-        return result.selected_cases, {**result.metadata, "query": query}
+        return result.selected_cases, {
+            **result.metadata,
+            "retrieval_backend": "structured_default",
+            "hifiasm_numeric_gate": {
+                "production_cutover_enabled": cutover_enabled,
+                "decision": "structured_default",
+                "reason": gate_reason,
+            },
+        }
 
     selector = EvidenceBasedCaseSelector(
         min_cases=min_cases,
@@ -170,6 +220,34 @@ def select_evidence_cases(
     )
     result = selector.select(cases, method_id=method_id, task=task, prompt_profile=prompt_profile)
     return result.selected_cases, result.metadata
+
+
+def _hifiasm_numeric_settings(
+    strategy: dict[str, Any] | None,
+) -> tuple[bool, dict[str, Any] | None]:
+    if strategy is not None and not isinstance(strategy, dict):
+        raise ValueError("strategy must be a mapping")
+    raw = (strategy or {}).get("hifiasm_numeric")
+    if raw is None:
+        return False, None
+    if not isinstance(raw, dict):
+        raise ValueError("hifiasm_numeric strategy must be a mapping")
+    cutover_enabled = raw.get(_HIFIASM_NUMERIC_CUTOVER_KEY, False)
+    if not isinstance(cutover_enabled, bool):
+        raise ValueError(f"hifiasm_numeric.{_HIFIASM_NUMERIC_CUTOVER_KEY} must be a bool")
+    numeric_config = {
+        key: value for key, value in raw.items() if key != _HIFIASM_NUMERIC_CUTOVER_KEY
+    }
+    return cutover_enabled, numeric_config
+
+
+def _structured_default_strategy(
+    strategy: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if strategy is None or "strategies" in strategy:
+        return strategy
+    structured = {key: value for key, value in strategy.items() if key != "hifiasm_numeric"}
+    return structured or None
 
 
 def _normalize_strategy(strategy: dict[str, Any] | None) -> dict[str, Any]:

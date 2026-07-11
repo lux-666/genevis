@@ -1,7 +1,7 @@
 # Task 2: Hifiasm EvidenceCase And Manual Source Contract
 
 **Phase**: 11
-**Status**: Complete
+**Status**: Complete (contract and validation); production cutover deferred to Task 6
 **Depends on**: Phase10 Task14 typed parameter-attempt contract
 **Created**: 2026-07-10
 **Updated**: 2026-07-10
@@ -18,21 +18,53 @@ inputs:
 2. one normalized article or internal-run body document,
 3. one normalized Methods document.
 
-The runtime consumes those prepared inputs, validates their references, and
-uses only approved evidence cases for hifiasm recommendation.
+The EvidenceCase backend consumes those prepared inputs, validates their
+references, and exposes only approved cases as retrieval-eligible. Enabling
+that backend in the production selector remains a Task 6 cutover decision.
 
 ## Implemented Contract
 
-- legacy hifiasm seed observations are ignored by the production selector;
+- schema-v2 EvidenceCase validation does not silently convert legacy hifiasm
+  seed observations;
 - case IDs, case type, applicability, source identity, intervention, and
   curation status are validated;
+- top-level and nested mappings use explicit closed allowlists; unknown fields
+  fail closed with deterministic field paths;
 - manifest and shard structure is validated without silently turning malformed
   inputs into empty evidence;
+- records from a v2 `assembly_evidence_case` manifest's inline cases and
+  `cases/hifiasm/*` shards are selected by manifest/shard provenance, not by
+  guessing from the record's tool fields; each such record must declare the
+  exact non-boolean integer `schema_version: 2`;
 - approved body/Methods paths are confined to the knowledge-pack root;
 - approved source hashes and exact, unambiguous quotes are verified;
 - numeric facts, reported parameters, and explicit rationale claims validate
   their span provenance;
-- only prompt-safe exact excerpts are returned, never complete documents;
+- the normalized case is recursively rebuilt from allowed fields rather than
+  copied from curator input, and `source_documents` is never prompt-visible;
+- Task 2 records an in-process attestation over the complete normalized case,
+  including prompt-visible evidence, source excerpts, curation status, and
+  retrieval eligibility; ordinary mappings cannot self-assert validation, and
+  any post-validation semantic modification fails closed before Task 3 or
+  Task 4;
+- Task 3 obtains a controlled validated snapshot before reading hard-filter or
+  ranking fields, then owns the private one-way `validated -> ranked`
+  transition; the public Task 2 prompt projector never accepts or re-casts
+  caller-supplied `numeric_match` metadata;
+- prompt-visible projection removes the complete `curation` audit object,
+  including `status`, `curator`, `reviewed_at`, and `notes`;
+- free-text fields in the normalized case are individually bounded to 1,000
+  characters and the structured case has a 16,000-character text budget;
+- source evidence is bounded to 2,000 characters per span, 32 unique span IDs
+  per case, 12,000 referenced quote characters per document, and 16,000 total
+  declared/prompt-visible quote characters per case; the prompt budget check is
+  performed after normalized excerpts are attached (`16,000` passes and
+  `16,001` fails);
+- unique quote offsets are retained only during validation; referenced
+  intervals are merged per document and must cover less than 90% of that
+  document, preventing multi-span full/near-full document reconstruction;
+- only referenced, validated exact excerpts are returned, never complete
+  documents;
 - initial and retry contracts are validated separately;
 - draft and rejected cases are retained as ineligible audit records;
 - empty initial/retry shards provide the manual curation landing point.
@@ -51,7 +83,8 @@ In scope:
 - evidence curation status;
 - deterministic loader and validation errors;
 - source hashes and prompt-safe excerpts;
-- migration treatment for the current synthetic seed cases.
+- contract treatment for the current synthetic seed cases without silent
+  compatibility conversion.
 
 Out of scope:
 
@@ -60,7 +93,9 @@ Out of scope:
 - embedding generation or vector databases;
 - Flye, NextDenovo, or hifiasm-ont evidence recommendation;
 - automatic promotion of runtime records into the production knowledge pack;
-- cross-tool parameter translation.
+- cross-tool parameter translation;
+- retry-specific retrieval semantics, which belong to Task 5;
+- production selector activation and evaluation, which belong to Task 6.
 
 ## First-Release Directory Contract
 
@@ -79,7 +114,14 @@ descriptors/knowledge_packs/assembly/parameter_recommender/
 
 `cases.yaml` remains a manifest. It identifies the schema version and case
 shards. Approved source documents are read only during source validation and
-are never retained in compact graph state or prompt payloads.
+are never retained in the normalized EvidenceCase, compact graph state, or
+prompt payloads.
+
+Within this mixed migration manifest, inline cases and records loaded from
+`cases/hifiasm/*` are strict schema-v2 hifiasm records. Legacy shards at other
+paths remain a separate input for methods that have not migrated; their
+records are not inferred to be v2 hifiasm cases from `source_tool`,
+`target_methods`, or `intervention.tool` values.
 
 ```yaml
 version: 2
@@ -230,9 +272,13 @@ The validator must verify that:
 
 - every referenced `span_id` exists;
 - each quote occurs in the declared source document;
-- an exact quote expected to identify a single passage is not ambiguous;
+- each exact quote has one unique offset, using overlap-aware matching (for
+  example, `aa` is ambiguous in `aaa` at offsets 0 and 1);
 - a quote is at most 2,000 characters and cannot equal the complete source
   document after trimming surrounding whitespace;
+- referenced quote lengths total at most 12,000 characters per document;
+- referenced intervals are merged by offset per document, cannot cover the
+  complete document, and must cover less than 90% of its characters;
 - every evidence-bearing numeric fact cites at least one span;
 - every reported source parameter cites at least one Methods span;
 - every explicit rationale claim cites at least one Methods span;
@@ -245,6 +291,101 @@ markers inside the manually prepared Markdown documents.
 Source SHA256 values may initially be `null` while a case is in `draft` status.
 An `approved` case must have source hashes generated and verified by the
 knowledge-pack validation command before it is retrieval-eligible.
+
+The source bundle is a closed schema:
+
+- `source_documents` allows only `body`, `methods`, and `spans`;
+- each document allows only `path` and `sha256`;
+- each span allows only `span_id`, `document`, and `quote`;
+- paths and span IDs are non-empty and bounded to 1,000 characters;
+- one quote is bounded to 2,000 characters;
+- one case is bounded to 32 declared spans and 16,000 total quote characters;
+- one document is bounded to 12,000 referenced quote characters and less than
+  90% merged referenced coverage.
+
+Unknown fields such as `source_documents.methods.full_text` fail validation;
+complete document bodies cannot be embedded as alternate metadata.
+
+## Closed Schema And Prompt-Safe Normalization
+
+The schema-v2 validator uses nested allowlists for `source`, `applicability`,
+facts, uncertainty, intervention parameters and changes, rationale claims,
+outcomes, curation metadata, and retry metadata. Dynamic parameter and metric
+names are allowed only inside their documented mapping positions; their values
+still follow the declared scalar or nested schema.
+
+Normalization constructs a fresh mapping recursively from those allowlists. It
+does not deep-copy curator input and remove only one known-dangerous field.
+Consequently fields such as `source.full_text`,
+`intervention.methods_text`, `observed_facts.<name>.notes`, a free-form
+top-level `rationale`, or unknown rationale-claim fields fail closed rather
+than reaching compact state or a prompt.
+
+Allowed strings remain evidence data, not executable instructions. They must
+be non-empty, are bounded to 1,000 characters each, and contribute to a
+16,000-character structured-text budget per case. Approved rationale claims
+require non-empty `claim_id`, `statement`, `explicitness`, and `effect_area`;
+approved intervention parameter entries require both `value` and boolean
+`reported`. Provenance rules still require reported parameters and explicit
+rationale claims to cite Methods spans.
+
+Contract identifiers are typed rather than accepted through a generic scalar:
+source `title`, `doi`, and `internal_run_id` values, approved
+`curation.curator`, and retry `failure_mode` /
+`execution_failure_class` labels are non-empty strings when present, with an
+approved curator required and at least one retry failure label required.
+Parameter `value`, previous-attempt parameter values, and review metrics retain
+the documented mixed finite JSON-scalar behavior (`null`, boolean, number, or
+bounded non-empty string).
+
+`project_hifiasm_prompt_safe_case()` is the public Task 2 projection. It
+rebuilds the single allowlisted schema only after checking a validation-owned
+attestation for an exact `validated` live object. The attestation binds a
+deterministic serialization of the complete mapping plus its stage kind,
+original curation status, and retrieval-eligibility decision. For a validated
+case this covers all Task 2-owned semantics: source and applicability profile,
+observed facts, intervention parameters and changes, rationale, outcomes,
+retry context, curation data, validated excerpts, and retrieval eligibility.
+The public projector accepts no numeric argument and returns only a Task 2
+`prompt_base` object. That object is intentionally not a Task 4 input.
+
+`project_hifiasm_retrieval_case()` accepts only a complete, unchanged validated
+case and returns a controlled deep copy. Task 3 calls it before reading case ID,
+curation, eligibility, compatibility fields, numeric facts, or ranking inputs.
+It therefore does not trust a mutable mapping's self-declared status or
+`retrieval_eligible` flag. Task 3 alone may perform the private one-way
+`validated -> ranked` transition that attaches `numeric_match`; that transition
+also requires the attested original decision to be `approved` and
+retrieval-eligible. Task 4 accepts only this Task 3-owned `ranked` kind. A
+validated approved case cannot bypass Task 3 by being sent directly to Task 4,
+and a ranked case cannot be passed back through either Task 2 projection to
+replace or re-attest its numeric metadata.
+
+The registered mapping type rejects direct construction. Its controlled
+`copy.copy()` and `copy.deepcopy()` paths first require a live registry entry
+and register the new identity with the same immutable attestation. Converting
+to a plain `dict`, serialization, or constructing the mapping subclass through
+`dict.__new__` intentionally loses attestation. Lookup verifies both object ID
+and weak-reference identity, preventing stale ID reuse; weak-reference cleanup
+keeps no strong case reference. The projection rejects duplicate `span_id`
+values and applies prompt text/excerpt budgets after normalized excerpts are
+attached. Self-supplied, replaced, removed, or appended excerpts—and changes
+to facts, rationale, parameters, source/profile fields, status, eligibility, or
+Task 3 numeric metadata—therefore fail closed.
+
+This registry is an application-process integrity and misuse-detection
+mechanism. It is not claimed as a security boundary against an actor with
+arbitrary Python reflection, monkeypatching, or code-execution capability, and
+the design does not rely on underscore naming, closure privacy, or an alleged
+unforgeable Python token for that stronger threat model.
+
+The shared nested-field projector omits `source_documents`,
+`retrieval_eligible`, and the complete `curation` audit object. The public Task
+2 projector never includes `numeric_match`; the private Task 3 transition adds
+it only while minting a ranked case. Task 4 verifies and copies that ranked
+case through the same shared nested schema implementation rather than
+maintaining a second EvidenceCase schema. This integration boundary does not
+claim that Task 5 retry retrieval or Task 6 production cutover is complete.
 
 ## Initial And Retry Case Separation
 
@@ -289,7 +430,9 @@ Allowed values:
 - `approved`: passes schema, source, and hash validation; retrieval-eligible;
 - `rejected`: retained for audit but never retrieval-eligible.
 
-The production selector consumes only `approved` cases.
+When the schema-v2 EvidenceCase backend is enabled, it consumes only `approved`
+and source-validated cases. The repository's production cutover flag remains
+disabled pending Task 6 evaluation.
 
 ## Synthetic Seed Cases
 
@@ -300,8 +443,9 @@ evidence. During implementation they must be either:
    production retrieval; or
 2. moved into test fixtures.
 
-There must not be a silent compatibility conversion for hifiasm production
-selection. Hifiasm uses one current case schema after Task 2.
+There must not be a silent compatibility conversion from these records into
+schema-v2 EvidenceCases. Task 2 establishes one current EvidenceCase schema;
+Task 6 decides when production selection cuts over from the existing backend.
 
 Other assembly methods may continue using their existing selector until their
 own future migration; that is a method-scoped rollout, not two active hifiasm
@@ -314,7 +458,8 @@ app/knowledge/evidence_cases.py
     Generic manifest, path, hash, curation, and source-span validation.
 
 app/domains/assembly/evidence_case.py
-    Assembly-specific EvidenceCase field validation and normalized view.
+    Assembly-specific EvidenceCase field validation, strict hifiasm-shard
+    provenance isolation, and the public prompt-safe projection.
 
 app/knowledge/packs.py
     Loads the manifest and structured case metadata without eagerly injecting
@@ -347,11 +492,14 @@ ordering.
 Implemented coverage includes:
 
 - evidence manifest and shard loading;
-- fail-closed validation for every schema-v2 record and any current-shape
-  hifiasm record with a missing/unsupported schema version;
+- fail-closed full-chain validation for every v2 hifiasm-shard record,
+  including missing/non-integer schema versions and missing, misspelled, or
+  wrongly typed tool identifiers;
+- independent handling of legacy seed records outside hifiasm v2 shards;
 - source path confinement;
-- exact quote validation, complete-document rejection, and a 2,000-character
-  excerpt ceiling;
+- overlap-aware exact quote validation, complete-document rejection,
+  full/near-full multi-span coverage rejection, and a 2,000-character excerpt
+  ceiling;
 - missing, duplicate, and ambiguous span IDs;
 - missing source hashes on approved cases;
 - checksum mismatch;
@@ -359,9 +507,32 @@ Implemented coverage includes:
   plus biological domain constraints for the five retrieval facts;
 - initial/retry required fields;
 - reported parameter provenance;
-- inferred rationale labeling;
+- inferred rationale labeling and required rationale-claim fields;
 - draft and rejected case exclusion;
-- no eager inclusion of full body/Methods text in compact state.
+- recursive prompt-safe reconstruction with nested unknown-field rejection;
+- no eager inclusion of full body/Methods text in compact state;
+- per-field and per-case structured-text limits plus per-span, span-count,
+  per-document quote/coverage, and per-case total-quote limits;
+- strict text typing for source identifiers, approved curator identity, and
+  retry failure labels while preserving mixed JSON scalar parameter values;
+- deep, allowlisted behavior of the public Task 2 prompt-safe projection;
+- public Task 2 projection rejecting ranked input and any caller-supplied
+  numeric argument, with approved validated cases unable to enter Task 4
+  directly;
+- validation-owned full-semantic weak identity attestation with exact-identity
+  lookup, GC cleanup, controlled copy/deepcopy, and explicit process-local
+  threat-model limits;
+- fail-closed ordinary-dict, direct-construction, replacement, addition,
+  removal, synchronized-tampering, and duplicate-span attacks against
+  `source_excerpts`, including the Task 2 -> Task 3 -> canonical Task 4 prompt
+  chain;
+- fail-closed draft/rejected self-promotion and post-validation mutation of
+  rationale, facts, parameters, source/applicability profile, status,
+  eligibility, or Task 3 numeric prompt metadata before Task 3/Task 4 use;
+- exact 16,000/16,001 total excerpt-character boundaries after projection and
+  complete removal of curation audit fields from the final prompt;
+- test-only activation of the numeric backend for full-chain EvidenceCase
+  validation without changing the production cutover flag.
 
 ## Acceptance Criteria
 
@@ -370,13 +541,19 @@ Implemented coverage includes:
 - [x] Approved cases have verified source hashes and valid exact-quote spans.
 - [x] Malformed schema-v2 cases fail validation instead of being silently
   discarded.
+- [x] V2 hifiasm shard provenance, not self-declared tool fields, determines
+  which records must satisfy exact `schema_version: 2` validation.
 - [x] Approved numeric retrieval facts have finite, interval-consistent schema
   validation.
 - [x] Initial and retry cases have distinct validated contracts.
-- [x] Draft, rejected, legacy, and source-invalid cases cannot enter hifiasm
-  production retrieval.
+- [x] Draft, rejected, legacy, and source-invalid records cannot enter the
+  schema-v2 EvidenceCase retrieval result.
 - [x] Full source documents remain ref-backed and out of compact graph state.
-- [x] Existing synthetic seed cases are no longer production evidence for
-  hifiasm.
+- [x] Nested unknown fields fail closed and prompt-safe normalization rebuilds
+  only documented fields under bounded text and excerpt budgets.
+- [x] Multiple excerpts cannot reconstruct a complete or near-complete source
+  document through overlapping or adjacent span chains.
+- [ ] Production selection no longer uses existing synthetic seed cases.
+  Activation is intentionally deferred to Task 6 evaluation and cutover.
 - [x] No PDF ingestion, GraphRAG, LLM Wiki, embedding, or cross-tool mapping is
   introduced.

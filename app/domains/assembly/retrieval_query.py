@@ -13,7 +13,10 @@ def build_hifiasm_retrieval_query(
     task: str,
     query_id: str | None = None,
 ) -> dict[str, Any]:
-    """Normalize profile paths and units before deterministic retrieval."""
+    """Normalize initial-profile paths and units before deterministic retrieval."""
+
+    if task != "recommend_initial":
+        raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
 
     genome_size_bp = _lookup(prompt_profile, "genome_survey.estimated_genome_size")
     read_n50_bp = _lookup(prompt_profile, "read_qc.read_n50")

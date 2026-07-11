@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import math
+import weakref
+from copy import deepcopy
 from typing import Any
 
+from app.domains.assembly.evidence_case import (
+    _project_hifiasm_ranked_prompt_case,
+    _rank_hifiasm_prompt_case,
+    project_hifiasm_retrieval_case,
+)
+from app.knowledge.evidence_cases import EvidenceCaseValidationError
 from app.knowledge.selectors import SelectionResult
 
 _FEATURES = ("genome_size_mb", "coverage", "read_n50_kb", "heterozygosity", "ploidy")
@@ -24,6 +33,232 @@ _CONFIG_KEYS = {
     "scales",
     "weights",
 }
+_RANKED_SELECTION_FIELD = "_hifiasm_ranked_selection_attestation"
+_ATTESTED_AUDIT_FIELDS = (
+    "retrieval_backend",
+    "candidate_case_ids",
+    "selected_case_ids",
+    "selected_count",
+    "eligible_case_count",
+    "total_cases",
+    "evidence_available",
+    "case_evidence_required",
+    "warning",
+    "query",
+    "trace",
+)
+
+
+def _build_ranked_selection_boundary():
+    """Bind Task 3's ordered shortlist outside caller-writable metadata."""
+
+    registry: dict[int, tuple[weakref.ReferenceType[Any], str]] = {}
+
+    class RankedSelection(dict[str, Any]):
+        __slots__ = ("__weakref__",)
+
+        def __new__(cls, *args: Any, **kwargs: Any) -> "RankedSelection":
+            raise TypeError("ranked selections can only be created by hifiasm numeric retrieval")
+
+        def __copy__(self) -> "RankedSelection":
+            return _copy_registered(self)
+
+        def __deepcopy__(self, memo: dict[int, Any]) -> "RankedSelection":
+            return _copy_registered(self, memo=memo)
+
+    def _semantic_proof(value: dict[str, Any]) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def _registered_proof(value: dict[str, Any]) -> str | None:
+        entry = registry.get(id(value))
+        if entry is None or entry[0]() is not value:
+            return None
+        return entry[1]
+
+    def _register(value: RankedSelection, proof: str) -> RankedSelection:
+        value_id = id(value)
+
+        def _discard(reference: weakref.ReferenceType[Any]) -> None:
+            entry = registry.get(value_id)
+            if entry is not None and entry[0] is reference:
+                registry.pop(value_id, None)
+
+        registry[value_id] = (weakref.ref(value, _discard), proof)
+        return value
+
+    def _new_registered(values: dict[str, Any]) -> RankedSelection:
+        result = dict.__new__(RankedSelection)
+        dict.__init__(result, values)
+        return _register(result, _semantic_proof(result))
+
+    def _copy_registered(
+        value: RankedSelection,
+        *,
+        memo: dict[int, Any] | None = None,
+    ) -> RankedSelection:
+        proof = _require_registered(value)
+        copied = dict.__new__(RankedSelection)
+        if memo is None:
+            values = dict(value)
+        else:
+            memo[id(value)] = copied
+            values = deepcopy(dict(value), memo)
+        dict.__init__(copied, values)
+        return _register(copied, proof)
+
+    def _require_registered(value: dict[str, Any]) -> str:
+        proof = _registered_proof(value)
+        if proof is None:
+            raise EvidenceCaseValidationError(
+                "hifiasm numeric shortlist requires Task 3 selection attestation"
+            )
+        if _semantic_proof(value) != proof:
+            raise EvidenceCaseValidationError(
+                "hifiasm numeric shortlist differs from its Task 3 selection attestation"
+            )
+        return proof
+
+    def _attest(
+        *,
+        selected_cases: list[dict[str, Any]],
+        metadata: dict[str, Any],
+        trace: list[dict[str, Any]],
+    ) -> RankedSelection:
+        ranked_cases = [_project_hifiasm_ranked_prompt_case(case) for case in selected_cases]
+        candidate_ids = [case["case_id"] for case in ranked_cases]
+        if metadata.get("candidate_case_ids") != candidate_ids:
+            raise EvidenceCaseValidationError("Task 3 candidate order is internally inconsistent")
+        if metadata.get("selected_case_ids") != candidate_ids:
+            raise EvidenceCaseValidationError("Task 3 selected IDs are internally inconsistent")
+        candidate_trace = sorted(
+            (item for item in trace if item.get("decision") == "candidate"),
+            key=lambda item: item.get("rank_numeric", math.inf),
+        )
+        if [item.get("case_id") for item in candidate_trace] != candidate_ids:
+            raise EvidenceCaseValidationError("Task 3 trace order is internally inconsistent")
+        candidate_ranks = [item.get("rank_numeric") for item in candidate_trace]
+        if any(rank is not None for rank in candidate_ranks):
+            if any(type(rank) is not int for rank in candidate_ranks) or candidate_ranks != list(
+                range(1, len(candidate_trace) + 1)
+            ):
+                raise EvidenceCaseValidationError(
+                    "Task 3 candidate ranks are internally inconsistent"
+                )
+        for case, trace_entry in zip(ranked_cases, candidate_trace):
+            expected_numeric = {
+                key: value
+                for key, value in trace_entry.items()
+                if key not in {"case_id", "decision", "hard_filter_reasons"}
+            }
+            if case.get("numeric_match") != expected_numeric:
+                raise EvidenceCaseValidationError(
+                    f"{case['case_id']}: ranked numeric metadata differs from Task 3 trace"
+                )
+        return _new_registered(
+            {
+                "retrieval_backend": "hifiasm_numeric",
+                "candidate_case_ids": candidate_ids,
+                "selected_case_ids": list(candidate_ids),
+                "evidence_case_ids": list(candidate_ids),
+                "selected_count": len(candidate_ids),
+                "eligible_case_count": metadata.get("eligible_case_count", 0),
+                "total_cases": metadata.get("total_cases", 0),
+                "evidence_available": bool(candidate_ids),
+                "case_evidence_required": metadata.get("case_evidence_required", False),
+                "warning": metadata.get("warning"),
+                "query": deepcopy(metadata.get("query") or {}),
+                "selected_cases": ranked_cases,
+                "trace": deepcopy(trace),
+            }
+        )
+
+    def _project_attested_audit_view(
+        selection: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return audit fields only after matching Task 3's registered envelope."""
+
+        envelope = selection.get(_RANKED_SELECTION_FIELD)
+        if not isinstance(envelope, dict):
+            raise EvidenceCaseValidationError(
+                "hifiasm numeric shortlist requires Task 3 selection attestation"
+            )
+        _require_registered(envelope)
+        for field in _ATTESTED_AUDIT_FIELDS:
+            if selection.get(field) != envelope.get(field):
+                raise EvidenceCaseValidationError(
+                    f"{field} differs from Task 3 selection attestation"
+                )
+        return {
+            field: deepcopy(envelope.get(field))
+            for field in _ATTESTED_AUDIT_FIELDS
+        }
+
+    def _validate(
+        *,
+        evidence_cases: list[dict[str, Any]],
+        case_retrieval: dict[str, Any],
+        case_limit: int,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        envelope = case_retrieval.get(_RANKED_SELECTION_FIELD)
+        if not isinstance(envelope, dict):
+            raise EvidenceCaseValidationError(
+                "hifiasm numeric shortlist requires Task 3 selection attestation"
+            )
+        _require_registered(envelope)
+
+        candidate_ids = list(envelope["candidate_case_ids"])
+        if case_retrieval.get("retrieval_backend") != envelope["retrieval_backend"]:
+            raise EvidenceCaseValidationError("retrieval_backend differs from Task 3 attestation")
+        if case_retrieval.get("candidate_case_ids") != candidate_ids:
+            raise EvidenceCaseValidationError("candidate_case_ids differ from Task 3 attestation")
+        if case_retrieval.get("selected_case_ids") != envelope["selected_case_ids"]:
+            raise EvidenceCaseValidationError("selected_case_ids differ from Task 3 attestation")
+        if case_retrieval.get("selected_count") != envelope["selected_count"]:
+            raise EvidenceCaseValidationError("selected_count differs from Task 3 attestation")
+        if case_retrieval.get("evidence_available") != envelope["evidence_available"]:
+            raise EvidenceCaseValidationError("evidence_available differs from Task 3 attestation")
+        for field in (
+            "eligible_case_count",
+            "total_cases",
+            "case_evidence_required",
+            "warning",
+        ):
+            if case_retrieval.get(field) != envelope[field]:
+                raise EvidenceCaseValidationError(
+                    f"{field} differs from Task 3 attestation"
+                )
+
+        ranked_cases = [_project_hifiasm_ranked_prompt_case(case) for case in evidence_cases]
+        evidence_ids = [case["case_id"] for case in ranked_cases]
+        expected_prefix_count = min(case_limit, len(candidate_ids))
+        if len(ranked_cases) != expected_prefix_count:
+            raise EvidenceCaseValidationError(
+                "Task 4 requires the complete attested shortlist prefix before budgeting"
+            )
+        declared_evidence_ids = case_retrieval.get("evidence_case_ids")
+        if declared_evidence_ids != evidence_ids:
+            raise EvidenceCaseValidationError(
+                "evidence_case_ids differ from the supplied Task 3 ranked cases"
+            )
+        if evidence_ids != candidate_ids[: len(evidence_ids)]:
+            raise EvidenceCaseValidationError(
+                "evidence cases do not preserve the Task 3 ranked shortlist order"
+            )
+        if ranked_cases != envelope["selected_cases"][: len(ranked_cases)]:
+            raise EvidenceCaseValidationError(
+                "evidence cases differ from the Task 3 ranked selection attestation"
+            )
+        return ranked_cases, candidate_ids
+
+    return _attest, _validate, _project_attested_audit_view
+
+
+(
+    _attest_hifiasm_ranked_selection,
+    _validate_hifiasm_ranked_selection,
+    _project_hifiasm_attested_selection_audit,
+) = _build_ranked_selection_boundary()
+del _build_ranked_selection_boundary
 
 
 class HifiasmNumericCaseRetriever:
@@ -101,9 +336,13 @@ class HifiasmNumericCaseRetriever:
             raise ValueError("at least one numeric feature weight must be positive")
 
     def select(self, cases: list[dict[str, Any]], *, query: dict[str, Any]) -> SelectionResult:
+        if query.get("task") != "recommend_initial":
+            raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
+
         trace: list[dict[str, Any]] = []
         ranked: list[tuple[float, float, int, str, dict[str, Any], dict[str, Any]]] = []
-        for case in cases:
+        for raw_case in cases:
+            case = project_hifiasm_retrieval_case(raw_case)
             case_id = str(case.get("case_id") or "")
             reasons = _hard_filter_reasons(case, query)
             if reasons:
@@ -193,6 +432,7 @@ class HifiasmNumericCaseRetriever:
             "evidence_available": evidence_available,
             "case_evidence_required": False,
             "warning": warning,
+            "query": deepcopy(query),
             "fallback_guidance": [
                 "Use readonly L1 profile facts as recommendation context.",
                 "Use parameter-recommender SKILL heuristics for bounded L2 choices.",
@@ -200,6 +440,11 @@ class HifiasmNumericCaseRetriever:
             ],
             "trace": trace,
         }
+        metadata[_RANKED_SELECTION_FIELD] = _attest_hifiasm_ranked_selection(
+            selected_cases=selected_cases,
+            metadata=metadata,
+            trace=trace,
+        )
         return SelectionResult(selected_cases=selected_cases, metadata=metadata, trace=trace)
 
     def _numeric_match(self, case: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
@@ -295,7 +540,7 @@ def _hard_filter_reasons(case: dict[str, Any], query: dict[str, Any]) -> list[st
     curation = case.get("curation") or {}
     applicability = case.get("applicability") or {}
     intervention = case.get("intervention") or {}
-    expected_case_type = "initial" if query.get("task") == "recommend_initial" else "retry"
+    expected_case_type = "initial"
     if curation.get("status") != "approved":
         reasons.append("curation_not_approved")
     elif case.get("retrieval_eligible") is not True:
@@ -319,22 +564,14 @@ def _hard_filter_reasons(case: dict[str, Any], query: dict[str, Any]) -> list[st
 
 
 def _prompt_safe_case(case: dict[str, Any], *, numeric_match: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "case_id": case.get("case_id"),
-        "case_type": case.get("case_type"),
-        "source": case.get("source") or {},
-        "applicability": case.get("applicability") or {},
-        "numeric_match": {
+    return _rank_hifiasm_prompt_case(
+        case,
+        numeric_match={
             key: value
             for key, value in numeric_match.items()
-            if key not in {"case_id", "decision", "hard_filter_reasons", "rank_numeric"}
+            if key not in {"case_id", "decision", "hard_filter_reasons"}
         },
-        "observed_facts": case.get("observed_facts") or {},
-        "intervention": case.get("intervention") or {},
-        "rationale_claims": case.get("rationale_claims") or [],
-        "outcomes": case.get("outcomes") or {},
-        "source_excerpts": case.get("source_excerpts") or [],
-    }
+    )
 
 
 def _fact_value(fact: Any) -> float | None:

@@ -1,6 +1,8 @@
 version: 1
 default_strategy: structured_default
 hifiasm_numeric:
+  # Task 6 owns production cutover after the curated corpus and evaluation pass.
+  production_cutover_enabled: false
   candidate_budget: 12
   weak_coverage_threshold: 0.6
   distance_clip: 4.0

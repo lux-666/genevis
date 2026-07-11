@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
+import secrets
+import stat
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,7 +26,24 @@ from app.domains.assembly.case_selector import evidence_read_type_matches, selec
 from app.domains.assembly.methods_evidence import (
     HIFIASM_EFFECT_AREAS,
     HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+    _seal_attested_hifiasm_methods_prompt_payload,
     build_hifiasm_evidence_payload,
+    sanitize_hifiasm_methods_prompt_payload,
+)
+from app.domains.assembly.numeric_case_retriever import (
+    _RANKED_SELECTION_FIELD,
+    _project_hifiasm_attested_selection_audit,
+)
+
+_SECURE_ARTIFACT_DIR_FD_SUPPORTED = (
+    os.name == "posix"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and all(
+        function in os.supports_dir_fd
+        for function in (os.open, os.mkdir, os.link, os.unlink)
+    )
+    and os.link in os.supports_follow_symlinks
 )
 
 # Avoid circular import by using local import in function
@@ -76,20 +98,27 @@ def build_prompt_payload(
     Hash fields are integrity fields. The running graph must call this with
     write_artifacts=True, session_id, and attempt_id so refs are replayable paths.
     """
-    if write_artifacts and (not session_id or attempt_id is None):
-        raise ValueError("session_id and attempt_id are required when write_artifacts=True")
+    artifact_plan: list[tuple[bytes, ArtifactRef, str]] = []
+    session_component: str | None = None
+    attempt_number: int | None = None
+    if write_artifacts:
+        if session_id is None or attempt_id is None:
+            raise ValueError("session_id and attempt_id are required when write_artifacts=True")
+        session_component = _validate_session_id_component(session_id)
+        attempt_number = _validate_attempt_id(attempt_id)
 
     # 1. Generate input profile reference (for replay)
     input_profile_hash = generate_profile_ref(full_profile)
 
-    # Write full_profile to disk if requested
     if write_artifacts:
-        profile_ref = write_profile_artifact(
-            profile=full_profile,
-            session_id=str(session_id),
-            attempt_id=int(attempt_id),
-            data_dir=data_dir,
+        profile_serialized, profile_ref = _prepare_json_artifact(
+            value=full_profile,
+            session_id=session_component,
+            attempt_id=attempt_number,
+            filename="input_profile.json",
+            artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
         )
+        artifact_plan.append((profile_serialized, profile_ref, "input_profile.json"))
         input_profile_ref = profile_ref.path_ref
         profile_hash_ref = profile_ref.sha256
     else:
@@ -134,13 +163,47 @@ def build_prompt_payload(
     )
 
     uses_hifiasm_evidence = case_selection.get("retrieval_backend") == "hifiasm_numeric"
+    retrieval_query_payload = None
+    retrieval_trace_payload = None
     if uses_hifiasm_evidence:
-        case_selection = _materialize_retrieval_artifacts(
+        (
             case_selection,
-            write_artifacts=write_artifacts,
-            session_id=session_id,
-            attempt_id=attempt_id,
-            data_dir=data_dir,
+            retrieval_query_payload,
+            retrieval_trace_payload,
+        ) = _materialize_retrieval_artifacts(case_selection)
+        if write_artifacts:
+            query_serialized, query_artifact = _prepare_json_artifact(
+                value=retrieval_query_payload,
+                session_id=session_component,
+                attempt_id=attempt_number,
+                filename="retrieval_query.json",
+                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+            )
+            trace_serialized, trace_artifact = _prepare_json_artifact(
+                value=retrieval_trace_payload,
+                session_id=session_component,
+                attempt_id=attempt_number,
+                filename="retrieval_trace.json",
+                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
+            )
+            artifact_plan.extend(
+                [
+                    (query_serialized, query_artifact, "retrieval_query.json"),
+                    (trace_serialized, trace_artifact, "retrieval_trace.json"),
+                ]
+            )
+            query_ref, query_hash = query_artifact.path_ref, query_artifact.sha256
+            trace_ref, trace_hash = trace_artifact.path_ref, trace_artifact.sha256
+        else:
+            query_ref = query_hash = _canonical_json_hash(retrieval_query_payload)
+            trace_ref = trace_hash = _canonical_json_hash(retrieval_trace_payload)
+        case_selection.update(
+            {
+                "query_ref": query_ref,
+                "query_hash": query_hash,
+                "trace_ref": trace_ref,
+                "trace_hash": trace_hash,
+            }
         )
     evidence_cases = (
         selected_cases[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
@@ -163,11 +226,15 @@ def build_prompt_payload(
         evidence_payload_hash = _canonical_json_hash(evidence_payload)
         evidence_payload_ref = evidence_payload_hash
         if write_artifacts:
-            evidence_artifact = write_evidence_payload_artifact(
-                payload=evidence_payload,
-                session_id=str(session_id),
-                attempt_id=int(attempt_id),
-                data_dir=data_dir,
+            evidence_serialized, evidence_artifact = _prepare_json_artifact(
+                value=evidence_payload,
+                session_id=session_component,
+                attempt_id=attempt_number,
+                filename="evidence_payload.json",
+                artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+            )
+            artifact_plan.append(
+                (evidence_serialized, evidence_artifact, "evidence_payload.json")
             )
             evidence_payload_ref = evidence_artifact.path_ref
             evidence_payload_hash = evidence_artifact.sha256
@@ -249,7 +316,11 @@ def build_prompt_payload(
             }
         )
 
-    # 6. Generate prompt payload reference (for audit)
+    # 6. Close the hifiasm prompt boundary before hashing or publishing anything.
+    if uses_hifiasm_evidence:
+        payload = sanitize_hifiasm_methods_prompt_payload(payload)
+
+    # 7. Generate prompt payload reference (for audit)
     # CANONICAL HASH SEMANTICS: We compute the hash by excluding self-referential
     # fields (prompt_payload_ref, prompt_payload_hash) to avoid circular dependencies.
     # This means prompt_payload_hash is NOT a hash of the complete file content,
@@ -259,21 +330,46 @@ def build_prompt_payload(
     payload_for_hash = {k: v for k, v in payload.items() if k not in ("prompt_payload_ref", "prompt_payload_hash")}
     payload_hash = generate_payload_ref(payload_for_hash)
 
-    # Write prompt_payload to disk if requested
+    # Bind the final ref/hash before preparing any publication. Task 4's registry
+    # proof covers these exact final values even though the canonical hash excludes
+    # the two self-referential fields.
     if write_artifacts:
-        payload["prompt_payload_ref"] = (
-            f"data/artifacts/assembly/{session_id}/parameter_attempt_{int(attempt_id)}/prompt_payload.json"
-        )
-        payload["prompt_payload_hash"] = payload_hash
-        write_payload_artifact(
-            payload=payload,
-            session_id=str(session_id),
-            attempt_id=int(attempt_id),
-            data_dir=data_dir,
+        prompt_payload_ref = _artifact_path_ref(
+            session_component,
+            attempt_number,
+            "prompt_payload.json",
         )
     else:
-        payload["prompt_payload_ref"] = payload_hash
+        prompt_payload_ref = payload_hash
+
+    if uses_hifiasm_evidence:
+        payload = _seal_attested_hifiasm_methods_prompt_payload(
+            payload,
+            prompt_payload_ref=prompt_payload_ref,
+            prompt_payload_hash=payload_hash,
+        )
+    else:
+        payload["prompt_payload_ref"] = prompt_payload_ref
         payload["prompt_payload_hash"] = payload_hash
+
+    if write_artifacts:
+        prompt_serialized, prompt_artifact = _prepare_json_artifact(
+            value=payload,
+            session_id=session_component,
+            attempt_id=attempt_number,
+            filename="prompt_payload.json",
+            artifact_type=ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+        )
+        artifact_plan.append((prompt_serialized, prompt_artifact, "prompt_payload.json"))
+        for serialized, artifact_ref, filename in artifact_plan:
+            _publish_prepared_json_artifact(
+                serialized=serialized,
+                artifact_ref=artifact_ref,
+                session_component=session_component,
+                attempt_number=attempt_number,
+                filename=filename,
+                data_dir=data_dir,
+            )
 
     return payload
 
@@ -320,58 +416,40 @@ def generate_payload_ref(prompt_payload: dict[str, Any]) -> str:
 
 def _materialize_retrieval_artifacts(
     selection: dict[str, Any],
-    *,
-    write_artifacts: bool,
-    session_id: str | None,
-    attempt_id: int | None,
-    data_dir: Path | None,
-) -> dict[str, Any]:
-    compact = dict(selection)
-    query = dict(compact.pop("query", {}) or {})
-    trace_entries = list(compact.pop("trace", []) or [])
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Validate Task 3 and return in-memory retrieval audit payloads only."""
+
+    attested = _project_hifiasm_attested_selection_audit(selection)
+    query = dict(attested["query"] or {})
+    trace_entries = list(attested["trace"] or [])
+    compact = {
+        field: attested[field]
+        for field in (
+            "retrieval_backend",
+            "selected_case_ids",
+            "candidate_case_ids",
+            "selected_count",
+            "eligible_case_count",
+            "total_cases",
+            "evidence_available",
+            "case_evidence_required",
+            "warning",
+        )
+    }
+    compact[_RANKED_SELECTION_FIELD] = selection[_RANKED_SELECTION_FIELD]
+    if "hifiasm_numeric_gate" in selection:
+        compact["hifiasm_numeric_gate"] = dict(selection["hifiasm_numeric_gate"])
     trace_payload = {
-        "retrieval_backend": compact.get("retrieval_backend"),
+        "retrieval_backend": attested["retrieval_backend"],
         "query_id": query.get("query_id"),
-        "selected_case_ids": list(compact.get("selected_case_ids") or []),
-        "eligible_case_count": compact.get("eligible_case_count", 0),
-        "warning": compact.get("warning"),
+        "selected_case_ids": list(attested["selected_case_ids"] or []),
+        "eligible_case_count": attested["eligible_case_count"],
+        "warning": attested["warning"],
         "trace": trace_entries,
     }
 
-    query_ref = _canonical_json_hash(query)
-    trace_ref = _canonical_json_hash(trace_payload)
-    query_hash = query_ref
-    trace_hash = trace_ref
-    if write_artifacts:
-        query_artifact = _write_json_artifact(
-            value=query,
-            session_id=str(session_id),
-            attempt_id=int(attempt_id),
-            filename="retrieval_query.json",
-            artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
-            data_dir=data_dir,
-        )
-        trace_artifact = _write_json_artifact(
-            value=trace_payload,
-            session_id=str(session_id),
-            attempt_id=int(attempt_id),
-            filename="retrieval_trace.json",
-            artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
-            data_dir=data_dir,
-        )
-        query_ref, query_hash = query_artifact.path_ref, query_artifact.sha256
-        trace_ref, trace_hash = trace_artifact.path_ref, trace_artifact.sha256
-
-    compact.update(
-        {
-            "query_id": query.get("query_id"),
-            "query_ref": query_ref,
-            "query_hash": query_hash,
-            "trace_ref": trace_ref,
-            "trace_hash": trace_hash,
-        }
-    )
-    return compact
+    compact["query_id"] = query.get("query_id")
+    return compact, query, trace_payload
 
 
 def _canonical_json_hash(value: Any) -> str:
@@ -454,6 +532,38 @@ def write_evidence_payload_artifact(
     )
 
 
+def _artifact_path_ref(
+    session_component: str,
+    attempt_number: int,
+    filename: str,
+) -> str:
+    return (
+        f"data/artifacts/assembly/{session_component}/"
+        f"parameter_attempt_{attempt_number}/{filename}"
+    )
+
+
+def _prepare_json_artifact(
+    *,
+    value: Any,
+    session_id: str,
+    attempt_id: int,
+    filename: str,
+    artifact_type: str,
+) -> tuple[bytes, ArtifactRef]:
+    """Serialize and validate an immutable artifact entirely in memory."""
+
+    session_component = _validate_session_id_component(session_id)
+    attempt_number = _validate_attempt_id(attempt_id)
+    serialized = json.dumps(value, indent=2).encode("utf-8")
+    artifact_ref = ArtifactRef(
+        path_ref=_artifact_path_ref(session_component, attempt_number, filename),
+        sha256=hashlib.sha256(serialized).hexdigest(),
+        artifact_type=artifact_type,
+    )
+    return serialized, artifact_ref
+
+
 def _write_json_artifact(
     *,
     value: Any,
@@ -463,23 +573,363 @@ def _write_json_artifact(
     artifact_type: str,
     data_dir: Path | None = None,
 ) -> ArtifactRef:
-    """Write one immutable attempt-scoped JSON artifact."""
+    """Prepare then publish one immutable attempt-scoped JSON artifact."""
 
-    root = data_dir or Path("data")
-    artifact_dir = root / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = artifact_dir / filename
-    path_ref = f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}"
-    with artifact_path.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, indent=2)
-
-    from app.schemas.artifacts import file_sha256
-
-    return ArtifactRef(
-        path_ref=path_ref,
-        sha256=file_sha256(artifact_path),
+    session_component = _validate_session_id_component(session_id)
+    attempt_number = _validate_attempt_id(attempt_id)
+    serialized, artifact_ref = _prepare_json_artifact(
+        value=value,
+        session_id=session_component,
+        attempt_id=attempt_number,
+        filename=filename,
         artifact_type=artifact_type,
     )
+    _publish_prepared_json_artifact(
+        serialized=serialized,
+        artifact_ref=artifact_ref,
+        session_component=session_component,
+        attempt_number=attempt_number,
+        filename=filename,
+        data_dir=data_dir,
+    )
+    return artifact_ref
+
+
+def _publish_prepared_json_artifact(
+    *,
+    serialized: bytes,
+    artifact_ref: ArtifactRef,
+    session_component: str,
+    attempt_number: int,
+    filename: str,
+    data_dir: Path | None,
+) -> None:
+    """Publish bytes whose serialization, hash, and ArtifactRef already succeeded."""
+
+    # No post-publication read or validation is needed: the ref was constructed
+    # from these exact bytes before any artifact in the attempt plan was published.
+    _ = artifact_ref
+    _require_secure_artifact_writer_support()
+    attempt_component = f"parameter_attempt_{attempt_number}"
+    directory_fds: list[int] = []
+    namespace_components: list[tuple[str, str]] = []
+    attempt_fd: int | None = None
+    temp_name: str | None = None
+    published_new = False
+    try:
+        directory_fds, namespace_components = _open_attempt_directory_fds(
+            data_dir or Path("data"),
+            session_component=session_component,
+            attempt_component=attempt_component,
+        )
+        attempt_fd = directory_fds[-1]
+        temp_name, handle = _open_unique_temp_file(attempt_fd, filename)
+        with handle:
+            _write_and_sync_json(handle, serialized)
+            _verify_artifact_namespace(directory_fds, namespace_components)
+            try:
+                os.link(
+                    temp_name,
+                    filename,
+                    src_dir_fd=attempt_fd,
+                    dst_dir_fd=attempt_fd,
+                    follow_symlinks=False,
+                )
+                published_new = True
+            except FileExistsError:
+                if not _existing_regular_file_matches(
+                    attempt_fd,
+                    filename,
+                    serialized,
+                ):
+                    raise FileExistsError(
+                        errno.EEXIST,
+                        "immutable attempt artifact already exists with different content",
+                        filename,
+                    ) from None
+            _fsync_directory(attempt_fd)
+            os.unlink(temp_name, dir_fd=attempt_fd)
+            _fsync_directory(attempt_fd)
+            temp_name = None
+            _verify_artifact_namespace(directory_fds, namespace_components)
+    except BaseException:
+        if published_new and attempt_fd is not None:
+            try:
+                os.unlink(filename, dir_fd=attempt_fd)
+                _fsync_directory(attempt_fd)
+            except BaseException:
+                # The active publication/namespace error remains authoritative.
+                pass
+        raise
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        cleanup_error: BaseException | None = None
+        if temp_name is not None and attempt_fd is not None:
+            try:
+                os.unlink(temp_name, dir_fd=attempt_fd)
+                _fsync_directory(attempt_fd)
+            except FileNotFoundError:
+                try:
+                    _fsync_directory(attempt_fd)
+                except BaseException as exc:
+                    cleanup_error = exc
+            except BaseException as exc:  # preserve KeyboardInterrupt/SystemExit
+                cleanup_error = exc
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except BaseException as exc:  # pragma: no cover - defensive OS cleanup
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None and not active_exception:
+            raise cleanup_error
+
+
+def _validate_session_id_component(session_id: str) -> str:
+    """Return a safe single path component for an artifact session."""
+
+    separators = {"/", "\\", os.sep}
+    if os.altsep:
+        separators.add(os.altsep)
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or session_id in {".", ".."}
+        or "\x00" in session_id
+        or Path(session_id).is_absolute()
+        or any(separator in session_id for separator in separators)
+    ):
+        raise ValueError("session_id must be a safe single path component")
+    return session_id
+
+
+def _validate_attempt_id(attempt_id: int) -> int:
+    """Return an exact, non-negative integer attempt identifier."""
+
+    if type(attempt_id) is not int or attempt_id < 0:
+        raise ValueError("attempt_id must be an exact non-negative integer")
+    return attempt_id
+
+
+def _require_secure_artifact_writer_support() -> None:
+    """Fail closed unless anchored, no-follow POSIX filesystem APIs exist."""
+
+    if not _SECURE_ARTIFACT_DIR_FD_SUPPORTED:
+        raise OSError(
+            errno.ENOTSUP,
+            "secure artifact publication requires POSIX dir_fd and O_NOFOLLOW support",
+        )
+
+
+def _directory_open_flags() -> int:
+    """Flags for opening a trusted directory without following a symlink."""
+
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_or_create_directory_at(parent_fd: int, name: str, *, label: str) -> int:
+    """Open one child directory relative to a trusted parent, never a symlink."""
+
+    created = False
+    try:
+        os.mkdir(name, mode=0o755, dir_fd=parent_fd)
+        created = True
+    except FileExistsError:
+        pass
+    if created:
+        _fsync_directory(parent_fd)
+    try:
+        return os.open(name, _directory_open_flags(), dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(f"{label} must not be a symlink or non-directory") from exc
+        raise
+
+
+def _open_attempt_directory_fds(
+    data_root: Path,
+    *,
+    session_component: str,
+    attempt_component: str,
+) -> tuple[list[int], list[tuple[str, str]]]:
+    """Create/open and retain the root-anchored artifact directory chain."""
+
+    absolute_root = Path(os.path.abspath(data_root))
+    components = [(part, "data_dir") for part in absolute_root.parts[1:]]
+    components.extend(
+        [
+            ("artifacts", "artifact root"),
+            ("assembly", "assembly artifact directory"),
+            (session_component, "session_id directory"),
+            (attempt_component, "attempt_id directory"),
+        ]
+    )
+    directory_fds = [os.open("/", _directory_open_flags())]
+    try:
+        for component, label in components:
+            directory_fds.append(
+                _open_or_create_directory_at(
+                    directory_fds[-1],
+                    component,
+                    label=label,
+                )
+            )
+        return directory_fds, components
+    except BaseException:
+        for directory_fd in reversed(directory_fds):
+            try:
+                os.close(directory_fd)
+            except BaseException:
+                pass
+        raise
+
+
+def _verify_artifact_namespace(
+    directory_fds: list[int],
+    components: list[tuple[str, str]],
+) -> None:
+    """Require the root-visible directory chain to retain the opened inodes."""
+
+    for index, (component, label) in enumerate(components):
+        try:
+            probe_fd = os.open(
+                component,
+                _directory_open_flags(),
+                dir_fd=directory_fds[index],
+            )
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+                raise ValueError(
+                    f"artifact namespace changed during publication at {label}"
+                ) from exc
+            raise
+        try:
+            expected = os.fstat(directory_fds[index + 1])
+            actual = os.fstat(probe_fd)
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                raise ValueError(
+                    f"artifact namespace changed during publication at {label}"
+                )
+        finally:
+            active_exception = sys.exc_info()[0] is not None
+            try:
+                os.close(probe_fd)
+            except BaseException:
+                if not active_exception:
+                    raise
+
+
+def _open_unique_temp_file(directory_fd: int, filename: str) -> tuple[str, Any]:
+    """Create an unpredictable same-directory temporary file by anchored FD."""
+
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _ in range(100):
+        temp_name = f".{filename}.{secrets.token_hex(12)}.tmp"
+        try:
+            temp_fd = os.open(temp_name, flags, 0o600, dir_fd=directory_fd)
+        except FileExistsError:
+            continue
+        try:
+            return temp_name, os.fdopen(temp_fd, "wb")
+        except BaseException:
+            try:
+                os.close(temp_fd)
+            except BaseException:
+                pass
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except BaseException:
+                pass
+            else:
+                try:
+                    _fsync_directory(directory_fd)
+                except BaseException:
+                    pass
+            raise
+    raise FileExistsError("could not allocate a unique artifact temporary file")
+
+
+def _existing_regular_file_matches(
+    directory_fd: int,
+    filename: str,
+    expected: bytes,
+) -> bool:
+    """Compare an existing no-follow regular file through its anchored FD."""
+
+    flags = (
+        os.O_RDONLY
+        | os.O_NONBLOCK
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        existing_fd = os.open(filename, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENXIO}:
+            raise FileExistsError(
+                errno.EEXIST,
+                "immutable attempt artifact exists but is not a regular file",
+                filename,
+            ) from None
+        raise
+    try:
+        metadata = os.fstat(existing_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise FileExistsError(
+                errno.EEXIST,
+                "immutable attempt artifact exists but is not a regular file",
+                filename,
+            )
+        if metadata.st_size != len(expected):
+            return False
+        offset = 0
+        while offset < len(expected):
+            chunk = os.read(existing_fd, min(64 * 1024, len(expected) - offset))
+            if not chunk:
+                return False
+            if chunk != expected[offset : offset + len(chunk)]:
+                return False
+            offset += len(chunk)
+        return os.read(existing_fd, 1) == b""
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            os.close(existing_fd)
+        except BaseException:
+            if not active_exception:
+                raise
+
+
+def _fsync_directory(directory_fd: int) -> None:
+    """Sync a published directory entry, tolerating documented unsupported OSes."""
+
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        unsupported = {errno.EINVAL, errno.ENOTSUP}
+        if hasattr(errno, "EOPNOTSUPP"):
+            unsupported.add(errno.EOPNOTSUPP)
+        if exc.errno not in unsupported:
+            raise
+
+
+def _write_and_sync_json(handle: Any, serialized: bytes) -> None:
+    """Write complete JSON bytes and sync them before atomic publication."""
+
+    handle.write(serialized)
+    handle.flush()
+    os.fsync(handle.fileno())
 
 
 def load_profile_by_ref(ref: str, data_dir: Path | None = None) -> dict[str, Any]:

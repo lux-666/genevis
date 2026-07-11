@@ -1,14 +1,21 @@
 """Hifiasm Methods-aware evidence and recommendation contracts.
 
 This module deliberately contains only deterministic, prompt-visible logic. Numeric
-ranking remains owned by ``numeric_case_retriever`` and catalog/rule validation
-remains owned by the assembly parameter validator.
+ranking remains owned by ``numeric_case_retriever`` and EvidenceCase schema projection
+remains owned by ``evidence_case``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import weakref
 from copy import deepcopy
 from typing import Any
+
+from app.domains.assembly.evidence_case import _project_hifiasm_ranked_prompt_case
+from app.domains.assembly.numeric_case_retriever import _validate_hifiasm_ranked_selection
+from app.knowledge.evidence_cases import MAX_SOURCE_EXCERPTS_PER_CASE
 
 HIFIASM_EFFECT_AREAS = (
     "kmer_and_seed_selection",
@@ -21,6 +28,13 @@ HIFIASM_EFFECT_AREAS = (
     "performance_and_memory",
 )
 HIFIASM_METHODS_EVIDENCE_CASE_LIMIT = 8
+HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE = 12
+HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE = 6_000
+HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS = 24_000
+HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES = 65_536
+HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 1
+
+_PROMPT_SCHEMA_VERSION_FIELD = "hifiasm_methods_prompt_schema_version"
 
 _ALLOWED_RELEVANCE = {"strong", "medium", "weak", "not_relevant"}
 _ALLOWED_ACTIONS = {"set", "keep_default", "omit"}
@@ -32,14 +46,64 @@ _ALLOWED_EVIDENCE_BASES = {
     "retry_failure",
     "catalog_default",
 }
-_EVIDENCE_CASE_FIELDS = (
-    "source",
-    "numeric_match",
-    "observed_facts",
-    "intervention",
-    "rationale_claims",
-    "source_excerpts",
-    "outcomes",
+_NUMERIC_MATCH_FIELDS = (
+    "distance",
+    "numeric_distance",
+    "numeric_similarity_display",
+    "evidence_coverage",
+    "weak_evidence",
+    "rank_numeric",
+    "feature_distances",
+)
+_FEATURE_DISTANCE_FIELDS = (
+    "query",
+    "case",
+    "distance",
+    "raw_distance",
+    "weight",
+    "status",
+)
+_PROMPT_COPY_FIELDS = (
+    "method_id",
+    "task",
+    "input_profile_ref",
+    "input_profile_hash",
+    "prompt_profile",
+    "catalog_subset",
+    "rules",
+    "recommendation_policy",
+    "skill_instructions",
+    "readonly_params",
+    "adjustable_params",
+    "evidence_payload_ref",
+    "evidence_payload_hash",
+)
+_PROMPT_SELF_FIELDS = ("prompt_payload_ref", "prompt_payload_hash")
+_CASE_RETRIEVAL_SCALAR_FIELDS = (
+    "retrieval_backend",
+    "query_id",
+    "selected_count",
+    "eligible_case_count",
+    "total_cases",
+    "evidence_available",
+    "case_evidence_required",
+    "warning",
+    "query_ref",
+    "query_hash",
+    "trace_ref",
+    "trace_hash",
+    "evidence_payload_ref",
+    "evidence_payload_hash",
+)
+_CASE_RETRIEVAL_ID_FIELDS = (
+    "selected_case_ids",
+    "candidate_case_ids",
+    "evidence_case_ids",
+)
+_GATE_FIELDS = (
+    "production_cutover_enabled",
+    "decision",
+    "reason",
 )
 
 
@@ -55,74 +119,618 @@ def build_hifiasm_evidence_payload(
     evidence_cases: list[dict[str, Any]],
     case_retrieval: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the bounded, replayable Methods evidence payload.
+    """Build one bounded evidence payload from Task 2 prompt-safe projections."""
 
-    The numeric retriever is the only authority allowed to define this candidate
-    set. Full source documents are intentionally not accepted by this builder;
-    only the already validated prompt-safe case representation is copied.
-    """
+    ranked_cases, retrieval_candidate_ids = _validate_hifiasm_ranked_selection(
+        evidence_cases=evidence_cases,
+        case_retrieval=case_retrieval,
+        case_limit=HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+    )
+    requested_evidence_ids = [case["case_id"] for case in ranked_cases]
+    evidence_case_ids = requested_evidence_ids[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
+    retrieval_candidate_set = set(retrieval_candidate_ids)
 
-    if case_retrieval.get("retrieval_backend") != "hifiasm_numeric":
-        raise ValueError("hifiasm evidence payload requires retrieval_backend=hifiasm_numeric")
-    retrieval_candidate_ids = _string_list(
+    raw_cases_by_id: dict[str, dict[str, Any]] = {}
+    for ranked_case in ranked_cases:
+        case_id = ranked_case["case_id"]
+        if case_id not in retrieval_candidate_set:
+            raise ValueError(f"evidence case {case_id!r} is outside the numeric shortlist")
+        if case_id in raw_cases_by_id:
+            raise ValueError(f"duplicate evidence case {case_id!r}")
+        raw_cases_by_id[case_id] = ranked_case
+
+    missing = [case_id for case_id in evidence_case_ids if case_id not in raw_cases_by_id]
+    if missing:
+        raise ValueError(f"numeric shortlist cases missing from evidence payload: {missing}")
+
+    omitted_cases = [
+        {"case_id": case_id, "reason": "serialized_evidence_bytes"}
+        for case_id in retrieval_candidate_ids[
+            len(evidence_case_ids):HIFIASM_METHODS_EVIDENCE_CASE_LIMIT
+        ]
+    ] + [
+        {"case_id": case_id, "reason": "case_limit"}
+        for case_id in retrieval_candidate_ids[HIFIASM_METHODS_EVIDENCE_CASE_LIMIT:]
+    ]
+    cases: list[dict[str, Any]] = []
+    omitted_spans: list[dict[str, str]] = []
+    total_excerpt_chars = 0
+    for case_id in evidence_case_ids:
+        case, case_omitted_spans, case_excerpt_chars = _budget_evidence_case(
+            raw_cases_by_id[case_id],
+            total_excerpt_chars=total_excerpt_chars,
+        )
+        cases.append(case)
+        omitted_spans.extend(case_omitted_spans)
+        total_excerpt_chars += case_excerpt_chars
+
+    payload = {
+        "retrieval_backend": "hifiasm_numeric",
+        "query_id": _safe_optional_scalar(case_retrieval.get("query_id")),
+        "candidate_case_ids": [case["case_id"] for case in cases],
+        "retrieval_candidate_case_ids": retrieval_candidate_ids,
+        "warning": _safe_optional_scalar(case_retrieval.get("warning")),
+        "effect_areas": list(HIFIASM_EFFECT_AREAS),
+        "cases": cases,
+        "budget": {
+            "limits": {
+                "cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+                "spans_per_case": HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE,
+                "excerpt_chars_per_case": HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE,
+                "total_excerpt_chars": HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS,
+                "serialized_bytes": HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES,
+            },
+            "used": {},
+            "case_usage": [],
+            "omitted_cases": omitted_cases,
+            "omitted_spans": omitted_spans,
+        },
+    }
+    _refresh_budget_usage(payload)
+    while payload["budget"]["used"]["serialized_bytes"] > HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES:
+        if not payload["cases"]:
+            raise ValueError("hifiasm Methods evidence metadata exceeds the serialized byte budget")
+        omitted_case = payload["cases"].pop()
+        omitted_case_id = omitted_case["case_id"]
+        payload["budget"]["omitted_cases"].append(
+            {"case_id": omitted_case_id, "reason": "serialized_evidence_bytes"}
+        )
+        payload["budget"]["omitted_spans"] = [
+            item
+            for item in payload["budget"]["omitted_spans"]
+            if item["case_id"] != omitted_case_id
+        ]
+        payload["candidate_case_ids"] = [case["case_id"] for case in payload["cases"]]
+        _refresh_budget_usage(payload)
+    candidate_order = {case_id: index for index, case_id in enumerate(retrieval_candidate_ids)}
+    payload["budget"]["omitted_cases"].sort(
+        key=lambda item: candidate_order.get(item["case_id"], len(candidate_order))
+    )
+    _refresh_budget_usage(payload)
+    return payload
+
+
+def _validate_canonical_hifiasm_methods_prompt_payload(
+    prompt_payload: dict[str, Any],
+) -> None:
+    version = prompt_payload.get(_PROMPT_SCHEMA_VERSION_FIELD)
+    if type(version) is not int or version != HIFIASM_METHODS_PROMPT_SCHEMA_VERSION:
+        raise ValueError("unsupported canonical hifiasm Methods prompt schema version")
+
+    required_fields = {
+        _PROMPT_SCHEMA_VERSION_FIELD,
+        "selected_cases",
+        "case_selection",
+        "case_retrieval",
+        "evidence_cases",
+        "methods_evidence",
+    }
+    allowed_fields = set(_PROMPT_COPY_FIELDS) | set(_PROMPT_SELF_FIELDS) | required_fields
+    missing_fields = required_fields - set(prompt_payload)
+    unexpected_fields = set(prompt_payload) - allowed_fields
+    if missing_fields or unexpected_fields:
+        raise ValueError(
+            "canonical hifiasm Methods prompt has invalid top-level fields; "
+            f"missing={sorted(missing_fields)}, unexpected={sorted(unexpected_fields)}"
+        )
+    if prompt_payload["selected_cases"] != []:
+        raise ValueError("canonical hifiasm Methods prompt requires selected_cases=[]")
+
+    prompt_ref = prompt_payload.get("prompt_payload_ref")
+    if prompt_ref is not None and (not isinstance(prompt_ref, str) or not prompt_ref.strip()):
+        raise ValueError("canonical prompt_payload_ref must be a non-empty string")
+    prompt_hash = prompt_payload.get("prompt_payload_hash")
+    if prompt_hash is not None:
+        semantic_payload = {
+            key: value
+            for key, value in prompt_payload.items()
+            if key not in _PROMPT_SELF_FIELDS
+        }
+        expected_hash = hashlib.sha256(
+            json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if prompt_hash != expected_hash:
+            raise ValueError("canonical prompt_payload_hash does not match canonical content")
+
+    case_retrieval = prompt_payload["case_retrieval"]
+    if not isinstance(case_retrieval, dict):
+        raise ValueError("canonical case_retrieval must be an object")
+    evidence_case_ids = _string_list(
+        case_retrieval.get("evidence_case_ids"),
+        field="evidence_case_ids",
+    )
+    if case_retrieval != _project_case_retrieval(
+        case_retrieval,
+        evidence_case_ids=evidence_case_ids,
+    ):
+        raise ValueError("canonical case_retrieval contains non-projected fields")
+    if prompt_payload["case_selection"] != case_retrieval:
+        raise ValueError("canonical case_selection must equal case_retrieval")
+
+    evidence_cases = prompt_payload["evidence_cases"]
+    if not isinstance(evidence_cases, list):
+        raise ValueError("canonical evidence_cases must be a list")
+    visible_case_ids: list[str] = []
+    for case in evidence_cases:
+        if not isinstance(case, dict):
+            raise ValueError("canonical evidence_cases entries must be objects")
+        visible_case_ids.append(_nonempty_string(case.get("case_id"), field="case_id"))
+    if len(visible_case_ids) != len(set(visible_case_ids)):
+        raise ValueError("canonical evidence_cases must not contain duplicate case IDs")
+    if visible_case_ids != evidence_case_ids:
+        raise ValueError("canonical evidence cases do not match evidence_case_ids")
+
+    candidate_case_ids = _string_list(
         case_retrieval.get("candidate_case_ids") or [],
         field="candidate_case_ids",
     )
-    if len(retrieval_candidate_ids) != len(set(retrieval_candidate_ids)):
-        raise ValueError("candidate_case_ids must not contain duplicates")
-    declared_evidence_ids = case_retrieval.get("evidence_case_ids")
-    if declared_evidence_ids is None:
-        evidence_case_ids = retrieval_candidate_ids[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
-    else:
-        evidence_case_ids = _string_list(
-            declared_evidence_ids,
-            field="evidence_case_ids",
-        )
-    if len(evidence_case_ids) > HIFIASM_METHODS_EVIDENCE_CASE_LIMIT:
-        raise ValueError(
-            "hifiasm Methods evidence payload may contain at most "
-            f"{HIFIASM_METHODS_EVIDENCE_CASE_LIMIT} cases"
-        )
-    if evidence_case_ids != retrieval_candidate_ids[: len(evidence_case_ids)]:
-        raise ValueError("evidence_case_ids must be the leading numeric retrieval candidates")
-    candidate_set = set(evidence_case_ids)
+    if len(candidate_case_ids) != len(set(candidate_case_ids)):
+        raise ValueError("canonical candidate_case_ids must not contain duplicates")
+    if visible_case_ids != candidate_case_ids[: len(visible_case_ids)]:
+        raise ValueError("canonical evidence cases must preserve numeric shortlist order")
 
-    cases: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw_case in evidence_cases:
-        if not isinstance(raw_case, dict):
-            raise ValueError("evidence_cases entries must be objects")
-        case_id = _nonempty_string(raw_case.get("case_id"), field="case_id")
-        if case_id not in candidate_set:
-            raise ValueError(f"evidence case {case_id!r} is outside the numeric shortlist")
-        if case_id in seen:
-            raise ValueError(f"duplicate evidence case {case_id!r}")
-        seen.add(case_id)
-        if "source_documents" in raw_case:
-            raise ValueError("full source_documents are not allowed in the evidence payload")
+    methods_evidence = prompt_payload["methods_evidence"]
+    if not isinstance(methods_evidence, dict):
+        raise ValueError("canonical methods_evidence must be an object")
+    budget = methods_evidence.get("evidence_budget")
+    if not isinstance(budget, dict):
+        raise ValueError("canonical evidence_budget must be an object")
+    if methods_evidence != _project_methods_evidence(budget):
+        raise ValueError("canonical methods_evidence contains non-projected fields")
+    _validate_canonical_evidence_budget(
+        budget,
+        evidence_cases=evidence_cases,
+        candidate_case_ids=candidate_case_ids,
+        case_retrieval=case_retrieval,
+    )
 
-        case = {"case_id": case_id}
-        for field in _EVIDENCE_CASE_FIELDS:
-            case[field] = deepcopy(raw_case.get(field) or ([] if field in {"rationale_claims", "source_excerpts"} else {}))
-        case["missing_fields"] = [
-            field for field in _EVIDENCE_CASE_FIELDS if not raw_case.get(field)
-        ]
-        cases.append(case)
+    policy = prompt_payload.get("recommendation_policy")
+    if isinstance(policy, dict):
+        allowed_bases = policy.get("allowed_evidence_bases")
+        if isinstance(allowed_bases, list) and "skill_heuristic" in allowed_bases:
+            raise ValueError("canonical recommendation policy must disable skill_heuristic")
 
-    ordered_cases = sorted(cases, key=lambda case: evidence_case_ids.index(case["case_id"]))
-    if [case["case_id"] for case in ordered_cases] != evidence_case_ids:
-        missing = [case_id for case_id in evidence_case_ids if case_id not in seen]
-        raise ValueError(f"numeric shortlist cases missing from evidence payload: {missing}")
 
-    return {
-        "retrieval_backend": "hifiasm_numeric",
-        "query_id": case_retrieval.get("query_id"),
-        "candidate_case_ids": evidence_case_ids,
-        "retrieval_candidate_case_ids": retrieval_candidate_ids,
-        "warning": case_retrieval.get("warning"),
-        "effect_areas": list(HIFIASM_EFFECT_AREAS),
-        "cases": ordered_cases,
+def _validate_canonical_evidence_budget(
+    budget: dict[str, Any],
+    *,
+    evidence_cases: list[dict[str, Any]],
+    candidate_case_ids: list[str],
+    case_retrieval: dict[str, Any],
+) -> None:
+    expected_limits = {
+        "cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+        "spans_per_case": HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE,
+        "excerpt_chars_per_case": HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE,
+        "total_excerpt_chars": HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS,
+        "serialized_bytes": HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES,
     }
+    if set(budget) != {"limits", "used", "case_usage", "omitted_cases", "omitted_spans"}:
+        raise ValueError("canonical evidence_budget has invalid fields")
+    if budget.get("limits") != expected_limits:
+        raise ValueError("canonical evidence_budget limits do not match the contract")
+
+    visible_case_ids = [case["case_id"] for case in evidence_cases]
+    if len(evidence_cases) > HIFIASM_METHODS_EVIDENCE_CASE_LIMIT:
+        raise ValueError("canonical evidence_cases exceeds the case limit")
+    total_excerpt_chars = 0
+    for case in evidence_cases:
+        spans = case.get("source_excerpts") or []
+        excerpt_chars = sum(len(span["quote"]) for span in spans)
+        if len(spans) > HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE:
+            raise ValueError("canonical evidence case exceeds the per-case span limit")
+        if excerpt_chars > HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE:
+            raise ValueError("canonical evidence case exceeds the per-case excerpt limit")
+        total_excerpt_chars += excerpt_chars
+    if total_excerpt_chars > HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS:
+        raise ValueError("canonical evidence cases exceed the total excerpt limit")
+
+    expected_omitted_cases = [
+        {"case_id": case_id, "reason": "serialized_evidence_bytes"}
+        for case_id in candidate_case_ids[
+            len(visible_case_ids):HIFIASM_METHODS_EVIDENCE_CASE_LIMIT
+        ]
+    ] + [
+        {"case_id": case_id, "reason": "case_limit"}
+        for case_id in candidate_case_ids[HIFIASM_METHODS_EVIDENCE_CASE_LIMIT:]
+    ]
+    if budget.get("omitted_cases") != expected_omitted_cases:
+        raise ValueError("canonical omitted_cases do not match shortlist budgeting")
+
+    omitted_spans = budget.get("omitted_spans")
+    if not isinstance(omitted_spans, list):
+        raise ValueError("canonical omitted_spans must be a list")
+    if len(omitted_spans) > (
+        HIFIASM_METHODS_EVIDENCE_CASE_LIMIT * MAX_SOURCE_EXCERPTS_PER_CASE
+    ):
+        raise ValueError("canonical omitted_spans exceeds the bounded audit limit")
+    visible_spans_by_case = {
+        case["case_id"]: {
+            span["span_id"] for span in case.get("source_excerpts") or []
+        }
+        for case in evidence_cases
+    }
+    seen_omitted_spans: set[tuple[str, str]] = set()
+    for item in omitted_spans:
+        if not isinstance(item, dict) or set(item) != {"case_id", "span_id", "reason"}:
+            raise ValueError("canonical omitted_spans entries have invalid fields")
+        case_id = _nonempty_string(item.get("case_id"), field="omitted_spans.case_id")
+        span_id = _nonempty_string(item.get("span_id"), field="omitted_spans.span_id")
+        if item.get("reason") not in {
+            "span_limit_per_case",
+            "excerpt_chars_per_case",
+            "excerpt_chars_total",
+        }:
+            raise ValueError("canonical omitted_spans contains an invalid reason")
+        if case_id not in visible_spans_by_case or span_id in visible_spans_by_case[case_id]:
+            raise ValueError("canonical omitted_spans must reference omitted spans of visible cases")
+        key = (case_id, span_id)
+        if key in seen_omitted_spans:
+            raise ValueError("canonical omitted_spans must not contain duplicates")
+        seen_omitted_spans.add(key)
+
+    audit_payload = {
+        "retrieval_backend": "hifiasm_numeric",
+        "query_id": _safe_optional_scalar(case_retrieval.get("query_id")),
+        "candidate_case_ids": visible_case_ids,
+        "retrieval_candidate_case_ids": candidate_case_ids,
+        "warning": _safe_optional_scalar(case_retrieval.get("warning")),
+        "effect_areas": list(HIFIASM_EFFECT_AREAS),
+        "cases": deepcopy(evidence_cases),
+        "budget": deepcopy(budget),
+    }
+    _refresh_budget_usage(audit_payload)
+    if audit_payload["budget"] != budget:
+        raise ValueError("canonical evidence_budget usage metadata is inconsistent")
+    if budget["used"]["serialized_bytes"] > HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES:
+        raise ValueError("canonical evidence payload exceeds the serialized byte budget")
+
+
+def _project_case_retrieval(
+    raw_retrieval: dict[str, Any],
+    *,
+    evidence_case_ids: list[str],
+) -> dict[str, Any]:
+    projected: dict[str, Any] = {}
+    for field in _CASE_RETRIEVAL_SCALAR_FIELDS:
+        if field in raw_retrieval:
+            projected[field] = _safe_optional_scalar(raw_retrieval[field])
+    for field in _CASE_RETRIEVAL_ID_FIELDS:
+        if field in raw_retrieval:
+            projected[field] = _string_list(raw_retrieval[field], field=field)
+    projected["retrieval_backend"] = "hifiasm_numeric"
+    projected["evidence_case_ids"] = list(evidence_case_ids)
+    gate = raw_retrieval.get("hifiasm_numeric_gate")
+    if isinstance(gate, dict):
+        projected["hifiasm_numeric_gate"] = {
+            field: _safe_optional_scalar(gate[field])
+            for field in _GATE_FIELDS
+            if field in gate
+        }
+    return projected
+
+
+def _project_methods_evidence(budget: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "effect_areas": list(HIFIASM_EFFECT_AREAS),
+        "max_evidence_cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+        "response_contract": "case_assessments_and_recommendation",
+        "assessment_rule": "assess only numeric-shortlist cases and cite only visible spans",
+        "recommendation_rule": (
+            "return L2 decisions with set, keep_default, or omit actions and a visible evidence basis"
+        ),
+        "evidence_budget": deepcopy(budget),
+    }
+
+
+def _budget_evidence_case(
+    raw_case: dict[str, Any],
+    *,
+    total_excerpt_chars: int,
+) -> tuple[dict[str, Any], list[dict[str, str]], int]:
+    projected = dict(_project_hifiasm_ranked_prompt_case(raw_case))
+    case_id = _nonempty_string(projected.get("case_id"), field="case_id")
+    source_excerpts = projected.get("source_excerpts") or []
+    safe_spans: list[dict[str, Any]] = []
+    omitted_spans: list[dict[str, str]] = []
+    case_excerpt_chars = 0
+    for span in source_excerpts:
+        span_id = str(span["span_id"])
+        quote = str(span["quote"])
+        reason = None
+        if len(safe_spans) >= HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE:
+            reason = "span_limit_per_case"
+        elif case_excerpt_chars + len(quote) > HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE:
+            reason = "excerpt_chars_per_case"
+        elif (
+            total_excerpt_chars + case_excerpt_chars + len(quote)
+            > HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS
+        ):
+            reason = "excerpt_chars_total"
+        if reason:
+            omitted_spans.append({"case_id": case_id, "span_id": span_id, "reason": reason})
+            continue
+        safe_spans.append(span)
+        case_excerpt_chars += len(quote)
+
+    projected["source_excerpts"] = safe_spans
+    projected["numeric_match"] = _project_numeric_match(projected.get("numeric_match"))
+    _filter_span_references(projected, visible_span_ids={span["span_id"] for span in safe_spans})
+    return projected, omitted_spans, case_excerpt_chars
+
+
+def _project_numeric_match(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    projected = {
+        field: _safe_optional_scalar(value[field])
+        for field in _NUMERIC_MATCH_FIELDS
+        if field in value and field != "feature_distances"
+    }
+    feature_distances = value.get("feature_distances")
+    if isinstance(feature_distances, dict):
+        projected["feature_distances"] = {
+            str(feature): {
+                field: _safe_optional_scalar(distance[field])
+                for field in _FEATURE_DISTANCE_FIELDS
+                if isinstance(distance, dict) and field in distance
+            }
+            for feature, distance in feature_distances.items()
+            if isinstance(feature, str) and isinstance(distance, dict)
+        }
+    return projected
+
+
+def _filter_span_references(value: Any, *, visible_span_ids: set[str]) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _filter_span_references(item, visible_span_ids=visible_span_ids)
+        return
+    if not isinstance(value, dict):
+        return
+    for field, item in value.items():
+        if field == "evidence_span_ids" and isinstance(item, list):
+            value[field] = [span_id for span_id in item if span_id in visible_span_ids]
+        else:
+            _filter_span_references(item, visible_span_ids=visible_span_ids)
+
+
+def _safe_optional_scalar(value: Any) -> Any:
+    return value if value is None or isinstance(value, (str, int, float, bool)) else None
+
+
+def _refresh_budget_usage(payload: dict[str, Any]) -> None:
+    cases = payload["cases"]
+    case_usage = [
+        {
+            "case_id": case["case_id"],
+            "spans": len(case["source_excerpts"]),
+            "excerpt_chars": sum(len(span["quote"]) for span in case["source_excerpts"]),
+        }
+        for case in cases
+    ]
+    payload["budget"]["case_usage"] = case_usage
+    payload["budget"]["used"] = {
+        "cases": len(cases),
+        "spans": sum(item["spans"] for item in case_usage),
+        "excerpt_chars": sum(item["excerpt_chars"] for item in case_usage),
+        "serialized_bytes": 0,
+    }
+    serialized_bytes = -1
+    while serialized_bytes != payload["budget"]["used"]["serialized_bytes"]:
+        payload["budget"]["used"]["serialized_bytes"] = serialized_bytes
+        serialized_bytes = len(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8")
+        )
+    payload["budget"]["used"]["serialized_bytes"] = serialized_bytes
+
+
+def _build_prompt_sanitizer():
+    """Create the public sanitizer while hiding its attestation minting boundary."""
+
+    registry: dict[int, tuple[weakref.ReferenceType[Any], str, bool]] = {}
+
+    class CanonicalPrompt(dict[str, Any]):
+        __slots__ = ("__weakref__",)
+
+        def __new__(cls, *args: Any, **kwargs: Any) -> "CanonicalPrompt":
+            raise TypeError("canonical hifiasm prompts can only be created by Task 4 validation")
+
+        def __copy__(self) -> "CanonicalPrompt":
+            return _copy_registered(self)
+
+        def __deepcopy__(self, memo: dict[int, Any]) -> "CanonicalPrompt":
+            return _copy_registered(self, memo=memo)
+
+    def _semantic_proof(prompt: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(prompt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _registered_attestation(prompt: dict[str, Any]) -> tuple[str, bool] | None:
+        entry = registry.get(id(prompt))
+        if entry is None or entry[0]() is not prompt:
+            return None
+        return entry[1], entry[2]
+
+    def _register(
+        prompt: CanonicalPrompt,
+        proof: str,
+        *,
+        finalized: bool,
+    ) -> CanonicalPrompt:
+        prompt_id = id(prompt)
+
+        def _discard(reference: weakref.ReferenceType[Any]) -> None:
+            entry = registry.get(prompt_id)
+            if entry is not None and entry[0] is reference:
+                registry.pop(prompt_id, None)
+
+        registry[prompt_id] = (weakref.ref(prompt, _discard), proof, finalized)
+        return prompt
+
+    def _new_registered(
+        values: dict[str, Any],
+        proof: str | None = None,
+        *,
+        finalized: bool = False,
+    ) -> CanonicalPrompt:
+        prompt = dict.__new__(CanonicalPrompt)
+        dict.__init__(prompt, values)
+        return _register(
+            prompt,
+            proof or _semantic_proof(prompt),
+            finalized=finalized,
+        )
+
+    def _copy_registered(
+        prompt: CanonicalPrompt,
+        *,
+        memo: dict[int, Any] | None = None,
+    ) -> CanonicalPrompt:
+        attestation = _registered_attestation(prompt)
+        if attestation is None:
+            raise ValueError("canonical hifiasm prompt lacks validation-owned attestation")
+        proof, finalized = attestation
+        copied = dict.__new__(CanonicalPrompt)
+        if memo is None:
+            values = dict(prompt)
+        else:
+            memo[id(prompt)] = copied
+            values = deepcopy(dict(prompt), memo)
+        dict.__init__(copied, values)
+        return _register(copied, proof, finalized=finalized)
+
+    def _require_registered(
+        prompt: dict[str, Any],
+        *,
+        require_final: bool = False,
+    ) -> None:
+        attestation = _registered_attestation(prompt)
+        if attestation is None:
+            raise ValueError("canonical hifiasm prompt lacks validation-owned attestation")
+        proof, finalized = attestation
+        if _semantic_proof(prompt) != proof:
+            raise ValueError("canonical hifiasm prompt differs from its validation-owned attestation")
+        if require_final and not finalized:
+            raise ValueError("canonical hifiasm prompt lacks final-envelope attestation")
+
+    def _require_attested(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+        """Require Task 4's validation-owned proof without copying the prompt."""
+
+        _require_registered(prompt_payload)
+        _validate_canonical_hifiasm_methods_prompt_payload(prompt_payload)
+        return prompt_payload
+
+    def _seal_final(
+        prompt_payload: dict[str, Any],
+        *,
+        prompt_payload_ref: str,
+        prompt_payload_hash: str,
+    ) -> dict[str, Any]:
+        """Bind the final replay ref/hash to a fresh validation-owned envelope."""
+
+        _require_registered(prompt_payload)
+        if any(field in prompt_payload for field in _PROMPT_SELF_FIELDS):
+            raise ValueError("canonical hifiasm prompt is already finalized")
+        final_values = dict(prompt_payload)
+        final_values.update(
+            {
+                "prompt_payload_ref": prompt_payload_ref,
+                "prompt_payload_hash": prompt_payload_hash,
+            }
+        )
+        finalized = _new_registered(final_values, finalized=True)
+        _validate_canonical_hifiasm_methods_prompt_payload(finalized)
+        return finalized
+
+    def _require_final_attested(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+        """Require the exact final object sealed after replay ref/hash materialization."""
+
+        _require_registered(prompt_payload, require_final=True)
+        _validate_canonical_hifiasm_methods_prompt_payload(prompt_payload)
+        return prompt_payload
+
+    def _sanitize(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+        if _PROMPT_SCHEMA_VERSION_FIELD in prompt_payload:
+            _require_attested(prompt_payload)
+            return deepcopy(prompt_payload)
+        if not uses_hifiasm_methods_contract(prompt_payload):
+            return deepcopy(prompt_payload)
+        raw_retrieval = prompt_payload.get("case_retrieval") or {}
+        evidence_payload = build_hifiasm_evidence_payload(
+            evidence_cases=prompt_payload.get("evidence_cases") or [],
+            case_retrieval=raw_retrieval,
+        )
+        case_retrieval = _project_case_retrieval(
+            raw_retrieval,
+            evidence_case_ids=evidence_payload["candidate_case_ids"],
+        )
+        canonical = {
+            field: deepcopy(prompt_payload[field])
+            for field in _PROMPT_COPY_FIELDS
+            if field in prompt_payload
+        }
+        canonical.update(
+            {
+                _PROMPT_SCHEMA_VERSION_FIELD: HIFIASM_METHODS_PROMPT_SCHEMA_VERSION,
+                "selected_cases": [],
+                "case_selection": deepcopy(case_retrieval),
+                "case_retrieval": case_retrieval,
+                "evidence_cases": evidence_payload["cases"],
+                "methods_evidence": _project_methods_evidence(evidence_payload["budget"]),
+            }
+        )
+        policy = canonical.get("recommendation_policy")
+        if isinstance(policy, dict):
+            allowed = policy.get("allowed_evidence_bases")
+            if isinstance(allowed, list):
+                policy["allowed_evidence_bases"] = [
+                    basis for basis in allowed if basis != "skill_heuristic"
+                ]
+            policy["no_case_behavior"] = (
+                "continue with readonly L1 facts and catalog defaults; "
+                "prefer conservative L2 changes"
+            )
+        attested = _new_registered(canonical)
+        _validate_canonical_hifiasm_methods_prompt_payload(attested)
+        return attested
+
+    _sanitize.__doc__ = (
+        "Build the single closed canonical hifiasm prompt used by the full call chain."
+    )
+    _sanitize.__name__ = "sanitize_hifiasm_methods_prompt_payload"
+    _sanitize.__qualname__ = "sanitize_hifiasm_methods_prompt_payload"
+    return _sanitize, _require_attested, _seal_final, _require_final_attested
+
+
+(
+    sanitize_hifiasm_methods_prompt_payload,
+    _require_attested_hifiasm_methods_prompt_payload,
+    _seal_attested_hifiasm_methods_prompt_payload,
+    _require_final_attested_hifiasm_methods_prompt_payload,
+) = _build_prompt_sanitizer()
+del _build_prompt_sanitizer
 
 
 def normalize_hifiasm_methods_response(
@@ -140,7 +748,6 @@ def normalize_hifiasm_methods_response(
         raise ValueError("hifiasm Methods-aware response must be an object")
     if not uses_hifiasm_methods_contract(prompt_payload):
         raise ValueError("hifiasm Methods-aware response requires hifiasm_numeric retrieval")
-
     evidence_cases = prompt_payload.get("evidence_cases") or []
     cases_by_id = {
         str(case.get("case_id")): case
@@ -398,15 +1005,31 @@ def _validate_parameter_decision(
         raw_decision.get("heuristic_labels") or [],
         field=f"{parameter}.heuristic_labels",
     )
-    if "skill_heuristic" in bases and not heuristic_labels:
-        raise ValueError(f"parameter {parameter!r} basis=skill_heuristic requires heuristic_labels")
+    if "skill_heuristic" in bases or heuristic_labels:
+        raise ValueError(
+            f"parameter {parameter!r} cannot use skill_heuristic until structured "
+            "prompt-visible heuristic IDs are available"
+        )
 
     retry_signals = _string_list(raw_decision.get("retry_signals") or [], field=f"{parameter}.retry_signals")
+    visible_retry_signals = _visible_retry_signal_refs(prompt_payload)
+    invalid_retry_signals = set(retry_signals) - visible_retry_signals
+    if invalid_retry_signals:
+        raise ValueError(
+            f"parameter {parameter!r} cites retry signals absent from structured prompt evidence: "
+            f"{sorted(invalid_retry_signals)}"
+        )
     if "retry_failure" in bases:
         if prompt_payload.get("task") == "recommend_initial":
             raise ValueError("retry_failure evidence is not valid for recommend_initial")
         if not retry_signals:
             raise ValueError(f"parameter {parameter!r} basis=retry_failure requires retry_signals")
+        if not visible_retry_signals:
+            raise ValueError(
+                f"parameter {parameter!r} basis=retry_failure requires structured retry evidence visible in the prompt"
+            )
+    elif retry_signals:
+        raise ValueError(f"parameter {parameter!r} has retry_signals without basis=retry_failure")
 
     decision = {
         **deepcopy(raw_decision),
@@ -437,6 +1060,29 @@ def _visible_span_ids(case: dict[str, Any]) -> set[str]:
         for span in case.get("source_excerpts") or []
         if isinstance(span, dict) and span.get("span_id")
     }
+
+
+def _visible_retry_signal_refs(prompt_payload: dict[str, Any]) -> set[str]:
+    """Return Task 5-style structured retry IDs/paths, or an empty fail-closed set."""
+
+    retry_evidence = prompt_payload.get("retry_evidence")
+    if not isinstance(retry_evidence, dict):
+        return set()
+    visible: set[str] = set()
+    for field in ("signal_ids", "signal_paths"):
+        values = retry_evidence.get(field)
+        if isinstance(values, list):
+            visible.update(item for item in values if isinstance(item, str) and item.strip())
+    signals = retry_evidence.get("signals")
+    if isinstance(signals, list):
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            for field in ("signal_id", "path"):
+                value = signal.get(field)
+                if isinstance(value, str) and value.strip():
+                    visible.add(value)
+    return visible
 
 
 def _lookup_path(values: Any, path: str) -> Any:
