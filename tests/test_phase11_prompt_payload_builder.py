@@ -44,13 +44,14 @@ _HIFIASM_SOURCE_ROOT = Path(_HIFIASM_SOURCE_DIR.name)
 def _legal_hifiasm_case(case_id: str, *, quote: str, distance: float) -> dict:
     span_id = f"methods.{case_id}"
     source_path = _HIFIASM_SOURCE_ROOT / f"{case_id}.methods.md"
-    body_path = _HIFIASM_SOURCE_ROOT / f"{case_id}.body.md"
-    source_path.write_text(f"Private context.\n{quote}\nPrivate trailing context.", encoding="utf-8")
-    body_path.write_text("Unquoted study body.", encoding="utf-8")
+    source_path.write_text(
+        "Methods context; YAML evidence is curated independently.\n",
+        encoding="utf-8",
+    )
     validated = validate_hifiasm_evidence_cases(
         [
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "case_id": case_id,
                 "case_type": "initial",
                 "source": {"kind": "paper", "title": f"Example {case_id}"},
@@ -66,19 +67,8 @@ def _legal_hifiasm_case(case_id: str, *, quote: str, distance: float) -> dict:
                 "rationale_claims": [],
                 "outcomes": {},
                 "curation": {"status": "approved", "curator": "test"},
-                "source_documents": {
-                    "body": {
-                        "path": body_path.name,
-                        "sha256": hashlib.sha256(body_path.read_bytes()).hexdigest(),
-                    },
-                    "methods": {
-                        "path": source_path.name,
-                        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-                    },
-                    "spans": [
-                        {"span_id": span_id, "document": "methods", "quote": quote}
-                    ],
-                },
+                "methods_path": source_path.name,
+                "evidence_spans": [{"span_id": span_id, "quote": quote}],
             }
         ],
         pack_root=_HIFIASM_SOURCE_ROOT,
@@ -360,6 +350,7 @@ class TestTaskScopedSlicing:
                 "exit_code": 137,
                 "failure_class": "memory_exhausted",
                 "stderr_tail": "oom-kill",
+                "stdout_tail": "loaded reads",
                 "params": {"threads": 64},
             },
         }
@@ -383,6 +374,8 @@ class TestTaskScopedSlicing:
         assert "attempt_id" in attempt
         assert "exit_code" in attempt
         assert "failure_class" in attempt
+        assert "stderr_tail" not in attempt
+        assert "stdout_tail" not in attempt
 
     def test_retry_after_review_failure_profile(self, sample_catalog, sample_full_profile):
         """retry_after_review_failure should include assembly_review metrics."""
@@ -391,6 +384,8 @@ class TestTaskScopedSlicing:
             "previous_attempt": {
                 "attempt_id": "attempt_002",
                 "method_id": "hifiasm",
+                "stderr_tail": "ignored failure text",
+                "stdout_tail": "ignored progress text",
                 "params": {"kmer_size": 51},
             },
             "assembly_review": {
@@ -414,6 +409,8 @@ class TestTaskScopedSlicing:
         assert "assembly_review" in profile
         assert "assets" not in profile
         assert "read_qc" not in profile
+        assert "stderr_tail" not in profile["previous_attempt"]
+        assert "stdout_tail" not in profile["previous_attempt"]
 
         # Assembly review should have metrics
         review = profile["assembly_review"]
@@ -448,14 +445,17 @@ class TestKnowledgePackLoading:
         assert isinstance(pack["cases"], list)
         assert len(pack["cases"]) > 0
 
-        # Check first case structure: cases are evidence observations, not prompt answers.
+        # Check the methods-only EvidenceCase v3 structure.
         case = pack["cases"][0]
+        assert case["schema_version"] == 3
         assert "case_id" in case
         assert "source" in case
-        assert "features" in case
-        assert "params" in case
-        assert "quality" in case
-        assert "evidence_note" in case
+        assert "methods_path" in case
+        assert "evidence_spans" in case
+        assert "applicability" in case
+        assert "intervention" in case
+        assert "curation" in case
+        assert "source_documents" not in case
 
     def test_load_skill_md(self):
         """SKILL.md should load as string."""
@@ -993,7 +993,7 @@ class TestEdgeCases:
             case["case_id"] for case in payload["selected_cases"]
         ]
 
-    def test_cyclone_route_selects_ont_evidence_cases(self, sample_catalog, sample_full_profile):
+    def test_cyclone_route_scores_ont_evidence_cases_highest(self, sample_catalog, sample_full_profile):
         cyclone_profile = {
             **sample_full_profile,
             "assets": {
@@ -1015,7 +1015,12 @@ class TestEdgeCases:
         assert payload["prompt_profile"]["assets"]["assembly_route"] == "cyclone"
         assert payload["prompt_profile"]["assets"]["read_type"] == "ont"
         assert payload["selected_cases"]
-        assert {case["features"]["read_type"] for case in payload["selected_cases"]} == {"ont"}
+        assert payload["selected_cases"][0]["features"]["read_type"] == "ont"
+        assert {case["features"]["read_type"] for case in payload["selected_cases"]} == {"hifi", "ont"}
+        assert all(
+            set(entry["excluded_reasons"]) <= {"failure_case_excluded_for_initial"}
+            for entry in payload["case_selection"]["trace"]
+        )
 
 
 class TestRealCatalogCompatibility:
@@ -1121,14 +1126,11 @@ class TestRealCatalogCompatibility:
             assert spec.level in [0, 1, 2], f"{method_id} parameter {key} has invalid level {spec.level}"
 
     @pytest.mark.parametrize("method_id,read_type", [("hifiasm", "hifi"), ("hifiasm_ont", "ont")])
-    def test_selected_cases_match_read_type(self, method_id, read_type):
-        """Verify selected cases match the read_type and no cross-contamination occurs."""
+    def test_method_and_read_type_are_scoring_attributes(self, method_id, read_type):
+        """Method/read type affect ranking without becoming discrete hard filters."""
         from app.stages.assembly.parameter_catalog import load_parameter_catalog
 
-        # Load real catalog
         catalog = load_parameter_catalog(method_id)
-
-        # Build sample profile with the specified read_type
         sample_profile = {
             "sample": {
                 "sample_id": "test_sample_001",
@@ -1167,7 +1169,6 @@ class TestRealCatalogCompatibility:
             "assembly_review": {},
         }
 
-        # Build prompt payload
         payload = build_prompt_payload(
             method_id=method_id,
             catalog=catalog,
@@ -1175,34 +1176,17 @@ class TestRealCatalogCompatibility:
             task="recommend_initial",
         )
 
-        # Extract selected_cases from payload
-        selected_cases = payload["selected_cases"]
+        cases = payload["evidence_cases"]
+        assert cases
+        case_read_types = {(case.get("applicability") or {}).get("read_type") for case in cases}
+        assert read_type in case_read_types
+        assert ({"hifi", "ont"} - {read_type}) & case_read_types
 
-        # Assert: ALL selected_cases have matching read_type
-        for case in selected_cases:
-            case_read_type = case.get("features", {}).get("read_type")
-            assert case_read_type == read_type, (
-                f"Case {case['case_id']} has read_type={case_read_type!r}, "
-                f"expected {read_type!r} for method {method_id}"
-            )
+        assert cases[0]["applicability"]["read_type"] == read_type
+        assert method_id in cases[0]["applicability"]["target_methods"]
+        assert payload["prompt_profile"]["assets"]["read_type"] == read_type
+        assert payload["method_id"] == method_id
 
-        # Assert: NO cross-contamination (verify opposite read_type is not present)
-        opposite_read_type = "ont" if read_type == "hifi" else "hifi"
-        for case in selected_cases:
-            case_read_type = case.get("features", {}).get("read_type")
-            assert case_read_type != opposite_read_type, (
-                f"Cross-contamination detected: Case {case['case_id']} has read_type={case_read_type!r}, "
-                f"but expected no {opposite_read_type!r} cases for method {method_id}"
-            )
-
-        # Verify params.tool compatibility (cases should be for the correct method)
-        # Note: cases use params.tool to denote method_id, not the executable tool
-        for case in selected_cases:
-            case_method = case.get("params", {}).get("tool")
-            assert case_method == method_id, (
-                f"Case {case['case_id']} has params.tool={case_method!r}, "
-                f"expected {method_id!r} for method {method_id}"
-            )
 
 
 def test_hifiasm_writes_ref_backed_methods_evidence_payload(

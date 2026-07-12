@@ -23,6 +23,8 @@ def route_after_enter(state: TopLevelState) -> str:
         "retry_parameters_after_review_failure",
     }:
         return "recommend"
+    if _output(state).get("status") == "parameters_approved":
+        return "plan"
     return "resolve"
 
 
@@ -62,7 +64,11 @@ def route_after_select(state: TopLevelState) -> str:
 def route_after_parameter_recommendation(state: TopLevelState) -> str:
     """Route after Phase10 parameter recommendation."""
     status = _output(state).get("status")
-    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {"parameter_validation_failed", "parameter_recommendation_failed"}:
+    if status == "blocked_human":
+        return "block"
+    if status in {"parameter_retry_stopped", "parameter_retry_expert_review"}:
+        return "fail"
+    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {"parameter_validation_failed", "parameter_retry_validation_failed", "parameter_recommendation_failed"}:
         return "fail"
     return "plan"
 

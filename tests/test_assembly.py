@@ -12,6 +12,8 @@ from pathlib import Path
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import initial_state
+from app.control.lifecycle import resume_review_state
+from app.review.base import ResumeReviewRequest
 from app.stages.assembly.builder import build_stage
 from app.stages.assembly.method_application import flye as flye_graph
 from app.stages.assembly.method_application import hifiasm as hifiasm_graph
@@ -58,6 +60,51 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
 
 class AssemblyStageTests(unittest.TestCase):
+    def _parameter_approval_request(self, blocked: dict) -> ResumeReviewRequest:
+        """Bind an approval to the exact proposed parameter attempt."""
+
+        self.assertEqual(blocked.get("supervision_state"), "blocked_human")
+        interrupt = blocked.get("active_interrupt") or {}
+        self.assertEqual(interrupt.get("gate_id"), "parameter_approval")
+        metadata_keys = (
+            "attempt_id",
+            "task",
+            "previous_attempt_id",
+            "recommendation_hash",
+        )
+        for key in metadata_keys:
+            self.assertIn(key, interrupt)
+        return ResumeReviewRequest(
+            session_id=blocked["session_id"],
+            stage="assembly",
+            gate_id="parameter_approval",
+            decision="approve_parameters",
+            metadata={key: interrupt[key] for key in metadata_keys},
+        )
+
+    def _approve_parameter_gate(self, blocked: dict) -> dict:
+        approval_update = resume_review_state(
+            blocked,
+            AssemblyStageTests._parameter_approval_request(self, blocked),
+        )
+        return {**blocked, **approval_update}
+
+    def _invoke_with_parameter_approvals(self, state: dict) -> dict:
+        """Run assembly, approving only the shared parameter gate when reached."""
+
+        graph = build_stage()
+        current = state
+        for _ in range(8):
+            result = graph.invoke(current)
+            interrupt = result.get("active_interrupt") or {}
+            if not (
+                result.get("supervision_state") == "blocked_human"
+                and interrupt.get("gate_id") == "parameter_approval"
+            ):
+                return result
+            current = AssemblyStageTests._approve_parameter_gate(self, result)
+        self.fail("assembly exceeded the bounded parameter-approval loop")
+
     def test_outer_graph_routes_to_method_subgraphs(self):
         outer_nodes = set(build_stage().get_graph().nodes)
         flye_nodes = set(build_flye_graph().get_graph().nodes)
@@ -242,7 +289,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -278,7 +325,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "blocked_human")
@@ -312,7 +359,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -350,7 +397,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -383,7 +430,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -409,7 +456,7 @@ class AssemblyStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -449,7 +496,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertFalse(called_marker.exists())
@@ -493,7 +540,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -502,7 +549,6 @@ class AssemblyStageTests(unittest.TestCase):
             invalid_params = {item["param"] for item in assembly.get("invalid_params") or []}
             self.assertIn("flye_parameters.threads", invalid_params)
             self.assertIn("flye_parameters.threads", result["last_error"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
 
     def test_local_flye_execution_writes_draft_assembly_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -535,7 +581,15 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            blocked = build_stage().invoke(state)
+            self.assertEqual(blocked["supervision_state"], "blocked_human")
+            interrupt = blocked["active_interrupt"]
+            self.assertEqual(interrupt["gate_id"], "parameter_approval")
+            self.assertEqual(interrupt["task"], "recommend_initial")
+            self.assertEqual(interrupt["attempt_id"], 0)
+            self.assertIsNone(interrupt["previous_attempt_id"])
+            approved = self._approve_parameter_gate(blocked)
+            result = build_stage().invoke(approved)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -602,7 +656,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -637,7 +691,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -686,11 +740,11 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("execution parameter retries exhausted", result["last_error"])
+            self.assertEqual(result["last_error"], "execution_retry_budget_exhausted")
             assembly = result["stage_outputs"]["assembly"]
             self.assertIn("fake flye failed", assembly["execution_failure_log_tail"])
             self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.flye")
@@ -736,7 +790,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertFalse(flye_marker.exists())
@@ -786,7 +840,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -833,7 +887,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             assembly = result["stage_outputs"]["assembly"]
@@ -868,11 +922,11 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "parameter_retries_exhausted")
+            self.assertEqual(assembly["status"], "execution_parameter_retries_exhausted")
             self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
@@ -920,7 +974,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             self.assertTrue(called_marker.exists())
@@ -986,7 +1040,7 @@ class AssemblyStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -1012,6 +1066,9 @@ class AssemblyStageTests(unittest.TestCase):
 
 class Phase4FlyeParameterTests(unittest.TestCase):
     """Phase 4 task03 coverage: Flye must not run without explicit params."""
+
+    def _invoke_with_parameter_approvals(self, state: dict) -> dict:
+        return AssemblyStageTests._invoke_with_parameter_approvals(self, state)
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
@@ -1088,7 +1145,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             marker = Path(tmpdir) / "flye-called"
             state = self._local_state_with_flye(tmpdir, flye_parameters=None, marker=marker)
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -1100,7 +1157,9 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(assembly["read_type_prior"]["source"], "manifest_platform")
             self.assertEqual(assembly["read_type_prior"]["flye"], "nano-raw")
             self.assertEqual(assembly["invalid_params"], [])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("attempt_started", {event["event_type"] for event in events})
 
     def test_flye_omitted_threads_uses_catalog_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1112,7 +1171,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 },
             )
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -1131,7 +1190,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             )
             state["shared_parameters"] = {"read_type": "pacbio_hifi", "estimated_genome_size": 2_000_000}
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -1156,7 +1215,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 marker=marker,
             )
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertFalse(marker.exists())
@@ -1178,7 +1237,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 },
             )
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -1215,7 +1274,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 "estimated_coverage": 35.5,
             }
 
-            result = build_stage().invoke(state)
+            result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]

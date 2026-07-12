@@ -106,7 +106,10 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt") or {}
-    if isinstance(active_interrupt, dict):
+    if isinstance(active_interrupt, dict) and active_interrupt.get("gate_id") == "parameter_approval":
+        if gate_id != "parameter_approval":
+            raise ValueError("parameter approval resume requires explicit gate_id=parameter_approval")
+    elif isinstance(active_interrupt, dict):
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
     return gate.load_decision_applier()(state, request)
@@ -123,6 +126,16 @@ def apply_review_gate_timeout(state: TopLevelState, request: Any, timeout: dict[
         return None
     return applier(state, request, timeout)
 
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="assembly",
+        gate_id="parameter_approval",
+        decisions_allowed=("approve_parameters", "reject_parameters"),
+        decision_applier="app.stages.assembly.nodes:apply_parameter_approval_decision",
+        prompt_adapter="generic",
+    )
+)
 
 register_review_gate(
     ReviewGateDeclaration(

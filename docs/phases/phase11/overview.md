@@ -1,143 +1,133 @@
-# Phase 11: Hifiasm Evidence Retrieval And Methods-Aware Recommendation
+# Phase 11: Hifiasm Initial Evidence And Same-Run Retry
 
 **Phase**: 11
-**Status**: Tasks 2-4 complete; Tasks 5-6 designed
+**Status**: Tasks 2-4 complete; the current worktree implements Task 6A initial cutover and Task 6B same-run retry, with final verification pending
 **Created**: 2026-07-07
-**Updated**: 2026-07-10
+**Updated**: 2026-07-12
 
 ## Goal
 
-Replace the hifiasm recommender's production seed/bucket selection with a
-manually curated, source-grounded, numerically continuous EvidenceCase
-pipeline.
+Use validated, source-grounded EvidenceCases for the initial hifiasm parameter
+recommendation, then handle failures from that run through the typed parameter
+attempt lifecycle. Initial evidence retrieval and same-run retry are different
+concerns: retry does not create or query a second evidence database.
 
-The cross-method typed-attempt expansion for Flye and NextDenovo belongs to
-[Phase10 Task14](../phase10/task_14_flye_nextdenovo_parameter_attempts.md) and
-is a completed prerequisite, not a Phase11 task. Task 2 now provides the
-validated EvidenceCase input boundary consumed by Tasks 3-4. Those later tasks
-remain incomplete until their own documented acceptance criteria are closed.
-Tasks 5-6 remain later retry/evaluation work and must not start before Tasks
-3-4 are complete.
+## Current Phase Boundary
 
-## Confirmed Evidence Boundary
+The approved completion design splits Task 6 into two independent parts:
 
-PDF acquisition and document preparation happen outside this project for the
-current phase. A human curator supplies:
+- **Task 6A — initial top-5 cutover.** Rank every eligible initial case with
+  the Task 3 unified similarity score and retain the first five, or all eligible
+  cases when fewer than five exist. Offline evaluation is
+  observational and cannot enable, disable, or block production behavior.
+- **Task 6B — same-run retry.** Build a retry from attempt 0's immutable
+  profile/evidence/policy snapshot, the immediately preceding attempt, and its
+  structured execution or review failure. Retry performs no database lookup,
+  evidence retrieval, backend selection, or runtime-case promotion.
+
+Both initial and retry recommendations pass automatic recommendation, catalog,
+hard-rule, capability, and parameter validation before entering the shared
+`parameter_approval` human gate. `approve_parameters` freezes the validated
+candidate and routes it to execution. `reject_parameters` terminates without
+execution; for retry it also appends no attempt and consumes no retry budget.
+
+Execution and review retry remain owned by different stages and have independent
+counters and limits. There is no failure classifier or repairability gate before
+an execution retry: a recorded execution failure plus remaining execution
+budget is sufficient to request a retry recommendation.
+
+## Initial Evidence Boundary
+
+A human curator supplies:
 
 ```text
 structured EvidenceCase YAML
-+ matching normalized body.md
-+ matching normalized methods.md
++ normalized methods.md
 ```
 
-The project validates and consumes those inputs. It does not parse PDFs or run
-GROBID.
-
-The hifiasm-first pipeline is:
+The project validates and consumes those inputs. It does not download or parse
+papers. The initial path is:
 
 ```text
-manual case/body/Methods bundle
+manual initial case/Methods pair
   -> schema and source validation
-  -> hard compatibility filters
-  -> continuous numeric shortlist
-  -> Methods-aware LLM assessment and parameter recommendation
-  -> deterministic catalog/rule validation
-  -> typed freeze/run/review attempt
-  -> retry-specific evidence retrieval when needed
-  -> curator-reviewable draft case artifact
+  -> validation
+  -> Task 3 similarity scoring
+  -> fixed top-5 shortlist
+  -> Methods-aware recommendation
+  -> automatic deterministic validation
+  -> parameter_approval human gate
+  -> freeze and execute only after approval
 ```
+
+Task 3 combines target-method match, read-type match, and missing-aware numeric
+similarity into one ranking score. Method and read type are scoring attributes,
+not hard filters. Ties use evidence coverage, numeric distance, clade, and case
+ID. Task 6A adds no maximum distance, minimum coverage, case-count,
+query-count, evaluation-result, recorded-recommendation, scientific-approval,
+non-inferiority, or other activation threshold. The former 20-case and 10-query
+targets are not gates.
+
+## Same-Run Retry Boundary
+
+Retry reuses the actual attempt 0 contract, whether the initial path was legacy
+or curated. It inherits attempt 0's immutable profile, selected initial cases,
+Methods evidence, retrieval trace, catalog, hard rules, capabilities, policy,
+and retry limits. It may additionally use only the previous attempt's frozen
+parameters/command and that attempt's structured execution result or review
+diagnosis.
+
+Retry has none of the following:
+
+- a retry EvidenceCase shard, corpus, query, retriever, or selector backend;
+- a `hifiasm_retry` backend;
+- cross-run or cross-sample historical retrieval;
+- draft candidate `EvidenceCase` creation, retention, curation, or promotion;
+- paper or policy re-retrieval during the run;
+- a repairability label or pre-retry repairability decision;
+- a combined execution/review retry budget.
 
 ## Explicit Non-Goals
 
-Phase11 Tasks 2-6 do not introduce:
-
-- PDF download, OCR, GROBID, or automatic Methods extraction;
-- GraphRAG, graph databases, or LLM Wiki;
-- embedding services, vector databases, or a generic RRF stack;
-- Flye/NextDenovo/hifiasm-ont evidence migration;
-- cross-tool parameter translation;
-- automatic promotion of runtime records into production evidence;
-- one universal scalar assembly-quality score.
-
-## Completed Phase10 Prerequisite
-
-[Phase10 Task14](../phase10/task_14_flye_nextdenovo_parameter_attempts.md)
-provides the shared executable-method typed-attempt foundation:
-
-- Flye and NextDenovo declare parameter catalogs.
-- Both methods build catalog-driven parameter sources and attempt-scoped command
-  artifacts.
-- Shared execution lifecycle updates typed parameter attempts for success and
-  failure.
-- All executable assembly methods enter parameter recommendation before
-  freeze/run.
-- Model-unavailable behavior remains strict unless the explicit operator/test
-  fallback is configured.
-- Method execution failure routes through the retry gate.
-
-## Hifiasm Evidence Design Principles
-
-- Initial and retry cases are separate retrieval spaces.
-- Numeric similarity and evidence coverage are separate values.
-- Bucket matching is replaced by continuous, feature-level numeric distance.
-- Only approved cases with verified source documents and exact source excerpts
-  are eligible.
-- The Methods-aware LLM sees only a bounded numeric shortlist.
-- The existing L0/L1/L2 contract remains authoritative: cases and the LLM may
-  explain L1 facts, but only cataloged L2 parameters may be recommended and L0
-  remains fixed by execution/configuration code.
-- Every recommendation records an auditable evidence basis. A case ID and exact
-  source span are required only when the recommendation claims case evidence;
-  L1 profile facts, SKILL heuristics, retry failures, and catalog defaults are
-  also valid bases.
-- Cases are optional evidence, not a recommendation prerequisite. No eligible
-  case produces an explicit warning and a more conservative recommendation,
-  while the existing L1 facts, SKILL guidance, and catalog defaults remain
-  usable.
-- Existing deterministic catalog/rule validation remains the execution gate.
-- Real runs produce draft artifacts; humans decide whether to promote them.
+Phase 11 does not introduce PDF download/OCR, GROBID, GraphRAG, LLM Wiki,
+embeddings, a vector database, generic RRF, cross-tool parameter translation,
+or evidence migration for Flye, NextDenovo, or hifiasm-ont. TUI implementation
+and presentation are also out of scope; a later TUI may consume the generic
+human-review interrupt contract.
 
 ## Task Index
 
-- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) - Complete
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) - Complete as an initial-only backend; production cutover remains default-disabled pending Task 6, while the compatibility backend consumes legacy non-v2 records only
-- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) - Complete; persists bounded Methods evidence, validates explicit assessments and parameter decisions, and preserves the legacy method contract
-- [Task 5: Hifiasm Retry Evidence And Curated Retention](task_05_hifiasm_retry_evidence_and_curated_retention.md) - Designed
-- [Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) - Designed
+- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) — complete for initial EvidenceCases.
+- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) — complete initial-only ranking; Task 6A fixes the production shortlist at top five.
+- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) — complete bounded prompt/response contract; initial and retry recommendations share post-validation parameter approval.
+- [Task 5: Superseded Retry-Evidence Design](task_05_hifiasm_retry_evidence_and_curated_retention.md) — superseded; it creates no retained runtime contract.
+- [Task 6: Hifiasm Initial Cutover And Same-Run Retry](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) — split into Task 6A initial top-5 cutover and Task 6B same-run retry.
 
 ## Dependency Order
 
 ```text
 [Phase10 Task14 typed parameter-attempt prerequisite]
-  -> Task 2 EvidenceCase/source contract
-      -> Task 3 deterministic numeric retrieval
-          -> Task 4 Methods-aware recommendation
-              -> Task 5 retry evidence and curated retention
-                  -> Task 6 evaluation and hifiasm cutover
+  -> Task 2 initial EvidenceCase/source contract
+      -> Task 3 deterministic initial numeric ranking
+          -> Task 4 Methods-aware recommendation and validation
+              -> Task 6A initial top-5 cutover
+              -> Task 6B same-run execution/review retry
 ```
 
-Tasks are intentionally sequential because each later contract consumes
-artifacts and invariants established by the earlier task. Task 3 receives
-normalized, retrieval-eligible cases and does not repeat manifest, filesystem,
-checksum, quote, or provenance validation. Task 4 receives prompt-safe cases plus
-the retrieval query/trace refs and does not repeat numeric ranking or Task 2
-source validation.
+The old Task 5 retry database/retrieval/promotion design is not a dependency.
 
 ## Phase Completion Criteria
 
-Phase11 is complete when:
+Phase 11 is complete when the implementation and regression suite confirm that:
 
-- Phase10 Task14 typed parameter attempts remain green for all executable assembly
-  methods;
-- hifiasm production recommendation consumes only approved EvidenceCases;
-- hifiasm case ranking is continuous and missing-aware rather than bucket-based;
-- hifiasm recommendations preserve L0/L1/L2 permissions and record their
-  evidence basis; case-backed claims are traceable to case IDs and exact source
-  spans;
-- no-case operation succeeds with an empty evidence set instead of blocking the
-  parameter recommender;
-- initial and retry evidence remain separate;
-- runtime draft cases require manual promotion;
-- the golden evaluation demonstrates safety and usefulness over the legacy
-  baseline;
-- deferred graph/wiki/vector/cross-tool work remains outside the phase.
+- hifiasm initial retrieval preserves Task 3 scoring and fixed top-5 selection;
+- observational evaluation has no activation or forward-progress effect;
+- retry uses only the current run's immutable attempt chain and structured
+  failure facts;
+- execution and review budgets remain independent;
+- every valid actionable initial or retry parameter candidate waits at
+  `parameter_approval`; `stop` and `expert_review` are not actionable and do
+  not enter parameter approval;
+- only approval can freeze and execute, while rejection terminates cleanly;
+- no hifiasm retry shard/backend/retriever or candidate-promotion path remains;
+- other methods retain their legacy descriptors and behavior.

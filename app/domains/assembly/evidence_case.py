@@ -16,19 +16,21 @@ from app.knowledge.evidence_cases import (
     MAX_SOURCE_EXCERPT_CHARS,
     MAX_SOURCE_EXCERPTS_PER_CASE,
     MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE,
-    validate_source_bundle,
-    validate_source_bundle_shape,
-    validate_source_excerpt_coverage,
+    validate_methods_source,
+    validate_methods_source_shape,
+    validate_referenced_excerpt_budget,
 )
 from app.knowledge.packs import ASSEMBLY_EVIDENCE_CASE_SCHEMA
 
-HIFIASM_EVIDENCE_SCHEMA_VERSION = 2
+HIFIASM_EVIDENCE_SCHEMA_VERSION = 3
 MAX_EVIDENCE_TEXT_FIELD_CHARS = 1_000
 MAX_PROMPT_SAFE_TEXT_CHARS_PER_CASE = 16_000
+_EVIDENCE_MANIFEST_VERSION = 2
 
-_ALLOWED_CASE_TYPES = {"initial", "retry"}
+_ALLOWED_CASE_TYPES = {"initial"}
 _ALLOWED_CURATION_STATUSES = {"draft", "approved", "rejected"}
 _ALLOWED_EXPLICITNESS = {"explicit", "inferred"}
+_ALLOWED_HIFIASM_METHODS = {"hifiasm", "hifiasm_ont"}
 _MAX_DYNAMIC_MAPPING_ITEMS = 64
 _MAX_RATIONALE_CLAIMS = 32
 _MAX_SHORT_STRING_LIST_ITEMS = 16
@@ -125,15 +127,25 @@ _CASE_SCHEMA = {
         "review_metrics": ("mapping", _JSON_SCALAR, _MAX_DYNAMIC_MAPPING_ITEMS),
     },
 }
+_EVIDENCE_SPAN_SCHEMA = {
+    "span_id": _TEXT,
+    "quote": _SOURCE_EXCERPT_TEXT,
+}
 _SOURCE_EXCERPT_SCHEMA = {
     "span_id": _TEXT,
     "document": _TEXT,
     "quote": _SOURCE_EXCERPT_TEXT,
 }
+_CASE_SCHEMA["methods_path"] = _TEXT
+_CASE_SCHEMA["evidence_spans"] = (
+    "list",
+    _EVIDENCE_SPAN_SCHEMA,
+    MAX_SOURCE_EXCERPTS_PER_CASE,
+)
 _PROMPT_CASE_SCHEMA = {
     field_name: field_schema
     for field_name, field_schema in _CASE_SCHEMA.items()
-    if field_name != "curation"
+    if field_name not in {"curation", "methods_path", "evidence_spans"}
 }
 
 
@@ -151,7 +163,7 @@ def validate_hifiasm_evidence_cases(
     *,
     pack_root: Path | None,
 ) -> list[dict[str, Any]]:
-    """Validate hifiasm cases and attach only referenced exact excerpts.
+    """Validate hifiasm cases and attach only referenced declared excerpts.
 
     Legacy seed observations are intentionally ignored. Draft and rejected
     cases are retained for audit but remain ineligible for retrieval.
@@ -174,8 +186,8 @@ def validate_hifiasm_evidence_cases(
         for case in candidates:
             if not is_hifiasm_evidence_case(case):
                 raise EvidenceCaseValidationError(
-                    f"{case.get('case_id') or '<missing-case-id>'}: hifiasm v2 shard requires "
-                    f"schema_version=2, got {case.get('schema_version')!r}"
+                    f"{case.get('case_id') or '<missing-case-id>'}: hifiasm v3 shard requires "
+                    f"schema_version=3, got {case.get('schema_version')!r}"
                 )
 
     seen: set[str] = set()
@@ -300,11 +312,11 @@ def _build_validation_boundary():
         case_id = str(case.get("case_id") or "<missing-case-id>")
         _reject_unknown_fields(
             case,
-            allowed=set(_CASE_SCHEMA) | {"source_documents"},
+            allowed=set(_CASE_SCHEMA),
             case_id=case_id,
             field_path="case",
         )
-        validate_source_bundle_shape(case, required=False)
+        validate_methods_source_shape(case, required=False)
         result = _normalize_case_fields(case, schema=_CASE_SCHEMA, case_id=case_id)
         case_id_value = result.get("case_id")
         if not isinstance(case_id_value, str) or not case_id_value.strip():
@@ -340,23 +352,40 @@ def _build_validation_boundary():
         applicability = result.get("applicability")
         if not isinstance(applicability, dict):
             raise EvidenceCaseValidationError(f"{case_id}: applicability must be a mapping")
-        if applicability.get("read_type") != "hifi":
-            raise EvidenceCaseValidationError(f"{case_id}: applicability.read_type must be 'hifi'")
-        if _short_method_name(applicability.get("source_tool")) != "hifiasm":
-            raise EvidenceCaseValidationError(f"{case_id}: applicability.source_tool must be hifiasm")
-        target_methods = applicability.get("target_methods")
-        if not isinstance(target_methods, list) or not any(
-            _short_method_name(method) == "hifiasm" for method in target_methods
-        ):
+        read_type = applicability.get("read_type")
+        if read_type not in {"hifi", "ont"}:
             raise EvidenceCaseValidationError(
-                f"{case_id}: applicability.target_methods must include hifiasm"
+                f"{case_id}: applicability.read_type must be one of ['hifi', 'ont']"
+            )
+        source_tool = _short_method_name(applicability.get("source_tool"))
+        if source_tool not in _ALLOWED_HIFIASM_METHODS:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: applicability.source_tool must be a known hifiasm family method"
+            )
+        target_methods = applicability.get("target_methods")
+        if not isinstance(target_methods, list) or not target_methods:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: applicability.target_methods must contain at least one known "
+                "hifiasm family method"
+            )
+        unknown_target_methods = [
+            method
+            for method in target_methods
+            if _short_method_name(method) not in _ALLOWED_HIFIASM_METHODS
+        ]
+        if unknown_target_methods:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: applicability.target_methods contains unknown hifiasm family "
+                f"methods: {unknown_target_methods}"
             )
 
         intervention = result.get("intervention")
         if not isinstance(intervention, dict):
             raise EvidenceCaseValidationError(f"{case_id}: intervention must be a mapping")
-        if _short_method_name(intervention.get("tool")) != "hifiasm":
-            raise EvidenceCaseValidationError(f"{case_id}: intervention.tool must be hifiasm")
+        if _short_method_name(intervention.get("tool")) not in _ALLOWED_HIFIASM_METHODS:
+            raise EvidenceCaseValidationError(
+                f"{case_id}: intervention.tool must be a known hifiasm family method"
+            )
         _validate_parameter_flags(intervention, case_id=case_id)
         _validate_case_type_contract(result, intervention=intervention)
 
@@ -371,10 +400,10 @@ def _build_validation_boundary():
                 f"{case_id}: pack_root is required to validate approved sources"
             )
 
-        source_excerpts = validate_source_bundle(case, pack_root=pack_root, require_hashes=True)
+        source_excerpts = validate_methods_source(case, pack_root=pack_root)
         span_documents = {span["span_id"]: span["document"] for span in source_excerpts}
         referenced_span_ids = _validate_provenance(result, span_documents=span_documents)
-        validate_source_excerpt_coverage(
+        validate_referenced_excerpt_budget(
             source_excerpts,
             referenced_span_ids=referenced_span_ids,
             case_id=case_id,
@@ -399,12 +428,11 @@ def _build_validation_boundary():
         case_id = str(case.get("case_id") or "<missing-case-id>")
         _reject_unknown_fields(
             case,
-            allowed=set(_CASE_SCHEMA)
-            | {"source_documents", "source_excerpts", "retrieval_eligible"},
+            allowed=set(_CASE_SCHEMA) | {"source_excerpts", "retrieval_eligible"},
             case_id=case_id,
             field_path="case",
         )
-        validate_source_bundle_shape(case, required=False)
+        validate_methods_source_shape(case, required=False)
         normalized = _normalize_case_fields(case, schema=_PROMPT_CASE_SCHEMA, case_id=case_id)
         if "source_excerpts" in case:
             source_excerpts = _normalize_value(
@@ -710,40 +738,18 @@ def _validate_case_type_contract(case: dict[str, Any], *, intervention: dict[str
     previous_attempt = case.get("previous_attempt")
     parameter_changes = intervention.get("parameter_changes")
 
-    if case_type == "initial":
-        if previous_attempt not in (None, {}):
-            raise EvidenceCaseValidationError(
-                f"{case_id}: initial case must not define previous_attempt"
-            )
-        if parameter_changes not in (None, {}):
-            raise EvidenceCaseValidationError(
-                f"{case_id}: initial case must not define intervention.parameter_changes"
-            )
-        return
-
-    if not isinstance(previous_attempt, dict):
-        raise EvidenceCaseValidationError(f"{case_id}: retry case requires previous_attempt")
-    if not isinstance(previous_attempt.get("parameters"), dict):
+    if case_type != "initial":
         raise EvidenceCaseValidationError(
-            f"{case_id}: retry case requires previous_attempt.parameters mapping"
+            f"{case_id}: only initial EvidenceCases are supported"
         )
-    if not any(previous_attempt.get(key) for key in ("failure_mode", "execution_failure_class")):
+    if previous_attempt not in (None, {}):
         raise EvidenceCaseValidationError(
-            f"{case_id}: retry case requires failure_mode or execution_failure_class"
+            f"{case_id}: initial case must not define previous_attempt"
         )
-    if not isinstance(parameter_changes, dict) or not parameter_changes:
+    if parameter_changes not in (None, {}):
         raise EvidenceCaseValidationError(
-            f"{case_id}: retry case requires non-empty intervention.parameter_changes"
+            f"{case_id}: initial case must not define intervention.parameter_changes"
         )
-    for parameter_name, change in parameter_changes.items():
-        field_name = f"intervention.parameter_changes.{parameter_name}"
-        if not isinstance(change, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: {field_name} must be a mapping")
-        missing = [key for key in ("from", "to") if key not in change]
-        if missing:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: {field_name} requires {', '.join(missing)}"
-            )
 
 
 def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]) -> set[str]:
@@ -774,8 +780,6 @@ def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]
                 f"{case_id}: reported parameter {parameter_name} requires evidence_span_ids"
             )
         _require_known_spans(case_id, field_path, span_ids, span_documents)
-        if parameter.get("reported") is True:
-            _require_document(case_id, parameter_name, span_ids, span_documents, "methods")
         referenced.update(span_ids)
 
     seen_claim_ids: set[str] = set()
@@ -803,8 +807,6 @@ def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]
                 f"{case_id}: explicit {field_path} requires evidence_span_ids"
             )
         _require_known_spans(case_id, field_path, span_ids, span_documents)
-        if explicitness == "explicit":
-            _require_document(case_id, field_path, span_ids, span_documents, "methods")
         referenced.update(span_ids)
     return referenced
 
@@ -820,20 +822,6 @@ def _require_known_spans(
             raise EvidenceCaseValidationError(f"{case_id}: {field_name} references unknown span_id {span_id!r}")
 
 
-def _require_document(
-    case_id: str,
-    field_name: str,
-    span_ids: Iterable[str],
-    span_documents: dict[str, str],
-    expected_document: str,
-) -> None:
-    wrong = [span_id for span_id in span_ids if span_documents.get(span_id) != expected_document]
-    if wrong:
-        raise EvidenceCaseValidationError(
-            f"{case_id}: {field_name} must cite {expected_document} spans, got {wrong}"
-        )
-
-
 def _short_method_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -841,7 +829,7 @@ def _short_method_name(value: Any) -> str | None:
 
 
 def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:
-    """Load records whose v2 manifest provenance places them in hifiasm shards."""
+    """Load v3 case records whose manifest places them in hifiasm shards."""
 
     manifest_path = pack_root / "cases.yaml"
     if not manifest_path.is_file():
@@ -849,7 +837,7 @@ def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
     if not isinstance(manifest, dict) or not (
         manifest.get("case_schema") == ASSEMBLY_EVIDENCE_CASE_SCHEMA
-        and manifest.get("version") == HIFIASM_EVIDENCE_SCHEMA_VERSION
+        and manifest.get("version") == _EVIDENCE_MANIFEST_VERSION
     ):
         return None
 

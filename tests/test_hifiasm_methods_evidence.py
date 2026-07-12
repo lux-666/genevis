@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from copy import deepcopy
@@ -41,6 +40,7 @@ def _case(
     quote: str | None = None,
     spans: list[dict[str, str]] | None = None,
     parameter_span_ids: list[str] | None = None,
+    parameters: dict | None = None,
     curation: dict | None = None,
     rationale_claims: list[dict] | None = None,
     numeric_match: dict | None = None,
@@ -49,38 +49,22 @@ def _case(
         spans = [
             {
                 "span_id": f"methods.{case_id}",
-                "document": "methods",
                 "quote": quote or "We used purge level 1 to preserve divergent haplotypes.",
             }
         ]
     span_ids = [span["span_id"] for span in spans]
-    cited_span_ids = [span["span_id"] for span in spans if span["document"] == "methods"]
-    cited_span_ids = cited_span_ids or span_ids
+    cited_span_ids = span_ids
 
     case_root = _SOURCE_ROOT / case_id
     case_root.mkdir(parents=True, exist_ok=True)
-    documents = {}
-    for document_name in ("body", "methods"):
-        document_spans = [span for span in spans if span["document"] == document_name]
-        excerpt_chars = sum(len(span["quote"]) for span in document_spans)
-        content = "\n".join(
-            f"BEGIN {index} {span['span_id']}\n{span['quote']}\nEND {index} {span['span_id']}"
-            for index, span in enumerate(document_spans)
-        ) or f"No cited {document_name} evidence for {case_id}."
-        padding = "0123456789" * (excerpt_chars // 40 + 30)
-        content = (
-            f"Private {document_name} context for {case_id}.\n{content}\n"
-            f"Unquoted trailing context: {padding}"
-        )
-        path = case_root / f"{document_name}.md"
-        path.write_text(content, encoding="utf-8")
-        documents[document_name] = {
-            "path": str(path.relative_to(_SOURCE_ROOT)),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
+    methods_path = case_root / "methods.md"
+    methods_path.write_text(
+        f"Methods context for {case_id}; YAML evidence is curated independently.\n",
+        encoding="utf-8",
+    )
 
     raw = {
-        "schema_version": 2,
+        "schema_version": 3,
         "case_id": case_id,
         "case_type": "initial",
         "source": {"kind": "paper", "title": f"Example {case_id}"},
@@ -94,7 +78,7 @@ def _case(
         },
         "intervention": {
             "tool": "hifiasm",
-            "parameters": {
+            "parameters": parameters or {
                 "purge_level": {
                     "value": 1,
                     "reported": True,
@@ -115,7 +99,8 @@ def _case(
         ],
         "outcomes": {},
         "curation": curation or {"status": "approved", "curator": "test"},
-        "source_documents": {**documents, "spans": spans},
+        "methods_path": str(methods_path.relative_to(_SOURCE_ROOT)),
+        "evidence_spans": spans,
     }
     if not spans:
         raw["observed_facts"] = {}
@@ -131,7 +116,9 @@ def _case(
     )
 
 
-def _case_retrieval(cases: list[dict], *, query_id: str = "q1") -> dict:
+def _case_retrieval(
+    cases: list[dict], *, query_id: str = "q1", backend: str = "hifiasm_numeric"
+) -> dict:
     case_ids = [case["case_id"] for case in cases]
     trace = [
         {
@@ -143,7 +130,7 @@ def _case_retrieval(cases: list[dict], *, query_id: str = "q1") -> dict:
         for case in cases
     ]
     metadata = {
-        "retrieval_backend": "hifiasm_numeric",
+        "retrieval_backend": backend,
         "query_id": query_id,
         "selected_case_ids": case_ids,
         "candidate_case_ids": case_ids,
@@ -164,12 +151,19 @@ def _case_retrieval(cases: list[dict], *, query_id: str = "q1") -> dict:
     return metadata
 
 
-def _prompt_payload(*, cases: list[dict] | None = None) -> dict:
+def _prompt_payload(
+    *,
+    cases: list[dict] | None = None,
+    task: str = "recommend_initial",
+    backend: str = "hifiasm_numeric",
+    prompt_profile: dict | None = None,
+    retry_evidence: dict | None = None,
+) -> dict:
     evidence_cases = [_case()] if cases is None else cases
-    return {
+    payload = {
         "method_id": "hifiasm",
-        "task": "recommend_initial",
-        "prompt_profile": {"genome_survey": {"heterozygosity": 0.012}},
+        "task": task,
+        "prompt_profile": prompt_profile or {"genome_survey": {"heterozygosity": 0.012}},
         "rules": {"rules": []},
         "recommendation_policy": {
             "allowed_evidence_bases": [
@@ -184,9 +178,12 @@ def _prompt_payload(*, cases: list[dict] | None = None) -> dict:
             "purge_level": {"level": 2, "default": 0},
             "kmer_length": {"level": 2, "default": 51},
         },
-        "case_retrieval": _case_retrieval(evidence_cases),
+        "case_retrieval": _case_retrieval(evidence_cases, backend=backend),
         "evidence_cases": evidence_cases,
     }
+    if retry_evidence is not None:
+        payload["retry_evidence"] = retry_evidence
+    return payload
 
 
 def _seal_canonical(canonical: dict) -> dict:
@@ -249,7 +246,7 @@ def _response() -> dict:
     }
 
 
-def test_evidence_payload_uses_task2_projection_and_exact_excerpts():
+def test_evidence_payload_uses_task2_projection_and_curated_yaml_excerpts():
     case = _case()
     cases = [case]
     original = deepcopy(cases)
@@ -257,14 +254,17 @@ def test_evidence_payload_uses_task2_projection_and_exact_excerpts():
     payload = build_hifiasm_evidence_payload(
         evidence_cases=cases,
         case_retrieval=_case_retrieval(cases),
+        allowed_parameter_ids={"purge_level", "kmer_length"},
     )
 
     assert cases == original
     assert payload["candidate_case_ids"] == ["case_a"]
     assert payload["effect_areas"] == list(HIFIASM_EFFECT_AREAS)
     assert payload["cases"][0]["source_excerpts"][0]["quote"].startswith("We used")
+    rendered = json.dumps(payload)
     assert "source_documents" not in payload["cases"][0]
-    assert "private/body.md" not in json.dumps(payload)
+    assert "methods_path" not in payload["cases"][0]
+    assert str(_SOURCE_ROOT) not in rendered
     assert payload["budget"]["used"]["cases"] == 1
 
 
@@ -277,6 +277,7 @@ def test_task2_projection_rejects_unknown_nested_case_fields():
         build_hifiasm_evidence_payload(
             evidence_cases=[case],
             case_retrieval=retrieval,
+            allowed_parameter_ids={"purge_level", "kmer_length"},
         )
 
 
@@ -321,30 +322,73 @@ def test_canonical_prompt_omits_all_curation_audit_fields():
 
 def test_evidence_payload_drops_whole_legal_spans_without_truncating_quotes():
     spans = [
-        {"span_id": f"s{index}", "document": "methods", "quote": char * 2_000}
+        {"span_id": f"s{index}", "quote": char * 2_000}
         for index, char in enumerate("abcd")
     ]
-    case = _case(spans=spans, parameter_span_ids=["s3"])
+    case = _case(spans=spans, parameter_span_ids=["s3"], rationale_claims=[])
 
     payload = build_hifiasm_evidence_payload(
         evidence_cases=[case],
         case_retrieval=_case_retrieval([case]),
+        allowed_parameter_ids={"purge_level", "kmer_length"},
     )
 
     spans = payload["cases"][0]["source_excerpts"]
-    assert [span["span_id"] for span in spans] == ["s0", "s1", "s2"]
-    assert [span["quote"] for span in spans] == ["a" * 2_000, "b" * 2_000, "c" * 2_000]
+    assert [span["span_id"] for span in spans] == ["s0", "s1", "s3"]
+    assert [span["quote"] for span in spans] == ["a" * 2_000, "b" * 2_000, "d" * 2_000]
     assert payload["budget"]["omitted_spans"] == [
-        {"case_id": "case_a", "span_id": "s3", "reason": "excerpt_chars_per_case"}
+        {"case_id": "case_a", "span_id": "s2", "reason": "excerpt_chars_per_case"}
     ]
-    assert payload["cases"][0]["intervention"]["parameters"]["purge_level"]["evidence_span_ids"] == []
+    assert payload["cases"][0]["intervention"]["parameters"]["purge_level"]["evidence_span_ids"] == ["s3"]
+
+
+def test_model_projection_suppresses_unknown_and_non_l2_parameters():
+    case = _case(
+        parameters={
+            "legacy_old_flag": {
+                "value": 3,
+                "reported": True,
+                "evidence_span_ids": ["methods.case_a"],
+            },
+            "genome_size_hint": {
+                "value": 2_400_000_000,
+                "reported": True,
+                "evidence_span_ids": ["methods.case_a"],
+            },
+            "purge_level": {
+                "value": 1,
+                "reported": True,
+                "evidence_span_ids": ["methods.case_a"],
+            },
+        }
+    )
+
+    canonical = sanitize_hifiasm_methods_prompt_payload(_prompt_payload(cases=[case]))
+
+    assert set(canonical["evidence_cases"][0]["intervention"]["parameters"]) == {"purge_level"}
+
+
+def test_budget_drops_reported_parameter_and_explicit_rationale_with_all_support(monkeypatch):
+    monkeypatch.setattr(methods_evidence_module, "HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS", 0)
+    case = _case()
+
+    payload = build_hifiasm_evidence_payload(
+        evidence_cases=[case],
+        case_retrieval=_case_retrieval([case]),
+        allowed_parameter_ids={"purge_level"},
+    )
+
+    projected = payload["cases"][0]
+    assert projected["source_excerpts"] == []
+    assert projected["intervention"]["parameters"] == {}
+    assert projected["rationale_claims"] == []
 
 
 def test_evidence_payload_enforces_span_and_total_excerpt_limits_in_stable_order():
     span_case = _case(
         "span_case",
         spans=[
-            {"span_id": f"s{index}", "document": "methods", "quote": f"quote-{index:02d}"}
+            {"span_id": f"s{index}", "quote": f"quote-{index:02d}"}
             for index in range(13)
         ],
     )
@@ -355,7 +399,6 @@ def test_evidence_payload_enforces_span_and_total_excerpt_limits_in_stable_order
             spans=[
                 {
                     "span_id": f"case_{index}.{span}",
-                    "document": "methods",
                     "quote": chr(97 + span) * 2_000,
                 }
                 for span in range(3)
@@ -366,10 +409,12 @@ def test_evidence_payload_enforces_span_and_total_excerpt_limits_in_stable_order
     span_payload = build_hifiasm_evidence_payload(
         evidence_cases=[span_case],
         case_retrieval=_case_retrieval([span_case]),
+        allowed_parameter_ids={"purge_level", "kmer_length"},
     )
     total_payload = build_hifiasm_evidence_payload(
         evidence_cases=full_cases,
         case_retrieval=_case_retrieval(full_cases),
+        allowed_parameter_ids={"purge_level", "kmer_length"},
     )
 
     assert len(span_payload["cases"][0]["source_excerpts"]) == 12
@@ -407,6 +452,7 @@ def test_evidence_payload_records_case_limit_and_drops_serialized_tail_cases():
     payload = build_hifiasm_evidence_payload(
         evidence_cases=cases[:8],
         case_retrieval=retrieval,
+        allowed_parameter_ids={"purge_level", "kmer_length"},
     )
 
     assert payload["budget"]["used"]["serialized_bytes"] <= HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES
@@ -424,6 +470,7 @@ def test_evidence_payload_rejects_case_outside_numeric_shortlist():
         build_hifiasm_evidence_payload(
             evidence_cases=[case],
             case_retrieval=retrieval,
+            allowed_parameter_ids={"purge_level", "kmer_length"},
         )
 
 
@@ -527,7 +574,7 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
                 "trace": [{"raw": "secret trace"}],
                 "debug_blob": {"raw": "secret debug"},
                 "hifiasm_numeric_gate": {
-                "production_cutover_enabled": True,
+                "initial_cutover_enabled": True,
                 "reason": {"raw": "secret gate"},
             },
         }
@@ -567,7 +614,7 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
 def test_canonical_prompt_is_idempotent_with_omitted_spans_and_stable_hash():
     case = _case(
         spans=[
-            {"span_id": f"s{index}", "document": "methods", "quote": char * 2_000}
+            {"span_id": f"s{index}", "quote": char * 2_000}
             for index, char in enumerate("abcd")
         ],
         parameter_span_ids=["s3"],
@@ -592,11 +639,11 @@ def test_canonical_prompt_is_idempotent_with_omitted_spans_and_stable_hash():
 
     assert first["hifiasm_methods_prompt_schema_version"] == HIFIASM_METHODS_PROMPT_SCHEMA_VERSION
     assert first["methods_evidence"]["evidence_budget"]["omitted_spans"] == [
-        {"case_id": "case_a", "span_id": "s3", "reason": "excerpt_chars_per_case"}
+        {"case_id": "case_a", "span_id": "s2", "reason": "excerpt_chars_per_case"}
     ]
     assert first["evidence_cases"][0]["intervention"]["parameters"]["purge_level"][
         "evidence_span_ids"
-    ] == []
+    ] == ["s3"]
     assert second == first
     assert second_hash == first_hash
 
@@ -625,7 +672,7 @@ def test_self_signed_canonical_prompt_cannot_replace_task2_quote_provenance():
 def test_self_signed_canonical_prompt_cannot_forge_omission_audit():
     case = _case(
         spans=[
-            {"span_id": f"s{index}", "document": "methods", "quote": char * 2_000}
+            {"span_id": f"s{index}", "quote": char * 2_000}
             for index, char in enumerate("abcd")
         ]
     )
@@ -717,6 +764,77 @@ def test_methods_response_rejects_out_of_scope_evidence(mutate, message):
         normalize_hifiasm_methods_response(response, _canonical_prompt())
 
 
+def test_parameter_decision_rejects_visible_but_unrelated_case_span():
+    case = _case(
+        spans=[
+            {"span_id": "methods.command", "quote": "Used purge level 1."},
+            {
+                "span_id": "methods.rationale",
+                "quote": "This preserved divergent haplotypes.",
+            },
+            {
+                "span_id": "methods.unrelated",
+                "quote": "Libraries were sequenced on another instrument.",
+            },
+        ],
+        parameter_span_ids=["methods.command"],
+        rationale_claims=[
+            {
+                "claim_id": "purge",
+                "statement": "Reduced purging preserved divergent haplotypes.",
+                "explicitness": "explicit",
+                "effect_area": "purging",
+                "evidence_span_ids": ["methods.command", "methods.rationale"],
+            }
+        ],
+    )
+    response = _response()
+    response["case_assessments"][0]["transferable_findings"][0]["evidence_span_ids"] = [
+        "methods.rationale"
+    ]
+    response["recommendation"]["adjustable_params"]["purge_level"]["supporting_span_ids"] = [
+        "methods.unrelated"
+    ]
+
+    with pytest.raises(ValueError, match="not curated support"):
+        normalize_hifiasm_methods_response(response, _canonical_prompt(cases=[case]))
+
+
+def test_parameter_decision_accepts_curated_same_effect_area_span():
+    case = _case(
+        spans=[
+            {"span_id": "methods.command", "quote": "Used purge level 1."},
+            {
+                "span_id": "methods.rationale",
+                "quote": "This preserved divergent haplotypes.",
+            },
+        ],
+        parameter_span_ids=["methods.command"],
+        rationale_claims=[
+            {
+                "claim_id": "purge",
+                "statement": "Reduced purging preserved divergent haplotypes.",
+                "explicitness": "explicit",
+                "effect_area": "purging",
+                "evidence_span_ids": ["methods.command", "methods.rationale"],
+            }
+        ],
+    )
+    response = _response()
+    response["case_assessments"][0]["transferable_findings"][0]["evidence_span_ids"] = [
+        "methods.rationale"
+    ]
+    response["recommendation"]["adjustable_params"]["purge_level"]["supporting_span_ids"] = [
+        "methods.rationale"
+    ]
+
+    normalized = normalize_hifiasm_methods_response(response, _canonical_prompt(cases=[case]))
+
+    assert normalized["parameter_evidence"]["purge_level"]["span_ids"] == [
+        "methods.rationale"
+    ]
+
+
 def test_hard_rule_ids_cannot_be_used_as_skill_heuristics():
     pack = load_knowledge_pack("parameter_recommender")
     hard_rule_id = pack["rules"]["rules"][0]["rule_id"]
@@ -744,6 +862,108 @@ def test_retry_failure_basis_fails_closed_without_structured_retry_evidence():
     decision["retry_signals"] = ["previous_attempt.failure_class"]
 
     with pytest.raises(ValueError, match="absent from structured prompt evidence"):
+        normalize_hifiasm_methods_response(response, prompt)
+
+
+@pytest.mark.parametrize(
+    "fact_path",
+    ["previous_attempt.failure_class", "assembly_review.busco_duplicate"],
+)
+def test_retry_failure_facts_cannot_bypass_retry_failure_basis(fact_path):
+    prompt = dict(_canonical_prompt())
+    prompt["task"] = "retry_after_review_failure"
+    prompt["prompt_profile"] = {
+        "previous_attempt": {"failure_class": "failed"},
+        "assembly_review": {"busco_duplicate": 0.21},
+    }
+    response = _response()
+    response["recommendation"]["retry_disposition"] = "retry"
+    decision = response["recommendation"]["adjustable_params"]["purge_level"]
+    decision.update(
+        {
+            "basis": "profile_fact",
+            "fact_paths": [fact_path],
+            "supporting_case_ids": [],
+            "supporting_span_ids": [],
+        }
+    )
+
+    with pytest.raises(ValueError, match="retry failure facts require basis=retry_failure"):
+        normalize_hifiasm_methods_response(response, prompt)
+
+
+def test_retry_changes_require_recorded_failure_signal_without_retry_case_proof():
+    prompt = dict(_canonical_prompt())
+    prompt["task"] = "retry_after_review_failure"
+    prompt["prompt_profile"] = {
+        "previous_attempt": {"params": {"purge_level": 1, "kmer_length": 51}}
+    }
+    prompt["retry_evidence"] = {
+        "task": "retry_after_review_failure",
+        "signal_ids": ["failure.family"],
+        "signal_paths": ["failure_signature.family"],
+        "signals": [
+            {
+                "signal_id": "failure.family",
+                "path": "failure_signature.family",
+                "value": "under_purged",
+            }
+        ],
+    }
+    prompt["evidence_cases"][0]["intervention"]["parameter_changes"] = {
+        "purge_level": {"from": 1, "to": 2}
+    }
+    response = _response()
+    response["recommendation"]["retry_disposition"] = "retry"
+    purge = response["recommendation"]["adjustable_params"]["purge_level"]
+    purge.update(
+        {
+            "value": 2,
+            "bases": ["case", "retry_failure"],
+            "retry_signals": ["failure.family"],
+        }
+    )
+    kmer = response["recommendation"]["adjustable_params"]["kmer_length"]
+    kmer.update({"action": "keep_previous", "basis": "catalog_default"})
+    normalized = normalize_hifiasm_methods_response(response, prompt)
+    assert normalized["params"] == {"purge_level": 2, "kmer_length": 51}
+
+    no_failure_basis = deepcopy(response)
+    no_failure_basis["recommendation"]["adjustable_params"]["purge_level"]["bases"] = ["case"]
+    no_failure_basis["recommendation"]["adjustable_params"]["purge_level"]["retry_signals"] = []
+    with pytest.raises(ValueError, match="requires retry_failure evidence"):
+        normalize_hifiasm_methods_response(no_failure_basis, prompt)
+
+
+def test_retry_unchanged_parameter_cannot_reset_with_keep_default():
+    prompt = dict(_canonical_prompt())
+    prompt["task"] = "retry_after_execution_failure"
+    prompt["prompt_profile"] = {"previous_attempt": {"params": {"kmer_length": 43}}}
+    prompt["retry_evidence"] = {
+        "task": "retry_after_execution_failure",
+        "signal_ids": ["execution.status"],
+        "signal_paths": ["previous_attempt.execution_status"],
+        "signals": [{"signal_id": "execution.status", "path": "previous_attempt.execution_status", "value": "failed"}],
+    }
+    response = _response()
+    response["recommendation"]["retry_disposition"] = "retry"
+    response["recommendation"]["adjustable_params"]["purge_level"].update(
+        {
+            "action": "keep_default",
+            "basis": "catalog_default",
+            "supporting_case_ids": [],
+            "supporting_span_ids": [],
+        }
+    )
+    response["recommendation"]["adjustable_params"]["kmer_length"].update(
+        {
+            "action": "keep_default",
+            "basis": "catalog_default",
+            "supporting_case_ids": [],
+            "supporting_span_ids": [],
+        }
+    )
+    with pytest.raises(ValueError, match="must keep_previous"):
         normalize_hifiasm_methods_response(response, prompt)
 
 
@@ -806,7 +1026,7 @@ def test_case_basis_requires_a_span_from_each_supporting_case():
 
 def test_decision_boundary_uses_the_existing_canonical_prompt_without_rebuilding(monkeypatch):
     raw_prompt = _prompt_payload(cases=[_case(spans=[
-        {"span_id": f"s{index}", "document": "methods", "quote": char * 2_000}
+        {"span_id": f"s{index}", "quote": char * 2_000}
         for index, char in enumerate("abcd")
     ])])
     canonical = _seal_canonical(sanitize_hifiasm_methods_prompt_payload(raw_prompt))
@@ -959,9 +1179,9 @@ def test_explicit_legacy_contract_remains_compatible_and_stays_out_of_model_json
         "case_selection": {
             "retrieval_backend": "structured_default",
             "hifiasm_numeric_gate": {
-                "production_cutover_enabled": False,
+                "initial_cutover_enabled": False,
                 "decision": "structured_default",
-                "reason": "production_cutover_disabled",
+                "reason": "initial_cutover_disabled",
             },
         },
     }
@@ -1115,7 +1335,7 @@ def test_decision_rechecks_attestation_before_response_validation(monkeypatch):
 
 def test_model_unavailable_fallback_validates_against_the_same_canonical_prompt(monkeypatch):
     raw_prompt = _prompt_payload(cases=[_case(spans=[
-        {"span_id": f"s{index}", "document": "methods", "quote": char * 2_000}
+        {"span_id": f"s{index}", "quote": char * 2_000}
         for index, char in enumerate("abcd")
     ])])
     canonical = _seal_canonical(sanitize_hifiasm_methods_prompt_payload(raw_prompt))
@@ -1157,6 +1377,52 @@ def test_model_unavailable_fallback_validates_against_the_same_canonical_prompt(
     assert canonical == original
 
 
+def test_model_unavailable_execution_retry_fallback_keeps_previous_and_recommends(monkeypatch):
+    retry_evidence = {
+        "task": "retry_after_execution_failure",
+        "signal_ids": ["execution.status"],
+        "signal_paths": ["previous_attempt.execution_status"],
+        "signals": [
+            {
+                "signal_id": "execution.status",
+                "path": "previous_attempt.execution_status",
+                "value": "failed",
+            }
+        ],
+    }
+    raw = _prompt_payload(
+        cases=[],
+        task="retry_after_execution_failure",
+        backend="hifiasm_numeric",
+        prompt_profile={"previous_attempt": {"params": {"purge_level": 2, "kmer_length": 43}}},
+        retry_evidence=retry_evidence,
+    )
+    canonical = _seal_canonical(sanitize_hifiasm_methods_prompt_payload(raw))
+
+    class _Model:
+        def invoke(self, _messages):
+            raise RuntimeError("offline")
+
+    monkeypatch.setattr("app.stages.assembly.decision.build_chat_model", lambda: _Model())
+    result = make_assembly_decision(
+        AssemblyDecisionRequest(
+            kind="parameter_recommendation",
+            session_id="s1",
+            prompt_contract="hifiasm_methods_v1",
+            prompt_payload=canonical,
+            system_prompt="Return JSON.",
+            allow_default_on_error=True,
+        )
+    )
+    assert result.valid is True
+    assert result.parsed["params"] == {"purge_level": 2, "kmer_length": 43}
+    assert result.parsed["recommendation"]["retry_disposition"] == "retry"
+    assert all(
+        item["action"] == "keep_previous"
+        for item in result.parsed["parameter_decisions"].values()
+    )
+
+
 def test_model_unavailable_fallback_rejects_prompt_mutated_during_invoke(monkeypatch):
     canonical = _canonical_prompt()
 
@@ -1176,8 +1442,7 @@ def test_model_unavailable_fallback_rejects_prompt_mutated_during_invoke(monkeyp
 
     monkeypatch.setattr("app.stages.assembly.decision.build_chat_model", lambda: _Model())
 
-    with pytest.raises(ValueError, match="validation-owned attestation"):
-        make_assembly_decision(
+    result = make_assembly_decision(
             AssemblyDecisionRequest(
                 kind="parameter_recommendation",
                 session_id="s1",
@@ -1187,3 +1452,5 @@ def test_model_unavailable_fallback_rejects_prompt_mutated_during_invoke(monkeyp
                 allow_default_on_error=True,
             )
         )
+    assert result.valid is False
+    assert "conservative fallback failed" in (result.error or "")

@@ -211,6 +211,10 @@ def _validate_resume_identity(state: TopLevelState, request: ResumeReviewRequest
     if active_interrupt.get("stage") != request.stage:
         raise ResumeValidationError("resume stage does not match active_interrupt.stage")
     active_gate_id = active_interrupt.get("gate_id")
+    if active_gate_id == "parameter_approval" and request.gate_id != "parameter_approval":
+        raise ResumeValidationError(
+            "parameter approval resume requires explicit gate_id=parameter_approval"
+        )
     if request.gate_id and active_gate_id and request.gate_id != active_gate_id:
         raise ResumeValidationError("resume gate_id does not match active_interrupt.gate_id")
     return active_interrupt

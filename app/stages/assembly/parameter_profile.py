@@ -52,8 +52,11 @@ EXECUTION_REPAIR_FIELDS = (
     "selected_cases",
     "exit_code",
     "failure_class",
-    "stderr_tail",
-    "stdout_tail",
+    "execution_status",
+    "execution_status_detail",
+    "stderr_ref",
+    "stdout_ref",
+    "resource_facts",
 )
 QUALITY_REPLAN_PREVIOUS_FIELDS = (
     "attempt_id",
@@ -64,6 +67,7 @@ QUALITY_REPLAN_PREVIOUS_FIELDS = (
     "selected_cases",
 )
 QUALITY_REVIEW_FIELDS = (
+    "failure_mode",
     "assembly_size",
     "assembly_size_ratio",
     "contig_count",
@@ -251,21 +255,52 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             "attempt_id": previous_attempt.get("attempt_id"),
             "method_id": previous_attempt.get("method_id"),
             "tool_version": previous_attempt.get("tool_version"),
-            "params": _first_value(previous_attempt.get("params"), previous_attempt.get("recommended_params")),
-            "command_argv": _first_value(previous_attempt.get("command_argv"), previous_attempt.get("argv")),
+            "params": _rendered_previous_params(previous_attempt),
+            "command_argv": _first_value(previous_attempt.get("argv"), previous_attempt.get("command_argv")),
             "selected_cases": _first_value(previous_attempt.get("selected_cases"), previous_attempt.get("selected_case_ids")),
             "exit_code": _first_path(previous_attempt, "exit_code", "execution_result.return_code", "execution_result.exit_code"),
-            "failure_class": _first_value(previous_attempt.get("failure_class"), previous_attempt.get("failure_mode")),
+            "failure_class": _first_path(
+                previous_attempt,
+                "failure_class",
+                "failure_mode",
+                "execution_result.failure_class",
+            ),
+            "execution_status": _first_path(previous_attempt, "execution_result.status"),
+            "execution_status_detail": _first_path(previous_attempt, "execution_result.status_detail"),
+            "stderr_ref": _first_path(previous_attempt, "stderr_ref", "execution_result.stderr_path"),
+            "stdout_ref": _first_path(previous_attempt, "stdout_ref", "execution_result.stdout_path"),
+            "resource_facts": _first_path(
+                previous_attempt,
+                "resource_facts",
+                "execution_result.resource_facts",
+                "execution_result.resources",
+            ),
             "stderr_tail": previous_attempt.get("stderr_tail"),
             "stdout_tail": previous_attempt.get("stdout_tail"),
         }
     )
 
 
+def _rendered_previous_params(previous_attempt: dict[str, Any]) -> dict[str, Any] | None:
+    rendered = previous_attempt.get("rendered_parameters")
+    if isinstance(rendered, dict) and rendered:
+        return dict(rendered)
+    values: dict[str, Any] = {}
+    snapshot = previous_attempt.get("catalog_snapshot") or {}
+    for key, spec in (snapshot.get("parameters") or {}).items():
+        if isinstance(spec, dict) and spec.get("level") == 2 and spec.get("default") is not None:
+            values[key] = spec["default"]
+    for source in (previous_attempt.get("params"), previous_attempt.get("recommended_params")):
+        if isinstance(source, dict):
+            values.update(source)
+    return values or None
+
+
 def _assembly_review_profile(assembly_review: dict[str, Any]) -> dict[str, Any]:
     metrics = dict(assembly_review.get("metrics") or assembly_review.get("summary") or {})
     return _drop_empty(
         {
+            "failure_mode": assembly_review.get("failure_mode"),
             "assembly_size": _first_path(assembly_review, "assembly_size", "metrics.assembly_size", "summary.assembly_size"),
             "assembly_size_ratio": _first_path(assembly_review, "assembly_size_ratio", "metrics.assembly_size_ratio"),
             "contig_count": _first_path(assembly_review, "contig_count", "metrics.contig_count"),

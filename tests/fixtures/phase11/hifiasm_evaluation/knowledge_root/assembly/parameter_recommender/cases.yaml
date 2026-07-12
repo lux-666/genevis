@@ -1,0 +1,5 @@
+version: 2
+case_schema: assembly_evidence_case
+case_files:
+  - cases/hifiasm/initial.yaml
+  - cases/legacy.yaml

@@ -16,7 +16,6 @@ from app.knowledge.selectors import SelectionResult
 
 DEFAULT_STRATEGY = {
     "hard_filters": {
-        "read_type_mismatch": True,
         "exclude_failure_cases_for_initial": True,
     },
     "scoring_weights": {
@@ -43,7 +42,9 @@ _HIFIASM_RETRY_TASKS = {
     "retry_after_review_failure",
 }
 _HIFIASM_PARAMETER_TASKS = {_HIFIASM_INITIAL_TASK, *_HIFIASM_RETRY_TASKS}
-_HIFIASM_NUMERIC_CUTOVER_KEY = "production_cutover_enabled"
+_HIFIASM_EVIDENCE_METHODS = {"hifiasm", "hifiasm_ont"}
+_HIFIASM_NUMERIC_CUTOVER_KEY = "initial_cutover_enabled"
+_HIFIASM_INITIAL_TOP_K = 5
 
 
 class EvidenceBasedCaseSelector:
@@ -77,11 +78,6 @@ class EvidenceBasedCaseSelector:
             case_id = str(case.get("case_id") or "")
             features = case.get("features") or {}
             excluded_reasons: list[str] = []
-            if hard_filters.get("read_type_mismatch", True) and not evidence_read_type_matches(
-                profile_read_type,
-                features.get("read_type"),
-            ):
-                excluded_reasons.append("read_type_mismatch")
             if (
                 hard_filters.get("exclude_failure_cases_for_initial", True)
                 and task == "recommend_initial"
@@ -156,15 +152,17 @@ def select_evidence_cases(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Dispatch the explicitly enabled hifiasm initial backend and preserve defaults."""
 
-    if _tool_name(method_id) == "hifiasm":
+    if _evidence_method_name(method_id) in _HIFIASM_EVIDENCE_METHODS:
         if task not in _HIFIASM_PARAMETER_TASKS:
             raise ValueError(f"unsupported hifiasm parameter task: {task!r}")
+        if task in _HIFIASM_RETRY_TASKS:
+            raise ValueError("hifiasm retry tasks do not use evidence-case selection")
 
         cutover_enabled, numeric_config = _hifiasm_numeric_settings(strategy)
         if task == _HIFIASM_INITIAL_TASK and cutover_enabled:
             retriever = HifiasmNumericCaseRetriever.from_config(
                 numeric_config,
-                max_cases=max_cases,
+                max_cases=_HIFIASM_INITIAL_TOP_K,
             )
             pack_root = Path(source_root) if source_root is not None else None
             validated_cases = validate_hifiasm_evidence_cases(cases, pack_root=pack_root)
@@ -179,17 +177,13 @@ def select_evidence_cases(
                 **result.metadata,
                 "query": query,
                 "hifiasm_numeric_gate": {
-                    "production_cutover_enabled": True,
+                    "initial_cutover_enabled": True,
                     "decision": "hifiasm_numeric",
-                    "reason": "production_cutover_enabled",
+                    "reason": "initial_cutover_enabled",
                 },
             }
 
-        gate_reason = (
-            "retry_pending_task_5"
-            if task in _HIFIASM_RETRY_TASKS
-            else "production_cutover_disabled"
-        )
+        gate_reason = "initial_cutover_disabled"
 
         selector = EvidenceBasedCaseSelector(
             min_cases=min_cases,
@@ -207,7 +201,7 @@ def select_evidence_cases(
             **result.metadata,
             "retrieval_backend": "structured_default",
             "hifiasm_numeric_gate": {
-                "production_cutover_enabled": cutover_enabled,
+                "initial_cutover_enabled": cutover_enabled,
                 "decision": "structured_default",
                 "reason": gate_reason,
             },
@@ -428,7 +422,11 @@ def _tool_family(method_id: Any) -> str | None:
 def _tool_name(method_id: Any) -> str | None:
     if not isinstance(method_id, str):
         return None
-    return method_id.rsplit(".", 1)[-1]
+    return method_id.rsplit(".", 1)[-1].lower().replace("-", "_")
+
+
+def _evidence_method_name(method_id: Any) -> str | None:
+    return _tool_name(method_id)
 
 
 def _same_bucket(left: Any, right: Any, thresholds: tuple[int, ...]) -> bool:

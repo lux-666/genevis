@@ -158,6 +158,13 @@ def update_current_parameter_attempt(
     if error:
         return [], error
     assert attempt is not None
+    if attempt.seal_hash:
+        return [], f"{label} current parameter attempt is sealed and cannot be mutated"
+    for field in ("execution_result", "review_outcome", "review_failure"):
+        if field not in updates or getattr(attempt, field) is None:
+            continue
+        if getattr(attempt, field) != updates[field]:
+            return [], f"{label} current parameter attempt {field} is append-once"
     updated = ParameterAttempt.model_validate({**attempt.model_dump(mode="json"), **updates}).model_dump(mode="json")
     attempts: list[dict[str, Any]] = []
     for item in output.get("parameter_attempts") or []:

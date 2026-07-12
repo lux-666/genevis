@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.domains.assembly.methods_evidence import allowed_parameter_evidence_span_ids
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
 from app.stages.assembly.parameter_profile import flatten_profile_facts
 
@@ -228,7 +229,9 @@ def validate_parameter_evidence(
         or case_retrieval.get("selected_case_ids")
         or []
     )
-    uses_hifiasm_evidence = case_retrieval.get("retrieval_backend") == "hifiasm_numeric"
+    uses_hifiasm_evidence = case_retrieval.get("retrieval_backend") in {
+        "hifiasm_numeric",
+    }
     declared_selected_ids: set[str] | None = None
     if uses_hifiasm_evidence and declared_selected_case_ids is not None:
         if not isinstance(declared_selected_case_ids, list) or not all(
@@ -385,6 +388,38 @@ def validate_parameter_evidence(
                             "severity": "critical",
                         }
                     )
+                cases_by_id = {
+                    str(case.get("case_id")): case
+                    for case in prompt_payload.get("evidence_cases") or []
+                    if isinstance(case, dict) and case.get("case_id")
+                }
+                unsupported_spans_by_case = {
+                    str(case_id): sorted(
+                        (spans_by_case.get(str(case_id), set()) & set(span_ids))
+                        - allowed_parameter_evidence_span_ids(
+                            cases_by_id.get(str(case_id), {}),
+                            parameter,
+                        )
+                    )
+                    for case_id in case_ids
+                }
+                unsupported_spans_by_case = {
+                    case_id: unsupported
+                    for case_id, unsupported in unsupported_spans_by_case.items()
+                    if unsupported
+                }
+                if unsupported_spans_by_case:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": (
+                                "case evidence cites visible spans that are not curated support "
+                                "for that parameter or its effect area: "
+                                f"{unsupported_spans_by_case}"
+                            ),
+                            "severity": "critical",
+                        }
+                    )
         if "profile_fact" in bases:
             fact_paths = evidence.get("fact_paths") or []
             if not isinstance(fact_paths, list) or not fact_paths:
@@ -396,6 +431,40 @@ def validate_parameter_evidence(
                     }
                 )
             else:
+                retry_fact_paths = [
+                    path
+                    for path in fact_paths
+                    if isinstance(path, str)
+                    and (
+                        path == "assembly_review"
+                        or path.startswith("assembly_review.")
+                        or path == "previous_attempt.failure_class"
+                        or path.startswith("previous_attempt.failure_class.")
+                        or path == "previous_attempt.execution_status"
+                        or path.startswith("previous_attempt.execution_status.")
+                        or path == "previous_attempt.execution_status_detail"
+                        or path.startswith("previous_attempt.execution_status_detail.")
+                        or path == "previous_attempt.exit_code"
+                        or path.startswith("previous_attempt.exit_code.")
+                        or path == "previous_attempt.stderr_ref"
+                        or path.startswith("previous_attempt.stderr_ref.")
+                        or path == "previous_attempt.stdout_ref"
+                        or path.startswith("previous_attempt.stdout_ref.")
+                        or path == "previous_attempt.resource_facts"
+                        or path.startswith("previous_attempt.resource_facts.")
+                    )
+                ]
+                if retry_fact_paths:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": (
+                                "retry failure facts require basis=retry_failure: "
+                                f"{retry_fact_paths}"
+                            ),
+                            "severity": "critical",
+                        }
+                    )
                 missing_paths = [
                     path
                     for path in fact_paths
@@ -409,11 +478,61 @@ def validate_parameter_evidence(
                             "severity": "critical",
                         }
                     )
-        if "retry_failure" in bases and prompt_payload.get("task") == "recommend_initial":
+        retry_signals = evidence.get("retry_signals") or []
+        retry_evidence = prompt_payload.get("retry_evidence") or {}
+        visible_retry_signals = {
+            item
+            for field in ("signal_ids", "signal_paths")
+            for item in (retry_evidence.get(field) or [])
+            if isinstance(item, str) and item.strip()
+        }
+        for signal in retry_evidence.get("signals") or []:
+            if not isinstance(signal, dict):
+                continue
+            visible_retry_signals.update(
+                value
+                for field in ("signal_id", "path")
+                if isinstance((value := signal.get(field)), str) and value.strip()
+            )
+        if "retry_failure" in bases:
+            if prompt_payload.get("task") == "recommend_initial":
+                violations.append(
+                    {
+                        "param": parameter,
+                        "reason": "retry_failure evidence is not valid for recommend_initial",
+                        "severity": "critical",
+                    }
+                )
+            if not isinstance(retry_signals, list) or not retry_signals:
+                violations.append(
+                    {
+                        "param": parameter,
+                        "reason": "basis=retry_failure requires retry_signals",
+                        "severity": "critical",
+                    }
+                )
+            else:
+                invalid_retry_signals = [
+                    signal
+                    for signal in retry_signals
+                    if not isinstance(signal, str) or signal not in visible_retry_signals
+                ]
+                if invalid_retry_signals:
+                    violations.append(
+                        {
+                            "param": parameter,
+                            "reason": (
+                                "retry_failure cites signals absent from structured prompt evidence: "
+                                f"{invalid_retry_signals}"
+                            ),
+                            "severity": "critical",
+                        }
+                    )
+        elif retry_signals:
             violations.append(
                 {
                     "param": parameter,
-                    "reason": "retry_failure evidence is not valid for recommend_initial",
+                    "reason": "retry_signals require basis=retry_failure",
                     "severity": "critical",
                 }
             )

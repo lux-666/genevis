@@ -59,7 +59,7 @@ def build_stage():
     graph.add_conditional_edges(
         "enter",
         route_after_enter,
-        {"resolve": "resolve_extended_inputs", "recommend": "recommend_parameters"},
+        {"resolve": "resolve_extended_inputs", "recommend": "recommend_parameters", "plan": "plan_candidate_attempts"},
     )
     graph.add_conditional_edges(
         "resolve_extended_inputs",
@@ -89,7 +89,7 @@ def build_stage():
     graph.add_conditional_edges(
         "recommend_parameters",
         route_after_parameter_recommendation,
-        {"plan": "plan_candidate_attempts", "fail": "fail"},
+        {"plan": "plan_candidate_attempts", "block": "block", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "plan_candidate_attempts",

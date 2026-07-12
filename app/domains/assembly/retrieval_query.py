@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.domains.assembly.selection import parameter_case_read_type
+
 
 def build_hifiasm_retrieval_query(
     prompt_profile: dict[str, Any],
@@ -17,6 +19,13 @@ def build_hifiasm_retrieval_query(
 
     if task != "recommend_initial":
         raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
+
+    return _build_query(prompt_profile, method_id=method_id, task=task, query_id=query_id)
+
+
+def _build_query(
+    prompt_profile: dict[str, Any], *, method_id: str, task: str, query_id: str | None
+) -> dict[str, Any]:
 
     genome_size_bp = _lookup(prompt_profile, "genome_survey.estimated_genome_size")
     read_n50_bp = _lookup(prompt_profile, "read_qc.read_n50")
@@ -34,12 +43,13 @@ def build_hifiasm_retrieval_query(
             "prompt_profile.genome_survey.kmer_peak_coverage",
         ),
     )
-    return {
+    query = {
         "query_id": query_id,
         "method_id": method_id,
         "task": task,
-        "read_type": _lookup(prompt_profile, "assets.read_type"),
-        "assembly_goal": _lookup(prompt_profile, "sample.assembly_goal") or "primary",
+        "read_type": parameter_case_read_type(
+            _lookup(prompt_profile, "assets.read_type")
+        ),
         "numeric_features": {
             "genome_size_mb": _number_record(
                 _scale(genome_size_bp, 1_000_000),
@@ -61,6 +71,7 @@ def build_hifiasm_retrieval_query(
         },
         "categorical_context": {"clade": _lookup(prompt_profile, "sample.clade")},
     }
+    return query
 
 
 def _lookup(values: Any, path: str) -> Any:

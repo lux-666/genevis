@@ -1,0 +1,10 @@
+cases:
+  - case_id: legacy_small
+    features: {read_type: hifi, clade: invertebrate, genome_size_mb: 100, coverage: 25, read_n50_kb: 12}
+    params: {tool: hifiasm, values: {purge_level: 0}}
+  - case_id: legacy_medium
+    features: {read_type: hifi, clade: vertebrate, genome_size_mb: 1200, coverage: 30, read_n50_kb: 18}
+    params: {tool: hifiasm, values: {purge_level: 1}}
+  - case_id: legacy_large
+    features: {read_type: hifi, clade: vertebrate, genome_size_mb: 3100, coverage: 60, read_n50_kb: 15}
+    params: {tool: hifiasm, values: {purge_level: 1}}

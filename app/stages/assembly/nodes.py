@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
+from app.control.ledger import Ledger
 from app.domains.assembly.methods_evidence import uses_hifiasm_methods_contract
 from app.domains.assembly.selection import (
     AssemblySelection,
@@ -42,12 +45,14 @@ from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_LLM_RESPONSE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
     ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
     ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
     ASSEMBLY_PARAMETER_REVIEW_FAILURE,
+    ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_VALIDATION,
     ASSEMBLY_ROUTE_DECISION,
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -386,6 +391,202 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
     }
 
 
+def apply_parameter_approval_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict[str, Any]:
+    """Apply one exactly-bound human decision to a validated recommendation."""
+
+    if request.stage != "assembly":
+        raise ResumeValidationError("parameter approval resume requires stage assembly")
+    if request.gate_id != "parameter_approval":
+        raise ResumeValidationError(
+            "parameter approval resume requires explicit gate_id=parameter_approval"
+        )
+    assembly_out = _assembly_output(state)
+    interrupt = state.get("active_interrupt") or assembly_out.get("active_interrupt")
+    if not isinstance(interrupt, dict) or interrupt.get("gate_id") != "parameter_approval":
+        raise ResumeValidationError("no unresolved parameter_approval gate")
+    if request.gate_id != interrupt.get("gate_id"):
+        raise ResumeValidationError("parameter approval gate_id does not match active interrupt")
+    allowed = list(interrupt.get("decisions_allowed") or [])
+    if request.decision not in allowed or request.decision not in {
+        "approve_parameters", "reject_parameters"
+    }:
+        raise ResumeValidationError("unsupported parameter approval decision")
+
+    required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
+    missing = [key for key in required if key not in request.metadata]
+    if missing:
+        raise ResumeValidationError(
+            f"parameter approval metadata missing required bindings: {missing}"
+        )
+    for key in required:
+        if request.metadata.get(key) != interrupt.get(key):
+            raise ResumeValidationError(f"stale parameter approval binding: {key}")
+
+    pending = assembly_out.get("pending_parameter_recommendation")
+    if not isinstance(pending, dict):
+        raise ResumeValidationError("active parameter approval has no pending recommendation")
+    if pending.get("attempt_id") != interrupt.get("attempt_id"):
+        raise ResumeValidationError("pending recommendation attempt does not match interrupt")
+    if pending.get("parameter_recommendation_hash") != interrupt.get("recommendation_hash"):
+        raise ResumeValidationError("pending recommendation hash does not match interrupt")
+    try:
+        pending_attempt = ParameterAttempt.model_validate(pending).model_dump(mode="json")
+    except ValueError as exc:
+        raise ResumeValidationError("pending parameter recommendation is invalid") from exc
+    recommendation_ref = pending.get("parameter_recommendation_ref") or {}
+    if recommendation_ref.get("sha256") != interrupt.get("recommendation_hash"):
+        raise ResumeValidationError("immutable recommendation artifact hash mismatch")
+    recommendation_path = _resolve_data_path_ref(
+        absolute_data_dir(state), str(recommendation_ref.get("path_ref") or "")
+    )
+    if not recommendation_path.exists() or file_sha256(recommendation_path) != interrupt.get("recommendation_hash"):
+        raise ResumeValidationError("immutable recommendation artifact is missing or changed")
+    try:
+        recommendation_payload = json.loads(recommendation_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ResumeValidationError("immutable recommendation artifact is unreadable") from exc
+    artifact_attempt = recommendation_payload.get("attempt") if isinstance(recommendation_payload, dict) else None
+    if not isinstance(artifact_attempt, dict):
+        raise ResumeValidationError("immutable recommendation artifact has no attempt proposal")
+    try:
+        artifact_attempt = ParameterAttempt.model_validate(artifact_attempt).model_dump(mode="json")
+    except ValueError as exc:
+        raise ResumeValidationError("immutable recommendation artifact attempt is invalid") from exc
+    artifact_semantic = _canonical_parameter_proposal(artifact_attempt)
+    pending_semantic = _canonical_parameter_proposal(pending_attempt)
+    if artifact_semantic != pending_semantic:
+        raise ResumeValidationError("pending recommendation differs semantically from artifact")
+    proposal_semantic_hash = _parameter_proposal_semantic_hash(artifact_semantic)
+    if interrupt.get("proposal_semantic_hash") != proposal_semantic_hash:
+        raise ResumeValidationError("parameter approval proposal semantic hash mismatch")
+
+    try:
+        attempts = _validate_parameter_attempt_chain(
+            assembly_out.get("parameter_attempts") or []
+        )
+    except (ValueError, TypeError) as exc:
+        raise ResumeValidationError("parameter approval attempt chain is invalid or mutated") from exc
+    attempt_id = int(interrupt["attempt_id"])
+    previous_id = interrupt.get("previous_attempt_id")
+    if any(item.get("attempt_id") == attempt_id for item in attempts):
+        raise ResumeValidationError("parameter approval gate was already resolved")
+    if attempt_id == 0:
+        if attempts or previous_id is not None:
+            raise ResumeValidationError("initial parameter approval chain head changed")
+    else:
+        if not attempts or attempts[-1].get("attempt_id") != previous_id or attempt_id != int(previous_id) + 1:
+            raise ResumeValidationError("parameter approval attempt chain head changed")
+        previous = attempts[-1]
+        if not previous.get("seal_hash"):
+            raise ResumeValidationError("parameter retry previous attempt is not sealed")
+        if pending.get("previous_attempt_seal_hash") != previous.get("seal_hash"):
+            raise ResumeValidationError("parameter retry previous attempt seal changed")
+        initial = attempts[0]
+        if pending.get("inherited_initial_attempt_id") != initial.get("attempt_id"):
+            raise ResumeValidationError("parameter retry initial attempt binding changed")
+        if pending.get("inherited_initial_snapshot_ref") != _attempt_snapshot_ref(initial):
+            raise ResumeValidationError("parameter retry initial snapshot changed")
+        if pending.get("initial_recommendation_contract") != initial.get("initial_recommendation_contract"):
+            raise ResumeValidationError("parameter retry initial contract changed")
+        if pending.get("catalog_snapshot") != initial.get("catalog_snapshot"):
+            raise ResumeValidationError("parameter retry catalog snapshot changed")
+        if pending.get("inherited_evidence_payload_ref") != initial.get("evidence_payload_ref"):
+            raise ResumeValidationError("parameter retry inherited evidence changed")
+        if pending.get("inherited_profile_ref") != initial.get("input_profile_ref"):
+            raise ResumeValidationError("parameter retry inherited profile changed")
+
+    decision_ref = _write_attempt_json_artifact(
+        state,
+        attempt_id,
+        "parameter_approval_decision.json",
+        {
+            "session_id": state["session_id"],
+            "stage": "assembly",
+            "gate_id": "parameter_approval",
+            "decision": request.decision,
+            "metadata": {key: request.metadata[key] for key in required},
+            "decided_by": request.decided_by,
+            "notes": list(request.notes),
+        },
+        artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+        method_name="assembly.parameter_approval",
+    )
+    Ledger(absolute_data_dir(state)).record_review_decision(
+        state["session_id"],
+        "assembly",
+        gate_id="parameter_approval",
+        decision=request.decision,
+        notes=list(request.notes),
+        artifact_ref=decision_ref.path_ref,
+        metadata={key: request.metadata[key] for key in required},
+        decided_by=request.decided_by,
+    )
+    outputs = dict(state.get("stage_outputs") or {})
+    if request.decision == "reject_parameters":
+        rejected_output = {
+            **assembly_out,
+            "status": "parameter_recommendation_rejected_by_human",
+            "reason": "parameter_recommendation_rejected_by_human",
+            "active_interrupt": None,
+            "pending_parameter_recommendation": None,
+            "parameter_rejection": {
+                "attempt_id": attempt_id,
+                "task": interrupt.get("task"),
+                "previous_attempt_id": previous_id,
+                "recommendation_ref": recommendation_ref,
+                "recommendation_hash": interrupt.get("recommendation_hash"),
+                "decision_ref": decision_ref.model_dump(mode="json"),
+                "decision": request.decision,
+            },
+        }
+        rejected_output["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
+            rejected_output,
+            status="parameter_recommendation_rejected_by_human",
+            reason="parameter_recommendation_rejected_by_human",
+        )
+        outputs["assembly"] = rejected_output
+        return {
+            "current_stage": "assembly",
+            "supervision_state": "failed_terminal",
+            "active_interrupt": None,
+            "last_error": "parameter_recommendation_rejected_by_human",
+            "stage_outputs": outputs,
+        }
+
+    approved = {
+        **pending,
+        "status": "recommended",
+        "parameter_approval_decision_ref": decision_ref.model_dump(mode="json"),
+        "parameter_approval_recommendation_hash": interrupt.get("recommendation_hash"),
+    }
+    # Validate the final appended representation before changing any counter.
+    approved = ParameterAttempt.model_validate(approved).model_dump(mode="json")
+    attempts.append(approved)
+    retry_counts = dict(assembly_out.get("retry_counts") or {})
+    if interrupt.get("task") == "retry_after_execution_failure":
+        retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
+    elif interrupt.get("task") == "retry_after_review_failure":
+        retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
+    outputs["assembly"] = {
+        **assembly_out,
+        "status": "parameters_approved",
+        "current_parameter_attempt_id": attempt_id,
+        "parameter_attempts": attempts,
+        "retry_counts": retry_counts,
+        "active_interrupt": None,
+        "pending_parameter_recommendation": None,
+        "proposed_parameter_attempt_id": None,
+    }
+    return {
+        "current_stage": "assembly",
+        "supervision_state": "running_stage",
+        "active_interrupt": None,
+        "stage_outputs": outputs,
+    }
+
+
 def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
     """Commit the current assembly recommendation after a configured timeout."""
     active_interrupt = state.get("active_interrupt") or {}
@@ -568,18 +769,54 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     method_name = _selected_parameter_method(assembly_out)
     if method_name is None:
         return {}
+    task = _parameter_prompt_task(assembly_out)
+    initial_snapshot = next(
+        (
+            dict(item) for item in assembly_out.get("parameter_attempts") or []
+            if isinstance(item, dict) and item.get("attempt_id") == 0
+        ),
+        {},
+    )
     try:
-        catalog = load_parameter_catalog(method_name)
-    except (FileNotFoundError, ValueError) as exc:
-        return _fail_update(state, f"Assembly parameter catalog is not usable: {exc}")
+        if task == "recommend_initial":
+            catalog = load_parameter_catalog(method_name)
+        else:
+            from app.schemas.parameter_catalog import MethodParameterCatalog
+            catalog = MethodParameterCatalog.model_validate(initial_snapshot["catalog_snapshot"])
+            if catalog.method_id != method_name.rsplit(".", 1)[-1]:
+                return _retry_transition_failure(state, "policy_snapshot_hash_mismatch")
+    except (KeyError, FileNotFoundError, ValueError) as exc:
+        reason = "policy_snapshot_mismatch" if task != "recommend_initial" else f"Assembly parameter catalog is not usable: {exc}"
+        return _fail_update(state, reason) if task == "recommend_initial" else _retry_transition_failure(state, reason)
 
     l2_keys = [key for key, spec in catalog.parameters.items() if spec.level == 2]
     if not l2_keys:
         return _fail_update(state, f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}")
 
-    task = _parameter_prompt_task(assembly_out)
-    attempt_id = int(assembly_out.get("current_parameter_attempt_id") or len(assembly_out.get("parameter_attempts") or []))
+    attempt_id = int(
+        assembly_out.get("proposed_parameter_attempt_id")
+        if assembly_out.get("proposed_parameter_attempt_id") is not None
+        else assembly_out.get("current_parameter_attempt_id")
+        or len(assembly_out.get("parameter_attempts") or [])
+    )
     previous_attempt = _previous_parameter_attempt(assembly_out, attempt_id)
+    attempts_before = [
+        dict(item) for item in assembly_out.get("parameter_attempts") or []
+        if isinstance(item, dict)
+    ]
+    initial_attempt = next(
+        (item for item in attempts_before if item.get("attempt_id") == 0), {}
+    )
+    if task != "recommend_initial":
+        if not previous_attempt or previous_attempt.get("attempt_id") != attempt_id - 1:
+            return _retry_transition_failure(state, "missing_failure_signal")
+        if not previous_attempt.get("seal_hash"):
+            return _retry_transition_failure(state, "unsealed_previous_attempt")
+        retry_request = dict(assembly_out.get("parameter_retry_request") or {})
+        if retry_request.get("previous_attempt_id") != previous_attempt.get("attempt_id"):
+            return _retry_transition_failure(state, "missing_failure_signal")
+        if retry_request.get("previous_attempt_seal_hash") != previous_attempt.get("seal_hash"):
+            return _retry_transition_failure(state, "previous_attempt_seal_hash_mismatch")
     full_profile = build_full_parameter_profile(
         state,
         assembly_out=assembly_out,
@@ -590,7 +827,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     session_id = state["session_id"]
 
     try:
-        prompt_contract = _parameter_prompt_contract(method_name, task)
+        prompt_contract = _parameter_prompt_contract(method_name, task, initial_snapshot)
         prompt_payload = build_prompt_payload(
             method_id=catalog.method_id,
             catalog=catalog,
@@ -600,6 +837,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             session_id=session_id,
             attempt_id=attempt_id,
             data_dir=data_dir,
+            initial_attempt_snapshot=initial_attempt,
         )
     except Exception as exc:
         return _fail_update(state, f"Assembly parameter prompt payload failed: {exc}")
@@ -720,10 +958,21 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         selected_case_ids = list(
             prompt_payload.get("case_selection", {}).get("selected_case_ids") or []
         )
+    previous_rendered = dict(
+        previous_attempt.get("rendered_parameters")
+        or previous_attempt.get("recommended_params")
+        or {}
+    )
+    proposed_parameter_changes = {
+        key: {"from": previous_rendered.get(key), "to": value}
+        for key, value in recommended_params.items()
+        if previous_attempt and previous_rendered.get(key) != value
+    }
     attempt = ParameterAttempt(
         attempt_id=attempt_id,
         method_id=method_name,
         status="recommended" if validation.get("valid") else "validation_failed",
+        task=task,
         input_profile_ref=ArtifactRef(
             path_ref=str(prompt_payload["input_profile_ref"]),
             sha256=str(prompt_payload["input_profile_hash"]),
@@ -775,6 +1024,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         llm_response_ref=llm_response_ref,
         validation_ref=validation_ref,
         catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",
+        catalog_snapshot=catalog.model_dump(mode="json"),
         knowledge_pack_ref="descriptors/knowledge_packs/assembly/parameter_recommender",
         selected_case_ids=selected_case_ids,
         recommended_params=recommended_params,
@@ -782,30 +1032,121 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         parameter_evidence=dict(parsed.get("parameter_evidence") or {}),
         case_assessments=list(parsed.get("case_assessments") or []),
         parameter_decisions=dict(parsed.get("parameter_decisions") or {}),
+        proposed_parameter_changes=proposed_parameter_changes,
         recommendation_summary=parsed.get("summary"),
         validation=validation,
         reasoning=parsed.get("reasoning"),
         confidence=parsed.get("confidence"),
         previous_attempt_id=previous_attempt.get("attempt_id") if previous_attempt else None,
+        failure_signature=(
+            dict((prompt_payload.get("retry_evidence") or {}))
+            if task != "recommend_initial"
+            else None
+        ),
         failure_log_tail=assembly_out.get("execution_failure_log_tail"),
         review_failure=assembly_out.get("review_failure"),
+        attempt_kind="initial" if task == "recommend_initial" else "retry",
+        retry_origin=(
+            "assembly_execution" if task == "retry_after_execution_failure"
+            else "assembly_review" if task == "retry_after_review_failure" else None
+        ),
+        initial_recommendation_contract=(
+            "curated_initial_v1"
+            if prompt_contract == "hifiasm_methods_v1"
+            else "legacy_initial"
+        ) if task == "recommend_initial" else initial_attempt.get("initial_recommendation_contract"),
+        inherited_initial_attempt_id=0 if task != "recommend_initial" else None,
+        inherited_initial_snapshot_ref=(
+            _attempt_snapshot_ref(initial_attempt) if task != "recommend_initial" else None
+        ),
+        inherited_evidence_payload_ref=(
+            initial_attempt.get("evidence_payload_ref") if task != "recommend_initial" else None
+        ),
+        inherited_profile_ref=(
+            initial_attempt.get("input_profile_ref") if task != "recommend_initial" else None
+        ),
+        previous_attempt_seal_hash=(
+            previous_attempt.get("seal_hash") if task != "recommend_initial" else None
+        ),
     )
-    attempts = _upsert_parameter_attempt(assembly_out.get("parameter_attempts") or [], attempt.model_dump(mode="json"))
-    status = "parameters_recommended" if validation.get("valid") else "parameter_validation_failed"
+    retry_disposition = (parsed.get("recommendation") or {}).get("retry_disposition")
+    if validation.get("valid") and retry_disposition == "stop":
+        status = "parameter_retry_stopped"
+    elif validation.get("valid") and retry_disposition == "expert_review":
+        status = "parameter_retry_expert_review"
+    else:
+        status = "blocked_human" if validation.get("valid") else "parameter_retry_validation_failed" if task != "recommend_initial" else "parameter_validation_failed"
+    attempt_payload = attempt.model_dump(mode="json")
+    recommendation_ref = _write_attempt_json_artifact(
+        state,
+        attempt_id,
+        "validated_recommendation.json",
+        {"attempt": attempt_payload, "validation": validation},
+        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION,
+        method_name="assembly.parameter_recommender",
+    )
+    attempt_payload["parameter_recommendation_ref"] = recommendation_ref.model_dump(mode="json")
+    attempt_payload["parameter_recommendation_hash"] = recommendation_ref.sha256
     update = {
         "status": status,
-        "current_parameter_attempt_id": attempt_id,
-        "parameter_attempts": attempts,
+        "proposed_parameter_attempt_id": attempt_id,
     }
     if not validation.get("valid"):
         update["reason"] = "Assembly parameter recommendation failed validation"
+        update["failed_parameter_recommendation"] = attempt_payload
+    elif retry_disposition == "stop":
+        update["reason"] = parsed.get("summary") or "Parameter retry stopped by evidence assessment"
+    elif retry_disposition == "expert_review":
+        update["reason"] = parsed.get("summary") or "Parameter retry requires expert review"
+    else:
+        parameter_diff = proposed_parameter_changes if previous_attempt else {
+            key: {"from": None, "to": value}
+            for key, value in recommended_params.items()
+        }
+        interrupt = _parameter_approval_interrupt(
+            attempt=attempt_payload,
+            recommendation_ref=recommendation_ref,
+            parameter_diff=parameter_diff,
+        )
+        request_ref = _write_attempt_json_artifact(
+            state,
+            attempt_id,
+            "parameter_approval_request.json",
+            interrupt,
+            artifact_type="assembly.parameter_approval.request",
+            method_name="assembly.parameter_approval",
+        )
+        interrupt["review_request_artifact_ref"] = request_ref.model_dump(mode="json")
+        Ledger(data_dir).record_review_requested(
+            session_id,
+            "assembly",
+            reason="assembly_parameter_approval_required",
+            candidates=[
+                {
+                    "attempt_id": attempt_id,
+                    "task": task,
+                    "previous_attempt_id": attempt.previous_attempt_id,
+                    "recommendation_hash": recommendation_ref.sha256,
+                }
+            ],
+            review_request_artifact_ref=request_ref.path_ref,
+            auto_decidable=False,
+            pending_human_confirmation=True,
+        )
+        update.update(
+            {
+                "block_reason": "assembly_parameter_approval_required",
+                "active_interrupt": interrupt,
+                "pending_parameter_recommendation": attempt_payload,
+            }
+        )
     return _update_assembly_output(state, update)
 
 
 def plan_candidate_attempts(state: TopLevelState) -> dict:
     """Write candidate bundles and select the optional local Flye route."""
     assembly_out = _assembly_output(state)
-    if assembly_out.get("status") not in {"selected", "parameters_recommended"}:
+    if assembly_out.get("status") not in {"selected", "parameters_recommended", "parameters_approved"}:
         return {}
 
     data_dir = Path(state.get("data_dir", "data"))
@@ -962,30 +1303,42 @@ def execution_retry_gate(state: TopLevelState) -> dict:
         previous["failure_log_tail"] = failure_log_tail
         previous["stderr_tail"] = _tail_from_path(execution_result.get("stderr_path"))
         previous["stdout_tail"] = _tail_from_path(execution_result.get("stdout_path"))
+    previous = _seal_parameter_attempt(previous)
     retry_counts = dict(assembly_out.get("retry_counts") or {})
     used = int(retry_counts.get("execution", 0))
     max_retries = _parameter_recommendation_config(state, assembly_out).get("max_execution_retries", 1)
     updated_attempts = [previous if item.get("attempt_id") == attempt_id else item for item in attempts]
     if used >= int(max_retries):
+        exhausted = {
+            "status": "execution_parameter_retries_exhausted",
+            "reason": "execution_retry_budget_exhausted",
+            "parameter_attempts": updated_attempts,
+            "execution_failure_log_tail": failure_log_tail,
+        }
+        exhausted["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
+            {**assembly_out, **exhausted},
+            status="execution_parameter_retries_exhausted",
+            reason="execution_retry_budget_exhausted",
+        )
         return _update_assembly_output(
             state,
-            {
-                "status": "parameter_retries_exhausted",
-                "reason": f"execution parameter retries exhausted after {used} retry attempt(s)",
-                "parameter_attempts": updated_attempts,
-                "execution_failure_log_tail": failure_log_tail,
-            },
+            exhausted,
         )
-    retry_counts["execution"] = used + 1
     return _update_assembly_output(
         state,
         {
             "status": "retry_parameters_after_execution_failure",
-            "current_parameter_attempt_id": attempt_id + 1,
+            "proposed_parameter_attempt_id": attempt_id + 1,
             "previous_parameter_attempt": previous,
             "parameter_attempts": updated_attempts,
             "retry_counts": retry_counts,
             "execution_failure_log_tail": failure_log_tail,
+            "parameter_retry_request": {
+                "origin": "assembly_execution",
+                "previous_attempt_id": attempt_id,
+                "previous_attempt_seal_hash": previous["seal_hash"],
+                "execution_result": execution_result,
+            },
         },
     )
 
@@ -998,7 +1351,27 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     metrics = dict(review_out.get("metrics") or review_out.get("summary") or assembly_out.get("review_metrics") or {})
     diagnosis = _review_failure_diagnosis(metrics)
     if diagnosis["passed"]:
-        return _update_assembly_output(state, {"status": "parameter_quality_passed", "quality_gate": diagnosis})
+        current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+        completed = _previous_parameter_attempt(assembly_out, current_id + 1)
+        completed = {**completed, "review_outcome": diagnosis}
+        completed = _seal_parameter_attempt(completed)
+        attempts = [
+            completed if item.get("attempt_id") == current_id else item
+            for item in assembly_out.get("parameter_attempts") or []
+            if isinstance(item, dict)
+        ]
+        passed = {
+            "status": "parameter_quality_passed",
+            "quality_gate": diagnosis,
+            "parameter_attempts": attempts,
+        }
+        passed["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
+            {**assembly_out, **passed}, status="assembly_succeeded", reason="completed"
+        )
+        return _update_assembly_output(
+            state,
+            passed,
+        )
     current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
     previous = _previous_parameter_attempt(assembly_out, current_id + 1)
     review_failure_ref = _write_attempt_json_artifact(
@@ -1017,8 +1390,10 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     previous = {
         **previous,
         "review_failure": diagnosis,
+        "review_outcome": diagnosis,
         "review_failure_ref": review_failure_ref.model_dump(mode="json"),
     }
+    previous = _seal_parameter_attempt(previous)
     attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
     updated_attempts = [previous if item.get("attempt_id") == current_id else item for item in attempts]
     if previous and not any(item.get("attempt_id") == current_id for item in updated_attempts):
@@ -1027,27 +1402,38 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     used = int(retry_counts.get("review", 0))
     max_retries = _parameter_recommendation_config(state, assembly_out).get("max_review_retries", 2)
     if used >= int(max_retries):
+        exhausted = {
+            "status": "review_parameter_retries_exhausted",
+            "quality_gate": diagnosis,
+            "review_failure": diagnosis,
+            "parameter_attempts": updated_attempts,
+            "reason": "review_retry_budget_exhausted",
+        }
+        exhausted["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
+            {**assembly_out, **exhausted},
+            status="review_parameter_retries_exhausted",
+            reason="review_retry_budget_exhausted",
+        )
         return _update_assembly_output(
             state,
-            {
-                "status": "parameter_retries_exhausted",
-                "quality_gate": diagnosis,
-                "review_failure": diagnosis,
-                "parameter_attempts": updated_attempts,
-                "reason": f"review parameter retries exhausted after {used} retry attempt(s)",
-            },
+            exhausted,
         )
-    retry_counts["review"] = used + 1
     return _update_assembly_output(
         state,
         {
             "status": "retry_parameters_after_review_failure",
-            "current_parameter_attempt_id": current_id + 1,
+            "proposed_parameter_attempt_id": current_id + 1,
             "previous_parameter_attempt": previous,
             "parameter_attempts": updated_attempts,
             "retry_counts": retry_counts,
             "review_failure": diagnosis,
             "quality_gate": diagnosis,
+            "parameter_retry_request": {
+                "origin": "assembly_review",
+                "previous_attempt_id": current_id,
+                "previous_attempt_seal_hash": previous["seal_hash"],
+                "review_failure": diagnosis,
+            },
         },
     )
 
@@ -1363,7 +1749,14 @@ def _write_attempt_json_artifact(
     artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     path = artifact_dir / filename
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    if path.exists():
+        if path.read_text(encoding="utf-8") != serialized:
+            raise ResumeValidationError(
+                f"immutable parameter-attempt artifact already exists with different content: {path}"
+            )
+    else:
+        path.write_text(serialized, encoding="utf-8")
     artifact = ArtifactMeta.from_file(
         path,
         stage="assembly",
@@ -1413,6 +1806,253 @@ def _previous_parameter_attempt(assembly_out: dict[str, Any], attempt_id: int) -
     return next((item for item in attempts if item.get("attempt_id") == attempt_id - 1), attempts[-1])
 
 
+def _parameter_approval_interrupt(
+    *,
+    attempt: dict[str, Any],
+    recommendation_ref: ArtifactRef,
+    parameter_diff: dict[str, Any],
+) -> dict[str, Any]:
+    failure_facts: dict[str, Any] = {}
+    if attempt.get("failure_signature"):
+        failure_facts["signals"] = attempt["failure_signature"]
+    if attempt.get("failure_log_tail"):
+        failure_facts["failure_log_tail"] = attempt["failure_log_tail"]
+    if attempt.get("review_failure"):
+        failure_facts["review_failure"] = attempt["review_failure"]
+    return {
+        "stage": "assembly",
+        "gate_id": "parameter_approval",
+        "reason": "assembly_parameter_approval_required",
+        "attempt_id": attempt["attempt_id"],
+        "task": attempt.get("task"),
+        "previous_attempt_id": attempt.get("previous_attempt_id"),
+        "recommendation_ref": recommendation_ref.model_dump(mode="json"),
+        "recommendation_hash": recommendation_ref.sha256,
+        "proposal_semantic_hash": _parameter_proposal_semantic_hash(attempt),
+        "parameter_diff": parameter_diff,
+        "rationale": attempt.get("recommendation_summary") or attempt.get("reasoning"),
+        "failure_facts": failure_facts,
+        "evidence_refs": {
+            key: attempt.get(key)
+            for key in (
+                "input_profile_ref",
+                "prompt_payload_ref",
+                "retrieval_query_ref",
+                "retrieval_trace_ref",
+                "evidence_payload_ref",
+                "catalog_ref",
+                "knowledge_pack_ref",
+                "inherited_initial_snapshot_ref",
+            )
+            if attempt.get(key) is not None
+        },
+        "decisions_allowed": ["approve_parameters", "reject_parameters"],
+        "auto_decidable": False,
+    }
+
+
+_PARAMETER_PROPOSAL_POST_WRITE_FIELDS = {
+    "parameter_recommendation_ref",
+    "parameter_recommendation_hash",
+    "parameter_approval_decision_ref",
+    "parameter_approval_recommendation_hash",
+    "sealed_at",
+    "seal_hash",
+}
+
+
+def _canonical_parameter_proposal(attempt: dict[str, Any]) -> dict[str, Any]:
+    """Return every proposal semantic that approval will append or later freeze."""
+
+    normalized = ParameterAttempt.model_validate(attempt).model_dump(mode="json")
+    return {
+        key: value
+        for key, value in normalized.items()
+        if key not in _PARAMETER_PROPOSAL_POST_WRITE_FIELDS
+    }
+
+
+def _parameter_proposal_semantic_hash(attempt: dict[str, Any]) -> str:
+    canonical = _canonical_parameter_proposal(attempt)
+    return sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _seal_parameter_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
+    value = dict(attempt)
+    semantic = {key: item for key, item in value.items() if key not in {"sealed_at", "seal_hash"}}
+    digest = sha256(
+        json.dumps(semantic, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    if value.get("seal_hash"):
+        if value["seal_hash"] != digest:
+            raise ValueError("sealed parameter attempt was mutated")
+        return value
+    value["sealed_at"] = datetime.now(timezone.utc).isoformat()
+    value["seal_hash"] = digest
+    return value
+
+
+def _attempt_snapshot_ref(attempt: dict[str, Any]) -> str | None:
+    if not attempt:
+        return None
+    return attempt.get("seal_hash") or sha256(
+        json.dumps(attempt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _retry_transition_failure(state: TopLevelState, reason: str) -> dict[str, Any]:
+    return _update_assembly_output(
+        state,
+        {"status": "parameter_retry_invalid_transition", "reason": reason},
+    )
+
+
+def _validate_parameter_attempt_chain(raw_attempts: list[Any]) -> list[dict[str, Any]]:
+    """Validate the complete ordered, sealed parameter-attempt history."""
+
+    attempts: list[dict[str, Any]] = []
+    for item in raw_attempts:
+        if not isinstance(item, dict):
+            raise ValueError("parameter attempt chain contains a non-mapping entry")
+        verified = _seal_parameter_attempt(dict(item))
+        attempts.append(ParameterAttempt.model_validate(verified).model_dump(mode="json"))
+    if not attempts:
+        return attempts
+
+    initial = attempts[0]
+    if initial.get("attempt_id") != 0 or initial.get("previous_attempt_id") is not None:
+        raise ValueError("parameter attempt chain must start at attempt 0")
+    if initial.get("attempt_kind") != "initial":
+        raise ValueError("parameter attempt 0 must be initial")
+    if initial.get("initial_recommendation_contract") not in {
+        "legacy_initial", "curated_initial_v1"
+    }:
+        raise ValueError("parameter attempt 0 has no known initial contract")
+    if any(
+        initial.get(key) is not None
+        for key in (
+            "retry_origin",
+            "inherited_initial_attempt_id",
+            "inherited_initial_snapshot_ref",
+            "inherited_evidence_payload_ref",
+            "inherited_profile_ref",
+            "previous_attempt_seal_hash",
+        )
+    ):
+        raise ValueError("parameter attempt 0 contains retry-only links")
+
+    initial_snapshot_ref = _attempt_snapshot_ref(initial)
+    for sequence, attempt in enumerate(attempts):
+        if attempt.get("attempt_id") != sequence:
+            raise ValueError("parameter attempt IDs must match fixed list order")
+        if sequence == 0:
+            continue
+        previous = attempts[sequence - 1]
+        if attempt.get("attempt_kind") != "retry":
+            raise ValueError("non-initial parameter attempts must be retries")
+        if attempt.get("previous_attempt_id") != sequence - 1:
+            raise ValueError("parameter attempt chain has a broken previous-attempt link")
+        if attempt.get("previous_attempt_seal_hash") != previous.get("seal_hash"):
+            raise ValueError("parameter attempt chain has a broken previous-seal link")
+        if attempt.get("inherited_initial_attempt_id") != 0:
+            raise ValueError("parameter retry has a broken initial-attempt link")
+        if attempt.get("inherited_initial_snapshot_ref") != initial_snapshot_ref:
+            raise ValueError("parameter retry has a broken initial-snapshot link")
+        if attempt.get("initial_recommendation_contract") != initial.get(
+            "initial_recommendation_contract"
+        ):
+            raise ValueError("parameter retry initial contract drifted")
+        if attempt.get("catalog_snapshot") != initial.get("catalog_snapshot"):
+            raise ValueError("parameter retry catalog snapshot drifted")
+        if attempt.get("inherited_evidence_payload_ref") != initial.get("evidence_payload_ref"):
+            raise ValueError("parameter retry inherited evidence drifted")
+        if attempt.get("inherited_profile_ref") != initial.get("input_profile_ref"):
+            raise ValueError("parameter retry inherited profile drifted")
+    return attempts
+
+
+def build_parameter_attempt_timeline(
+    assembly_out: dict[str, Any], *, status: str, reason: str
+) -> dict[str, Any]:
+    """Derive a deterministic terminal timeline from the sealed attempt chain."""
+
+    attempts = _validate_parameter_attempt_chain(
+        assembly_out.get("parameter_attempts") or []
+    )
+    for sequence, attempt in enumerate(attempts):
+        if int(attempt["attempt_id"]) != sequence:
+            raise ValueError("parameter attempt timeline requires contiguous attempt IDs")
+        expected_previous = None if sequence == 0 else sequence - 1
+        if attempt.get("previous_attempt_id") != expected_previous:
+            raise ValueError("parameter attempt timeline contains a broken previous-attempt link")
+        if not attempt.get("seal_hash"):
+            raise ValueError("parameter attempt timeline requires sealed attempts")
+        if not attempt.get("parameter_approval_decision_ref"):
+            raise ValueError("parameter attempt timeline requires an approval decision ref")
+        if attempt.get("parameter_approval_recommendation_hash") != attempt.get("parameter_recommendation_hash"):
+            raise ValueError("parameter attempt timeline approval hash mismatch")
+
+    initial_contract = attempts[0].get("initial_recommendation_contract") if attempts else None
+    if attempts and initial_contract not in {"legacy_initial", "curated_initial_v1"}:
+        raise ValueError("parameter attempt timeline has missing/unknown initial contract")
+    entries = []
+    for sequence, attempt in enumerate(attempts):
+        execution = attempt.get("execution_result")
+        review = attempt.get("review_outcome") or attempt.get("review_failure")
+        entries.append(
+            {
+                "sequence": sequence,
+                "attempt_id": attempt["attempt_id"],
+                "previous_attempt_id": attempt.get("previous_attempt_id"),
+                "attempt_kind": attempt.get("attempt_kind"),
+                "retry_origin": attempt.get("retry_origin"),
+                "frozen_parameters_ref": attempt.get("validation_ref"),
+                "command_ref": attempt.get("command_ref"),
+                "execution": execution,
+                "stderr_tail": attempt.get("stderr_tail"),
+                "stdout_tail": attempt.get("stdout_tail"),
+                "review": review,
+                "failure_signal_ref": attempt.get("review_failure_ref") or (
+                    attempt.get("execution_result") if execution and execution.get("status") != "succeeded" else None
+                ),
+                "parameter_delta": attempt.get("proposed_parameter_changes") or {},
+                "inherited_initial_snapshot_ref": attempt.get("inherited_initial_snapshot_ref") or attempts[0].get("seal_hash"),
+                "parameter_approval": {
+                    "decision": "approve_parameters",
+                    "decision_ref": attempt.get("parameter_approval_decision_ref"),
+                    "recommendation_ref": attempt.get("parameter_recommendation_ref"),
+                    "recommendation_hash": attempt.get("parameter_approval_recommendation_hash"),
+                },
+                "seal_hash": attempt.get("seal_hash"),
+            }
+        )
+    retry_counts = dict(assembly_out.get("retry_counts") or {})
+    terminal = {
+        "status": status,
+        "reason": reason,
+        "final_attempt_id": attempts[-1]["attempt_id"] if attempts else None,
+        "execution_retries_used": int(retry_counts.get("execution", 0)),
+        "review_retries_used": int(retry_counts.get("review", 0)),
+        "result_ref": assembly_out.get("draft_assembly_ref"),
+        "parameter_rejection": assembly_out.get("parameter_rejection"),
+    }
+    chain_hash = sha256(
+        json.dumps(
+            [(item["attempt_id"], item["seal_hash"]) for item in attempts],
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "initial_recommendation_contract": initial_contract,
+        "entries": entries,
+        "terminal": terminal,
+        "source_attempt_chain_hash": chain_hash,
+    }
+
+
 def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
     typed = [ParameterAttempt.model_validate(item).model_dump(mode="json") for item in attempts if isinstance(item, dict)]
     return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
@@ -1441,7 +2081,8 @@ def _parameter_recommender_system_prompt(
         "methods_evidence.effect_areas value and cite span IDs visible in that same case. "
         "recommendation.adjustable_params must contain exactly one decision for every catalog L2 "
         "parameter. Each decision must "
-        "choose action set, keep_default, or omit; include confidence strong, medium, or weak; include "
+        "choose action set, keep_previous, keep_default, or omit; on retries use keep_previous for "
+        "unchanged prior values and never reset them with keep_default; include confidence strong, medium, or weak; include "
         "a non-empty reason; and declare at least one evidence basis. basis=case requires selected, "
         "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts or "
         "catalog defaults. Never invent cases, spans, parameters, effect areas, or profile facts. "
@@ -1456,11 +2097,19 @@ def _parameter_recommender_system_prompt(
 def _parameter_prompt_contract(
     method_name: str,
     task: str,
+    initial_snapshot: dict[str, Any] | None = None,
 ) -> AssemblyPromptContract:
     """Choose the decision contract from trusted routing and pack configuration."""
 
-    if method_name != HIFIASM_METHOD or task != "recommend_initial":
+    if method_name != HIFIASM_METHOD:
         return "legacy"
+    if task != "recommend_initial":
+        contract = (initial_snapshot or {}).get("initial_recommendation_contract")
+        if contract == "curated_initial_v1":
+            return "hifiasm_methods_v1"
+        if contract == "legacy_initial":
+            return "legacy"
+        raise ValueError("retry is missing attempt 0 initial recommendation contract")
     pack = load_knowledge_pack("parameter_recommender")
     strategies = pack.get("strategies") or {}
     if not isinstance(strategies, dict):
@@ -1470,9 +2119,9 @@ def _parameter_prompt_contract(
         return "legacy"
     if not isinstance(numeric, dict):
         raise ValueError("hifiasm_numeric strategy must be a mapping")
-    cutover_enabled = numeric.get("production_cutover_enabled", False)
+    cutover_enabled = numeric.get("initial_cutover_enabled", False)
     if not isinstance(cutover_enabled, bool):
-        raise ValueError("hifiasm_numeric.production_cutover_enabled must be a bool")
+        raise ValueError("hifiasm_numeric.initial_cutover_enabled must be a bool")
     return "hifiasm_methods_v1" if cutover_enabled else "legacy"
 
 

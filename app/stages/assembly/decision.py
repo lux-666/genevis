@@ -84,18 +84,30 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
         response = model.invoke(messages)
     except Exception as exc:
         if request.kind == "parameter_recommendation" and request.allow_default_on_error:
-            prompt_payload = request._require_current_prompt_attestation()
-            fallback = _default_parameter_recommendation(
-                prompt_payload,
-                request._validated_prompt_contract or request.prompt_contract,
-            )
-            return AssemblyDecisionResult(
-                kind=request.kind,
-                raw_response=json.dumps(fallback),
-                parsed=fallback,
-                valid=True,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            try:
+                prompt_payload = request._require_current_prompt_attestation()
+                fallback = _default_parameter_recommendation(
+                    prompt_payload,
+                    request._validated_prompt_contract or request.prompt_contract,
+                )
+                return AssemblyDecisionResult(
+                    kind=request.kind,
+                    raw_response=json.dumps(fallback),
+                    parsed=fallback,
+                    valid=True,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception as fallback_exc:
+                return AssemblyDecisionResult(
+                    kind=request.kind,
+                    raw_response="",
+                    parsed=None,
+                    valid=False,
+                    error=(
+                        f"{type(exc).__name__}: {exc}; conservative fallback failed: "
+                        f"{type(fallback_exc).__name__}: {fallback_exc}"
+                    ),
+                )
         return AssemblyDecisionResult(
             kind=request.kind,
             raw_response="",
@@ -162,24 +174,46 @@ def _default_parameter_recommendation(
 ) -> dict[str, Any]:
     reason = "model unavailable; using catalog defaults for all L2 parameters"
     if prompt_contract == "hifiasm_methods_v1":
+        is_retry = prompt_payload.get("task") != "recommend_initial"
+        previous_params = (
+            (prompt_payload.get("prompt_profile") or {})
+            .get("previous_attempt", {})
+            .get("params", {})
+        )
+        retry_evidence = prompt_payload.get("retry_evidence") or {}
+        retry_signals = list(retry_evidence.get("signal_ids") or [])
+        if is_retry:
+            reason = "model unavailable; preserve prior values for human approval"
         decisions: dict[str, dict[str, Any]] = {}
         for parameter, spec in (prompt_payload.get("adjustable_params") or {}).items():
             has_default = isinstance(spec, dict) and spec.get("default") is not None
+            has_previous = is_retry and parameter in previous_params
+            basis = "retry_failure" if has_previous and retry_signals else "catalog_default"
             decision = {
-                "action": "keep_default" if has_default else "omit",
-                "basis": "catalog_default",
+                "action": (
+                    "keep_previous"
+                    if has_previous
+                    else "keep_default" if has_default else "omit"
+                ),
+                "basis": basis,
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
                 "confidence": "weak",
                 "reason": reason,
             }
-            if has_default:
+            if has_previous:
+                decision["value"] = previous_params[parameter]
+                decision["retry_signals"] = retry_signals
+            elif has_default:
                 decision["value"] = spec["default"]
             decisions[parameter] = decision
+        recommendation = {"adjustable_params": decisions}
+        if is_retry:
+            recommendation["retry_disposition"] = "retry"
         return normalize_hifiasm_methods_response(
             {
                 "case_assessments": [],
-                "recommendation": {"adjustable_params": decisions},
+                "recommendation": recommendation,
                 "selected_case_ids": [],
                 "summary": reason,
             },

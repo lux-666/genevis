@@ -28,6 +28,8 @@ ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
 ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
 ASSEMBLY_PARAMETER_REVIEW_FAILURE = "assembly.parameter.review_failure"
+ASSEMBLY_PARAMETER_RECOMMENDATION = "assembly.parameter.recommendation"
+ASSEMBLY_PARAMETER_APPROVAL_DECISION = "assembly.parameter_approval.decision"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
@@ -121,6 +123,7 @@ class ParameterAttempt(BaseModel):
     attempt_id: int
     method_id: str
     status: str
+    task: str | None = None
     input_profile_ref: ArtifactRef
     prompt_payload_ref: ArtifactRef
     retrieval_backend: str | None = None
@@ -136,6 +139,7 @@ class ParameterAttempt(BaseModel):
     command_ref: ArtifactRef | None = None
     review_failure_ref: ArtifactRef | None = None
     catalog_ref: str | None = None
+    catalog_snapshot: dict[str, Any] | None = None
     knowledge_pack_ref: str | None = None
     selected_case_ids: list[str] = Field(default_factory=list)
     recommended_params: dict[str, Any] = Field(default_factory=dict)
@@ -143,6 +147,7 @@ class ParameterAttempt(BaseModel):
     parameter_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
     case_assessments: list[dict[str, Any]] = Field(default_factory=list)
     parameter_decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    proposed_parameter_changes: dict[str, dict[str, Any]] = Field(default_factory=dict)
     recommendation_summary: str | None = None
     parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
     rendered_parameters: dict[str, Any] = Field(default_factory=dict)
@@ -151,9 +156,28 @@ class ParameterAttempt(BaseModel):
     reasoning: str | None = None
     confidence: float | None = None
     previous_attempt_id: int | None = None
+    failure_signature: dict[str, Any] | None = None
     execution_result: dict[str, Any] | None = None
+    failure_class: str | None = None
     failure_log_tail: str | None = None
+    stderr_tail: str | None = None
+    stdout_tail: str | None = None
     review_failure: dict[str, Any] | None = None
+    review_outcome: dict[str, Any] | None = None
+    attempt_kind: Literal["initial", "retry"] = "initial"
+    initial_recommendation_contract: Literal["legacy_initial", "curated_initial_v1"] | None = None
+    retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
+    inherited_initial_attempt_id: int | None = None
+    inherited_initial_snapshot_ref: str | None = None
+    inherited_evidence_payload_ref: ArtifactRef | None = None
+    inherited_profile_ref: ArtifactRef | None = None
+    previous_attempt_seal_hash: str | None = None
+    parameter_recommendation_ref: ArtifactRef | None = None
+    parameter_recommendation_hash: str | None = None
+    parameter_approval_decision_ref: ArtifactRef | None = None
+    parameter_approval_recommendation_hash: str | None = None
+    sealed_at: str | None = None
+    seal_hash: str | None = None
 
 
 class AssemblyParameterLoopState(BaseModel):

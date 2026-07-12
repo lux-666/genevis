@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
+
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
@@ -22,13 +24,14 @@ from app.schemas.artifacts import (
     ArtifactRef,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
-from app.domains.assembly.case_selector import evidence_read_type_matches, select_evidence_cases
+from app.domains.assembly.case_selector import select_evidence_cases
 from app.domains.assembly.methods_evidence import (
     HIFIASM_EFFECT_AREAS,
     HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
     _seal_attested_hifiasm_methods_prompt_payload,
     build_hifiasm_evidence_payload,
     sanitize_hifiasm_methods_prompt_payload,
+    uses_hifiasm_methods_contract,
 )
 from app.domains.assembly.numeric_case_retriever import (
     _RANKED_SELECTION_FIELD,
@@ -66,6 +69,7 @@ def build_prompt_payload(
     attempt_id: int | None = None,
     data_dir: Path | None = None,
     knowledge_root: Path | None = None,
+    initial_attempt_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build complete LLM prompt payload with references for audit trail.
 
@@ -131,8 +135,20 @@ def build_prompt_payload(
 
     prompt_profile = build_prompt_profile(full_profile, task)
 
-    # 3. Load knowledge pack
-    knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
+    initial_prompt = (
+        _load_initial_prompt_snapshot(initial_attempt_snapshot or {}, data_dir=data_dir)
+        if task != "recommend_initial"
+        else {}
+    )
+    # 3. Load policy only for attempt 0. Retries inherit the exact prompt snapshot.
+    if task == "recommend_initial":
+        knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
+    else:
+        knowledge_pack = {
+            "cases": [],
+            "rules": dict(initial_prompt.get("rules") or {}),
+            "skill": str(initial_prompt.get("skill_instructions") or ""),
+        }
 
     # 4. Filter catalog to L1 (readonly) + L2 (adjustable)
     readonly_params = {}
@@ -148,24 +164,49 @@ def build_prompt_payload(
         "adjustable_params": adjustable_params,
     }
 
-    selected_cases, case_selection = select_evidence_cases(
-        knowledge_pack["cases"],
-        method_id=method_id,
-        task=task,
-        prompt_profile=prompt_profile,
-        strategy=knowledge_pack.get("strategies"),
-        source_root=knowledge_pack.get("pack_root"),
-        query_id=(
-            f"{session_id}:parameter_attempt_{attempt_id}"
-            if session_id is not None and attempt_id is not None
-            else None
-        ),
-    )
+    if task == "recommend_initial":
+        selected_cases, case_selection = select_evidence_cases(
+            knowledge_pack["cases"],
+            method_id=method_id,
+            task=task,
+            prompt_profile=prompt_profile,
+            strategy=knowledge_pack.get("strategies"),
+            source_root=knowledge_pack.get("pack_root"),
+            query_id=(
+                f"{session_id}:parameter_attempt_{attempt_id}"
+                if session_id is not None and attempt_id is not None
+                else None
+            ),
+        )
+    else:
+        # Retry is a transition inside one run.  It must inherit attempt 0's
+        # exact evidence selection and must never invoke a selector/retriever.
+        selected_cases = list(
+            initial_prompt.get("evidence_cases")
+            or initial_prompt.get("selected_cases")
+            or []
+        )
+        inherited_selection = initial_prompt.get("case_retrieval") or initial_prompt.get("case_selection")
+        case_selection = dict(inherited_selection or {})
+        if not case_selection:
+            case_selection = {
+                "retrieval_backend": None,
+                "selected_case_ids": list((initial_attempt_snapshot or {}).get("selected_case_ids") or []),
+                "candidate_case_ids": [],
+                "selected_count": len((initial_attempt_snapshot or {}).get("selected_case_ids") or []),
+                "eligible_case_count": None,
+                "total_cases": None,
+                "evidence_available": False,
+                "case_evidence_required": False,
+                "warning": "retry_inherits_attempt_0_without_retrieval",
+            }
 
-    uses_hifiasm_evidence = case_selection.get("retrieval_backend") == "hifiasm_numeric"
+    uses_hifiasm_evidence = case_selection.get("retrieval_backend") in {
+        "hifiasm_numeric",
+    }
     retrieval_query_payload = None
     retrieval_trace_payload = None
-    if uses_hifiasm_evidence:
+    if uses_hifiasm_evidence and task == "recommend_initial":
         (
             case_selection,
             retrieval_query_payload,
@@ -219,31 +260,38 @@ def build_prompt_payload(
             **case_selection,
             "evidence_case_ids": [case["case_id"] for case in evidence_cases],
         }
-        evidence_payload = build_hifiasm_evidence_payload(
-            evidence_cases=evidence_cases,
-            case_retrieval=case_selection,
-        )
-        evidence_payload_hash = _canonical_json_hash(evidence_payload)
-        evidence_payload_ref = evidence_payload_hash
-        if write_artifacts:
-            evidence_serialized, evidence_artifact = _prepare_json_artifact(
-                value=evidence_payload,
-                session_id=session_component,
-                attempt_id=attempt_number,
-                filename="evidence_payload.json",
-                artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+        if task == "recommend_initial":
+            evidence_payload = build_hifiasm_evidence_payload(
+                evidence_cases=evidence_cases,
+                case_retrieval=case_selection,
+                allowed_parameter_ids=set(adjustable_params),
             )
-            artifact_plan.append(
-                (evidence_serialized, evidence_artifact, "evidence_payload.json")
-            )
-            evidence_payload_ref = evidence_artifact.path_ref
-            evidence_payload_hash = evidence_artifact.sha256
+            evidence_payload_hash = _canonical_json_hash(evidence_payload)
+            evidence_payload_ref = evidence_payload_hash
+            if write_artifacts:
+                evidence_serialized, evidence_artifact = _prepare_json_artifact(
+                    value=evidence_payload,
+                    session_id=session_component,
+                    attempt_id=attempt_number,
+                    filename="evidence_payload.json",
+                    artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+                )
+                artifact_plan.append(
+                    (evidence_serialized, evidence_artifact, "evidence_payload.json")
+                )
+                evidence_payload_ref = evidence_artifact.path_ref
+                evidence_payload_hash = evidence_artifact.sha256
+        else:
+            evidence_payload_ref = initial_prompt.get("evidence_payload_ref")
+            evidence_payload_hash = initial_prompt.get("evidence_payload_hash")
+            if not evidence_payload_ref or not evidence_payload_hash:
+                raise ValueError("curated retry is missing attempt 0 evidence payload binding")
         case_selection = {
             **case_selection,
             "evidence_payload_ref": evidence_payload_ref,
             "evidence_payload_hash": evidence_payload_hash,
         }
-        methods_evidence = {
+        methods_evidence = dict(initial_prompt.get("methods_evidence") or {}) if task != "recommend_initial" else {
             "effect_areas": list(HIFIASM_EFFECT_AREAS),
             "max_evidence_cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
             "response_contract": "case_assessments_and_recommendation",
@@ -252,21 +300,6 @@ def build_prompt_payload(
                 "return L2 decisions with set, keep_default, or omit actions and at least one evidence basis"
             ),
         }
-
-    # Defensive validation: verify all selected cases match profile read_type
-    profile_read_type = prompt_profile.get("assets", {}).get("read_type")
-    if profile_read_type:
-        for case in evidence_cases if uses_hifiasm_evidence else legacy_selected_cases:
-            case_read_type = (
-                (case.get("applicability") or {}).get("read_type")
-                if uses_hifiasm_evidence
-                else (case.get("features") or {}).get("read_type")
-            )
-            if case_read_type and not evidence_read_type_matches(profile_read_type, case_read_type):
-                raise ValueError(
-                    f"Case selector failed: case {case.get('case_id')} has read_type={case_read_type} "
-                    f"but profile has read_type={profile_read_type}"
-                )
 
     # 5. Build complete payload
     payload = {
@@ -315,9 +348,17 @@ def build_prompt_payload(
                 "methods_evidence": methods_evidence,
             }
         )
+        if task != "recommend_initial":
+            payload["retry_evidence"] = _build_retry_evidence(
+                prompt_profile,
+                task=task,
+            )
 
-    # 6. Close the hifiasm prompt boundary before hashing or publishing anything.
-    if uses_hifiasm_evidence:
+    # 6. Close the structured hifiasm Methods boundary before hashing or publishing.
+    # Numeric retrieval is shared by hifiasm-family methods, but the response
+    # contract remains an independent method-level concern.
+    uses_methods_contract = uses_hifiasm_methods_contract(payload)
+    if uses_methods_contract:
         payload = sanitize_hifiasm_methods_prompt_payload(payload)
 
     # 7. Generate prompt payload reference (for audit)
@@ -342,7 +383,7 @@ def build_prompt_payload(
     else:
         prompt_payload_ref = payload_hash
 
-    if uses_hifiasm_evidence:
+    if uses_methods_contract:
         payload = _seal_attested_hifiasm_methods_prompt_payload(
             payload,
             prompt_payload_ref=prompt_payload_ref,
@@ -450,6 +491,55 @@ def _materialize_retrieval_artifacts(
 
     compact["query_id"] = query.get("query_id")
     return compact, query, trace_payload
+
+
+def _build_retry_evidence(profile: dict[str, Any], *, task: str) -> dict[str, Any]:
+    previous = dict(profile.get("previous_attempt") or {})
+    review = dict(profile.get("assembly_review") or {})
+    signals: list[dict[str, Any]] = []
+    for signal_id, path, value in (
+        ("execution.status", "previous_attempt.execution_status", previous.get("execution_status")),
+        ("execution.status_detail", "previous_attempt.execution_status_detail", previous.get("execution_status_detail")),
+        ("execution.exit_code", "previous_attempt.exit_code", previous.get("exit_code")),
+        ("execution.stderr_ref", "previous_attempt.stderr_ref", previous.get("stderr_ref")),
+        ("execution.stdout_ref", "previous_attempt.stdout_ref", previous.get("stdout_ref")),
+        ("review.failure_mode", "assembly_review.failure_mode", review.get("failure_mode")),
+    ):
+        if value is not None:
+            signals.append({"signal_id": signal_id, "path": path, "value": value})
+    for metric, value in review.items():
+        if metric == "failure_mode" or value is None or isinstance(value, (dict, list)):
+            continue
+        signals.append(
+            {
+                "signal_id": f"review.{metric}",
+                "path": f"assembly_review.{metric}",
+                "value": value,
+            }
+        )
+    return {
+        "task": task,
+        "signal_ids": [signal["signal_id"] for signal in signals],
+        "signal_paths": [signal["path"] for signal in signals],
+        "signals": signals,
+    }
+
+
+def _load_initial_prompt_snapshot(
+    attempt: dict[str, Any], *, data_dir: Path | None
+) -> dict[str, Any]:
+    ref = attempt.get("prompt_payload_ref") or {}
+    path_ref = ref.get("path_ref") if isinstance(ref, dict) else None
+    if not path_ref:
+        return {}
+    path = Path(str(path_ref))
+    if not path.is_absolute() and str(path_ref).startswith("data/"):
+        path = (data_dir or Path("data")) / str(path_ref).removeprefix("data/")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _canonical_json_hash(value: Any) -> str:

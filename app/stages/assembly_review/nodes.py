@@ -280,7 +280,7 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
             "stage_outputs": updated_outputs,
         }
 
-    if updated_assembly.get("status") == "parameter_retries_exhausted":
+    if updated_assembly.get("status") == "review_parameter_retries_exhausted":
         updated_outputs["assembly_review"] = {
             **ar_out,
             "parameter_quality_gate": quality_gate,

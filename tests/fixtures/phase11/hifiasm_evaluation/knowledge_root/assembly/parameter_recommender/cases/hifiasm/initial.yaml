@@ -1,0 +1,72 @@
+cases:
+  - schema_version: 3
+    case_id: eval_initial_small
+    case_type: initial
+    source: {kind: internal_run, title: Synthetic contract fixture, internal_run_id: fixture:eval_initial_small}
+    methods_path: sources/eval_initial_small/methods.md
+    evidence_spans:
+      - {span_id: methods.context, quote: "Synthetic small-genome context used by the offline evaluation."}
+      - {span_id: methods.reads, quote: "Synthetic HiFi read measurements used by the offline evaluation."}
+      - {span_id: methods.command, quote: "Synthetic hifiasm parameter observation used by the offline evaluation."}
+    applicability: {read_type: hifi, source_tool: hifiasm, target_methods: [assembly.candidate.hifiasm], assembly_goal: primary}
+    observed_facts:
+      genome_size_mb: {value: 100, evidence_span_ids: [methods.context]}
+      coverage: {value: 25, evidence_span_ids: [methods.reads]}
+      read_n50_kb: {value: 12, evidence_span_ids: [methods.reads]}
+      ploidy: {value: 2, evidence_span_ids: [methods.context]}
+      clade: {value: invertebrate, evidence_span_ids: []}
+    intervention:
+      tool: hifiasm
+      parameters:
+        purge_level: {value: 0, reported: true, evidence_span_ids: [methods.command]}
+    rationale_claims: []
+    outcomes: {}
+    curation: {status: approved, curator: fixture-maintainer}
+
+  - schema_version: 3
+    case_id: eval_initial_medium
+    case_type: initial
+    source: {kind: internal_run, title: Synthetic contract fixture, internal_run_id: fixture:eval_initial_medium}
+    methods_path: sources/eval_initial_medium/methods.md
+    evidence_spans:
+      - {span_id: methods.context, quote: "Synthetic medium-genome context used by the offline evaluation."}
+      - {span_id: methods.reads, quote: "Synthetic HiFi read measurements used by the offline evaluation."}
+      - {span_id: methods.command, quote: "Synthetic hifiasm parameter observation used by the offline evaluation."}
+    applicability: {read_type: hifi, source_tool: hifiasm, target_methods: [assembly.candidate.hifiasm], assembly_goal: primary}
+    observed_facts:
+      genome_size_mb: {value: 1200, evidence_span_ids: [methods.context]}
+      coverage: {value: 30, evidence_span_ids: [methods.reads]}
+      read_n50_kb: {value: 18, evidence_span_ids: [methods.reads]}
+      ploidy: {value: 2, evidence_span_ids: [methods.context]}
+      clade: {value: vertebrate, evidence_span_ids: []}
+    intervention:
+      tool: hifiasm
+      parameters:
+        purge_level: {value: 1, reported: true, evidence_span_ids: [methods.command]}
+    rationale_claims: []
+    outcomes: {}
+    curation: {status: approved, curator: fixture-maintainer}
+
+  - schema_version: 3
+    case_id: eval_initial_large
+    case_type: initial
+    source: {kind: internal_run, title: Synthetic contract fixture, internal_run_id: fixture:eval_initial_large}
+    methods_path: sources/eval_initial_large/methods.md
+    evidence_spans:
+      - {span_id: methods.context, quote: "Synthetic large-genome context used by the offline evaluation."}
+      - {span_id: methods.reads, quote: "Synthetic HiFi read measurements used by the offline evaluation."}
+      - {span_id: methods.command, quote: "Synthetic hifiasm parameter observation used by the offline evaluation."}
+    applicability: {read_type: hifi, source_tool: hifiasm, target_methods: [assembly.candidate.hifiasm], assembly_goal: primary}
+    observed_facts:
+      genome_size_mb: {value: 3100, evidence_span_ids: [methods.context]}
+      coverage: {value: 60, evidence_span_ids: [methods.reads]}
+      read_n50_kb: {value: 15, evidence_span_ids: [methods.reads]}
+      ploidy: {value: 2, evidence_span_ids: [methods.context]}
+      clade: {value: vertebrate, evidence_span_ids: []}
+    intervention:
+      tool: hifiasm
+      parameters:
+        purge_level: {value: 1, reported: true, evidence_span_ids: [methods.command]}
+    rationale_claims: []
+    outcomes: {}
+    curation: {status: approved, curator: fixture-maintainer}

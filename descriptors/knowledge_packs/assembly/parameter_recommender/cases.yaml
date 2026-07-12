@@ -1,9 +1,11 @@
 version: 2
-description: "Hifiasm consumes only approved EvidenceCase shards; other methods retain their current observations until separately curated."
+description: "Hifiasm initial recommendation consumes approved EvidenceCases; other methods retain their legacy observation shards."
 case_schema: assembly_evidence_case
 case_files:
-  - cases/hifiasm/initial.yaml
-  - cases/hifiasm/retry.yaml
+  - cases/hifiasm/papers/s41587-022-01261-x/case.yaml
+  - cases/hifiasm/papers/s41592-024-02269-8/case.yaml
+  - cases/hifiasm/papers/s41586-026-10105-6/case.yaml
+  - cases/hifiasm/papers/s41586-022-05325-5/case.yaml
   - cases/initial_hifi.yaml
   - cases/initial_ont.yaml
   - cases/retry_failures.yaml

@@ -1,0 +1,55 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41592-024-02269-8
+    case_type: initial
+    source:
+      kind: paper
+      title: null
+      doi: 10.1038/s41592-024-02269-8
+      year: 2024
+    methods_path: cases/hifiasm/papers/s41592-024-02269-8/methods.md
+    evidence_spans:
+      - span_id: scenario.near_t2t
+        quote: "The workflow combines HiFi accuracy with ONT ultra-long read span for scalable near telomere-to-telomere assembly of diploid or polyploid genomes."
+      - span_id: rationale.hybrid_reads
+        quote: "HiFi reads are accurate but may not span centromeres and long or segmental repeats; ONT ultra-long reads provide long-range paths through these regions."
+      - span_id: preprocessing.ul_filter
+        quote: "The reported seqkit filters retain reads of at least 100,000 bases for HPRC Year 2 and at least 50,000 bases for HPRC Year 1 and plant samples to avoid assembly errors and reduce running time."
+      - span_id: command.hybrid
+        quote: "The reported hifiasm 0.19.5-r587 command combines HiFi reads with --ul, optional paired Hi-C inputs, and a sample-specific --hom-cov value."
+      - span_id: caveat.not_ul_cut
+        quote: "The seqkit minimum-length thresholds are preprocessing thresholds and are not evidence for the hifiasm ul_cut parameter; hom_cov is sample-derived read-only context in this project."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: 0.19.5-r587
+      target_methods: [hifiasm]
+      assembly_goal: scalable near telomere-to-telomere assembly
+    observed_facts: {}
+    intervention:
+      tool: hifiasm
+      version: 0.19.5-r587
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: hybrid_reads.complementarity
+        statement: "HiFi accuracy and ONT ultra-long span are complementary for resolving long repetitive regions in near-T2T assembly."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [scenario.near_t2t, rationale.hybrid_reads]
+      - claim_id: ul_preprocessing.filter_reason
+        statement: "The reported upstream minimum-length filtering was used to avoid assembly errors and reduce running time."
+        explicitness: explicit
+        effect_area: read_preprocessing
+        evidence_span_ids: [preprocessing.ul_filter]
+      - claim_id: hybrid_command.context_only
+        statement: "The reported command includes UL-ONT, Hi-C, and sample-derived homozygous coverage context, but this case does not expose those inputs or hom_cov as adjustable L2 evidence."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [command.hybrid, caveat.not_ul_cut]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "No ul_cut recommendation is inferred from seqkit -m, and hom_cov remains L1/read-only. Read type and target method remain ordinary scoring attributes."

@@ -13,6 +13,7 @@ from app.domains.assembly.evidence_case import (
     _rank_hifiasm_prompt_case,
     project_hifiasm_retrieval_case,
 )
+from app.domains.assembly.selection import parameter_case_read_type
 from app.knowledge.evidence_cases import EvidenceCaseValidationError
 from app.knowledge.selectors import SelectionResult
 
@@ -25,8 +26,8 @@ _DEFAULT_SCALES = {
     "ploidy": 1.0,
 }
 _DEFAULT_WEIGHTS = {feature: 1.0 for feature in _FEATURES}
+_CATEGORICAL_MATCH_WEIGHTS = {"method": 1.0, "read_type": 1.0}
 _CONFIG_KEYS = {
-    "candidate_budget",
     "weak_coverage_threshold",
     "distance_clip",
     "epsilon",
@@ -154,9 +155,12 @@ def _build_ranked_selection_boundary():
                 raise EvidenceCaseValidationError(
                     f"{case['case_id']}: ranked numeric metadata differs from Task 3 trace"
                 )
+        backend = metadata.get("retrieval_backend", "hifiasm_numeric")
+        if backend != "hifiasm_numeric":
+            raise EvidenceCaseValidationError("unsupported hifiasm ranked retrieval backend")
         return _new_registered(
             {
-                "retrieval_backend": "hifiasm_numeric",
+                "retrieval_backend": backend,
                 "candidate_case_ids": candidate_ids,
                 "selected_case_ids": list(candidate_ids),
                 "evidence_case_ids": list(candidate_ids),
@@ -301,12 +305,8 @@ class HifiasmNumericCaseRetriever:
         unknown = set(raw) - _CONFIG_KEYS
         if unknown:
             raise ValueError(f"hifiasm_numeric strategy contains unknown keys: {sorted(unknown)}")
-        candidate_budget = raw.get("candidate_budget", 12)
-        if not isinstance(candidate_budget, int) or isinstance(candidate_budget, bool) or candidate_budget < 1:
-            raise ValueError("hifiasm_numeric.candidate_budget must be a positive integer")
-        effective_budget = min(candidate_budget, max_cases) if max_cases is not None else candidate_budget
         return cls(
-            max_cases=effective_budget,
+            max_cases=12 if max_cases is None else max_cases,
             weak_coverage_threshold=raw.get("weak_coverage_threshold", 0.6),
             distance_clip=raw.get("distance_clip", 4.0),
             epsilon=raw.get("epsilon", 1e-6),
@@ -340,7 +340,9 @@ class HifiasmNumericCaseRetriever:
             raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
 
         trace: list[dict[str, Any]] = []
-        ranked: list[tuple[float, float, int, str, dict[str, Any], dict[str, Any]]] = []
+        ranked: list[
+            tuple[float, float, float, int, str, dict[str, Any], dict[str, Any]]
+        ] = []
         for raw_case in cases:
             case = project_hifiasm_retrieval_case(raw_case)
             case_id = str(case.get("case_id") or "")
@@ -361,25 +363,32 @@ class HifiasmNumericCaseRetriever:
                 continue
 
             numeric = self._numeric_match(case, query)
-            clade_penalty = _clade_tie_break(case, query)
+            categorical = _categorical_match(case, query)
+            numeric.update(categorical)
+            numeric["ranking_score"] = (
+                float(categorical["categorical_match_score"])
+                + float(numeric["evidence_coverage"])
+                * float(numeric["numeric_similarity_display"])
+            )
             distance_key = numeric["numeric_distance"] if numeric["numeric_distance"] is not None else math.inf
             ranked.append(
                 (
+                    -float(numeric["ranking_score"]),
                     -float(numeric["evidence_coverage"]),
                     float(distance_key),
-                    clade_penalty,
+                    _clade_tie_break(case, query),
                     case_id,
                     case,
                     numeric,
                 )
             )
 
-        ranked.sort(key=lambda item: item[:4])
+        ranked.sort(key=lambda item: item[:5])
         selected_entries = ranked[: self.max_cases]
-        selected_ids = {entry[3] for entry in selected_entries}
+        selected_ids = {entry[4] for entry in selected_entries}
         selected_cases: list[dict[str, Any]] = []
         for rank, entry in enumerate(ranked, start=1):
-            _, _, _, case_id, case, numeric = entry
+            _, _, _, _, case_id, case, numeric = entry
             decision = "candidate" if case_id in selected_ids else "not_selected"
             trace_entry = {
                 "case_id": case_id,
@@ -406,7 +415,7 @@ class HifiasmNumericCaseRetriever:
         warnings: list[str] = []
         if not evidence_available:
             warnings.append(
-                "No compatible approved hifiasm evidence cases; use readonly L1 facts, "
+                "No eligible approved hifiasm evidence cases; use readonly L1 facts, "
                 "SKILL guidance, retry context, and catalog defaults conservatively."
             )
         else:
@@ -417,7 +426,7 @@ class HifiasmNumericCaseRetriever:
                 )
             if weak_selected:
                 warnings.append(
-                    "Some compatible hifiasm cases have weak evidence coverage; "
+                    "Some selected hifiasm cases have weak evidence coverage; "
                     "treat cases as optional support and prefer conservative L2 changes."
                 )
         warning = " ".join(warnings) or None
@@ -538,8 +547,6 @@ class HifiasmNumericCaseRetriever:
 def _hard_filter_reasons(case: dict[str, Any], query: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     curation = case.get("curation") or {}
-    applicability = case.get("applicability") or {}
-    intervention = case.get("intervention") or {}
     expected_case_type = "initial"
     if curation.get("status") != "approved":
         reasons.append("curation_not_approved")
@@ -547,20 +554,32 @@ def _hard_filter_reasons(case: dict[str, Any], query: dict[str, Any]) -> list[st
         reasons.append("source_not_validated")
     if case.get("case_type") != expected_case_type:
         reasons.append("case_type_mismatch")
-    if applicability.get("read_type") != "hifi" or query.get("read_type") not in {"hifi", "pacbio_hifi"}:
-        reasons.append("read_type_mismatch")
-    if _short_method_name(applicability.get("source_tool") or intervention.get("tool")) != "hifiasm":
-        reasons.append("source_tool_mismatch")
-    targets = applicability.get("target_methods") or []
-    if not isinstance(targets, list) or not any(
-        _short_method_name(target) == _short_method_name(query.get("method_id")) for target in targets
-    ):
-        reasons.append("target_method_mismatch")
-    query_goal = query.get("assembly_goal")
-    case_goal = applicability.get("assembly_goal")
-    if query_goal and case_goal and query_goal != case_goal:
-        reasons.append("assembly_goal_mismatch")
     return reasons
+
+
+def _categorical_match(case: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
+    applicability = case.get("applicability") or {}
+    targets = applicability.get("target_methods") or []
+    query_method = _short_method_name(query.get("method_id"))
+    method_match = bool(
+        query_method
+        and isinstance(targets, list)
+        and any(_short_method_name(target) == query_method for target in targets)
+    )
+    query_read_type = parameter_case_read_type(query.get("read_type"))
+    case_read_type = parameter_case_read_type(applicability.get("read_type"))
+    read_type_match = bool(
+        query_read_type and case_read_type and query_read_type == case_read_type
+    )
+    score = (
+        _CATEGORICAL_MATCH_WEIGHTS["method"] * int(method_match)
+        + _CATEGORICAL_MATCH_WEIGHTS["read_type"] * int(read_type_match)
+    )
+    return {
+        "categorical_match_score": score,
+        "method_match": method_match,
+        "read_type_match": read_type_match,
+    }
 
 
 def _prompt_safe_case(case: dict[str, Any], *, numeric_match: dict[str, Any]) -> dict[str, Any]:
@@ -639,7 +658,7 @@ def _fact_raw_value(fact: Any) -> Any:
 def _short_method_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    return value.rsplit(".", 1)[-1]
+    return value.rsplit(".", 1)[-1].lower().replace("-", "_")
 
 
 def _is_number(value: Any) -> bool:

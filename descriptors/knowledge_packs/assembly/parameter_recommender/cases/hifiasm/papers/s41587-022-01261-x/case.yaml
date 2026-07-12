@@ -1,0 +1,53 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41587-022-01261-x
+    case_type: initial
+    source:
+      kind: paper
+      title: null
+      doi: 10.1038/s41587-022-01261-x
+      year: 2022
+    methods_path: cases/hifiasm/papers/s41587-022-01261-x/methods.md
+    evidence_spans:
+      - span_id: scenario.no_parents
+        quote: "The workflow produces a haplotype-resolved assembly from a diploid sample with PacBio HiFi and Hi-C data without sequencing the parents."
+      - span_id: rationale.complementary_links
+        quote: "HiFi supports a high-accuracy assembly graph, while Hi-C supplies chromosome-scale haplotype links for phasing."
+      - span_id: command.hifi_hic
+        quote: "Supplementary methods report hifiasm 0.16.1-r375 with --h1 and --h2 for paired Hi-C reads, plus the HiFi reads as the primary input."
+      - span_id: command.hifi_only
+        quote: "The paper also reports a HiFi-only invocation for partially phased assembly when Hi-C data are not supplied."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: 0.16.1-r375
+      target_methods: [hifiasm]
+      assembly_goal: haplotype-resolved diploid assembly without parental sequencing
+    observed_facts: {}
+    intervention:
+      tool: hifiasm
+      version: 0.16.1-r375
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: hifi_hic.no_parental_requirement
+        statement: "HiFi plus Hi-C can support haplotype-resolved assembly when parental sequencing is unavailable."
+        explicitness: explicit
+        effect_area: haplotype_phasing
+        evidence_span_ids: [scenario.no_parents, command.hifi_hic]
+      - claim_id: hifi_hic.complementarity
+        statement: "HiFi graph accuracy and chromosome-scale Hi-C links provide complementary evidence for phasing."
+        explicitness: explicit
+        effect_area: haplotype_phasing
+        evidence_span_ids: [rationale.complementary_links]
+      - claim_id: hifi_only.partial_phasing
+        statement: "A HiFi-only run is documented as a partial-phasing alternative, not as equivalent to the HiFi plus Hi-C result."
+        explicitness: explicit
+        effect_area: assembly_scope
+        evidence_span_ids: [command.hifi_only]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "Read type and target method are scoring attributes; Hi-C availability is documentary context, not a discrete retrieval condition."

@@ -1,10 +1,11 @@
 version: 1
 default_strategy: structured_default
 hifiasm_numeric:
-  # Task 6 owns production cutover after the curated corpus and evaluation pass.
-  production_cutover_enabled: false
-  candidate_budget: 12
+  # Initial retrieval is enabled independently of observational evaluation.
+  initial_cutover_enabled: true
+  # Warning metadata only; this never filters a case or gates activation.
   weak_coverage_threshold: 0.6
+  # Robust distance calculation only; this is not a maximum-distance gate.
   distance_clip: 4.0
   epsilon: 0.000001
   scales:
@@ -22,7 +23,6 @@ hifiasm_numeric:
 strategies:
   structured_default:
     hard_filters:
-      read_type_mismatch: true
       exclude_failure_cases_for_initial: true
     scoring_weights:
       method_exact_match: 8

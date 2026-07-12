@@ -1,181 +1,185 @@
-# Task 6: Hifiasm Hybrid Retrieval Evaluation And Cutover
+# Task 6: Hifiasm Initial Cutover And Same-Run Retry
 
 **Phase**: 11
-**Status**: Designed; implementation pending
-**Depends on**: Tasks 2-5
+**Status**: Task 6A and Task 6B are implemented in the current worktree; final focused and regression verification pending
+**Depends on**: Tasks 2-4 and the Phase 10 typed parameter-attempt lifecycle; the superseded Task 5 design is not a dependency
 **Created**: 2026-07-10
-**Updated**: 2026-07-10
+**Updated**: 2026-07-12
 
-## Goal
+## Decision
 
-Build a reproducible offline evaluation for hifiasm evidence retrieval and
-recommendation, compare it with the existing bucket/weight selector, and cut the
-hifiasm production path over to the curated EvidenceCase pipeline only after the
-new contract is demonstrably safer and more useful.
+Task 6 is split into two independent delivery surfaces:
 
-## Evaluation Corpus
+- **Task 6A:** initial-only numeric cutover with a fixed top-five shortlist and
+  optional observational evaluation.
+- **Task 6B:** same-run parameter retry using immutable attempt history, with
+  independent execution and review ownership/budgets.
 
-The first evaluation set is manually curated and version-controlled.
+They share the typed parameter lifecycle and post-validation human approval
+gate, but they do not share an evidence-retrieval backend for retry.
 
-Recommended minimum:
+## Task 6A — Initial Top-5 Cutover
 
-- 20 approved hifiasm initial cases;
-- 8 approved hifiasm retry cases;
-- 10 initial query profiles;
-- 6 retry query profiles;
-- deliberate contrasts in genome size, coverage, read N50, heterozygosity,
-  ploidy, and assembly goal;
-- at least three weak/missing-evidence queries;
-- at least three cases where keeping defaults is the expected answer.
+### Activation And Selection
 
-Synthetic edge cases remain test fixtures and are not counted as scientific
-production evidence.
-
-## Golden Labels
-
-For each query, a curator records:
+The complete descriptor setting is:
 
 ```yaml
-query_id: query_001
-relevant_case_tiers:
-  strong: [case_a, case_b]
-  acceptable: [case_c]
-  irrelevant: [case_x]
-expected_effect_areas:
-  - purging
-expected_parameter_actions:
-  purge_level:
-    allowed_actions: [keep_default, set]
-    allowed_values: [0, 1]
-  kmer_length:
-    allowed_actions: [keep_default]
-forbidden_actions:
-  - "Changing a parameter without cited evidence"
-notes: "..."
+hifiasm_numeric:
+  initial_cutover_enabled: true
 ```
 
-Golden labels test acceptable decision boundaries rather than requiring one
-magical exact parameter vector when the literature does not justify it.
+When enabled, hifiasm ranks every eligible initial EvidenceCase with the
+existing Task 3 ordering:
 
-## Retrieval Metrics
+1. `evidence_coverage` descending;
+2. `numeric_distance` ascending;
+3. the existing clade tie-break;
+4. `case_id`.
 
-Measure:
+Then it selects the first five. With one to four eligible cases it selects all;
+with none it preserves the existing no-case behavior. Task 6A changes only the
+shortlist truncation and does not introduce a combined score.
 
-- Recall@k;
-- nDCG@k using strong/acceptable tiers;
-- mean reciprocal rank;
-- evidence coverage of selected cases;
-- shortlist diversity;
-- incompatible-case leakage rate;
-- initial/retry cross-contamination rate.
+### Evaluation Is Observational
 
-## Numeric Robustness Tests
+The deterministic offline runner may compare the legacy initial selector with
+the numeric initial retriever and report Recall@k, nDCG@k, reciprocal rank,
+evidence coverage, leakage/holdout observations, and replay hashes. Reports
+must declare that they are observational and have no activation effect.
 
-Include metamorphic tests:
+No report, corpus, label, metric, or operator assessment can enable/disable the
+switch, reject a shortlist, or stop recommendation. There is no 20-case,
+10-query, permission, scientific-approval, recorded-recommendation, distance,
+coverage, pass/fail, non-inferiority, or default-preservation gate. Evaluation
+may be absent or unfavorable without changing forward progress.
 
-- 29.9x and 30.1x coverage do not create a rank discontinuity;
-- multiplying query and case values by the same factor preserves log-ratio
-  distance;
-- missing fields never improve evidence coverage;
-- same Methods text with materially different numeric context changes ranking;
-- identical numeric context with different Methods rationale remains available
-  for Task4 to distinguish;
-- very low heterozygosity does not produce division-by-zero or unstable ranks.
+### Task 6A Flow
 
-## Evidence And Recommendation Metrics
+```text
+initial query
+  -> eligible cases ranked by the existing Task 3 contract
+  -> fixed top five / all 1-4 / existing no-case behavior
+  -> Task 4 Methods-aware recommendation
+  -> automatic schema/catalog/rule/capability/parameter validation
+  -> parameter_approval human gate
+       approve_parameters -> freeze attempt 0 and execute
+       reject_parameters  -> terminate without execution
+```
 
-Measure:
+## Task 6B — Same-Run Retry
 
-- source-span citation validity;
-- unsupported case/span citation rate;
-- non-default parameter evidence rate;
-- default-preservation rate under weak evidence;
-- catalog/rule violation rate;
-- expert pairwise preference between baseline and curated-evidence outputs;
-- abstention/stop correctness when retry is not evidence-supported.
+### Retry Basis
 
-The primary safety requirements are:
+Retry uses only:
 
-- zero invalid catalog values reaching freeze;
-- zero accepted references to absent cases or spans;
-- zero silent use of draft/rejected cases;
-- zero automatic promotion of runtime draft cases.
+1. attempt 0's actual immutable profile, initial evidence/selector output,
+   Methods citations, catalog, hard rules, capabilities, policy, and limits;
+2. the immediately preceding attempt's frozen parameters and command;
+3. that attempt's raw structured execution result or review diagnosis;
+4. the remaining budget owned by the failure domain.
 
-## Baseline
+It performs no cross-run/cross-sample lookup, paper retrieval, policy reload,
+case ranking, or evidence payload construction. Current observations may block
+execution for safety, but they may not select or justify a different retry
+delta. A policy snapshot mismatch fails closed and requires a new run.
 
-Run the existing `structured_default` bucket/weight selector against the same query
-set and record:
+### Explicit Absences
 
-- selected cases;
-- trace and score;
-- boundary discontinuities;
-- expert preference;
-- recommendation output under the same mocked or fixed decision backend where
-  possible.
+Task 6B has no retry database, shard, corpus, query, retriever, selector backend,
+`hifiasm_retry` backend, retry retrieval artifact, runtime candidate
+`EvidenceCase`, retention/curation/promotion workflow, failure classifier,
+repairability label, or repairability gate.
 
-The curated evidence path does not need to win every ranking metric. It must
-demonstrate:
+### Execution-Failure Retry
 
-- no regression in hard compatibility;
-- improved numeric continuity;
-- explicit missingness/evidence coverage;
-- source-grounded non-default recommendations;
-- better expert preference or safer default preservation.
+The assembly execution stage owns execution failure and
+`max_execution_retries`:
 
-## Method-Scoped Cutover
+```text
+execution fails and records structured facts
+  -> seal the preceding attempt
+  -> check execution retry budget
+  -> build recommendation from attempt 0 + preceding attempt + execution facts
+  -> automatically validate
+  -> parameter_approval human gate
+       approve -> freeze, append, increment execution counter, execute
+       reject  -> terminate without append, increment, or execution
+```
 
-After acceptance:
+No repairability decision precedes this flow. If execution budget remains, the
+stage emits the typed request. If exhausted, it terminates with the
+execution-specific exhaustion outcome. A recommendation/schema/validation
+error may terminate before the human gate.
 
-- `assembly.candidate.hifiasm` uses the curated evidence selector only;
-- its prompt contains curated evidence payloads only;
-- hifiasm no longer reads bucket fields or `structured_default` weights;
-- tests that assert hifiasm bucket scores are removed or rewritten as curated
-  evidence behavior tests;
-- Flye, NextDenovo, and hifiasm-ont may remain on their existing selector until
-  a later explicitly scoped task migrates them.
+### Review-Failure Retry
 
-This is not a hidden compatibility fallback. Each method has one declared
-selector backend.
+The assembly review stage owns directional review diagnosis and
+`max_review_retries`:
 
-## Documentation And Operator Visibility
+```text
+execution succeeds, review fails, and review records its diagnosis
+  -> seal the preceding attempt
+  -> check review retry budget
+  -> build recommendation from attempt 0 + preceding attempt + review signal
+  -> automatically validate
+  -> parameter_approval human gate
+       approve -> freeze, append, increment review counter, execute
+       reject  -> terminate without append, increment, or execution
+```
 
-Document:
+Review signals remain directional constraints such as under-purged,
+over-purged, fragmented, low completeness, unexpected duplication, or assembly
+size-ratio direction. They are not combined into a universal quality score.
 
-- how a curator creates a case/body/Methods bundle;
-- how to validate and approve it;
-- how to run the offline evaluation;
-- how to inspect retrieval and evidence artifacts for an attempt;
-- what weak-evidence warnings mean;
-- how a runtime draft case is manually promoted;
-- why GraphRAG, LLM Wiki, embeddings, and cross-tool mapping are deferred.
+### Independent Budgets
 
-## Tests And Commands
+Execution and review counters/limits are independent. An execution retry
+increments only the execution counter; a review retry increments only the
+review counter. Pending approval, recommendation/validation errors, rejection,
+stale resume, and duplicate decisions consume neither budget. A single run may
+use both budgets in sequence.
 
-The implementation task should provide focused test commands for:
+## Shared Parameter Approval
 
-- EvidenceCase validation;
-- numeric retrieval;
-- Methods-aware prompt/response validation;
-- retry retrieval and retention;
-- golden-set evaluation;
-- existing hifiasm integration and typed attempt lifecycle.
+Initial, execution-retry, and review-retry recommendations use the same gate
+after automatic validation:
 
-The full repository regression suite runs after focused tests pass.
+```yaml
+stage: assembly
+gate_id: parameter_approval
+decisions_allowed: [approve_parameters, reject_parameters]
+auto_decidable: false
+```
 
-## Acceptance Criteria
+The interrupt binds the exact validated recommendation, hash, proposed attempt,
+task, previous attempt for retry, parameter diff, rationale/failure facts, and
+evidence/policy refs. Resume must explicitly provide the gate ID and matching
+identity/hash metadata. Only approval may freeze, append, increment, or
+execute. Rejection terminates with no execution. The generic review/resume
+contract is reused; TUI work is explicitly out of scope.
 
-- [ ] A version-controlled hifiasm initial/retry evaluation corpus exists.
-- [ ] Baseline and curated evidence paths run against the same golden queries
-  with recorded metrics.
-- [ ] Curated evidence retrieval has no bucket-boundary discontinuity and exposes
-  missingness explicitly.
-- [ ] All case-backed recommendations cite valid approved evidence; non-case
-  recommendations name another allowed evidence basis.
-- [ ] Weak evidence increases conservative/default-preserving behavior at the
-  expected rate, while no-case queries still complete through L1/SKILL/default
-  evidence bases.
-- [ ] Hifiasm uses one selector/prompt contract after cutover.
-- [ ] Existing typed attempt, validation, freeze, execution, and retry behavior
-  remains regression-covered.
-- [ ] Deferred GraphRAG/LLM Wiki/vector/cross-tool work is not introduced by
-  stealth.
+## Acceptance Matrix
+
+| Area | Required result |
+|---|---|
+| Initial ranking | Preserve Task 3 lexicographic order exactly |
+| Initial shortlist | Fixed first five, all 1-4, existing no-case behavior for 0 |
+| Evaluation | Observational only; no activation or progress effect |
+| Retry inputs | Attempt 0 snapshot + preceding attempt + structured failure only |
+| Retry retrieval | No database/retriever/backend/query/shard or candidate promotion |
+| Execution retry | No repairability gate; execution budget owned by execution stage |
+| Review retry | Directional diagnosis and review budget owned by review stage |
+| Approval | Every valid actionable initial/retry parameter candidate blocks at `parameter_approval`; `stop` and `expert_review` do not |
+| Approval decision | Approve executes; reject terminates without retry budget use |
+| Presentation | No TUI implementation in Task 6 |
+
+## Completion Criteria
+
+- [x] Task 6A preserves Task 3 ranking and fixes the production shortlist at five.
+- [x] Offline evaluation is deterministic, replayable, and observational only.
+- [x] Task 6B uses same-run immutable attempt history without retry retrieval.
+- [x] Execution and review retry have independent ownership and budgets.
+- [x] No repairability gate or runtime-case promotion remains.
+- [x] Initial and retry recommendations share the post-validation human gate.
+- [ ] Focused tests and the full regression suite pass for the final worktree.

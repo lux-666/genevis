@@ -1,0 +1,65 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41586-022-05325-5
+    case_type: initial
+    source:
+      kind: paper
+      title: null
+      doi: 10.1038/s41586-022-05325-5
+      year: 2022
+    methods_path: cases/hifiasm/papers/s41586-022-05325-5/methods.md
+    evidence_spans:
+      - span_id: scenario.reference_diploid
+        quote: "The study constructs a high-quality diploid human reference and reports that graph-based haplotype phasing during assembly outperformed approaches that did not phase in the graph."
+      - span_id: rationale.trio_graph
+        quote: "Trio hifiasm combines parent-specific k-mers from parental short reads with the HiFi assembly graph to separate paternal and maternal haplotypes."
+      - span_id: command.reported_test
+        quote: "The explicitly reported yak and hifiasm test commands correspond to asm9 and hifiasm v0.3; the final reference used hifiasm v0.14.1 trio mode, but its complete command was not reported."
+      - span_id: downstream.ont_gap_fill
+        quote: "Haplotype-binned ONT ultra-long reads were assembled with Flye v2.8.3-b1695 using --genome-size 3.1g and --min-overlap 10000, then corrected with Medaka and Merfin and used to fill gaps in HiFi scaffolds."
+      - span_id: caveat.no_reconstruction
+        quote: "The unreported final hifiasm v0.14.1 command must not be reconstructed, and Flye, Medaka, and Merfin settings are downstream context rather than hifiasm L2 parameter evidence."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: 0.14.1
+      target_methods: [hifiasm]
+      assembly_goal: reference-grade diploid human assembly
+    observed_facts:
+      organism:
+        value: Homo sapiens
+        evidence_span_ids: [scenario.reference_diploid]
+      genome_size_mb:
+        value: 3100
+        unit: Mb
+        evidence_span_ids: [downstream.ont_gap_fill]
+      ploidy:
+        value: 2
+        evidence_span_ids: [scenario.reference_diploid]
+    intervention:
+      tool: hifiasm
+      version: 0.14.1
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: trio_graph.haplotype_separation
+        statement: "Parent-specific k-mers combined with the HiFi assembly graph improve paternal and maternal haplotype separation."
+        explicitness: explicit
+        effect_area: haplotype_phasing
+        evidence_span_ids: [scenario.reference_diploid, rationale.trio_graph]
+      - claim_id: final_command.not_reported
+        statement: "The complete final hifiasm v0.14.1 trio command was not reported and must not be reconstructed from the earlier v0.3 test command."
+        explicitness: explicit
+        effect_area: evidence_scope
+        evidence_span_ids: [command.reported_test, caveat.no_reconstruction]
+      - claim_id: downstream_gap_fill.context_only
+        statement: "Flye assembly, Medaka and Merfin correction, and ONT-supported gap filling are downstream workflow context, not hifiasm L2 parameter evidence."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [downstream.ont_gap_fill, caveat.no_reconstruction]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "The case records the final hifiasm version without inventing its missing command; trio and ONT-UL remain documentary context while read type and target method are ordinary scoring attributes."

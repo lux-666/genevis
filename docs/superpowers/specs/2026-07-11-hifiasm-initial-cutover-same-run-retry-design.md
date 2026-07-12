@@ -176,8 +176,8 @@ explains parameter semantics and safe context; it is not falsely cited as
 evidence that this exact retry succeeded elsewhere. For an execution-origin
 retry request with budget remaining, recommendation must return a candidate
 parameter set (which may preserve previous values) and automatic validation must
-run. A valid recommendation then blocks at the mandatory parameter approval
-human gate. Human approval is the only path to freeze, append, counter increment,
+run. A valid actionable parameter candidate then blocks at the mandatory parameter
+approval human gate. Human approval is the only path to freeze, append, counter increment,
 and execution. Human rejection terminates the run. An actual recommendation or
 parameter-validation error may terminate before the gate. Neither insufficient
 evidence nor a model stop/expert choice may skip recommendation or replace the
@@ -657,7 +657,7 @@ keys. In neither case may normalization keep the old runtime behavior reachable.
 | Resume gate identity | Valid request; omitted `gate_id`; wrong gate ID; unknown decision, each repeated with otherwise matching attempt/task/previous-attempt/hash metadata | Only an explicit `gate_id=parameter_approval` plus `approve_parameters` or `reject_parameters` is accepted; missing/wrong gate and unknown decisions fail closed before application even when all other identity fields match |
 | Resume integrity and idempotency | Wrong attempt/task/previous attempt, stale or replaced recommendation, missing/wrong hash, changed chain head, duplicate approve, approve-after-reject, reject-after-approve, restart/reload | Every invalid or duplicate resume is rejected without freeze, append, counter change, or execution; one durable decision is authoritative across reload |
 | Human rejection | Reject initial, execution retry, and review retry before append | Status and reason are `parameter_recommendation_rejected_by_human`; no command executes, no retry attempt appends, no retry budget is consumed, and the rejection appears in the terminal timeline |
-| Execution retry routing | Raw exit/signal/log/resource fact variants; remaining/exhausted budget; successful recommendation; approve/reject; recommendation error; validation error; attempted model stop/expert; assert no classifier or repairability gate is invoked | With budget, every execution failure emits a request and every valid recommendation validates then blocks for human approval; only approval freezes/appends/increments/executes; stop/expert fails the execution recommendation contract; exhaustion and rejection are domain-specific closed outcomes |
+| Execution retry routing | Raw exit/signal/log/resource fact variants; remaining/exhausted budget; successful recommendation; approve/reject; recommendation error; validation error; attempted model stop/expert; assert no classifier or repairability gate is invoked | With budget, every execution failure emits a request and every valid actionable parameter candidate validates then blocks for human approval; only approval freezes/appends/increments/executes; stop/expert fails the execution recommendation contract; exhaustion and rejection are domain-specific closed outcomes |
 | Review retry routing | Every review reason/status, execution success + failed review, directional diagnoses, remaining/exhausted budget, approved/rejected proposal | Review stage owns diagnosis/request/terminal; every parameter proposal uses the shared gate; only a human-approved, frozen, appended review retry increments the review counter |
 | Mixed chain | Execution failure -> execution retry -> review failure -> review retry -> pass | Both budgets remain independent and ordered attempts produce final success |
 | Parameter delta validation | Changed, unchanged, coupled, unsupported, invalid-catalog, hard-rule violation | Every change is failure-linked and validated; unsafe/unsupported deltas never execute |

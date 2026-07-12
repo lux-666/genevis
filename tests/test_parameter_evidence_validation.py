@@ -37,6 +37,65 @@ def test_profile_fact_basis_does_not_require_a_case():
     assert result["valid"] is True
 
 
+def test_retry_profile_fact_requires_structured_retry_failure_basis():
+    payload = _payload()
+    payload["task"] = "retry_after_review_failure"
+    payload["prompt_profile"] = {"assembly_review": {"busco_duplicate": 0.21}}
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "purge_level": {
+                "basis": "profile_fact",
+                "fact_paths": ["assembly_review.busco_duplicate"],
+            }
+        },
+        recommended_params={"purge_level": 1},
+        prompt_payload=payload,
+    )
+
+    assert result["valid"] is False
+    assert "retry failure facts require basis=retry_failure" in result["violations"][0]["reason"]
+
+
+def test_retry_profile_fact_allows_previous_attempt_parameter_value():
+    payload = _payload()
+    payload["task"] = "retry_after_execution_failure"
+    payload["prompt_profile"] = {"previous_attempt": {"params": {"threads": 64}}}
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "purge_level": {
+                "basis": "profile_fact",
+                "fact_paths": ["previous_attempt.params.threads"],
+            }
+        },
+        recommended_params={"purge_level": 1},
+        prompt_payload=payload,
+    )
+
+    assert result["valid"] is True
+
+
+def test_retry_failure_basis_accepts_only_visible_signal_ids_or_paths():
+    payload = _payload()
+    payload["task"] = "retry_after_review_failure"
+    payload["retry_evidence"] = {
+        "signal_ids": ["review.busco_duplicate"],
+        "signal_paths": ["assembly_review.busco_duplicate"],
+    }
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "purge_level": {
+                "basis": "retry_failure",
+                "retry_signals": ["review.invented"],
+            }
+        },
+        recommended_params={"purge_level": 1},
+        prompt_payload=payload,
+    )
+
+    assert result["valid"] is False
+    assert "absent from structured prompt evidence" in result["violations"][0]["reason"]
+
+
 def test_case_basis_requires_visible_case_and_span():
     result = validate_parameter_evidence(
         parameter_evidence={

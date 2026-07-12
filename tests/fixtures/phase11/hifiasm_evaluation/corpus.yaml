@@ -1,0 +1,69 @@
+schema_version: 1
+corpus_id: phase11_hifiasm_initial_observational_fixture_v1
+queries:
+  - query_id: initial_small
+    task: recommend_initial
+    prompt_profile:
+      assets: {read_type: hifi}
+      sample: {assembly_goal: primary, ploidy: 2, clade: invertebrate}
+      read_qc: {effective_coverage_1kb: 25, read_n50: 12000}
+      genome_survey: {estimated_genome_size: 100000000}
+    relevant_case_tiers:
+      strong: [legacy_small, eval_initial_small]
+      acceptable: [legacy_medium, eval_initial_medium]
+      irrelevant: [legacy_large, eval_initial_large]
+    incompatible_case_ids: []
+    held_out_case_ids: []
+
+  - query_id: initial_boundary_29_9
+    task: recommend_initial
+    prompt_profile:
+      assets: {read_type: hifi}
+      sample: {assembly_goal: primary, ploidy: 2, clade: vertebrate}
+      read_qc: {effective_coverage_1kb: 29.9, read_n50: 18000}
+      genome_survey: {estimated_genome_size: 1200000000}
+    relevant_case_tiers: &medium_tiers
+      strong: [legacy_medium, eval_initial_medium]
+      acceptable: [legacy_small, eval_initial_small, legacy_large, eval_initial_large]
+      irrelevant: []
+    incompatible_case_ids: []
+    held_out_case_ids: []
+
+  - query_id: initial_boundary_30_1
+    task: recommend_initial
+    prompt_profile:
+      assets: {read_type: hifi}
+      sample: {assembly_goal: primary, ploidy: 2, clade: vertebrate}
+      read_qc: {effective_coverage_1kb: 30.1, read_n50: 18000}
+      genome_survey: {estimated_genome_size: 1200000000}
+    relevant_case_tiers: *medium_tiers
+    incompatible_case_ids: []
+    held_out_case_ids: []
+
+  - query_id: initial_weak_missing
+    task: recommend_initial
+    prompt_profile:
+      assets: {read_type: hifi}
+      sample: {assembly_goal: primary}
+      read_qc: {}
+      genome_survey: {}
+    relevant_case_tiers:
+      strong: []
+      acceptable: [legacy_small, eval_initial_small, legacy_medium, eval_initial_medium, legacy_large, eval_initial_large]
+      irrelevant: []
+    incompatible_case_ids: []
+    held_out_case_ids: []
+
+  - query_id: initial_large_leave_one_out
+    task: recommend_initial
+    prompt_profile:
+      assets: {read_type: hifi}
+      sample: {assembly_goal: primary, ploidy: 2, clade: vertebrate}
+      read_qc: {effective_coverage_1kb: 60, read_n50: 15000}
+      genome_survey: {estimated_genome_size: 3100000000}
+    relevant_case_tiers:
+      strong: [legacy_large, eval_initial_large]
+      acceptable: [legacy_medium, eval_initial_medium]
+      irrelevant: [legacy_small, eval_initial_small]
+    incompatible_case_ids: []
+    held_out_case_ids: [legacy_large, eval_initial_large]

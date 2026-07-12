@@ -37,7 +37,7 @@ HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 1
 _PROMPT_SCHEMA_VERSION_FIELD = "hifiasm_methods_prompt_schema_version"
 
 _ALLOWED_RELEVANCE = {"strong", "medium", "weak", "not_relevant"}
-_ALLOWED_ACTIONS = {"set", "keep_default", "omit"}
+_ALLOWED_ACTIONS = {"set", "keep_previous", "keep_default", "omit"}
 _ALLOWED_CONFIDENCE = {"strong", "medium", "weak"}
 _ALLOWED_EVIDENCE_BASES = {
     "case",
@@ -77,6 +77,7 @@ _PROMPT_COPY_FIELDS = (
     "adjustable_params",
     "evidence_payload_ref",
     "evidence_payload_hash",
+    "retry_evidence",
 )
 _PROMPT_SELF_FIELDS = ("prompt_payload_ref", "prompt_payload_hash")
 _CASE_RETRIEVAL_SCALAR_FIELDS = (
@@ -101,23 +102,27 @@ _CASE_RETRIEVAL_ID_FIELDS = (
     "evidence_case_ids",
 )
 _GATE_FIELDS = (
-    "production_cutover_enabled",
+    "initial_cutover_enabled",
     "decision",
     "reason",
 )
 
 
 def uses_hifiasm_methods_contract(prompt_payload: dict[str, Any]) -> bool:
-    """Return whether the prompt uses Task 4's hifiasm evidence contract."""
+    """Return whether the prompt uses the structured hifiasm Methods contract."""
 
     retrieval = prompt_payload.get("case_retrieval") or prompt_payload.get("case_selection") or {}
-    return retrieval.get("retrieval_backend") == "hifiasm_numeric"
+    return (
+        prompt_payload.get("method_id") == "hifiasm"
+        and retrieval.get("retrieval_backend") == "hifiasm_numeric"
+    )
 
 
 def build_hifiasm_evidence_payload(
     *,
     evidence_cases: list[dict[str, Any]],
     case_retrieval: dict[str, Any],
+    allowed_parameter_ids: set[str],
 ) -> dict[str, Any]:
     """Build one bounded evidence payload from Task 2 prompt-safe projections."""
 
@@ -159,13 +164,14 @@ def build_hifiasm_evidence_payload(
         case, case_omitted_spans, case_excerpt_chars = _budget_evidence_case(
             raw_cases_by_id[case_id],
             total_excerpt_chars=total_excerpt_chars,
+            allowed_parameter_ids=allowed_parameter_ids,
         )
         cases.append(case)
         omitted_spans.extend(case_omitted_spans)
         total_excerpt_chars += case_excerpt_chars
 
     payload = {
-        "retrieval_backend": "hifiasm_numeric",
+        "retrieval_backend": case_retrieval.get("retrieval_backend"),
         "query_id": _safe_optional_scalar(case_retrieval.get("query_id")),
         "candidate_case_ids": [case["case_id"] for case in cases],
         "retrieval_candidate_case_ids": retrieval_candidate_ids,
@@ -309,6 +315,36 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         allowed_bases = policy.get("allowed_evidence_bases")
         if isinstance(allowed_bases, list) and "skill_heuristic" in allowed_bases:
             raise ValueError("canonical recommendation policy must disable skill_heuristic")
+    retry_evidence = prompt_payload.get("retry_evidence")
+    if prompt_payload.get("task") == "recommend_initial":
+        if retry_evidence is not None:
+            raise ValueError("initial hifiasm prompt must not contain retry_evidence")
+    else:
+        _validate_retry_evidence(retry_evidence)
+
+
+def _validate_retry_evidence(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "task", "signal_ids", "signal_paths", "signals"
+    }:
+        raise ValueError("retry_evidence must use the closed same-run structure")
+    if value.get("task") not in {"retry_after_execution_failure", "retry_after_review_failure"}:
+        raise ValueError("retry_evidence has an unsupported task")
+    signal_ids = _string_list(value.get("signal_ids"), field="retry_evidence.signal_ids")
+    signal_paths = _string_list(value.get("signal_paths"), field="retry_evidence.signal_paths")
+    signals = value.get("signals")
+    if not isinstance(signals, list):
+        raise ValueError("retry_evidence.signals must be a list")
+    projected_ids: list[str] = []
+    projected_paths: list[str] = []
+    for signal in signals:
+        if not isinstance(signal, dict) or set(signal) != {"signal_id", "path", "value"}:
+            raise ValueError("retry_evidence signal has invalid fields")
+        projected_ids.append(_nonempty_string(signal.get("signal_id"), field="retry signal_id"))
+        projected_paths.append(_nonempty_string(signal.get("path"), field="retry signal path"))
+        _safe_optional_scalar(signal.get("value"))
+    if projected_ids != signal_ids or projected_paths != signal_paths:
+        raise ValueError("retry_evidence signal indexes are inconsistent")
 
 
 def _validate_canonical_evidence_budget(
@@ -390,7 +426,7 @@ def _validate_canonical_evidence_budget(
         seen_omitted_spans.add(key)
 
     audit_payload = {
-        "retrieval_backend": "hifiasm_numeric",
+        "retrieval_backend": case_retrieval.get("retrieval_backend"),
         "query_id": _safe_optional_scalar(case_retrieval.get("query_id")),
         "candidate_case_ids": visible_case_ids,
         "retrieval_candidate_case_ids": candidate_case_ids,
@@ -418,7 +454,10 @@ def _project_case_retrieval(
     for field in _CASE_RETRIEVAL_ID_FIELDS:
         if field in raw_retrieval:
             projected[field] = _string_list(raw_retrieval[field], field=field)
-    projected["retrieval_backend"] = "hifiasm_numeric"
+    backend = raw_retrieval.get("retrieval_backend")
+    if backend != "hifiasm_numeric":
+        raise ValueError("unsupported hifiasm evidence retrieval backend")
+    projected["retrieval_backend"] = backend
     projected["evidence_case_ids"] = list(evidence_case_ids)
     gate = raw_retrieval.get("hifiasm_numeric_gate")
     if isinstance(gate, dict):
@@ -437,7 +476,7 @@ def _project_methods_evidence(budget: dict[str, Any]) -> dict[str, Any]:
         "response_contract": "case_assessments_and_recommendation",
         "assessment_rule": "assess only numeric-shortlist cases and cite only visible spans",
         "recommendation_rule": (
-            "return L2 decisions with set, keep_default, or omit actions and a visible evidence basis"
+            "return L2 decisions with set, keep_previous, keep_default, or omit actions and a visible evidence basis"
         ),
         "evidence_budget": deepcopy(budget),
     }
@@ -447,14 +486,21 @@ def _budget_evidence_case(
     raw_case: dict[str, Any],
     *,
     total_excerpt_chars: int,
+    allowed_parameter_ids: set[str],
 ) -> tuple[dict[str, Any], list[dict[str, str]], int]:
     projected = dict(_project_hifiasm_ranked_prompt_case(raw_case))
     case_id = _nonempty_string(projected.get("case_id"), field="case_id")
+    _filter_model_visible_parameters(projected, allowed_parameter_ids=allowed_parameter_ids)
     source_excerpts = projected.get("source_excerpts") or []
+    span_priorities = _supporting_span_priorities(projected)
+    ordered_spans = sorted(
+        enumerate(source_excerpts),
+        key=lambda item: (span_priorities.get(str(item[1].get("span_id")), 2), item[0]),
+    )
     safe_spans: list[dict[str, Any]] = []
     omitted_spans: list[dict[str, str]] = []
     case_excerpt_chars = 0
-    for span in source_excerpts:
+    for _, span in ordered_spans:
         span_id = str(span["span_id"])
         quote = str(span["quote"])
         reason = None
@@ -473,10 +519,70 @@ def _budget_evidence_case(
         safe_spans.append(span)
         case_excerpt_chars += len(quote)
 
+    source_order = {str(span["span_id"]): index for index, span in enumerate(source_excerpts)}
+    safe_spans.sort(key=lambda span: source_order[str(span["span_id"])])
+    omitted_spans.sort(key=lambda item: source_order[item["span_id"]])
     projected["source_excerpts"] = safe_spans
     projected["numeric_match"] = _project_numeric_match(projected.get("numeric_match"))
     _filter_span_references(projected, visible_span_ids={span["span_id"] for span in safe_spans})
+    _drop_unsupported_prompt_facts(projected)
     return projected, omitted_spans, case_excerpt_chars
+
+
+def _filter_model_visible_parameters(
+    case: dict[str, Any],
+    *,
+    allowed_parameter_ids: set[str],
+) -> None:
+    intervention = case.get("intervention")
+    if not isinstance(intervention, dict):
+        return
+    parameters = intervention.get("parameters")
+    if isinstance(parameters, dict):
+        intervention["parameters"] = {
+            parameter: value
+            for parameter, value in parameters.items()
+            if parameter in allowed_parameter_ids
+        }
+
+
+def _supporting_span_priorities(case: dict[str, Any]) -> dict[str, int]:
+    priorities: dict[str, int] = {}
+    parameters = ((case.get("intervention") or {}).get("parameters") or {})
+    for parameter in parameters.values():
+        if isinstance(parameter, dict) and parameter.get("reported") is True:
+            for span_id in parameter.get("evidence_span_ids") or []:
+                priorities[str(span_id)] = 0
+    for claim in case.get("rationale_claims") or []:
+        if isinstance(claim, dict) and claim.get("explicitness") == "explicit":
+            for span_id in claim.get("evidence_span_ids") or []:
+                priorities.setdefault(str(span_id), 1)
+    return priorities
+
+
+def _drop_unsupported_prompt_facts(case: dict[str, Any]) -> None:
+    intervention = case.get("intervention")
+    if isinstance(intervention, dict) and isinstance(intervention.get("parameters"), dict):
+        intervention["parameters"] = {
+            parameter: value
+            for parameter, value in intervention["parameters"].items()
+            if not (
+                isinstance(value, dict)
+                and value.get("reported") is True
+                and not value.get("evidence_span_ids")
+            )
+        }
+    rationale_claims = case.get("rationale_claims")
+    if isinstance(rationale_claims, list):
+        case["rationale_claims"] = [
+            claim
+            for claim in rationale_claims
+            if not (
+                isinstance(claim, dict)
+                and claim.get("explicitness") == "explicit"
+                and not claim.get("evidence_span_ids")
+            )
+        ]
 
 
 def _project_numeric_match(value: Any) -> dict[str, Any]:
@@ -681,6 +787,7 @@ def _build_prompt_sanitizer():
         evidence_payload = build_hifiasm_evidence_payload(
             evidence_cases=prompt_payload.get("evidence_cases") or [],
             case_retrieval=raw_retrieval,
+            allowed_parameter_ids=set((prompt_payload.get("adjustable_params") or {}).keys()),
         )
         case_retrieval = _project_case_retrieval(
             raw_retrieval,
@@ -690,6 +797,7 @@ def _build_prompt_sanitizer():
             field: deepcopy(prompt_payload[field])
             for field in _PROMPT_COPY_FIELDS
             if field in prompt_payload
+            and (field != "retry_evidence" or prompt_payload.get("task") != "recommend_initial")
         }
         canonical.update(
             {
@@ -747,7 +855,7 @@ def normalize_hifiasm_methods_response(
     if not isinstance(response, dict):
         raise ValueError("hifiasm Methods-aware response must be an object")
     if not uses_hifiasm_methods_contract(prompt_payload):
-        raise ValueError("hifiasm Methods-aware response requires hifiasm_numeric retrieval")
+        raise ValueError("hifiasm Methods-aware response requires attested hifiasm evidence retrieval")
     evidence_cases = prompt_payload.get("evidence_cases") or []
     cases_by_id = {
         str(case.get("case_id")): case
@@ -800,6 +908,9 @@ def normalize_hifiasm_methods_response(
     recommendation = response.get("recommendation")
     if not isinstance(recommendation, dict):
         raise ValueError("recommendation must be an object")
+    retry_disposition = None
+    if prompt_payload.get("task") != "recommend_initial":
+        retry_disposition = recommendation.get("retry_disposition")
     raw_decisions = recommendation.get("adjustable_params")
     if not isinstance(raw_decisions, dict):
         raise ValueError("recommendation.adjustable_params must be an object")
@@ -817,6 +928,7 @@ def normalize_hifiasm_methods_response(
     omitted_parameters: list[str] = []
     parameter_evidence: dict[str, dict[str, Any]] = {}
     parameter_decisions: dict[str, dict[str, Any]] = {}
+    changed_parameters: set[str] = set()
     for parameter, raw_decision in raw_decisions.items():
         if parameter not in allowed_parameters:
             raise ValueError(f"parameter {parameter!r} is not an adjustable L2 parameter")
@@ -833,8 +945,24 @@ def normalize_hifiasm_methods_response(
         if decision["action"] == "set":
             params[parameter] = decision["value"]
             parameter_evidence[parameter] = evidence
+            changed_parameters.add(parameter)
+        elif decision["action"] == "keep_previous":
+            params[parameter] = decision["value"]
+            parameter_evidence[parameter] = evidence
         else:
             omitted_parameters.append(parameter)
+
+    task = prompt_payload.get("task")
+    if task != "recommend_initial" and retry_disposition not in {
+        "retry", "stop", "expert_review"
+    }:
+        raise ValueError("retry recommendation requires retry_disposition=retry, stop, or expert_review")
+    if task == "retry_after_execution_failure" and retry_disposition != "retry":
+        raise ValueError("execution-failure retry recommendation requires retry_disposition=retry")
+    if retry_disposition in {"stop", "expert_review"} and changed_parameters:
+        raise ValueError("stop/expert_review retry disposition must not invent parameter changes")
+    if task == "retry_after_review_failure" and retry_disposition == "retry" and not changed_parameters:
+        raise ValueError("retry disposition requires at least one evidence-backed parameter change")
 
     summary = _nonempty_string(response.get("summary"), field="summary")
     normalized = deepcopy(response)
@@ -934,6 +1062,18 @@ def _validate_parameter_decision(
         raise ValueError(f"parameter decision action must be one of {sorted(_ALLOWED_ACTIONS)}")
     if action == "set" and "value" not in raw_decision:
         raise ValueError(f"parameter {parameter!r} action=set requires value")
+    previous_value = _lookup_path(
+        prompt_payload.get("prompt_profile") or {},
+        f"previous_attempt.params.{parameter}",
+    )
+    if action == "keep_previous":
+        if prompt_payload.get("task") == "recommend_initial" or previous_value is None:
+            raise ValueError(f"parameter {parameter!r} has no previous retry value to keep")
+        if "value" in raw_decision and raw_decision.get("value") != previous_value:
+            raise ValueError(f"parameter {parameter!r} keep_previous value differs from previous")
+        raw_decision = {**raw_decision, "value": previous_value}
+    if action == "keep_default" and prompt_payload.get("task") != "recommend_initial" and previous_value is not None:
+        raise ValueError(f"retry parameter {parameter!r} must keep_previous, not reset to catalog default")
     if action == "keep_default" and parameter_spec.get("default") is None:
         raise ValueError(f"parameter {parameter!r} has no explicit catalog default to keep")
     if action == "omit" and parameter_spec.get("default") is not None:
@@ -986,6 +1126,23 @@ def _validate_parameter_decision(
                 f"parameter {parameter!r} cites cases without a span from that case: "
                 f"{cases_without_cited_span}"
             )
+        unsupported_spans_by_case = {
+            case_id: sorted(
+                (_visible_span_ids(cases_by_id[case_id]) & set(supporting_span_ids))
+                - allowed_parameter_evidence_span_ids(cases_by_id[case_id], parameter)
+            )
+            for case_id in supporting_case_ids
+        }
+        unsupported_spans_by_case = {
+            case_id: span_ids
+            for case_id, span_ids in unsupported_spans_by_case.items()
+            if span_ids
+        }
+        if unsupported_spans_by_case:
+            raise ValueError(
+                f"parameter {parameter!r} cites visible spans that are not curated support "
+                f"for that parameter or its effect area: {unsupported_spans_by_case}"
+            )
     elif supporting_case_ids or supporting_span_ids:
         raise ValueError(f"parameter {parameter!r} has case citations without basis=case")
 
@@ -993,6 +1150,31 @@ def _validate_parameter_decision(
     if "profile_fact" in bases:
         if not fact_paths:
             raise ValueError(f"parameter {parameter!r} basis=profile_fact requires fact_paths")
+        retry_fact_paths = [
+            path
+            for path in fact_paths
+            if path == "assembly_review"
+            or path.startswith("assembly_review.")
+            or path == "previous_attempt.failure_class"
+            or path.startswith("previous_attempt.failure_class.")
+            or path == "previous_attempt.execution_status"
+            or path.startswith("previous_attempt.execution_status.")
+            or path == "previous_attempt.execution_status_detail"
+            or path.startswith("previous_attempt.execution_status_detail.")
+            or path == "previous_attempt.exit_code"
+            or path.startswith("previous_attempt.exit_code.")
+            or path == "previous_attempt.stderr_ref"
+            or path.startswith("previous_attempt.stderr_ref.")
+            or path == "previous_attempt.stdout_ref"
+            or path.startswith("previous_attempt.stdout_ref.")
+            or path == "previous_attempt.resource_facts"
+            or path.startswith("previous_attempt.resource_facts.")
+        ]
+        if retry_fact_paths:
+            raise ValueError(
+                f"parameter {parameter!r} retry failure facts require basis=retry_failure: "
+                f"{retry_fact_paths}"
+            )
         missing_paths = [
             path
             for path in fact_paths
@@ -1031,6 +1213,12 @@ def _validate_parameter_decision(
     elif retry_signals:
         raise ValueError(f"parameter {parameter!r} has retry_signals without basis=retry_failure")
 
+    if prompt_payload.get("task") != "recommend_initial" and action == "set":
+        if "retry_failure" not in bases:
+            raise ValueError(
+                f"retry parameter change {parameter!r} requires retry_failure evidence"
+            )
+
     decision = {
         **deepcopy(raw_decision),
         "action": action,
@@ -1060,6 +1248,48 @@ def _visible_span_ids(case: dict[str, Any]) -> set[str]:
         for span in case.get("source_excerpts") or []
         if isinstance(span, dict) and span.get("span_id")
     }
+
+
+def allowed_parameter_evidence_span_ids(case: dict[str, Any], parameter: str) -> set[str]:
+    """Return case-local spans curated to support one parameter or its effect area.
+
+    Direct parameter spans establish the parameter anchor.  Rationale effect areas
+    become associated only when at least one claim in that area shares a direct
+    parameter span; all curated rationale spans in those associated areas are then
+    valid support.  This stays fail-closed when a case does not encode a defensible
+    parameter-to-effect relationship.
+    """
+
+    parameters = ((case.get("intervention") or {}).get("parameters") or {})
+    parameter_fact = parameters.get(parameter) if isinstance(parameters, dict) else None
+    if not isinstance(parameter_fact, dict):
+        return set()
+    direct_spans = {
+        str(span_id)
+        for span_id in parameter_fact.get("evidence_span_ids") or []
+        if isinstance(span_id, str)
+    }
+    if not direct_spans:
+        return set()
+    claims = [claim for claim in case.get("rationale_claims") or [] if isinstance(claim, dict)]
+    associated_effect_areas = {
+        str(claim.get("effect_area"))
+        for claim in claims
+        if direct_spans
+        & {
+            str(span_id)
+            for span_id in claim.get("evidence_span_ids") or []
+            if isinstance(span_id, str)
+        }
+    }
+    rationale_spans = {
+        str(span_id)
+        for claim in claims
+        if str(claim.get("effect_area")) in associated_effect_areas
+        for span_id in claim.get("evidence_span_ids") or []
+        if isinstance(span_id, str)
+    }
+    return direct_spans | rationale_spans
 
 
 def _visible_retry_signal_refs(prompt_payload: dict[str, Any]) -> set[str]:
