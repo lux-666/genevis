@@ -47,15 +47,17 @@ The complete activation contract is:
 initial_cutover_enabled: true
 ```
 
-When enabled, rank every eligible initial case by the existing numeric score.
-The ordering must be stable: descending numeric score, followed by one explicit
-deterministic tie-break key (`case_id` ascending). Select exactly as follows:
+When enabled, preserve the exact lexicographic numeric ranking already approved
+in Task 3: `evidence_coverage` descending, `numeric_distance` ascending, the
+existing clade tie-break, then `case_id`. Task 6A does not define, collapse, or
+replace that ordering with a single score; it changes only the deterministic
+shortlist truncation. Select exactly as follows:
 
 - 5 or more eligible cases: select the first 5;
 - 1-4 eligible cases: select all of them;
 - 0 eligible cases: use the existing no-case behavior unchanged.
 
-There is no minimum numeric score, evidence coverage, eligible-case count,
+There is no maximum numeric distance, minimum evidence coverage, eligible-case count,
 corpus size, query-set size, scientific approval, recorded recommendation,
 threshold, non-inferiority, or default-preservation requirement for activation
 or forward progress. Evaluation may report any of these measurements for
@@ -94,8 +96,8 @@ Task 6B covers:
 ```text
 sample + input profile
   -> initial hifiasm query
-  -> all eligible initial cases scored by existing numeric score
-  -> stable sort by score desc, case_id asc
+  -> all eligible initial cases ranked by the existing Task 3 numeric contract
+  -> evidence_coverage desc, numeric_distance asc, clade tie-break, case_id
   -> fixed top_k=5 selection (or all 1-4; existing no-case path for 0)
   -> bounded Methods evidence payload
   -> initial parameter recommendation
@@ -643,8 +645,8 @@ keys. In neither case may normalization keep the old runtime behavior reachable.
 
 | Area | Required tests | Acceptance |
 |---|---|---|
-| Initial stable top-5 | More than 5 cases, tied scores, shuffled input order, exactly 5, 1-4, and 0 eligible cases | Sort is score descending then `case_id` ascending; select first 5, all 1-4, or existing no-case behavior for 0 |
-| Initial no evaluation gate | Low/negative scores, low/missing coverage, any case count, absent evaluation, failing observational metrics, no recorded recommendation set | No score/coverage/count/evaluation/scientific-approval threshold blocks selection or activation; the mandatory post-validation parameter human gate still controls execution |
+| Initial stable top-5 | More than 5 cases; ties at each lexicographic key; shuffled input order; clade and `case_id` tie-breaks; exactly 5, 1-4, and 0 eligible cases | Preserve Task 3 ordering exactly: `evidence_coverage` descending, `numeric_distance` ascending, existing clade tie-break, then `case_id`; select first 5, all 1-4, or existing no-case behavior for 0 |
+| Initial no evaluation gate | Large numeric distances, low/missing coverage, any case count, absent evaluation, failing observational metrics, no recorded recommendation set | No distance/coverage/count/evaluation/scientific-approval threshold blocks selection or activation; the mandatory post-validation parameter human gate still controls execution |
 | Observational evaluation | Run and omit evaluation; vary reported retrieval/recommendation metrics | Reports remain replayable when produced and never alter `initial_cutover_enabled`, selected cases, or control flow |
 | Absence of retry retrieval | Config/schema rejection of retry backend; no retry query/case fixture; no retrieval call during retry | Retry works with no retry database and does not emit a retrieval artifact |
 | Attempt 0 snapshot | Stable hashes/refs before and after retries; assert no catalog/knowledge pack/hard-rule/capability/profile/evidence reload; policy hash changes mid-run | Full basis is immutable; mismatch fails closed and requires a new run |
