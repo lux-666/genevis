@@ -1,652 +1,904 @@
 # Hifiasm Scenario EvidenceCase v3 Design
 
-**Date:** 2026-07-12  
-**Status:** Approved for implementation  
-**Scope:** Assembly parameter-recommender knowledge ingestion and initial evidence retrieval for `hifiasm` and `hifiasm_ont`
+## 1. Decision
 
-## 1. Purpose
+Adopt **methods-only, scenario-aware EvidenceCase v3** for hifiasm initial parameter recommendation.
 
-Replace the current source-heavy hifiasm EvidenceCase v2 contract with a small, repository-native EvidenceCase v3 model that:
+This is a small replacement refactor, not a compatibility layer:
 
-- stores one curator-authored `methods.md` beside each paper case;
-- treats structured YAML spans as the model-consumed evidence;
-- removes `body.md`, source-document SHA256, exact quote matching, quote offsets, and document-coverage analysis;
-- models assembly input topology and phasing mode explicitly;
-- retrieves evidence by scenario compatibility before optional numeric similarity;
-- supports both HiFi hifiasm and ONT-simplex hifiasm-ONT cases;
-- preserves the existing validated-case, ranked-case, prompt-budget, and citation attestation boundaries;
-- seeds four approved paper cases supplied and reviewed by the project owner.
+- create four approved paper cases, each in its own `case.yaml` and paired `methods.md`;
+- delete the obsolete hifiasm v2 source-document contract;
+- delete `body.md`, source SHA256, exact substring matching, unique offsets, and document-coverage validation;
+- retrieve by input topology before numeric similarity;
+- support both `hifiasm` and `hifiasm_ont` through one attested backend;
+- preserve prompt budgets, parameter-level citations, Task 2/3/4 attestation, path confinement, and runtime artifact/replay hashes.
 
-This is a small contract refactor, not another compatibility layer. The obsolete v2 source model is deleted rather than supported in parallel.
+The four initial cases are one case per paper. Multi-scenario-per-paper diversity is explicitly out of scope for this refactor.
 
-## 2. Problems In The Current Design
+## 2. Goals And Non-goals
 
-### 2.1 Source ingestion is over-specified
+### 2.1 Goals
 
-The existing contract requires a `body.md`, a `methods.md`, two source hashes, exact and uniquely located quotes, offset tracking, and document coverage calculations. These controls were designed as though the knowledge pack were ingesting arbitrary full papers. In practice, the repository stores short curator-authored evidence dossiers. Git revision history plus schema/provenance validation is the appropriate integrity boundary.
+1. Make the knowledge source easy to curate and review in Git.
+2. Select only cases compatible with the route actually chosen for the sample.
+3. Keep paper-reported commands, rationale, limitations, and transfer constraints visible to the recommendation pipeline.
+4. Prevent L0/L1 route- or profile-owned values from becoming L2 recommendations.
+5. Remove old machinery instead of leaving adapters and deprecated fields behind.
 
-### 2.2 Scenario compatibility is under-specified
+### 2.2 Non-goals
 
-The existing applicability model primarily uses one `read_type` string. It cannot reliably distinguish:
+- Rechecking the original PDFs.
+- Pinning curator-authored Markdown with SHA256.
+- Proving that YAML evidence text occurs verbatim in Markdown.
+- Supporting legacy hifiasm v2 cases.
+- Reworking retry-case selection.
+- Renaming the existing runtime `source_excerpts` or `intervention.parameters` interfaces.
+- Deleting any artifact, replay, prompt, ledger, or decision SHA/hash logic.
 
-- HiFi plus Hi-C phasing;
-- HiFi plus ultra-long ONT bridging;
-- ONT R10.4.1 simplex mode;
-- Trio HiFi with paternal and maternal short-read k-mers.
-
-The prompt profile already exposes `has_hifi`, `has_ont`, `has_ultra_long`, `has_hic`, and `has_trio`, but retrieval does not use the complete topology.
-
-### 2.3 ONT evidence is outside the current v2 numeric path
-
-The current numeric retriever is hard-coded around HiFi compatibility. A paper case for `hifiasm_ont` would either be excluded or fall back to a legacy path, defeating the purpose of the new curated evidence model.
-
-### 2.4 Production cases are currently empty
-
-The production hifiasm v2 shard contains no cases. Therefore, this is the correct point to replace the unpublished production authoring contract rather than preserve a permanent v2/v3 compatibility burden.
-
-## 3. Design Principles
-
-1. **Scenario first, numbers second.** Input topology and assembly mode are hard compatibility facts. Genome size and read statistics are optional ranking features.
-2. **One human evidence dossier.** Each paper directory contains one `methods.md`; no synthetic `body.md` is required.
-3. **Structured YAML is authoritative for prompts.** YAML spans are curated evidence text, not automatically verified quotations.
-4. **No fake precision.** Missing numeric facts remain absent; they are never replaced with zero or inferred defaults.
-5. **Separate route facts from recommendable parameters.** Input flags and workflow modes remain L0/L1 route context, not L2 parameter recommendations.
-6. **Delete obsolete machinery.** No v2 source checksum or quote-matching compatibility path remains.
-7. **Keep runtime safety boundaries.** Validated-case attestation, ranked selection attestation, prompt budgets, and response citation validation remain.
-8. **Avoid unrelated refactors.** Retry state, approval gates, artifact hashes, replay hashes, and execution lifecycle are outside this change.
-
-## 4. Target Directory Layout
+## 3. Target Layout
 
 ```text
 descriptors/knowledge_packs/assembly/parameter_recommender/
 ├── cases.yaml
-├── cases/
-│   ├── hifiasm/
-│   │   └── papers/
-│   │       ├── s41587-022-01261-x/
-│   │       │   ├── case.yaml
-│   │       │   └── methods.md
-│   │       ├── s41592-024-02269-8/
-│   │       │   ├── case.yaml
-│   │       │   └── methods.md
-│   │       ├── s41586-026-10105-6/
-│   │       │   ├── case.yaml
-│   │       │   └── methods.md
-│   │       └── s41586-022-05325-5/
-│   │           ├── case.yaml
-│   │           └── methods.md
-│   └── legacy/
-│       ├── initial_hifi.yaml
-│       ├── initial_ont.yaml
-│       └── retry_failures.yaml
-├── rules/
-└── strategies.yaml
+└── cases/hifiasm/papers/
+    ├── s41587-022-01261-x/
+    │   ├── case.yaml
+    │   └── methods.md
+    ├── s41592-024-02269-8/
+    │   ├── case.yaml
+    │   └── methods.md
+    ├── s41586-026-10105-6/
+    │   ├── case.yaml
+    │   └── methods.md
+    └── s41586-022-05325-5/
+        ├── case.yaml
+        └── methods.md
 ```
 
-The manifest continues to reference shard files using the existing loader convention. Each paper `case.yaml` contains a `cases` list, normally with one scenario case. A later paper may contain more than one case only when it reports genuinely different input topologies, assembly modes, or interventions.
-
-Legacy non-hifiasm shards may remain for their current consumers, but obsolete v2 hifiasm source fixtures and production layout are removed.
-
-## 5. Persistent EvidenceCase v3 Contract
-
-### 5.1 Top-level shape
+Each `case.yaml` is a shard with exactly one entry:
 
 ```yaml
-schema_version: 3
-case_id: paper.s41587-022-01261-x.hifi-hic
-case_type: initial
-paper_id: s41587-022-01261-x
-
-source:
-  kind: paper
-  title: null
-  doi: 10.1038/s41587-022-01261-x
-  year: 2022
-
-applicability: ...
-observed_facts: ...
-intervention: ...
-rationale_claims: ...
-outcomes: ...
-evidence: ...
-curation: ...
+cases:
+  - schema_version: 3
+    ...
 ```
 
-`paper_id` groups cases derived from the same paper. `case_id` identifies the scenario retrieval unit.
-
-### 5.2 Evidence block
+`cases.yaml` remains manifest version 2. Manifest version and case schema version are independent:
 
 ```yaml
-evidence:
-  methods_path: methods.md
-  spans:
-    - span_id: applicability
-      text: >
-        Diploid sample with PacBio HiFi and Hi-C, without parental
-        sequencing, for haplotype-resolved assembly.
-    - span_id: command.hifi_hic
-      text: |
-        hifiasm \
-          -o <outputPrefix> \
-          --h1 <HiC-reads-R1.fasta> \
-          --h2 <HiC-reads-R2.fasta> \
-          -t <nThreads> \
-          <HiFi-reads.fasta>
+version: 2
+case_schema: assembly_evidence_case
+case_files:
+  - cases/hifiasm/papers/s41587-022-01261-x/case.yaml
+  - cases/hifiasm/papers/s41592-024-02269-8/case.yaml
+  - cases/hifiasm/papers/s41586-026-10105-6/case.yaml
+  - cases/hifiasm/papers/s41586-022-05325-5/case.yaml
+  - cases/initial_hifi.yaml
+  - cases/initial_ont.yaml
+  - cases/retry_failures.yaml
 ```
 
-Authoring rules:
+The old empty `cases/hifiasm/initial.yaml` is deleted.
 
-- `methods_path` is required for approved cases.
-- The path must be relative, confined to the knowledge-pack root, and resolve to a regular file.
-- The file basename is `methods.md`.
-- A span contains only `span_id` and `text`.
-- Span IDs are non-empty and unique within the case.
-- Span text is non-empty and bounded.
-- The validator does not require span text to occur in `methods.md`.
-- The validator does not read the document for quote matching, offsets, hashes, or coverage.
-- Only spans referenced by structured fields are projected downstream.
-
-The runtime Task 2 projection retains the existing downstream interface:
+`methods_path` is always **pack-root-relative**, not case-file-relative. This avoids adding loader sidecar metadata:
 
 ```yaml
-source_excerpts:
-  - span_id: command.hifi_hic
-    document: methods
-    quote: "..."
+methods_path: cases/hifiasm/papers/s41587-022-01261-x/methods.md
 ```
 
-`document: methods` and `quote` are compatibility fields synthesized by Task 2. They are not part of the persistent v3 YAML contract.
+## 4. Canonical Persistent Schema
 
-### 5.3 Curation
+The following is the only accepted v3 shape. Every mapping is closed: unknown fields fail validation.
 
 ```yaml
-curation:
-  status: approved
-  curator: project_owner
-  reviewed_at: "2026-07-12"
-  notes: >
-    Curated from the project owner's paper and supplementary-method summary.
+schema_version: 3                         # required, exact integer
+case_id: hifiasm.paper.s41587-022-01261-x # required, unique string
+case_type: initial                       # required; only initial in v3
+
+source:                                  # required
+  kind: paper                            # required; paper only for initial corpus
+  title: null                            # optional string/null
+  doi: 10.1038/s41587-022-01261-x        # required string
+  year: 2022                             # required integer
+
+methods_path: cases/hifiasm/papers/.../methods.md # required string
+
+evidence_spans:                         # required, 1..32
+  - span_id: scenario.inputs             # required, unique string
+    quote: "Curator-authored evidence text." # required nonblank UTF-8 text, <=2000 chars
+
+applicability:                           # required
+  method_id: hifiasm                     # hifiasm | hifiasm_ont
+  primary_read:                          # required
+    technology: pacbio_hifi              # pacbio_hifi | ont
+    subtype: null                        # null | r10_4_1_simplex
+  required_selected_inputs: [hic]        # list from controlled vocabulary
+  forbidden_selected_inputs: [trio_parental_short_reads]
+  optional_inputs: []
+  assembly_product: haplotype_resolved   # controlled vocabulary
+  phasing_strategy: hic                  # controlled vocabulary
+  evidence_span_ids: [scenario.inputs]   # required, nonempty
+
+observed_facts:                          # optional mapping; only present facts
+  organism:
+    value: human
+    unit: null
+    uncertainty: null
+    evidence_span_ids: [sample.organism]
+  genome_size_mb:
+    value: 3100
+    unit: Mb
+    uncertainty:
+      kind: interval
+      min: 3000
+      max: 3200
+    evidence_span_ids: [sample.genome]
+
+intervention:                            # required
+  tool: hifiasm                          # required string; runtime interface retained
+  version: 0.16.1-r375                   # optional string/null
+  parameters:                            # required L2-only mapping; may be empty
+    dual_scaffold:
+      value: true
+      reported: true
+      evidence_span_ids: [command.main]
+      transfer_constraints: null
+  readonly_context:                      # required L0/L1 mapping; may be empty
+    hom_cov:
+      value: null
+      value_semantics: sample_specific_homozygous_coverage_peak
+      evidence_span_ids: [command.hom_cov]
+  commands:                              # required list; may be empty
+    - command_id: hifi_hic
+      tool: hifiasm
+      version: 0.16.1-r375
+      status: reported                   # reported | illustrative | incomplete_report
+      shell: "hifiasm ..."
+      evidence_span_ids: [command.main]
+
+rationale_claims:                        # optional, 0..32
+  - claim_id: hifi_hic.complementarity
+    statement: "HiFi supplies an accurate graph and Hi-C supplies chromosome-scale phase links."
+    explicitness: explicit               # explicit | inferred
+    effect_area: haplotype_preservation  # existing effect-area vocabulary
+    applies_to:
+      parameters: []                     # catalog IDs
+      commands: [hifi_hic]               # declared command IDs
+    evidence_span_ids: [rationale.hifi_hic]
+
+limitations:                             # optional, 0..32
+  - limitation_id: telomere.human_only
+    statement: "CCCTAA is a human telomere motif and must not transfer to other taxa."
+    applies_to:
+      parameters: [telomere_motif]
+      commands: [ont_simplex]
+    evidence_span_ids: [limitation.telomere]
+
+outcomes:                                # optional mapping; same fact shape as observed_facts
+  contig_n50_mb:
+    value: 100
+    unit: Mb
+    uncertainty: null
+    evidence_span_ids: [outcome.n50]
+
+curation:                                # required
+  status: approved                       # draft | approved | rejected
+  curator: BGI                           # required nonblank for approved
+  reviewed_at: 2026-07-12                # optional string/null
+  notes: null                            # optional string/null
 ```
 
-Only approved cases are retrieval eligible. Approved cases require a curator and a valid `methods.md` path. Draft and rejected cases may be incomplete but remain ineligible.
+### 4.1 Controlled vocabularies
 
-## 6. Scenario Applicability Model
+`required_selected_inputs`, `forbidden_selected_inputs`, and `optional_inputs` use:
 
-### 6.1 Primary reads
+- `hic`
+- `ultra_long_ont`
+- `trio_parental_short_reads`
+- `hifi`
 
-`primary_reads` describes the reads assembled into the primary graph:
+The three lists must be disjoint.
+
+`assembly_product` uses:
+
+- `haplotype_resolved`
+- `near_t2t`
+- `partially_phased_near_t2t`
+- `reference_grade_diploid`
+
+`phasing_strategy` uses:
+
+- `hic`
+- `trio`
+- `ont_read_phasing`
+- `partial_graph_phasing`
+
+### 4.2 Required and optional facts
+
+`observed_facts` and `outcomes` are sparse. Missing means unknown; the validator never creates zero, false, or an empty string.
+
+Allowed fact IDs remain:
+
+- observed: `organism`, `clade`, `genome_size_mb`, `coverage`, `read_n50_kb`, `heterozygosity`, `ploidy`;
+- outcomes: `assembly_size_mb`, `contig_n50_mb`, `busco_complete`, `busco_duplicate`.
+
+Every present fact requires at least one valid `evidence_span_id` in an approved case.
+
+The fact object is closed and has exactly `value`, `unit`, `uncertainty`, and
+`evidence_span_ids`. `value` is a JSON scalar; numeric fact IDs require finite numbers.
+`unit` is string/null. `uncertainty` is null or the closed mapping
+`{kind, min, max}`. The existing vocabulary is unchanged: `kind` is `point` or
+`interval`; `range` is invalid. `min` and `max` are finite numbers and are required
+for `interval`; a point uncertainty is exactly `{kind: point, min: null, max: null}`.
+Evidence span lists contain 1..32 unique IDs for approved cases.
+
+### 4.3 L0/L1 versus L2
+
+`intervention.parameters` may contain only catalog parameters whose level is 2. Keys are catalog IDs, never CLI spellings.
+
+Route-owned or sample-owned values go into `readonly_context`, including:
+
+- `hom_cov` (`--hom-cov`, L1);
+- input files and route bindings such as `--h1`, `--h2`, `--ul`, `-1`, and `-2` (L0);
+- `--ont` route mode (L0).
+
+They may be shown as reported context but can never become adjustable parameter evidence.
+
+The new nested objects are closed as follows:
+
+- `intervention.parameters` is a mapping of at most 64 unique L2 catalog IDs to
+  `{value, reported, evidence_span_ids, transfer_constraints}`. `reported` is a
+  boolean. Approved reported entries require 1..32 unique span IDs.
+- `intervention.readonly_context` is a mapping of at most 64 unique L0/L1 catalog
+  IDs to `{value, value_semantics, evidence_span_ids}`. `value` may be null;
+  `value_semantics` is a required nonblank string of at most 1,000 characters;
+  approved entries require 1..32 unique span IDs. Route bindings use existing IDs
+  including `hic_r1`, `hic_r2`, `ul_reads`, `hap1_yak`, `hap2_yak`, and `ont_mode`.
+- `intervention.commands` is a list of at most 32 commands with unique
+  `command_id`. Every command contains exactly
+  `{command_id, tool, version, status, shell, evidence_span_ids}`. `command_id` and
+  `tool` are required nonblank strings; `version` is string/null; `status` is
+  `reported`, `illustrative`, or `incomplete_report`; `shell` is a nonblank string
+  for `reported`/`illustrative` and string/null for `incomplete_report`; approved
+  commands require 1..32 unique span IDs.
+- `rationale_claims` contains at most 32 unique `claim_id` objects and uses exactly
+  `{claim_id, statement, explicitness, effect_area, applies_to,
+  evidence_span_ids}`. `applies_to` contains exactly `parameters` and `commands`,
+  each a unique-ID list. The existing eight-value `HIFIASM_EFFECT_AREAS`
+  vocabulary is unchanged.
+- `limitations` contains at most 32 unique `limitation_id` objects and uses exactly
+  `{limitation_id, statement, applies_to, evidence_span_ids}`. `applies_to`
+  contains exactly `parameters` and `commands`, each a unique-ID list. Approved
+  limitations require 1..32 unique span IDs.
+- `source.title`, `intervention.version`, `curation.reviewed_at`, and
+  `curation.notes` are the only nullable text fields. All other declared text is
+  nonblank and at most 1,000 characters unless an explicit field limit is stated.
+  `evidence_spans[].quote` is the sole larger exception and remains capped at
+  2,000 characters.
+
+### 4.4 Transfer constraints
+
+`transfer_constraints` is either null or:
 
 ```yaml
-primary_reads:
+transfer_constraints:
+  allowed_taxon_ids: [9606]
+  on_mismatch: exclude_parameter_evidence
+```
+
+For the ONT paper, `telomere_motif=CCCTAA` has this constraint. If query taxon is absent or not allowed, the parameter fact and every command that depends on it are removed from model-visible evidence. The associated limitation remains visible in the omission audit.
+
+`transfer_constraints` is a closed mapping. `allowed_taxon_ids` is a nonempty list
+of at most 32 unique positive integers and `on_mismatch` is exactly
+`exclude_parameter_evidence`.
+
+A command depends on a constrained parameter exactly when one limitation lists
+both IDs in `applies_to.parameters` and `applies_to.commands`. Transfer filtering
+runs before span budgeting. On absent/mismatched taxon it:
+
+1. removes the constrained parameter;
+2. removes the dependent commands;
+3. removes those IDs from model-visible rationale `applies_to` lists;
+4. removes the limitation from the filtered visible case and retains its complete
+   payload in an omission audit;
+5. removes any now-unreferenced ordinary spans before budgeting.
+
+The Task 4 `methods_evidence.omission_audit` is a list of at most 32 closed
+mappings:
+
+```yaml
+- case_id: hifiasm.paper.s41586-026-10105-6
+  reason: transfer_constraint_taxon_mismatch
+  parameter_ids: [telomere_motif]
+  command_ids: [ont_simplex]
+  retained_limitations:
+    - limitation_id: telomere.human_only
+      statement: "CCCTAA is a human telomere motif and must not transfer to other taxa."
+      applies_to:
+        parameters: [telomere_motif]
+        commands: [ont_simplex]
+      evidence_span_ids: [limitation.telomere]
+```
+
+The two top-level ID lists are unique and deterministically sorted.
+`retained_limitations` uses the same closed limitation shape as the case and is
+ordered by `limitation_id`. Its `applies_to` IDs intentionally identify objects
+removed by transfer filtering and therefore are not dangling visible references.
+The omission audit is included in canonicalization, byte budgeting, Task 4
+attestation, and mutation/forgery checks. Retry inherits the exact attempt-0 audit.
+
+### 4.5 Incomplete commands
+
+A command with `status: incomplete_report` is documentary context only. It must never be synthesized into a runnable or fully reported command.
+
+The trio case therefore records:
+
+- the reported hifiasm v0.3 test command as `reported`;
+- the final hifiasm v0.14.1 trio command as `incomplete_report` with a limitation stating that the complete final command was not reported.
+
+### 4.6 Structural cardinality and references
+
+Top-level required fields are `schema_version`, `case_id`, `case_type`, `source`,
+`methods_path`, `evidence_spans`, `applicability`, `intervention`, and `curation`.
+Top-level optional fields are `observed_facts`, `rationale_claims`, `limitations`,
+and `outcomes`; omission is normalized to an empty mapping/list only inside the
+validated runtime object.
+
+`source` contains exactly `kind`, `title`, `doi`, and `year`; `kind` is `paper`.
+`applicability` contains exactly the eight fields shown in the canonical schema.
+`intervention` contains exactly `tool`, `version`, `parameters`,
+`readonly_context`, and `commands`; the three collections are required and may be
+empty. `curation` contains exactly `status`, `curator`, `reviewed_at`, and `notes`;
+all four keys are required, and nullable values are represented explicitly.
+
+Case IDs, span IDs, command IDs, claim IDs, and limitation IDs are each unique in
+their scope. Every parameter ID must exist in the hifiasm parameter catalog at the
+required level. Every command/parameter reference in `applies_to` must resolve.
+Every evidence span reference must resolve. A limitation must apply to at least one
+parameter or command; rationale may use two empty lists when it explains the route
+as a whole. Lists are curator ordered unless this design explicitly requires sorted
+audit output.
+
+## 5. `methods.md` Contract
+
+`methods.md` is a curator-authored paper dossier paired with the YAML case. It contains the user-supplied scenario, rationale, versions, commands, and caveats in readable Markdown.
+
+Validation is deliberately lightweight:
+
+1. path is relative, contains no `..`, resolves inside the knowledge-pack root, is a regular file, and is not a symlink escape;
+2. file size is 1 byte to 256 KiB;
+3. file decodes as UTF-8;
+4. decoded content contains non-whitespace text;
+5. first nonblank line is a Markdown heading containing the DOI suffix or `case_id`.
+
+The validator does **not**:
+
+- compute or check SHA256;
+- require a `body.md`;
+- compare `evidence_spans[].quote` with Markdown;
+- search substrings;
+- calculate offsets, uniqueness, or document coverage;
+- send the full Markdown file or its path to the model.
+
+Repository revision is the integrity boundary for curator-authored knowledge.
+
+## 6. Persistent-To-Runtime Projection
+
+Task 2 validates v3 and projects it to the current attested runtime interface.
+
+| Persistent v3 | Validated/runtime |
+|---|---|
+| `evidence_spans[].span_id` | `source_excerpts[].span_id` |
+| no document field | `source_excerpts[].document = "methods"` |
+| `evidence_spans[].quote` | `source_excerpts[].quote` |
+| `intervention.parameters` | unchanged |
+| `intervention.readonly_context` | retained as non-adjustable context |
+| `intervention.commands` | retained |
+| `limitations` | retained |
+| `methods_path` | validation-only; omitted from prompt projection |
+| `evidence_spans` | replaced by referenced `source_excerpts`; omitted from prompt projection |
+| `curation` | attestation/audit only; omitted from prompt projection |
+
+Only spans referenced by applicability, facts, parameters, commands, rationale, or limitations are projected.
+
+`methods_evidence.py` continues to consume `source_excerpts`, `intervention.parameters`, and `evidence_span_ids`. It is extended only to retain limitations/commands and enforce transfer constraints. `prompt_payload.py` continues to receive an attested ranked case list. `parameter_validation.py` continues to accept case evidence only for visible L2 parameters and visible cited spans.
+
+The runtime contracts are exact:
+
+- **Task 2 validated case:** the persistent object with `methods_path`,
+  `evidence_spans`, and `curation` removed; `source_excerpts` added as the closed
+  list `{span_id, document, quote}`; `retrieval_eligible` added; and omitted
+  optional collections normalized exactly to `observed_facts: {}`,
+  `rationale_claims: []`, `limitations: []`, and `outcomes: {}`. No other field is
+  synthesized. Task 2 attestation covers the complete projected object.
+- **Task 3 ranked case:** the Task 2 prompt case plus `numeric_match`. The closed
+  `numeric_match` object is `{numeric_distance, numeric_similarity_display,
+  evidence_coverage, weak_evidence, feature_distances, rank_numeric}`. Existing
+  per-feature distance records are unchanged. Task 3 attestation covers query,
+  complete ordered trace, complete ordered cases, candidate/selected IDs, backend,
+  and gate metadata.
+- **Task 3 selection metadata:** retains existing fields but uses
+  `retrieval_backend: hifiasm_scenario` and `hifiasm_scenario_gate` in place of
+  `hifiasm_numeric_gate`. The gate is exactly
+  `{initial_cutover_enabled, decision, reason}` with
+  `decision: hifiasm_scenario` when active.
+- **Task 4 evidence:** contains the budgeted Task 3 cases, existing evidence-budget
+  fields, and the new closed `methods_evidence.omission_audit`. Commands,
+  limitations, readonly context, spans, and every `applies_to` reference are
+  canonicalized after transfer filtering and budgeting. Task 4 attestation covers
+  the entire canonical evidence object, including omission audit and case order.
+
+`evidence_coverage` remains the established numeric field name. The design does not
+introduce a second `evidence_coverage` field.
+
+## 7. Canonical Retrieval Query
+
+The query is tri-state and route-aware:
+
+```yaml
+query_id: ...
+method_id: hifiasm
+primary_read:
   technology: pacbio_hifi
   subtype: null
+selected_inputs:
+  hic: true
+  ultra_long_ont: false
+  trio_parental_short_reads: false
+  hifi: true
+available_inputs:
+  hic: true
+  ultra_long_ont: false
+  trio_parental_short_reads: unknown
+  hifi: true
+assembly_product: haplotype_resolved
+phasing_strategy: hic
+taxon_id: 9606
+numeric_features: ...
+categorical_context:
+  clade: mammal
 ```
 
-or:
+Allowed state values for every availability/selection input are `true`, `false`, or `unknown`.
+
+### 7.1 Profile additions
+
+The prompt profile gains explicit fields rather than inferring absence from Python truthiness:
 
 ```yaml
-primary_reads:
-  technology: ont
-  subtype: r10_4_1_simplex
+assets:
+  primary_read_technology: pacbio_hifi | ont | unknown
+  primary_read_subtype: r10_4_1_simplex | unknown
+  input_availability:
+    hic: true | false | unknown
+    ultra_long_ont: true | false | unknown
+    trio_paternal_short_reads: true | false | unknown
+    trio_maternal_short_reads: true | false | unknown
+    hifi: true | false | unknown
+  route_inputs:
+    hic: true | false | unknown
+    ultra_long_ont: true | false | unknown
+    trio_paternal_short_reads: true | false | unknown
+    trio_maternal_short_reads: true | false | unknown
+    hifi: true | false | unknown
 ```
 
-Controlled technologies initially include:
+`trio_parental_short_reads` is true only when both paternal and maternal route inputs are true; false if either is false; otherwise unknown.
 
-- `pacbio_hifi`
-- `ont`
+Existing `has_*` fields may remain for other consumers, but EvidenceCase v3 does not use them because current boolean fallback collapses unknown into false.
 
-Controlled ONT subtypes initially include:
-
-- `r10_4_1_simplex`
-- `ultra_long`
-
-Ultra-long ONT used only as a bridging auxiliary input is not the primary read type.
-
-### 6.2 Auxiliary inputs
+The authoritative persisted source is an explicit nullable topology on both
+`AssemblyRunConfig` and `AssemblyInputProfile`:
 
 ```yaml
-auxiliary_inputs:
-  hic: required
-  ultra_long_ont: absent
-  parental_short_reads: absent
+assembly_topology: hifi_hic | hifi_ul_hic | trio_hifi | ont_r10_4_1_simplex | null
+primary_read_subtype: r10_4_1_simplex | null
+ultra_long_reads_ref: string | null
+trio_paternal_short_reads_ref: string | null
+trio_maternal_short_reads_ref: string | null
 ```
 
-Allowed states:
+The existing `hifi_reads_ref` and `hic_reads_ref` remain. New fields are copied from
+run config into the input-profile artifact without truthiness coercion. `null`
+means unknown, not false.
 
-- `required`
-- `optional`
-- `absent`
-- `unknown`
+`route_inputs` is derived only from explicit `assembly_topology` and its required
+bindings; asset discovery never changes selection. The exact mapping is:
 
-These are scenario conditions, not numeric features. `unknown` means the curated evidence does not establish the condition; it must not be interpreted as absent.
+| topology | hifi | hic | ultra-long | trio parental |
+|---|---:|---:|---:|---:|
+| `hifi_hic` | true iff resolved, else unknown | true iff resolved, else unknown | false | false |
+| `hifi_ul_hic` | true iff resolved, else unknown | true iff resolved, else unknown | true iff resolved, else unknown | false |
+| `trio_hifi` | true iff resolved, else unknown | false | false | true iff both parental refs exist; otherwise unknown |
+| `ont_r10_4_1_simplex` | false | false | false | false |
+| null/unknown | unknown | unknown | unknown | unknown |
 
-For Trio cases, parental input can be represented more specifically:
+Run-config validation checks method/topology consistency and rejects explicitly
+forbidden bindings. Required bindings are resolved after `resolve_extended_inputs`:
 
-```yaml
-parental_short_reads:
-  state: required
-  relationships: [paternal, maternal]
-  role: parental_kmer_binning
-```
+| topology | required resolved bindings | forbidden explicit bindings |
+|---|---|---|
+| `hifi_hic` | HiFi primary, Hi-C | UL, either parental side |
+| `hifi_ul_hic` | HiFi primary, Hi-C, UL | either parental side |
+| `trio_hifi` | HiFi primary; both parental sides are required for an exact case match | Hi-C, UL |
+| `ont_r10_4_1_simplex` | ONT primary from run config or resolved registered long-read asset | HiFi, Hi-C, UL, either parental side |
 
-The implementation may use a uniform nested record for all auxiliary inputs if that keeps validation clearer, provided the four-state semantics remain explicit.
+An unproved primary-read technology fails query construction. Incomplete auxiliary
+bindings produce `unknown` route-input states and reach retrieval, where the case
+is excluded. They are blocked before command execution.
+In particular, one missing trio side aggregates to unknown rather than causing a
+run-config error. Explicitly conflicting Hi-C/UL/parental bindings fail topology
+construction. This removes overlapping-route ambiguity without inventing inputs.
 
-### 6.3 Assembly goal
+`input_availability` is separate audit context. Presence of an explicit ref or
+registered compatible asset maps to true. Lack of positive evidence maps to
+unknown in production; production does not synthesize false from absence.
+Parental availability aggregates to true iff both sides are true, false if either
+side is explicitly false, otherwise unknown. Availability never implies route
+selection.
 
-```yaml
-assembly_goal:
-  product: haplotype_resolved
-  phasing_strategy: hic
-  target_level: chromosome
-```
+### 7.2 Deterministic route mapping
 
-Controlled values initially include:
+The query adapter derives intent from the selected method and route binding:
 
-- `product`: `primary`, `primary_and_alternate`, `haplotype_resolved`, `partially_phased`
-- `phasing_strategy`: `none`, `hic`, `trio`, `read_based`
-- `target_level`: `contig`, `chromosome`, `near_t2t`, `reference_grade`
+| Method/selected route inputs | Primary read | Product | Phasing |
+|---|---|---|---|
+| `hifiasm` + Hi-C, no trio | `pacbio_hifi` | `haplotype_resolved` | `hic` |
+| `hifiasm` + UL-ONT + Hi-C | `pacbio_hifi` | `near_t2t` | `hic` |
+| `hifiasm_ont` + subtype R10.4.1 simplex | `ont/r10_4_1_simplex` | `partially_phased_near_t2t` | `ont_read_phasing` |
+| `hifiasm` + both parental sides | `pacbio_hifi` | `reference_grade_diploid` | `trio` |
 
-Product and phasing strategy are strong compatibility fields. Target level is a weaker compatibility field unless a case-specific method requires it.
+If the state cannot prove a required subtype or parental relationship, the corresponding case is not an exact-compatible candidate.
 
-### 6.4 Target method
+The adapter uses `assembly_topology` as the authoritative branch and then validates
+the method and refs; it does not select the first matching row. Exact mappings are:
 
-```yaml
-method:
-  id: hifiasm
-```
+- `hifi_hic` -> `hifiasm`, PacBio HiFi, haplotype-resolved, Hi-C;
+- `hifi_ul_hic` -> `hifiasm`, PacBio HiFi, near-T2T, Hi-C;
+- `trio_hifi` -> `hifiasm`, PacBio HiFi, reference-grade diploid, trio;
+- `ont_r10_4_1_simplex` -> `hifiasm_ont`, ONT/R10.4.1 simplex,
+  partially-phased near-T2T, ONT read phasing.
 
-or:
+Any contradiction produces a query-construction error and no EvidenceCase shortlist;
+the adapter never guesses another topology.
 
-```yaml
-method:
-  id: hifiasm_ont
-```
+## 8. Compatibility And Ranking
 
-The validator and selector support both methods under the shared v3 scenario contract.
+Compatibility is evaluated before numeric distance.
 
-## 7. Observed Facts And Numeric Ranking
+### 8.1 Hard compatibility truth table
 
-Observed numeric facts remain optional and evidence-cited:
+A case is compatible only when all conditions hold:
 
-- genome size in Mb;
-- primary-read coverage;
-- primary-read N50 in kb;
-- heterozygosity;
-- ploidy.
+1. query `method_id` exactly equals `applicability.method_id`;
+2. primary technology exactly matches;
+3. if the case declares a subtype, query subtype exactly matches; `unknown` does not match;
+4. every `required_selected_input` is `true` in `selected_inputs`;
+5. every `forbidden_selected_input` is `false`; `unknown` does not satisfy absence;
+6. query product and phasing exactly match the case values.
 
-Rules:
+Availability alone never satisfies a required selected input.
 
-- A present numeric fact must be finite and within the existing biological sanity bounds.
-- A present numeric fact must cite one or more v3 evidence spans.
-- Missing facts are omitted.
-- Auxiliary-read coverage and N50 are not mapped into primary-read numeric fields.
-- Outcomes never participate in input similarity ranking.
-- Input technology, Hi-C, UL-ONT, Trio, phasing mode, tool version, and command flags are categorical scenario facts, not numeric distance features.
+Each rejected case receives stable exclusion codes:
 
-Retrieval classifies numeric support as:
+- `method_mismatch`
+- `primary_read_mismatch`
+- `primary_subtype_unknown_or_mismatch`
+- `required_input_not_selected:<input>`
+- `forbidden_input_selected_or_unknown:<input>`
+- `assembly_product_mismatch`
+- `phasing_strategy_mismatch`
 
-- `numeric_comparable`: enough shared features exist to compute a meaningful distance;
-- `scenario_only`: compatibility is exact but numeric overlap is insufficient;
-- `numeric_distant`: compatible scenario with a large distance, usable only as weak evidence.
+The retriever emits **all** applicable reasons once, in the exact order listed
+above. Input-specific reasons are ordered by the controlled input vocabulary
+`hic`, `ultra_long_ont`, `trio_parental_short_reads`, `hifi`. `optional_inputs`
+is documentary context only and imposes no compatibility condition.
 
-No case is made artificially comparable by inserting zero values.
+### 8.2 Numeric distance
 
-## 8. Intervention Model
+Numeric features remain the existing five weighted features. The algorithm is deterministic:
 
-```yaml
-intervention:
-  tool:
-    id: hifiasm
-    version: 0.16.1-r375
+1. use only features with finite query and case values and positive configured weight;
+2. if no feature is shared, set `numeric_distance: null` and `evidence_coverage: 0`;
+3. otherwise use the existing clipped normalized distance and divide by the sum of shared weights;
+4. missing values are omitted, never converted to zero.
 
-  route:
-    mode: hic_phasing
-    evidence_span_ids: [command.hifi_hic]
+`evidence_coverage` is the sum of shared positive weights divided by the sum of all
+configured positive weights.
 
-  reported_parameters:
-    hom_cov:
-      cli_flag: --hom-cov
-      value: null
-      value_semantics: sample_specific
-      reported: true
-      evidence_span_ids: [command.hifi_ul_hic, parameter.hom_cov]
+No `close/moderate/distant` threshold is introduced in this refactor.
 
-  commands:
-    - command_id: hifi_hic
-      purpose: haplotype_resolved_assembly
-      evidence_span_ids: [command.hifi_hic]
-```
-
-### 8.1 Route configuration
-
-Route configuration records workflow modes and input bindings such as:
-
-- Hi-C R1/R2 inputs;
-- UL-ONT input;
-- paternal and maternal Yak databases;
-- ONT simplex mode;
-- dual-haplotype scaffolding mode.
-
-These facts inform scenario compatibility and prompt context. They are not emitted as L2 parameter recommendations.
-
-### 8.2 Reported parameters
-
-Only behavior-changing parameters that can map to the method catalog are eligible as parameter evidence. Each reported parameter must cite a span.
-
-Examples:
-
-- `--hom-cov`: reported, sample-specific value;
-- `--telo-m CCCTAA`: reported, explicitly species-specific;
-- `--dual-scaf`: reported mode/behavior flag if cataloged as adjustable;
-- `--min-overlap 10000` in Flye: downstream method evidence, not a hifiasm L2 parameter.
-
-Execution mechanics such as `-o` and `-t` remain non-recommendable route/executor fields.
-
-### 8.3 Commands
-
-Full commands remain visible as curated evidence spans and human-readable methods sections. They are not flattened into invented parameter facts. The case extracts only route facts and catalog-mappable reported parameters.
-
-## 9. Rationale Claims
-
-```yaml
-rationale_claims:
-  - claim_id: combine_hifi_hic
-    statement: >
-      HiFi provides a high-accuracy assembly graph and Hi-C provides
-      chromosome-scale haplotype linkage without parental sequencing.
-    explicitness: explicit
-    effect_area: phasing
-    applies_to:
-      route_fields: [auxiliary_inputs.hic]
-      parameters: []
-    evidence_span_ids: [rationale.hifi_hic]
-```
-
-Rules:
-
-- `explicit` means the curated source summary attributes the rationale to the paper.
-- `inferred` means the curator derived the rationale from the method context.
-- Explicit claims require cited spans.
-- Inferred claims remain visibly labeled and may omit spans.
-- Claims may associate with route fields, parameters, or both.
-- A reported command with no reported rationale must not receive an invented generic rationale.
-
-## 10. Retrieval Pipeline
-
-The initial retrieval pipeline becomes:
+Compatible candidates sort by:
 
 ```text
-raw v3 paper cases
-  -> Task 2 schema/provenance validation and attestation
-  -> scenario compatibility filtering
-  -> optional numeric ranking within compatible scenarios
-  -> source diversity and top-k selection
-  -> Task 3 ranked-case attestation
-  -> Task 4 prompt budgeting and citation contract
+(
+  numeric_distance_is_null,       # false first
+  numeric_distance_or_infinity,   # ascending
+  -evidence_coverage,      # descending
+  case_id                         # ascending, deterministic
+)
 ```
 
-### 10.1 Compatibility order
+With the initial one-case-per-scenario corpus, numeric distance is primarily audit metadata and a future tie-breaker.
 
-1. exact target method (`hifiasm` or `hifiasm_ont`);
-2. primary read technology and subtype;
-3. required/absent auxiliary input compatibility;
-4. phasing strategy;
-5. assembly product;
-6. target level preference;
-7. optional numeric ranking.
+### 8.3 Backend and attestation
 
-A topology mismatch is never repaired by numeric similarity.
+Rename the backend and strategy key from `hifiasm_numeric` to `hifiasm_scenario`.
 
-### 10.2 Query construction
+The `strategies.yaml` block is closed and retains the existing numeric settings:
 
-The retrieval query uses existing prompt-profile facts:
+```yaml
+hifiasm_scenario:
+  initial_cutover_enabled: true
+  weak_coverage_threshold: 0.6
+  distance_clip: 4.0
+  epsilon: 0.000001
+  scales: {genome_size_mb: ..., coverage: ..., read_n50_kb: ..., heterozygosity: ..., ploidy: ...}
+  weights: {genome_size_mb: ..., coverage: ..., read_n50_kb: ..., heterozygosity: ..., ploidy: ...}
+```
 
-- `assets.read_type`;
-- `assets.has_hifi`;
-- `assets.has_ont`;
-- `assets.has_ultra_long`;
-- `assets.has_hic`;
-- `assets.has_trio`;
-- sample ploidy;
-- target level;
-- genome/read numeric facts.
+No legacy `hifiasm_numeric` alias is accepted after the refactor.
 
-It must not read the currently absent `sample.assembly_goal` path and silently default every query to `primary`. Product/phasing intent should be derived from route/method selection and available input topology, or represented as unknown when not determinable.
+`case_selector.py` dispatches both short tool names:
 
-### 10.3 Ranking
+```python
+{"hifiasm", "hifiasm_ont"}
+```
 
-Within the compatible scenario set:
+to the same initial EvidenceCase v3 path. Task 3 attestation accepts only `retrieval_backend == "hifiasm_scenario"` for this path and binds the exact query `method_id`. `hifiasm_ont` must never silently fall back to `structured_default` while scenario cutover is enabled.
 
-1. exact scenario tier;
-2. meaningful numeric-overlap eligibility;
-3. numeric distance ascending;
-4. evidence coverage descending;
-5. clade as a weak tie-break;
-6. stable case ID ordering.
+Short-name normalization is used only for dispatch. The canonical query and case
+store exact values `hifiasm` or `hifiasm_ont`; Task 3 requires equality between the
+requested method, query method, and every selected case method. Task 4 additionally
+binds prompt method, attested query method, backend, ordered candidate IDs, ordered
+selected IDs, and projected selected cases. Independent mutation of any one of
+those fields must fail for both methods.
 
-This replaces the current coverage-first behavior that can reward a distant but fully reported case over a close but partially reported case.
+Retry tasks remain unchanged and inherit attempt-0 evidence as before.
 
-### 10.4 Paper diversity
+## 9. Prompt Evidence Rules
 
-`paper_id` is included in retrieval metadata. By default, only one case per paper is selected unless another scenario from the same paper has a distinct, directly relevant intervention. This prevents one paper with several branches from being counted as several independent studies.
+Task 4 preserves complete-span budgeting and citation checks.
 
-## 11. Four Initial Approved Cases
+Priority order is:
 
-### 11.1 `s41587-022-01261-x`
+1. applicability and required-input evidence;
+2. reported command and L2 parameter evidence;
+3. limitations and transfer constraints required by visible commands/parameters;
+4. explicit rationale;
+5. observed numeric facts and outcomes;
+6. other referenced evidence.
 
-- Method: `hifiasm`
-- Version: `0.16.1-r375`
-- Primary reads: PacBio HiFi
-- Required auxiliary input: Hi-C
-- Parental reads: absent
-- Goal: haplotype-resolved assembly using Hi-C phasing
-- Commands:
-  - HiFi + Hi-C phased assembly
-  - HiFi-only partially phased fallback
-- Key rationale: accurate HiFi graph plus chromosome-scale Hi-C haplotype linkage
+A parameter or command cannot remain visible if a required limitation span was dropped. For `telomere_motif`, the limitation is inseparable from the value.
 
-### 11.2 `s41592-024-02269-8`
+The prompt never includes:
 
-- Method: `hifiasm`
-- Version: `0.19.5-r587`
-- Primary reads: PacBio HiFi
-- Required auxiliary input: ultra-long ONT
-- Hi-C: optional for the described scalable near-T2T route
-- Goal: diploid or polyploid near-T2T assembly
-- Commands:
-  - UL read filtering at 100 kb for HPRC Year 2
-  - UL read filtering at 50 kb for HPRC Year 1 and plant samples
-  - HiFi + UL-ONT + Hi-C hifiasm command
-- Key parameter: `--hom-cov` is sample-specific and derived from the homozygous coverage peak
-- Key rationale: UL-ONT bridges repeats while HiFi provides accuracy; filtering avoids assembly errors and reduces runtime
+- `methods_path`;
+- full `methods.md`;
+- raw `evidence_spans`;
+- curation metadata;
+- source SHA256, because it no longer exists.
 
-### 11.3 `s41586-026-10105-6`
+## 10. Four Approved Cases
 
-- Method: `hifiasm_ont`
-- Version: `0.25.0-r726`
-- Primary reads: ONT R10.4.1 standard simplex
-- Dedicated UL preparation: absent
-- Goal: partially phased near-T2T assembly
-- Command flags:
-  - `--ont`
-  - `--dual-scaf`
-  - `--telo-m CCCTAA`
-- Key rationale: read phasing separates stable heterozygous variants from recurrent sequencing errors
-- Transfer restriction: the human telomere motif must not be copied to another species without species-specific evidence
+### 10.1 `s41587-022-01261-x`
 
-### 11.4 `s41586-022-05325-5`
+- method: `hifiasm`
+- primary: PacBio HiFi
+- required selected input: Hi-C
+- forbidden: Trio parental reads, UL-ONT
+- product/phasing: haplotype-resolved / Hi-C
+- version: `0.16.1-r375`
+- commands: HiFi+Hi-C reported command and HiFi-only partial-phasing command
+- rationale: accurate HiFi graph plus chromosome-scale Hi-C phase links
 
-- Method: `hifiasm`
-- Final cited trio version: `0.14.1`; explicitly reported test command used v0.3
-- Primary reads: PacBio HiFi
-- Required auxiliary inputs: paternal and maternal short reads for Yak k-mers
-- Hi-C/Omni-C: available in the reference-grade workflow
-- UL-ONT: downstream haplotype-binned gap filling, not a hifiasm primary input in the cited Trio command
-- Goal: trio-phased, reference-grade diploid assembly
-- Commands:
-  - paternal Yak count
-  - maternal Yak count
-  - Trio hifiasm command
-  - haplotype-binned Flye command
-- Key rationale: graph-based trio phasing outperformed non-graph phasing; ONT-UL fills GA-rich and other complex gaps
-- Provenance warning: the final hifiasm v0.14.1 production command is not fully reported and must not be reconstructed as though explicit
+### 10.2 `s41592-024-02269-8`
 
-## 12. Removed V2 Design
+- method: `hifiasm`
+- primary: PacBio HiFi
+- required selected input: UL-ONT
+- Hi-C is required because the initial stored hifiasm command uses Hi-C
+- product: near-T2T
+- version: `0.19.5-r587`
+- commands: 100 kb and 50 kb `seqkit` filters plus HiFi+UL+Hi-C hifiasm command
+- rationale: HiFi accuracy plus UL-ONT repeat-spanning length; filtering avoids assembly errors and reduces runtime
+- `hom_cov` is `readonly_context`, not a recommendable parameter
 
-The following are deleted from the EvidenceCase source contract and their tests/fixtures/docs:
+Because the stored command uses Hi-C, this first case declares Hi-C required. A future HiFi+UL/no-Hi-C branch should be a separate case rather than weakening compatibility.
 
-- `body.md`;
+### 10.3 `s41586-026-10105-6`
+
+- method: `hifiasm_ont`
+- primary: ONT R10.4.1 standard simplex
+- forbidden selected inputs: HiFi, dedicated UL-ONT, trio parental reads
+- product/phasing: partially phased near-T2T / ONT read phasing
+- version: `0.25.0-r726`
+- reported L2 parameters: `dual_scaffold=true`, `telomere_motif=CCCTAA`
+- route context: `--ont`
+- transfer constraint: telomere motif only for taxon 9606
+- rationale: read phasing separates phase-consistent heterozygous variants from recurrent errors
+
+### 10.4 `s41586-022-05325-5`
+
+- method: `hifiasm`
+- primary: PacBio HiFi
+- required selected input: both paternal and maternal short-read sides
+- product/phasing: reference-grade diploid / trio
+- commands: paternal/maternal `yak count`, reported hifiasm v0.3 test command, Flye v2.8.3-b1695 command
+- Flye context retains `--min-overlap 10000`
+- limitation: final hifiasm v0.14.1 trio command was not fully reported and must not be reconstructed
+- ONT-UL/Flye/Medaka/Merfin steps are documented as downstream gap-filling context, not hifiasm L2 parameter evidence
+
+## 11. Deleted V2 Design
+
+Delete production code, tests, fixtures, and documentation whose sole purpose is:
+
 - `source_documents.body`;
-- source-document `sha256` fields;
-- SHA256 format and checksum comparison;
-- raw span `document` discriminator;
-- exact quote/file substring validation;
-- quote unique-offset validation;
-- overlapping quote ambiguity detection;
-- quote start/end metadata;
-- complete-document quote rejection;
-- merged interval calculations;
-- 90% document coverage checks;
-- per-document excerpt coverage budgets;
-- methods-document type checks that become tautological in a methods-only contract.
+- `source_documents.methods.sha256`;
+- any EvidenceCase source SHA256;
+- exact quote/file matching;
+- unique quote occurrence;
+- `_start`/`_end` offsets;
+- complete-document or 90% coverage analysis;
+- per-document body/method provenance distinction;
+- v2 schema acceptance or migration.
 
-The old v2 production shard/layout and obsolete fixture body files are deleted. Old design documents are marked superseded rather than silently rewritten as historical records.
+Do not leave deprecated aliases, dual validators, feature flags, or conversion adapters.
 
-## 13. Preserved Safety And Runtime Invariants
+Keep:
 
-The refactor must retain:
+- pack path confinement;
+- UTF-8/nonblank methods validation;
+- closed YAML schema;
+- span count and character budgets;
+- provenance references;
+- approved/draft/rejected eligibility;
+- Task 2/3/4 semantic attestation;
+- prompt serialization budgets;
+- all runtime artifact/replay/hash checks.
 
-- confined relative paths and symlink escape rejection;
-- closed persistent and runtime schemas;
-- approved/draft/rejected eligibility semantics;
-- required curator for approved cases;
-- unique span IDs;
-- valid evidence-span references;
-- evidence requirements for numeric facts, reported parameters, and explicit rationales;
-- per-field, per-span, per-case, and Task 4 prompt budgets;
-- projection of referenced spans only;
-- omission audit when prompt budgets drop evidence;
-- Task 2 validation-owned semantic attestation;
-- Task 3 ranked-selection attestation;
-- Task 4 canonical prompt attestation;
-- catalog parameter allowlists and L0/L1/L2 boundaries;
-- response case/span citation validation;
-- runtime artifact, prompt, decision, command, replay, ledger, and evaluation hashes.
+## 12. Error Handling
 
-## 14. Error Handling
+Approved v3 cases fail closed for:
 
-Validation errors remain deterministic configuration errors and identify:
-
-- case ID;
-- field path;
-- manifest or shard path;
-- missing/escaping methods path;
-- duplicate or unknown span ID;
+- unknown/missing schema fields;
 - invalid controlled vocabulary;
-- incompatible target method/read topology;
-- missing approved curator;
-- missing required evidence citations;
-- prompt budget violation.
+- duplicate case or span IDs;
+- missing/unsafe/empty/non-UTF-8/oversized `methods.md`;
+- unknown evidence span references;
+- non-L2 entries in `intervention.parameters`;
+- unknown catalog parameter IDs;
+- invalid command/limitation references;
+- missing evidence for applicability, reported parameters, reported commands, explicit rationale, limitations, or present facts;
+- overlapping required/forbidden/optional input lists.
 
-An invalid approved case is never silently skipped.
+Draft/rejected cases remain non-retrieval-eligible, but must still satisfy the closed structural schema when present.
 
-## 15. Testing Strategy
+## 13. Acceptance Matrix
 
-### 15.1 Source contract
+| Query | Must select | Must exclude |
+|---|---|---|
+| `hifiasm`, HiFi + selected Hi-C, no UL/trio | `s41587-022-01261-x` | ONT, Trio, UL-required |
+| `hifiasm`, HiFi + selected UL + selected Hi-C | `s41592-024-02269-8` | Hi-C-only, Trio, ONT |
+| `hifiasm_ont`, ONT R10.4.1 simplex, no HiFi/UL/trio | `s41586-026-10105-6` | all HiFi cases |
+| `hifiasm`, HiFi + both selected parental sides | `s41586-022-05325-5` | non-Trio exact tier |
 
-Test that:
+The four positive fixtures set every selected-input key explicitly:
 
-- approved methods-only case succeeds;
-- body, source SHA256, and raw span document fields are rejected as obsolete;
-- missing, absolute, traversal, non-file, and symlink-escaping methods paths fail;
-- YAML span text need not occur in methods.md;
-- duplicate/empty/oversized spans fail;
-- total span budget remains enforced;
-- only referenced spans are projected;
-- runtime projection synthesizes `document: methods` and `quote`.
+| Fixture | topology | method | subtype | selected `(hic, ul, trio, hifi)` |
+|---|---|---|---|---|
+| HiFi+Hi-C | `hifi_hic` | `hifiasm` | unknown | `(true, false, false, true)` |
+| HiFi+UL+Hi-C | `hifi_ul_hic` | `hifiasm` | unknown | `(true, true, false, true)` |
+| ONT simplex | `ont_r10_4_1_simplex` | `hifiasm_ont` | `r10_4_1_simplex` | `(false, false, false, false)` |
+| Trio | `trio_hifi` | `hifiasm` | unknown | `(false, false, true, true)` |
 
-### 15.2 Provenance and attestation
+Every fixture also supplies all availability keys; values may be true, false, or
+unknown because availability is asserted not to affect compatibility. Separate
+negative fixtures cover each selected state as false and unknown.
 
-Test that:
+Tests must also prove:
 
-- numeric facts require spans;
-- reported parameters require spans;
-- explicit rationale requires spans;
-- inferred rationale remains labeled;
-- ordinary dictionaries cannot bypass Task 2;
-- mutation invalidates attestation;
-- draft/rejected cannot self-promote;
-- Task 3 and Task 4 accept only their appropriate attested inputs.
+1. every exclusion has the expected stable reason;
+2. selected order and `hifiasm_scenario` backend are deterministic;
+3. `hifiasm_ont` does not fall back to `structured_default`;
+4. unknown subtype does not match the ONT case;
+5. one missing parental side does not match the trio case;
+6. available-but-not-selected auxiliary data does not satisfy a required route input;
+7. missing numeric features remain missing; no zero filling;
+8. no shared numeric feature yields `numeric_distance: null`;
+9. full Markdown path/content is absent from the prompt;
+10. telomere motif evidence is excluded for non-human or unknown taxon and its limitation is retained;
+11. the trio final-command limitation remains attached to the incomplete command;
+12. `hom_cov` cannot appear in L2 recommendation output;
+13. Task 2/3/4 mutation and forgery rejection remains green;
+14. existing artifact and replay SHA/hash tests remain green;
+15. mixed manifests still load the four v3 shards and legacy non-hifiasm shards.
+16. UL without selected Hi-C is excluded from the initial UL case;
+17. unknown required and unknown forbidden inputs produce their stable reasons;
+18. Trio with conflicting Hi-C/UL refs fails topology construction before retrieval;
+19. unproved primary technology fails query construction;
+20. available-but-unselected Hi-C, UL, or parental sides never satisfy a requirement.
 
-### 15.3 Scenario compatibility
+## 14. Implementation Scope And Dirty-Worktree Safety
 
-Add focused cases for:
+Before implementation, record:
 
-- HiFi + Hi-C;
-- HiFi + UL-ONT;
-- ONT simplex;
-- Trio HiFi + parental reads.
+```bash
+mkdir -p /tmp/hifiasm-v3-baseline
+git status --short --untracked-files=all > /tmp/hifiasm-v3-baseline/status.txt
+git diff --binary > /tmp/hifiasm-v3-baseline/tracked.patch
+git ls-files --others --exclude-standard > /tmp/hifiasm-v3-baseline/untracked.txt
+git ls-files --others --exclude-standard -z | tar --null -T - -cf /tmp/hifiasm-v3-baseline/untracked.tar
+```
 
-Verify topology mismatches are excluded before numeric ranking. Verify `hifiasm_ont` uses the v3 path rather than legacy evidence selection.
+The current deletion of `cases/hifiasm/retry.yaml` predates this refactor. Do not restore it and do not claim it as this refactor's change.
 
-### 15.4 Numeric ranking
+### 14.1 Production modification allowlist
 
-Verify:
+- `app/knowledge/evidence_cases.py`
+- `app/knowledge/packs.py` only if required for exact v3 shard validation; no manifest-version change
+- `app/domains/assembly/evidence_case.py`
+- `app/domains/assembly/retrieval_query.py`
+- `app/domains/assembly/numeric_case_retriever.py`
+- `app/domains/assembly/case_selector.py`
+- `app/domains/assembly/methods_evidence.py`
+- `app/domains/assembly/hifiasm_evaluation.py`
+- `app/stages/assembly/parameter_profile.py`
+- `app/stages/assembly/prompt_payload.py`
+- `app/stages/assembly/parameter_validation.py` only if required to retain limitations/transfer filtering
+- `app/schemas/run_config.py`
+- `app/schemas/artifacts.py`
+- `app/stages/assembly/nodes.py` only for narrow topology propagation and
+  `hifiasm_numeric` -> `hifiasm_scenario` backend/gate/strategy migration hunks
+- `app/entrypoints/run.py` only for narrow propagation of the five new topology/ref fields
+- `descriptors/knowledge_packs/assembly/parameter_recommender/cases.yaml`
+- `descriptors/knowledge_packs/assembly/parameter_recommender/strategies.yaml`
+- the four new paper directories
 
-- distance precedes evidence completeness after compatibility;
-- insufficient overlap produces `scenario_only` rather than fabricated distance;
-- missing numeric facts are not treated as zero;
-- top-k ordering is deterministic;
-- paper-level diversity is deterministic.
+### 14.2 Deletion allowlist
 
-### 15.5 Prompt and parameter evidence
+- `descriptors/knowledge_packs/assembly/parameter_recommender/cases/hifiasm/initial.yaml`
+- `docs/superpowers/specs/2026-07-10-hifiasm-evidence-case-contract-design.md`
+- `tests/fixtures/phase11/hifiasm_evaluation/knowledge_root/assembly/parameter_recommender/sources/eval_initial_large/body.md`
+- `tests/fixtures/phase11/hifiasm_evaluation/knowledge_root/assembly/parameter_recommender/sources/eval_initial_medium/body.md`
+- `tests/fixtures/phase11/hifiasm_evaluation/knowledge_root/assembly/parameter_recommender/sources/eval_initial_small/body.md`
 
-Retain and run existing tests for:
+No test source file is deleted. V2-only test cases and helpers are edited or replaced
+inside the exact test-file allowlist below.
 
-- span and serialized-byte budgets;
-- whole-span omission without truncation;
-- omission audit;
-- visible case/span citations;
-- unrelated span rejection;
-- same-effect-area evidence rules;
-- full methods file/path not entering the prompt;
-- L0/L1 parameters remaining non-recommendable.
+### 14.3 Test/document allowlist
 
-### 15.6 Regression
+- `tests/test_hifiasm_evidence_case.py`
+- `tests/test_hifiasm_numeric_retrieval.py`
+- `tests/test_hifiasm_methods_evidence.py`
+- `tests/test_assembly_case_selector.py`
+- `tests/test_phase11_prompt_payload_builder.py`
+- `tests/test_parameter_evidence_validation.py`
+- `tests/test_phase10_parameter_catalog.py`
+- `tests/test_hifiasm_offline_evaluation.py` and its fixtures if needed
+- `docs/phases/phase11/overview.md`
+- `docs/phases/phase11/task_02_hifiasm_evidence_case_contract.md`
+- `docs/phases/phase11/task_03_hifiasm_numeric_case_retrieval.md`
+- `docs/phases/phase11/task_04_hifiasm_methods_aware_recommendation.md`
+- `docs/phases/phase11/task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md`
+- `docs/user_guide/hifiasm_offline_evaluation.md`
 
-Run focused Phase 11 suites plus assembly regressions covering:
+Use narrow edits in already-dirty files. Do not restore, reset, or rewrite unrelated Phase 11 work. Compare final diffs against the recorded baseline so only newly introduced hunks are attributed to this refactor.
 
-- case selection;
-- prompt payload building;
-- Methods-aware response normalization;
-- parameter evidence validation;
-- offline evaluation reproducibility;
-- parameter approval and retry boundaries;
-- artifact hashes and replay binding.
+At completion, generate a second status/patch/untracked snapshot and compare it to
+`/tmp/hifiasm-v3-baseline`. New paths and new hunks must be confined to the exact
+allowlists in this section. Every pre-existing untracked file is compared against
+the baseline tar archive, not treated as newly created by this refactor.
 
-## 16. Implementation Boundaries And Dirty Worktree Safety
-
-The worktree already contains unrelated uncommitted Phase 11 work. Implementation must:
-
-- edit narrow hunks rather than replace files wholesale;
-- not restore, reset, or overwrite user changes;
-- preserve current runtime `source_excerpts` shape;
-- avoid unnecessary edits to `methods_evidence.py` and retry/lifecycle modules;
-- migrate shared test helpers before editing individual assertions;
-- delete only EvidenceCase source SHA logic, never global artifact SHA logic;
-- inspect diffs after every implementation slice.
-
-## 17. Acceptance Criteria
+## 15. Completion Criteria
 
 The refactor is complete when:
 
-1. no production EvidenceCase code requires body documents, source SHA256, exact quote matching, quote offsets, or document coverage;
-2. the persistent v3 contract uses one methods path and structured YAML spans;
-3. all four paper cases are approved, valid, and loadable;
-4. each paper has a human-readable `methods.md` containing the supplied scenario, rationale, commands, caveats, and version information;
-5. `hifiasm` and `hifiasm_ont` both use v3 scenario-aware initial evidence retrieval;
-6. scenario topology is evaluated before numeric similarity;
-7. missing numeric facts remain missing and can yield `scenario_only` evidence;
-8. runtime attestation, prompt budgets, citation validation, catalog safety, and artifact hashes remain intact;
-9. obsolete v2 source fixtures and code are removed rather than hidden behind compatibility branches;
-10. focused and regression tests pass without reverting unrelated worktree changes.
+- the four approved `case.yaml` + `methods.md` pairs load from the production pack;
+- the old empty hifiasm shard and all v2 source-verification code are gone;
+- all four topology queries select the intended paper and exclude incompatible papers;
+- limitations and transfer constraints survive evidence budgeting;
+- only L2 catalog parameters can be recommended;
+- the attested Task 2/3/4 path and artifact/replay hashes remain intact;
+- targeted tests and the affected assembly regression suite pass;
+- repository structure and docs describe only the v3 design, with no obsolete SHA/body/offset contract remaining.
