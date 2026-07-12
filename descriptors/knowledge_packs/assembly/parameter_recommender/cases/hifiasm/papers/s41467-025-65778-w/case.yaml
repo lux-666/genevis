@@ -1,0 +1,64 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41467-025-65778-w
+    case_type: initial
+    source:
+      kind: paper
+      title: "Insights into natural neocentromere evolution from a cattle T2T X chromosome"
+      doi: 10.1038/s41467-025-65778-w
+      year: 2025
+    methods_path: cases/hifiasm/papers/s41467-025-65778-w/methods.md
+    evidence_spans:
+      - span_id: scenario.cattle_candidates
+        quote: "The diploid cattle study generated ten candidate assemblies from HiFi, ONT, ultra-long ONT, parental, and Hi-C data while comparing Verkko, hifiasm, and HERRO-corrected reads."
+      - span_id: observed.coverage
+        quote: "The selected candidate used approximately 58.1-fold HiFi, 57-fold HERRO-corrected ONT, and 121-fold total ONT coverage, including 18.3-fold reads longer than 100 kb."
+      - span_id: result.verkko_c0
+        quote: "For the selected Verkko workflow, 57-fold HERRO-corrected ONT with -C0 produced the most T2T chromosomes; -C0 improved telomere length and T2T count relative to -C2 with a modest accuracy tradeoff."
+      - span_id: caveat.cross_tool
+        quote: "The published -C0 switch and --hifi or --nano inputs belong to Verkko, while minimap2 polishing is downstream; none is hifiasm L2 parameter evidence."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      target_methods: [hifiasm]
+      assembly_goal: compare candidate workflows for a diploid cattle T2T assembly
+    observed_facts:
+      organism:
+        value: Bos taurus
+        evidence_span_ids: [scenario.cattle_candidates]
+      clade:
+        value: vertebrate_mammalian
+        evidence_span_ids: [scenario.cattle_candidates]
+      coverage:
+        value: 58.1
+        unit: x HiFi
+        evidence_span_ids: [observed.coverage]
+      ploidy:
+        value: 2
+        evidence_span_ids: [scenario.cattle_candidates]
+    intervention:
+      tool: hifiasm
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: cattle.candidate_comparison
+        statement: "Multiple assemblers, ONT correction states, coverage levels, and Verkko modes were compared before selecting the most contiguous T2T candidate."
+        explicitness: explicit
+        effect_area: assembly_scope
+        evidence_span_ids: [scenario.cattle_candidates, result.verkko_c0]
+      - claim_id: cattle.coverage_balance
+        statement: "The selected workflow balanced 58.1-fold HiFi with 57-fold corrected ONT and broader raw ONT support; increasing corrected ONT beyond HiFi coverage was reported to fragment the assembly."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [observed.coverage, result.verkko_c0]
+      - claim_id: cattle.verkko_not_hifiasm
+        statement: "Verkko -C0 and downstream polishing settings are retained as comparison context and cannot be transferred to hifiasm parameters."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [caveat.cross_tool]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "This case contributes numeric and workflow-comparison evidence only; the selected Verkko settings are deliberately not projected as hifiasm L2 parameters."

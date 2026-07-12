@@ -323,6 +323,37 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         _validate_retry_evidence(retry_evidence)
 
 
+def _validate_authoritative_l2_projection(
+    prompt_payload: dict[str, Any],
+    *,
+    authoritative_l2_projection: dict[str, Any],
+) -> None:
+    """Bind both prompt catalog projections to the caller-owned current catalog."""
+
+    if not isinstance(authoritative_l2_projection, dict) or any(
+        not isinstance(parameter, str)
+        or not parameter
+        or not isinstance(spec, dict)
+        for parameter, spec in authoritative_l2_projection.items()
+    ):
+        raise ValueError("authoritative L2 projection must contain canonical parameter specs")
+    adjustable = prompt_payload.get("adjustable_params")
+    catalog_subset = prompt_payload.get("catalog_subset")
+    subset_adjustable = (
+        catalog_subset.get("adjustable_params")
+        if isinstance(catalog_subset, dict)
+        else None
+    )
+    if not isinstance(adjustable, dict) or not isinstance(subset_adjustable, dict):
+        raise ValueError("hifiasm prompt requires both adjustable parameter projections")
+    if adjustable != authoritative_l2_projection:
+        raise ValueError("top-level adjustable_params differ from authoritative L2 catalog projection")
+    if subset_adjustable != authoritative_l2_projection:
+        raise ValueError(
+            "catalog_subset.adjustable_params differ from authoritative L2 catalog projection"
+        )
+
+
 def _validate_retry_evidence(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != {
         "task", "signal_ids", "signal_paths", "signals"
@@ -655,6 +686,7 @@ def _build_prompt_sanitizer():
     """Create the public sanitizer while hiding its attestation minting boundary."""
 
     registry: dict[int, tuple[weakref.ReferenceType[Any], str, bool]] = {}
+    replay_registry: dict[int, tuple[weakref.ReferenceType[Any], str]] = {}
 
     class CanonicalPrompt(dict[str, Any]):
         __slots__ = ("__weakref__",)
@@ -667,6 +699,12 @@ def _build_prompt_sanitizer():
 
         def __deepcopy__(self, memo: dict[int, Any]) -> "CanonicalPrompt":
             return _copy_registered(self, memo=memo)
+
+    class PersistedInitialPrompt(dict[str, Any]):
+        __slots__ = ("__weakref__",)
+
+        def __new__(cls, *args: Any, **kwargs: Any) -> "PersistedInitialPrompt":
+            raise TypeError("persisted prompts can only be attested by the artifact loader")
 
     def _semantic_proof(prompt: dict[str, Any]) -> str:
         return hashlib.sha256(
@@ -741,6 +779,32 @@ def _build_prompt_sanitizer():
         if require_final and not finalized:
             raise ValueError("canonical hifiasm prompt lacks final-envelope attestation")
 
+    def _attest_loaded_initial(prompt_payload: dict[str, Any]) -> PersistedInitialPrompt:
+        """Mint a process-local replay envelope after the loader verifies the artifact."""
+
+        _validate_canonical_hifiasm_methods_prompt_payload(prompt_payload)
+        prompt = dict.__new__(PersistedInitialPrompt)
+        dict.__init__(prompt, prompt_payload)
+        prompt_id = id(prompt)
+
+        def _discard(reference: weakref.ReferenceType[Any]) -> None:
+            entry = replay_registry.get(prompt_id)
+            if entry is not None and entry[0] is reference:
+                replay_registry.pop(prompt_id, None)
+
+        replay_registry[prompt_id] = (
+            weakref.ref(prompt, _discard),
+            _semantic_proof(prompt),
+        )
+        return prompt
+
+    def _require_loaded_initial(prompt_payload: dict[str, Any]) -> None:
+        entry = replay_registry.get(id(prompt_payload))
+        if entry is None or entry[0]() is not prompt_payload:
+            raise ValueError("retry replay requires a loader-attested attempt 0 prompt")
+        if _semantic_proof(prompt_payload) != entry[1]:
+            raise ValueError("loader-attested attempt 0 prompt was mutated")
+
     def _require_attested(prompt_payload: dict[str, Any]) -> dict[str, Any]:
         """Require Task 4's validation-owned proof without copying the prompt."""
 
@@ -777,7 +841,84 @@ def _build_prompt_sanitizer():
         _validate_canonical_hifiasm_methods_prompt_payload(prompt_payload)
         return prompt_payload
 
-    def _sanitize(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    def _rehydrate_retry(
+        persisted_initial_prompt: dict[str, Any],
+        retry_overlay: dict[str, Any],
+        *,
+        authoritative_l2_projection: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Re-attest a verified JSON attempt-0 prompt for one same-run retry."""
+
+        _require_loaded_initial(persisted_initial_prompt)
+        if persisted_initial_prompt.get("task") != "recommend_initial":
+            raise ValueError("retry replay requires the canonical attempt 0 prompt")
+        _validate_canonical_hifiasm_methods_prompt_payload(persisted_initial_prompt)
+        _validate_authoritative_l2_projection(
+            persisted_initial_prompt,
+            authoritative_l2_projection=authoritative_l2_projection,
+        )
+        if retry_overlay.get("task") not in {
+            "retry_after_execution_failure",
+            "retry_after_review_failure",
+        }:
+            raise ValueError("retry replay has an unsupported task")
+        _validate_authoritative_l2_projection(
+            retry_overlay,
+            authoritative_l2_projection=authoritative_l2_projection,
+        )
+        inherited_fields = {
+            "rules",
+            "recommendation_policy",
+            "skill_instructions",
+            "evidence_payload_ref",
+            "evidence_payload_hash",
+            "case_selection",
+            "case_retrieval",
+            "evidence_cases",
+            "methods_evidence",
+        }
+        selection_identity_fields = {
+            "evidence_payload_ref",
+            "evidence_payload_hash",
+            "case_selection",
+            "case_retrieval",
+            "evidence_cases",
+            "methods_evidence",
+        }
+        for field in selection_identity_fields:
+            if retry_overlay.get(field) != persisted_initial_prompt.get(field):
+                raise ValueError(
+                    f"retry replay {field} differs from the canonical attempt 0 projection"
+                )
+        canonical = {
+            field: deepcopy(value)
+            for field, value in persisted_initial_prompt.items()
+            if field not in _PROMPT_SELF_FIELDS
+        }
+        for field in _PROMPT_COPY_FIELDS:
+            if field in inherited_fields:
+                continue
+            if field in retry_overlay:
+                canonical[field] = deepcopy(retry_overlay[field])
+        canonical["selected_cases"] = []
+        canonical["retry_evidence"] = deepcopy(retry_overlay.get("retry_evidence"))
+        attested = _new_registered(canonical)
+        _validate_canonical_hifiasm_methods_prompt_payload(attested)
+        _validate_authoritative_l2_projection(
+            attested,
+            authoritative_l2_projection=authoritative_l2_projection,
+        )
+        return attested
+
+    def _sanitize(
+        prompt_payload: dict[str, Any],
+        *,
+        authoritative_l2_projection: dict[str, Any],
+    ) -> dict[str, Any]:
+        _validate_authoritative_l2_projection(
+            prompt_payload,
+            authoritative_l2_projection=authoritative_l2_projection,
+        )
         if _PROMPT_SCHEMA_VERSION_FIELD in prompt_payload:
             _require_attested(prompt_payload)
             return deepcopy(prompt_payload)
@@ -787,7 +928,7 @@ def _build_prompt_sanitizer():
         evidence_payload = build_hifiasm_evidence_payload(
             evidence_cases=prompt_payload.get("evidence_cases") or [],
             case_retrieval=raw_retrieval,
-            allowed_parameter_ids=set((prompt_payload.get("adjustable_params") or {}).keys()),
+            allowed_parameter_ids=set(authoritative_l2_projection),
         )
         case_retrieval = _project_case_retrieval(
             raw_retrieval,
@@ -822,6 +963,10 @@ def _build_prompt_sanitizer():
             )
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
+        _validate_authoritative_l2_projection(
+            attested,
+            authoritative_l2_projection=authoritative_l2_projection,
+        )
         return attested
 
     _sanitize.__doc__ = (
@@ -829,11 +974,20 @@ def _build_prompt_sanitizer():
     )
     _sanitize.__name__ = "sanitize_hifiasm_methods_prompt_payload"
     _sanitize.__qualname__ = "sanitize_hifiasm_methods_prompt_payload"
-    return _sanitize, _require_attested, _seal_final, _require_final_attested
+    return (
+        _sanitize,
+        _attest_loaded_initial,
+        _rehydrate_retry,
+        _require_attested,
+        _seal_final,
+        _require_final_attested,
+    )
 
 
 (
     sanitize_hifiasm_methods_prompt_payload,
+    _attest_loaded_hifiasm_initial_prompt_snapshot,
+    rehydrate_hifiasm_methods_retry_prompt_payload,
     _require_attested_hifiasm_methods_prompt_payload,
     _seal_attested_hifiasm_methods_prompt_payload,
     _require_final_attested_hifiasm_methods_prompt_payload,
@@ -1253,11 +1407,10 @@ def _visible_span_ids(case: dict[str, Any]) -> set[str]:
 def allowed_parameter_evidence_span_ids(case: dict[str, Any], parameter: str) -> set[str]:
     """Return case-local spans curated to support one parameter or its effect area.
 
-    Direct parameter spans establish the parameter anchor.  Rationale effect areas
-    become associated only when at least one claim in that area shares a direct
-    parameter span; all curated rationale spans in those associated areas are then
-    valid support.  This stays fail-closed when a case does not encode a defensible
-    parameter-to-effect relationship.
+    Direct parameter spans establish the parameter anchor.  A rationale claim may
+    add only its own spans, and only when that same claim intersects the direct
+    anchor.  Merely sharing an effect area with another claim is not evidence of a
+    parameter-to-claim relationship.
     """
 
     parameters = ((case.get("intervention") or {}).get("parameters") or {})
@@ -1272,20 +1425,15 @@ def allowed_parameter_evidence_span_ids(case: dict[str, Any], parameter: str) ->
     if not direct_spans:
         return set()
     claims = [claim for claim in case.get("rationale_claims") or [] if isinstance(claim, dict)]
-    associated_effect_areas = {
-        str(claim.get("effect_area"))
-        for claim in claims
-        if direct_spans
-        & {
-            str(span_id)
-            for span_id in claim.get("evidence_span_ids") or []
-            if isinstance(span_id, str)
-        }
-    }
     rationale_spans = {
         str(span_id)
         for claim in claims
-        if str(claim.get("effect_area")) in associated_effect_areas
+        if direct_spans
+        & {
+            str(claim_span_id)
+            for claim_span_id in claim.get("evidence_span_ids") or []
+            if isinstance(claim_span_id, str)
+        }
         for span_id in claim.get("evidence_span_ids") or []
         if isinstance(span_id, str)
     }

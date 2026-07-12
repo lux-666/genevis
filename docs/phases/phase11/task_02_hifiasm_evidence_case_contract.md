@@ -1,7 +1,7 @@
 # Task 2: Hifiasm EvidenceCase And Methods Contract
 
 **Phase**: 11
-**Status**: Complete; v3 methods-only refactor in progress
+**Status**: Implemented and verified for the v3 methods-only contract
 **Depends on**: Phase 10 assembly parameter catalog
 **Updated**: 2026-07-12
 
@@ -66,6 +66,36 @@ source_excerpts:
 Only referenced spans are projected. Closed-schema validation, field/text/span
 budgets, curation eligibility, provenance, prompt budgets, and artifact/replay
 hashes remain in force.
+
+## Curator Authoring Rules
+
+`methods.md` is the complete human-reviewed methods note for the paper. It can
+retain commands, rationale, caveats, and mixed-workflow context needed for
+future review, but the file is not copied wholesale into the LLM prompt.
+
+`case.yaml.evidence_spans` is the bounded, model-visible evidence surface. Every
+span must be referenced by at least one structured fact, intervention
+parameter, rationale claim, or outcome. Conversely, any parameter, command, or
+rationale that the model may use must be represented by a referenced span; text
+that exists only in `methods.md` remains curator context. This reference-closure
+rule, including evidence for inferred rationale, is a curator-authoring and
+production-approval gate for this corpus. The general loader schema does not
+make evidence spans mandatory for every inferred rationale in all callers.
+
+Cross-method or mixed-pipeline information belongs in rationale or context by
+default. Do not encode it as a target-method intervention effect or outcome.
+`outcomes` currently contains only results attributable to the target-method
+run; leave it empty when the paper reports only a combined pipeline result.
+
+A paper directory may contain multiple entries in the same top-level `cases:`
+list, named `hifiasm.paper.<paper-id>.<scenario-id>`, only when the scenarios
+have materially different transferable L2 combinations, numeric applicability,
+attributable outcomes, or transfer semantics. Do not split a paper mechanically
+because it reports two commands.
+
+The current contract deliberately adds no `scope`, `attribution`, `reviewer`,
+or PDF-storage fields. Additions require a separate demonstrated runtime need;
+they are not placeholders for information already preserved in `methods.md`.
 
 ## Current Curated Cases
 

@@ -22,7 +22,8 @@ from app.domains.assembly.methods_evidence import (
     HIFIASM_METHODS_PROMPT_SCHEMA_VERSION,
     build_hifiasm_evidence_payload,
     normalize_hifiasm_methods_response,
-    sanitize_hifiasm_methods_prompt_payload,
+    rehydrate_hifiasm_methods_retry_prompt_payload,
+    sanitize_hifiasm_methods_prompt_payload as _sanitize_hifiasm_methods_prompt_payload,
 )
 from app.knowledge.evidence_cases import EvidenceCaseValidationError
 from app.knowledge.packs import load_knowledge_pack
@@ -32,6 +33,18 @@ from app.stages.assembly.prompt_payload import generate_payload_ref
 
 _SOURCE_DIR = tempfile.TemporaryDirectory(prefix="hifiasm_methods_evidence_")
 _SOURCE_ROOT = Path(_SOURCE_DIR.name)
+
+
+def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
+    if "catalog_subset" not in prompt:
+        prompt["catalog_subset"] = {
+            "readonly_params": {},
+            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
+        }
+    return _sanitize_hifiasm_methods_prompt_payload(
+        prompt,
+        authoritative_l2_projection=deepcopy(prompt.get("adjustable_params") or {}),
+    )
 
 
 def _case(
@@ -368,6 +381,49 @@ def test_model_projection_suppresses_unknown_and_non_l2_parameters():
     assert set(canonical["evidence_cases"][0]["intervention"]["parameters"]) == {"purge_level"}
 
 
+@pytest.mark.parametrize("forged_projection", ["top", "subset", "both_spec"])
+def test_canonical_prompt_cannot_self_authorize_forged_adjustable_parameter(
+    forged_projection,
+):
+    prompt = _prompt_payload()
+    prompt["catalog_subset"] = {
+        "readonly_params": {},
+        "adjustable_params": deepcopy(prompt["adjustable_params"]),
+    }
+    if forged_projection == "both_spec":
+        prompt["adjustable_params"]["purge_level"]["default"] = "FORGED"
+        prompt["catalog_subset"]["adjustable_params"]["purge_level"][
+            "default"
+        ] = "FORGED"
+    else:
+        target = (
+            prompt["adjustable_params"]
+            if forged_projection == "top"
+            else prompt["catalog_subset"]["adjustable_params"]
+        )
+        target["forged_flag"] = {"level": 2, "default": 1}
+
+    with pytest.raises(ValueError, match="authoritative L2 catalog"):
+        _sanitize_hifiasm_methods_prompt_payload(
+            prompt,
+            authoritative_l2_projection={
+                "purge_level": {"level": 2, "default": 0},
+                "kmer_length": {"level": 2, "default": 51},
+            },
+        )
+
+
+def test_retry_rehydration_rejects_plain_json_dict_without_loader_attestation():
+    persisted = json.loads(json.dumps(_canonical_prompt()))
+
+    with pytest.raises(ValueError, match="loader-attested attempt 0 prompt"):
+        rehydrate_hifiasm_methods_retry_prompt_payload(
+            persisted,
+            {},
+            authoritative_l2_projection=deepcopy(persisted["adjustable_params"]),
+        )
+
+
 def test_budget_drops_reported_parameter_and_explicit_rationale_with_all_support(monkeypatch):
     monkeypatch.setattr(methods_evidence_module, "HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS", 0)
     case = _case()
@@ -590,8 +646,9 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
         "task",
         "prompt_profile",
         "rules",
-        "recommendation_policy",
-        "adjustable_params",
+            "recommendation_policy",
+            "catalog_subset",
+            "adjustable_params",
         "selected_cases",
         "case_selection",
         "case_retrieval",
@@ -833,6 +890,43 @@ def test_parameter_decision_accepts_curated_same_effect_area_span():
     assert normalized["parameter_evidence"]["purge_level"]["span_ids"] == [
         "methods.rationale"
     ]
+
+
+def test_parameter_decision_rejects_unlinked_second_claim_in_same_effect_area():
+    case = _case(
+        spans=[
+            {"span_id": "methods.command", "quote": "Used purge level 1."},
+            {"span_id": "methods.linked", "quote": "This preserved haplotypes."},
+            {"span_id": "methods.other", "quote": "Another observation concerned purging."},
+        ],
+        parameter_span_ids=["methods.command"],
+        rationale_claims=[
+            {
+                "claim_id": "linked",
+                "statement": "Reduced purging preserved haplotypes.",
+                "explicitness": "explicit",
+                "effect_area": "purging",
+                "evidence_span_ids": ["methods.command", "methods.linked"],
+            },
+            {
+                "claim_id": "other",
+                "statement": "A separate purging observation was reported.",
+                "explicitness": "explicit",
+                "effect_area": "purging",
+                "evidence_span_ids": ["methods.other"],
+            },
+        ],
+    )
+    response = _response()
+    response["case_assessments"][0]["transferable_findings"][0][
+        "evidence_span_ids"
+    ] = ["methods.linked"]
+    response["recommendation"]["adjustable_params"]["purge_level"][
+        "supporting_span_ids"
+    ] = ["methods.other"]
+
+    with pytest.raises(ValueError, match="not curated support"):
+        normalize_hifiasm_methods_response(response, _canonical_prompt(cases=[case]))
 
 
 def test_hard_rule_ids_cannot_be_used_as_skill_heuristics():

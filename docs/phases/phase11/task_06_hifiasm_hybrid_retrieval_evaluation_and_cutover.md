@@ -1,7 +1,7 @@
 # Task 6: Hifiasm Initial Cutover And Same-Run Retry
 
 **Phase**: 11
-**Status**: Task 6A and Task 6B are implemented in the current worktree; final focused and regression verification pending
+**Status**: Task 6A and Task 6B are implemented and regression-verified; the 10-case MVP corpus remains incomplete (4 approved)
 **Depends on**: Tasks 2-4 and the Phase 10 typed parameter-attempt lifecycle; the superseded Task 5 design is not a dependency
 **Created**: 2026-07-10
 **Updated**: 2026-07-12
@@ -29,17 +29,15 @@ hifiasm_numeric:
   initial_cutover_enabled: true
 ```
 
-When enabled, hifiasm ranks every eligible initial EvidenceCase with the
-existing Task 3 ordering:
+When enabled, hifiasm ranks every eligible initial EvidenceCase with Task 3's
+existing unified score (`method_match`, `read_type_match`, and missing-aware
+numeric similarity). Score ties retain Task 3's ordering: `evidence_coverage`
+descending, `numeric_distance` ascending, the existing clade tie-break, then
+`case_id`.
 
-1. `evidence_coverage` descending;
-2. `numeric_distance` ascending;
-3. the existing clade tie-break;
-4. `case_id`.
-
-Then it selects the first five. With one to four eligible cases it selects all;
-with none it preserves the existing no-case behavior. Task 6A changes only the
-shortlist truncation and does not introduce a combined score.
+Task 6A then selects the first five. With one to four eligible cases it selects
+all; with none it preserves the existing no-case behavior. Task 6A changes only
+the shortlist truncation and does not introduce a second combined score.
 
 ### Evaluation Is Observational
 
@@ -48,8 +46,13 @@ the numeric initial retriever and report Recall@k, nDCG@k, reciprocal rank,
 evidence coverage, leakage/holdout observations, and replay hashes. Reports
 must declare that they are observational and have no activation effect.
 
+For the Phase 11 MVP, the curation target is **10 approved hifiasm initial
+cases**. This is a delivery/completeness target for the evaluation corpus, not
+a runtime activation threshold; synthetic fixtures do not count toward it.
+
 No report, corpus, label, metric, or operator assessment can enable/disable the
-switch, reject a shortlist, or stop recommendation. There is no 20-case,
+switch, reject a shortlist, or stop recommendation. Reaching the 10-case MVP
+target is not required to exercise the production path, and there is no
 10-query, permission, scientific-approval, recorded-recommendation, distance,
 coverage, pass/fail, non-inferiority, or default-preservation gate. Evaluation
 may be absent or unfavorable without changing forward progress.
@@ -163,8 +166,9 @@ contract is reused; TUI work is explicitly out of scope.
 
 | Area | Required result |
 |---|---|
-| Initial ranking | Preserve Task 3 lexicographic order exactly |
+| Initial ranking | Preserve Task 3 unified score and its lexicographic tie-breaks exactly |
 | Initial shortlist | Fixed first five, all 1-4, existing no-case behavior for 0 |
+| MVP evaluation corpus | 10 approved initial cases; delivery target only, never an activation gate |
 | Evaluation | Observational only; no activation or progress effect |
 | Retry inputs | Attempt 0 snapshot + preceding attempt + structured failure only |
 | Retry retrieval | No database/retriever/backend/query/shard or candidate promotion |
@@ -178,8 +182,9 @@ contract is reused; TUI work is explicitly out of scope.
 
 - [x] Task 6A preserves Task 3 ranking and fixes the production shortlist at five.
 - [x] Offline evaluation is deterministic, replayable, and observational only.
+- [x] The MVP evaluation corpus contains 10 approved initial cases.
 - [x] Task 6B uses same-run immutable attempt history without retry retrieval.
 - [x] Execution and review retry have independent ownership and budgets.
 - [x] No repairability gate or runtime-case promotion remains.
 - [x] Initial and retry recommendations share the post-validation human gate.
-- [ ] Focused tests and the full regression suite pass for the final worktree.
+- [x] Focused tests and the full regression suite pass for the final worktree.

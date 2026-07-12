@@ -18,7 +18,9 @@ from app.domains.assembly.evidence_case import (
     project_hifiasm_prompt_safe_case,
     validate_hifiasm_evidence_cases,
 )
-from app.domains.assembly.methods_evidence import sanitize_hifiasm_methods_prompt_payload
+from app.domains.assembly.methods_evidence import (
+    sanitize_hifiasm_methods_prompt_payload as _sanitize_hifiasm_methods_prompt_payload,
+)
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.knowledge.evidence_cases import (
     EvidenceCaseValidationError,
@@ -29,6 +31,18 @@ from app.knowledge.evidence_cases import (
     MAX_METHODS_FILE_BYTES,
 )
 from app.knowledge.packs import load_knowledge_pack
+
+
+def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
+    if "catalog_subset" not in prompt:
+        prompt["catalog_subset"] = {
+            "readonly_params": {},
+            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
+        }
+    return _sanitize_hifiasm_methods_prompt_payload(
+        prompt,
+        authoritative_l2_projection=deepcopy(prompt.get("adjustable_params") or {}),
+    )
 
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:

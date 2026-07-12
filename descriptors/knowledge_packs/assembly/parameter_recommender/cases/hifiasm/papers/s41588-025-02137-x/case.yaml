@@ -1,0 +1,70 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41588-025-02137-x
+    case_type: initial
+    source:
+      kind: paper
+      title: "A telomere-to-telomere genome assembly coupled with multi-omic data provides insights into the evolution of hexaploid bread wheat"
+      doi: 10.1038/s41588-025-02137-x
+      year: 2025
+    methods_path: cases/hifiasm/papers/s41588-025-02137-x/methods.md
+    evidence_spans:
+      - span_id: scenario.hexaploid_wheat
+        quote: "The roughly 15 Gb hexaploid bread-wheat genome contains more than 85% repetitive sequence and was assembled with about 150-fold HiFi and 100-fold ultra-long ONT coverage plus Bionano and Hi-C."
+      - span_id: workflow.multi_assembler
+        quote: "hifiasm produced the principal contigs, while Verkko and Flye supplied independent validation, gap patches, and telomere repairs."
+      - span_id: workflow.spart
+        quote: "The SPART repository runs hifiasm, Verkko, and Flye as candidate assemblers before contig screening, Bionano scaffolding, Hi-C placement, patching, and polishing."
+      - span_id: workflow.patch_polish
+        quote: "RagTag patch used 0.99 identity and minimap2 asm20 settings; telomeric ONT consensus used Medaka and was subsequently corrected with HiFi alignments and Racon."
+      - span_id: caveat.wrapper
+        quote: "The published SPART hifiasm wrapper call exposes only reads, output prefix, and threads; other assembler and polishing options are not hifiasm L2 parameter evidence."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      target_methods: [hifiasm]
+      assembly_goal: telomere-to-telomere assembly of an ultra-large repeat-rich hexaploid plant genome
+    observed_facts:
+      organism:
+        value: Triticum aestivum
+        evidence_span_ids: [scenario.hexaploid_wheat]
+      clade:
+        value: flowering_plant
+        evidence_span_ids: [scenario.hexaploid_wheat]
+      genome_size_mb:
+        value: 15000
+        unit: Mb
+        evidence_span_ids: [scenario.hexaploid_wheat]
+      coverage:
+        value: 150
+        unit: x HiFi
+        evidence_span_ids: [scenario.hexaploid_wheat]
+      ploidy:
+        value: 6
+        evidence_span_ids: [scenario.hexaploid_wheat]
+    intervention:
+      tool: hifiasm
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: wheat.scale_and_repeats
+        statement: "Very deep HiFi and ultra-long ONT data were combined with long-range maps for an approximately 15 Gb, repeat-rich hexaploid genome."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [scenario.hexaploid_wheat]
+      - claim_id: wheat.multi_assembler_consensus
+        statement: "hifiasm principal contigs were checked and repaired using independent Verkko and Flye assemblies within SPART."
+        explicitness: explicit
+        effect_area: assembly_scope
+        evidence_span_ids: [workflow.multi_assembler, workflow.spart]
+      - claim_id: wheat.finishing_context
+        statement: "RagTag, Medaka, minimap2, and Racon settings belong to patching and telomere polishing, not hifiasm parameter selection."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [workflow.patch_polish, caveat.wrapper]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "The case supplies scale, ploidy, coverage, and multi-assembler workflow evidence; wrapper arguments and downstream tool options are not promoted to hifiasm L2 values."

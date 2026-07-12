@@ -15,8 +15,9 @@ Evaluation is not an activation or forward-progress gate. A report cannot
 enable or disable `initial_cutover_enabled`, reject a shortlist, stop a
 recommendation, or authorize execution. Corpus size, query count, scores,
 coverage, scientific assessment, recorded recommendations, and other reported
-metrics have no controlling threshold. The former 20-case and 10-query targets
-are not production requirements.
+metrics have no controlling threshold. Phase 11's reduced MVP delivery target
+is 10 approved initial cases (synthetic fixtures excluded), but it is not a
+production activation requirement; neither is the 10-query evaluation target.
 
 ## Run the fixture
 

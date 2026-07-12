@@ -1,0 +1,69 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41588-025-02273-4
+    case_type: initial
+    source:
+      kind: paper
+      title: "Haplotype-resolved, gap-free genome assemblies provide insights into the divergence between Asian and European pears"
+      doi: 10.1038/s41588-025-02273-4
+      year: 2025
+    methods_path: cases/hifiasm/papers/s41588-025-02273-4/methods.md
+    evidence_spans:
+      - span_id: scenario.pear_heterozygosity
+        quote: "The two diploid pear cultivars have reported heterozygosity of 1.23% and 1.33%, and the study identifies high heterozygosity as a source of reference gaps."
+      - span_id: workflow.hifiasm
+        quote: "hifiasm 0.19.0 used PacBio HiFi, ONT ultra-long, and Hi-C inputs to generate the initial two haplotype assemblies."
+      - span_id: workflow.cross_assembler_patch
+        quote: "Verkko sequences bridged gaps in hifiasm assemblies, HiCanu supplied telomeric sequence, and ALLHiC plus Hi-C supported chromosome scaffolding and manual correction."
+      - span_id: caveat.no_cli
+        quote: "The paper reports software versions, inputs, and tool roles but does not publish a complete one-line hifiasm command, so no adjustable parameter values are reconstructed."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: 0.19.0
+      target_methods: [hifiasm]
+      assembly_goal: haplotype-resolved gap-free assembly of highly heterozygous diploid plants
+    observed_facts:
+      organism:
+        value: Pyrus spp.
+        evidence_span_ids: [scenario.pear_heterozygosity]
+      clade:
+        value: flowering_plant
+        evidence_span_ids: [scenario.pear_heterozygosity]
+      heterozygosity:
+        unit: fraction
+        uncertainty:
+          kind: interval
+          min: 0.0123
+          max: 0.0133
+        evidence_span_ids: [scenario.pear_heterozygosity]
+      ploidy:
+        value: 2
+        evidence_span_ids: [scenario.pear_heterozygosity]
+    intervention:
+      tool: hifiasm
+      version: 0.19.0
+      parameters: {}
+      parameter_changes: {}
+    rationale_claims:
+      - claim_id: pear.initial_haplotype_assembly
+        statement: "hifiasm generated the initial haplotypes for two highly heterozygous diploid pear genomes."
+        explicitness: explicit
+        effect_area: haplotype_phasing
+        evidence_span_ids: [scenario.pear_heterozygosity, workflow.hifiasm]
+      - claim_id: pear.cross_assembler_finishing
+        statement: "Independent assemblers and Hi-C scaffolding supplied complementary sequence and chromosome-scale evidence for gap-free finishing."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [workflow.cross_assembler_patch]
+      - claim_id: pear.no_parameter_reconstruction
+        statement: "The missing full hifiasm invocation prevents reliable extraction of adjustable hifiasm parameter values."
+        explicitness: explicit
+        effect_area: evidence_scope
+        evidence_span_ids: [caveat.no_cli]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "The two reported heterozygosity values are represented as an interval; multi-assembler finishing remains workflow context."

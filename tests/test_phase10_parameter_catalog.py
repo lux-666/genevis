@@ -1020,14 +1020,15 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertEqual(
                 attempt["retrieval_candidate_case_ids"],
                 [
+                    "hifiasm.paper.s41597-024-03664-8",
+                    "hifiasm.paper.s41467-025-65778-w",
+                    "hifiasm.paper.s41467-025-65870-1",
                     "hifiasm.paper.s41586-022-05325-5",
-                    "hifiasm.paper.s41587-022-01261-x",
-                    "hifiasm.paper.s41592-024-02269-8",
-                    "hifiasm.paper.s41586-026-10105-6",
+                    "hifiasm.paper.s41588-025-02137-x",
                 ],
             )
-            self.assertEqual(attempt["retrieval_eligible_case_count"], 4)
-            self.assertIn("Only 4 of 5 requested", attempt["retrieval_warning"])
+            self.assertEqual(attempt["retrieval_eligible_case_count"], 10)
+            self.assertIn("weak evidence coverage", attempt["retrieval_warning"])
             evidence_ref = attempt["evidence_payload_ref"]
             self.assertIsNotNone(evidence_ref)
             self.assertTrue(attempt["validation"]["valid"], attempt["validation"])

@@ -1,7 +1,7 @@
 # Phase 11: Hifiasm Initial Evidence And Same-Run Retry
 
 **Phase**: 11
-**Status**: Tasks 2-4 complete; the current worktree implements Task 6A initial cutover and Task 6B same-run retry, with final verification pending
+**Status**: Tasks 2-4 are verified; Task 6 implementation and regression verification pass, while the 10-case MVP corpus remains incomplete (4 approved)
 **Created**: 2026-07-07
 **Updated**: 2026-07-12
 
@@ -65,8 +65,10 @@ similarity into one ranking score. Method and read type are scoring attributes,
 not hard filters. Ties use evidence coverage, numeric distance, clade, and case
 ID. Task 6A adds no maximum distance, minimum coverage, case-count,
 query-count, evaluation-result, recorded-recommendation, scientific-approval,
-non-inferiority, or other activation threshold. The former 20-case and 10-query
-targets are not gates.
+non-inferiority, or other activation threshold. The 10-query evaluation target
+is not a gate. Task 6 retains a reduced MVP delivery target of 10 approved
+initial cases; the current approved corpus contains 4, and corpus completion
+still does not gate the production path.
 
 ## Same-Run Retry Boundary
 
@@ -97,9 +99,9 @@ human-review interrupt contract.
 
 ## Task Index
 
-- [Task 2: Hifiasm EvidenceCase And Manual Source Contract](task_02_hifiasm_evidence_case_contract.md) — complete for initial EvidenceCases.
-- [Task 3: Hifiasm Continuous Numeric Case Retrieval](task_03_hifiasm_numeric_case_retrieval.md) — complete initial-only ranking; Task 6A fixes the production shortlist at top five.
-- [Task 4: Hifiasm Methods-Aware Evidence Recommendation](task_04_hifiasm_methods_aware_recommendation.md) — complete bounded prompt/response contract; initial and retry recommendations share post-validation parameter approval.
+- [Task 2: Hifiasm EvidenceCase And Methods Contract](task_02_hifiasm_evidence_case_contract.md) — implemented and verified for initial EvidenceCases and the v3 methods-only contract.
+- [Task 3: Hifiasm EvidenceCase Scoring](task_03_hifiasm_numeric_case_retrieval.md) — implemented initial-only ranking; Task 6A fixes the production shortlist at top five.
+- [Task 4: Hifiasm Methods-Aware Recommendation And Validation](task_04_hifiasm_methods_aware_recommendation.md) — implemented bounded prompt/response contract; initial and retry recommendations share post-validation parameter approval.
 - [Task 5: Superseded Retry-Evidence Design](task_05_hifiasm_retry_evidence_and_curated_retention.md) — superseded; it creates no retained runtime contract.
 - [Task 6: Hifiasm Initial Cutover And Same-Run Retry](task_06_hifiasm_hybrid_retrieval_evaluation_and_cutover.md) — split into Task 6A initial top-5 cutover and Task 6B same-run retry.
 
@@ -122,6 +124,8 @@ Phase 11 is complete when the implementation and regression suite confirm that:
 
 - hifiasm initial retrieval preserves Task 3 scoring and fixed top-5 selection;
 - observational evaluation has no activation or forward-progress effect;
+- the MVP evaluation corpus contains 10 approved initial cases, without making
+  corpus size a production activation gate;
 - retry uses only the current run's immutable attempt chain and structured
   failure facts;
 - execution and review budgets remain independent;

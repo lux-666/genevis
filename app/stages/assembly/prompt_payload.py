@@ -9,6 +9,7 @@ import os
 import secrets
 import stat
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,14 +23,17 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
     ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
     ArtifactRef,
+    file_sha256,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.domains.assembly.case_selector import select_evidence_cases
 from app.domains.assembly.methods_evidence import (
     HIFIASM_EFFECT_AREAS,
     HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+    _attest_loaded_hifiasm_initial_prompt_snapshot,
     _seal_attested_hifiasm_methods_prompt_payload,
     build_hifiasm_evidence_payload,
+    rehydrate_hifiasm_methods_retry_prompt_payload,
     sanitize_hifiasm_methods_prompt_payload,
     uses_hifiasm_methods_contract,
 )
@@ -136,7 +140,11 @@ def build_prompt_payload(
     prompt_profile = build_prompt_profile(full_profile, task)
 
     initial_prompt = (
-        _load_initial_prompt_snapshot(initial_attempt_snapshot or {}, data_dir=data_dir)
+        _load_initial_prompt_snapshot(
+            initial_attempt_snapshot or {},
+            data_dir=data_dir,
+            session_id=session_id,
+        )
         if task != "recommend_initial"
         else {}
     )
@@ -359,7 +367,18 @@ def build_prompt_payload(
     # contract remains an independent method-level concern.
     uses_methods_contract = uses_hifiasm_methods_contract(payload)
     if uses_methods_contract:
-        payload = sanitize_hifiasm_methods_prompt_payload(payload)
+        authoritative_l2_projection = deepcopy(adjustable_params)
+        if task == "recommend_initial":
+            payload = sanitize_hifiasm_methods_prompt_payload(
+                payload,
+                authoritative_l2_projection=authoritative_l2_projection,
+            )
+        else:
+            payload = rehydrate_hifiasm_methods_retry_prompt_payload(
+                initial_prompt,
+                payload,
+                authoritative_l2_projection=authoritative_l2_projection,
+            )
 
     # 7. Generate prompt payload reference (for audit)
     # CANONICAL HASH SEMANTICS: We compute the hash by excluding self-referential
@@ -526,20 +545,41 @@ def _build_retry_evidence(profile: dict[str, Any], *, task: str) -> dict[str, An
 
 
 def _load_initial_prompt_snapshot(
-    attempt: dict[str, Any], *, data_dir: Path | None
+    attempt: dict[str, Any], *, data_dir: Path | None, session_id: str | None
 ) -> dict[str, Any]:
     ref = attempt.get("prompt_payload_ref") or {}
     path_ref = ref.get("path_ref") if isinstance(ref, dict) else None
     if not path_ref:
         return {}
+    if session_id is None:
+        raise ValueError("attempt 0 prompt replay requires the current session ID")
+    session_component = _validate_session_id_component(session_id)
+    expected_path_ref = _artifact_path_ref(
+        session_component,
+        0,
+        "prompt_payload.json",
+    )
+    if path_ref != expected_path_ref:
+        raise ValueError("attempt 0 prompt artifact is outside the current session attempt 0 path")
+    expected_file_hash = ref.get("sha256")
+    if not isinstance(expected_file_hash, str) or not expected_file_hash:
+        raise ValueError("attempt 0 prompt artifact is missing its file hash")
     path = Path(str(path_ref))
     if not path.is_absolute() and str(path_ref).startswith("data/"):
         path = (data_dir or Path("data")) / str(path_ref).removeprefix("data/")
     try:
+        if file_sha256(path) != expected_file_hash:
+            raise ValueError("attempt 0 prompt artifact hash mismatch")
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except OSError as exc:
+        raise ValueError("attempt 0 prompt artifact is unreadable") from exc
+    if not isinstance(value, dict):
+        raise ValueError("attempt 0 prompt artifact must contain a JSON object")
+    if value.get("prompt_payload_ref") != path_ref:
+        raise ValueError("attempt 0 prompt artifact path binding mismatch")
+    if "hifiasm_methods_prompt_schema_version" in value:
+        return _attest_loaded_hifiasm_initial_prompt_snapshot(value)
+    return value
 
 
 def _canonical_json_hash(value: Any) -> str:

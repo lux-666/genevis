@@ -21,6 +21,7 @@ import pytest
 from app.domains.assembly import numeric_case_retriever as numeric_retriever_module
 from app.domains.assembly.evidence_case import (
     _rank_hifiasm_prompt_case,
+    project_hifiasm_prompt_safe_case,
     validate_hifiasm_evidence_cases,
 )
 from app.knowledge.evidence_cases import EvidenceCaseValidationError
@@ -30,11 +31,30 @@ from app.schemas.artifacts import file_sha256
 from app.stages.assembly import prompt_payload as prompt_payload_module
 from app.stages.assembly.prompt_payload import (
     ParameterPromptTask,
+    _load_initial_prompt_snapshot,
     build_prompt_payload,
     generate_payload_ref,
     generate_profile_ref,
     write_payload_artifact,
 )
+
+
+@pytest.mark.parametrize(
+    "path_ref",
+    [
+        "data/artifacts/assembly/other/parameter_attempt_0/prompt_payload.json",
+        "data/artifacts/assembly/s1/parameter_attempt_1/prompt_payload.json",
+    ],
+)
+def test_attempt_zero_prompt_loader_rejects_cross_session_or_nonzero_substitution(
+    tmp_path, path_ref
+):
+    with pytest.raises(ValueError, match="current session attempt 0 path"):
+        _load_initial_prompt_snapshot(
+            {"prompt_payload_ref": {"path_ref": path_ref, "sha256": "0" * 64}},
+            data_dir=tmp_path,
+            session_id="s1",
+        )
 
 
 _HIFIASM_SOURCE_DIR = tempfile.TemporaryDirectory(prefix="phase11_prompt_hifiasm_")
@@ -445,6 +465,23 @@ class TestKnowledgePackLoading:
         assert isinstance(pack["cases"], list)
         assert len(pack["cases"]) > 0
 
+        assert {
+            case["case_id"]
+            for case in pack["cases"]
+            if case.get("schema_version") == 3
+        } == {
+            "hifiasm.paper.s41587-022-01261-x",
+            "hifiasm.paper.s41592-024-02269-8",
+            "hifiasm.paper.s41586-026-10105-6",
+            "hifiasm.paper.s41586-022-05325-5",
+            "hifiasm.paper.s41467-024-54188-z",
+            "hifiasm.paper.s41588-025-02273-4",
+            "hifiasm.paper.s41467-025-65778-w",
+            "hifiasm.paper.s41467-025-65870-1",
+            "hifiasm.paper.s41597-024-03664-8",
+            "hifiasm.paper.s41588-025-02137-x",
+        }
+
         # Check the methods-only EvidenceCase v3 structure.
         case = pack["cases"][0]
         assert case["schema_version"] == 3
@@ -456,6 +493,166 @@ class TestKnowledgePackLoading:
         assert "intervention" in case
         assert "curation" in case
         assert "source_documents" not in case
+
+    @pytest.mark.parametrize(
+        (
+            "case_id",
+            "doi",
+            "read_type",
+            "target_method",
+            "expected_l2_parameters",
+            "context_only_parameter_ids",
+        ),
+        [
+            (
+                "hifiasm.paper.s41587-022-01261-x",
+                "10.1038/s41587-022-01261-x",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hic_r1", "hic_r2"},
+            ),
+            (
+                "hifiasm.paper.s41592-024-02269-8",
+                "10.1038/s41592-024-02269-8",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hic_r1", "hic_r2", "hom_cov", "ul_cut", "ul_reads"},
+            ),
+            (
+                "hifiasm.paper.s41586-026-10105-6",
+                "10.1038/s41586-026-10105-6",
+                "ont",
+                "hifiasm_ont",
+                {"dual_scaffold"},
+                {"ont_mode", "telomere_motif"},
+            ),
+            (
+                "hifiasm.paper.s41586-022-05325-5",
+                "10.1038/s41586-022-05325-5",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hap1_yak", "hap2_yak"},
+            ),
+            (
+                "hifiasm.paper.s41467-024-54188-z",
+                "10.1038/s41467-024-54188-z",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hap1_yak", "hap2_yak", "hic_r1", "hic_r2", "ul_reads"},
+            ),
+            (
+                "hifiasm.paper.s41588-025-02273-4",
+                "10.1038/s41588-025-02273-4",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hic_r1", "hic_r2", "ul_reads"},
+            ),
+            (
+                "hifiasm.paper.s41467-025-65778-w",
+                "10.1038/s41467-025-65778-w",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"hic_r1", "hic_r2", "ul_reads"},
+            ),
+            (
+                "hifiasm.paper.s41467-025-65870-1",
+                "10.1038/s41467-025-65870-1",
+                "hifi",
+                "hifiasm",
+                {
+                    "correction_rounds",
+                    "high_freq_kmer_drop",
+                    "contig_bubble_pop_distance",
+                    "break_low_coverage",
+                    "purge_level",
+                    "duplicate_overlap_min_reads",
+                },
+                {"hg_size", "primary_mode"},
+            ),
+            (
+                "hifiasm.paper.s41597-024-03664-8",
+                "10.1038/s41597-024-03664-8",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"ul_reads"},
+            ),
+            (
+                "hifiasm.paper.s41588-025-02137-x",
+                "10.1038/s41588-025-02137-x",
+                "hifi",
+                "hifiasm",
+                set(),
+                {"ul_reads"},
+            ),
+        ],
+    )
+    def test_production_hifiasm_corpus_preserves_curated_prompt_boundary(
+        self,
+        sample_full_profile,
+        case_id,
+        doi,
+        read_type,
+        target_method,
+        expected_l2_parameters,
+        context_only_parameter_ids,
+    ):
+        """All ten curated shards must survive real loading and prompt projection unchanged."""
+
+        def referenced_span_ids(value):
+            references = set()
+            if isinstance(value, dict):
+                for field, item in value.items():
+                    if field == "evidence_spans":
+                        continue
+                    if field == "evidence_span_ids":
+                        references.update(item)
+                    else:
+                        references.update(referenced_span_ids(item))
+            elif isinstance(value, list):
+                for item in value:
+                    references.update(referenced_span_ids(item))
+            return references
+
+        pack = load_knowledge_pack("parameter_recommender")
+        raw_case = next(case for case in pack["cases"] if case.get("case_id") == case_id)
+        validated_cases = validate_hifiasm_evidence_cases(
+            pack["cases"],
+            pack_root=Path(pack["pack_root"]),
+        )
+        validated_case = next(case for case in validated_cases if case["case_id"] == case_id)
+        projected_case = project_hifiasm_prompt_safe_case(validated_case)
+
+        assert raw_case["source"]["doi"] == doi
+        assert raw_case["applicability"]["read_type"] == read_type
+        assert raw_case["applicability"]["target_methods"] == [target_method]
+        assert projected_case["source"]["doi"] == doi
+        assert projected_case["applicability"]["read_type"] == read_type
+        assert projected_case["applicability"]["target_methods"] == [target_method]
+
+        declared_span_ids = {span["span_id"] for span in raw_case["evidence_spans"]}
+        raw_reference_ids = referenced_span_ids(raw_case)
+        visible_span_ids = {span["span_id"] for span in projected_case["source_excerpts"]}
+        projected_reference_ids = referenced_span_ids(projected_case)
+        assert raw_reference_ids == declared_span_ids
+        assert visible_span_ids == declared_span_ids
+        assert projected_reference_ids == visible_span_ids
+        assert "methods_path" not in projected_case
+        assert "evidence_spans" not in projected_case
+
+        projected_parameters = set(projected_case["intervention"]["parameters"])
+        assert projected_parameters == expected_l2_parameters
+        assert projected_parameters.isdisjoint(context_only_parameter_ids)
+        assert raw_case["outcomes"] == {}
+        assert projected_case["outcomes"] == {}
+        assert "scope" not in raw_case
+        assert "attribution" not in projected_case
 
     def test_load_skill_md(self):
         """SKILL.md should load as string."""
@@ -872,6 +1069,116 @@ class TestArtifactWriter:
         assert content1["prompt_profile"]["sample"]["organism"] == "Homo sapiens"
         assert content2["prompt_profile"]["sample"]["organism"] == "Mus musculus"
 
+    @pytest.mark.parametrize(
+        ("retry_task", "tamper_semantic_hash"),
+        [
+            ("retry_after_execution_failure", False),
+            ("retry_after_review_failure", False),
+            ("retry_after_execution_failure", True),
+        ],
+    )
+    def test_hifiasm_retry_rehydrates_json_attempt_zero_without_registry_state(
+        self,
+        sample_catalog,
+        sample_full_profile,
+        tmp_path,
+        monkeypatch,
+        retry_task,
+        tamper_semantic_hash,
+    ):
+        case = _legal_hifiasm_case(
+            "case_replay", quote="Curated Methods evidence.", distance=0.1
+        )
+        selection = _attested_numeric_selection(
+            [case], query_id="s1:parameter_attempt_0"
+        )
+        monkeypatch.setattr(
+            prompt_payload_module,
+            "load_knowledge_pack",
+            lambda *_args, **_kwargs: {
+                "cases": [case],
+                "rules": {"rules": []},
+                "skill": "Use only visible curated evidence.",
+                "strategies": {},
+                "pack_root": _HIFIASM_SOURCE_ROOT,
+            },
+        )
+        monkeypatch.setattr(
+            prompt_payload_module,
+            "select_evidence_cases",
+            lambda *_args, **_kwargs: ([case], selection),
+        )
+        catalog = sample_catalog.model_copy(update={"method_id": "hifiasm"})
+        initial = build_prompt_payload(
+            method_id="hifiasm",
+            catalog=catalog,
+            full_profile=sample_full_profile,
+            task="recommend_initial",
+            write_artifacts=True,
+            session_id="s1",
+            attempt_id=0,
+            data_dir=tmp_path,
+        )
+        initial_path = (
+            tmp_path
+            / "artifacts"
+            / "assembly"
+            / "s1"
+            / "parameter_attempt_0"
+            / "prompt_payload.json"
+        )
+        persisted = json.loads(initial_path.read_text(encoding="utf-8"))
+        if tamper_semantic_hash:
+            persisted["prompt_payload_hash"] = "0" * 64
+            initial_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+        retry_profile = json.loads(json.dumps(sample_full_profile))
+        retry_profile["previous_attempt"] = {
+            "execution_result": {"status": "failed", "exit_code": 2},
+            "rendered_parameters": {
+                "threads": 16,
+                "kmer_size": 51,
+                "purge_level": 1,
+            },
+        }
+        retry_profile["assembly_review"] = {
+            "failure_mode": "under_purged",
+            "busco_duplicate": 0.12,
+        }
+        retry_kwargs = {
+            "method_id": "hifiasm",
+            "catalog": catalog,
+            "full_profile": retry_profile,
+            "task": retry_task,
+            "write_artifacts": True,
+            "session_id": "s1",
+            "attempt_id": 1,
+            "data_dir": tmp_path,
+            "initial_attempt_snapshot": {
+                "prompt_payload_ref": {
+                    "path_ref": initial["prompt_payload_ref"],
+                    "sha256": file_sha256(initial_path),
+                }
+            },
+        }
+        if tamper_semantic_hash:
+            with pytest.raises(ValueError, match="prompt_payload_hash does not match"):
+                build_prompt_payload(**retry_kwargs)
+            return
+        retry = build_prompt_payload(**retry_kwargs)
+
+        assert retry["task"] == retry_task
+        assert retry["evidence_cases"] == persisted["evidence_cases"]
+        assert retry["case_retrieval"] == persisted["case_retrieval"]
+        assert retry["methods_evidence"] == persisted["methods_evidence"]
+        assert retry["retry_evidence"]["task"] == retry_task
+        assert retry["prompt_payload_hash"] == generate_payload_ref(
+            {
+                key: value
+                for key, value in retry.items()
+                if key not in {"prompt_payload_ref", "prompt_payload_hash"}
+            }
+        )
+
     def test_write_artifacts_false_no_files_created(self, sample_catalog, sample_full_profile, tmp_path):
         """With write_artifacts=False, no files should be created."""
         payload = build_prompt_payload(
@@ -1180,7 +1487,20 @@ class TestRealCatalogCompatibility:
         assert cases
         case_read_types = {(case.get("applicability") or {}).get("read_type") for case in cases}
         assert read_type in case_read_types
-        assert ({"hifi", "ont"} - {read_type}) & case_read_types
+
+        # The fixed top-five shortlist may now be filled by the larger matching
+        # corpus. Verify cross-read-type cases remain retrieval-eligible instead
+        # of requiring one to displace a stronger shortlist match.
+        pack = load_knowledge_pack("parameter_recommender")
+        validated_cases = validate_hifiasm_evidence_cases(
+            pack["cases"],
+            pack_root=Path(pack["pack_root"]),
+        )
+        assert all(case["retrieval_eligible"] is True for case in validated_cases)
+        assert {
+            (case.get("applicability") or {}).get("read_type")
+            for case in validated_cases
+        } == {"hifi", "ont"}
 
         assert cases[0]["applicability"]["read_type"] == read_type
         assert method_id in cases[0]["applicability"]["target_methods"]
@@ -1392,7 +1712,7 @@ def test_hifiasm_prompt_artifact_is_absent_if_canonical_build_is_interrupted(
     )
 
     if failure_point == "canonicalization":
-        def _interrupt(_payload):
+        def _interrupt(_payload, **_kwargs):
             raise RuntimeError("interrupted before canonical write")
 
         monkeypatch.setattr(
