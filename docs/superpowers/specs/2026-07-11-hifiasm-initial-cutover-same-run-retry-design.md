@@ -226,15 +226,37 @@ decisions_allowed: [approve_parameters, reject_parameters]
 
 These values may be carried by the generic `ReviewPayload` candidate/context,
 signal, and report-ref fields and projected into `active_interrupt`; they do not
-justify a parallel parameter-gate entity. `ResumeReviewRequest.metadata` binds
-the response to `attempt_id`, `task`, `previous_attempt_id`, and
-`recommendation_hash`. The decision applier verifies those values against the
-current `active_interrupt`, the immutable recommendation artifact, the current
-attempt-chain head, and (for retry) the sealed previous attempt. It rejects a
-resume for the wrong attempt, a stale/replaced recommendation, a missing or
-mismatched hash, a changed chain head, or an already-resolved gate. A successful
-decision is recorded exactly once as an immutable human-decision artifact;
-duplicate approval/rejection cannot freeze, append, increment, or execute again.
+justify a parallel parameter-gate entity. Every parameter-approval
+`ResumeReviewRequest` must explicitly carry `gate_id: parameter_approval`; the
+applier must not accept an omitted `gate_id` through the generic request's
+optional default or infer/fill it from `active_interrupt`. Its `decision` must be
+exactly `approve_parameters` or `reject_parameters`. `ResumeReviewRequest.metadata`
+binds the response to `attempt_id`, `task`, `previous_attempt_id`, and
+`recommendation_hash`:
+
+```yaml
+stage: assembly
+gate_id: parameter_approval
+decision: approve_parameters # or reject_parameters
+metadata:
+  attempt_id: <exact proposed attempt id>
+  task: <exact active task>
+  previous_attempt_id: <exact active value>
+  recommendation_hash: <exact active hash>
+```
+
+Validation first requires the explicit request `gate_id` to equal both
+`parameter_approval` and `active_interrupt.gate_id`, and requires the decision
+to be in the interrupt's closed `decisions_allowed` set. Only then may the
+decision applier verify the metadata against the current `active_interrupt`,
+the immutable recommendation artifact, the current attempt-chain head, and
+(for retry) the sealed previous attempt. Missing or wrong `gate_id`, any unknown
+decision, wrong attempt, stale/replaced recommendation, missing or mismatched
+hash, changed chain head, and an already-resolved gate all fail closed. Matching
+attempt metadata and hash cannot compensate for a missing/wrong gate ID or an
+unknown decision. A successful decision is recorded exactly once as an immutable
+human-decision artifact; duplicate approval/rejection cannot freeze, append,
+increment, or execute again.
 
 On `approve_parameters`, and only then, freeze the already validated candidate,
 append its attempt, clear `active_interrupt`, leave `blocked_human`, and route to
@@ -362,6 +384,10 @@ seal_hash: <hash or null>
 16. At most one unresolved `parameter_approval` interrupt exists per run. Its
     proposed attempt ID is the next appendable ID, and its chain head cannot
     change while the run is `blocked_human`.
+17. Parameter approval resume identity is conjunctive: explicit
+    `ResumeReviewRequest.gate_id == active_interrupt.gate_id ==
+    "parameter_approval"`, an allowed decision, and exact metadata/hash binding
+    must all pass. No field match may weaken or substitute for another.
 
 ## User-visible Timeline
 
@@ -626,6 +652,7 @@ keys. In neither case may normalization keep the old runtime behavior reachable.
 | Sealing lifecycle | Exactly-once result/diagnosis/signal population, overwrite rejection, post-seal failure-fact/diagnosis mutation rejection, artifact overwrite rejection, append-before-seal rejection, terminal-before-seal rejection, request seal-hash match/mismatch, serialization/reload | Owner seals before request; request binds the exact seal hash; membership is append-only and sealed values never change |
 | Shared parameter approval payload | Initial, execution-retry, and review-retry validated recommendations | `active_interrupt` is `blocked_human`, uses `gate_id=parameter_approval`, identifies task/attempt/previous attempt, parameter diff, rationale, failure facts, evidence refs, recommendation ref/hash, and allows only `approve_parameters`/`reject_parameters` |
 | Approval ordering and budgets | Assert state after validation, block, approve, freeze, append, counter increment, and execution for all three tasks | Nothing freezes/appends/executes before approval; retry counter increments only after approved freeze+append, and only in the owning domain |
+| Resume gate identity | Valid request; omitted `gate_id`; wrong gate ID; unknown decision, each repeated with otherwise matching attempt/task/previous-attempt/hash metadata | Only an explicit `gate_id=parameter_approval` plus `approve_parameters` or `reject_parameters` is accepted; missing/wrong gate and unknown decisions fail closed before application even when all other identity fields match |
 | Resume integrity and idempotency | Wrong attempt/task/previous attempt, stale or replaced recommendation, missing/wrong hash, changed chain head, duplicate approve, approve-after-reject, reject-after-approve, restart/reload | Every invalid or duplicate resume is rejected without freeze, append, counter change, or execution; one durable decision is authoritative across reload |
 | Human rejection | Reject initial, execution retry, and review retry before append | Status and reason are `parameter_recommendation_rejected_by_human`; no command executes, no retry attempt appends, no retry budget is consumed, and the rejection appears in the terminal timeline |
 | Execution retry routing | Raw exit/signal/log/resource fact variants; remaining/exhausted budget; successful recommendation; approve/reject; recommendation error; validation error; attempted model stop/expert; assert no classifier or repairability gate is invoked | With budget, every execution failure emits a request and every valid recommendation validates then blocks for human approval; only approval freezes/appends/increments/executes; stop/expert fails the execution recommendation contract; exhaustion and rejection are domain-specific closed outcomes |
