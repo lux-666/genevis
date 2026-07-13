@@ -222,31 +222,10 @@ def _read_paths(input_ref: Any, input_type: Any) -> tuple[list[Path], str | None
     if missing:
         return [], f"Hifiasm ONT local execution read paths not found: {missing}"
 
-    # Accept FASTA and FASTQ (incl. gzip); ONT/Cyclone often ship as .fa/.fasta.
-    allowed_suffixes = (
-        ".fastq",
-        ".fq",
-        ".fastq.gz",
-        ".fq.gz",
-        ".fasta",
-        ".fa",
-        ".fna",
-        ".fasta.gz",
-        ".fa.gz",
-        ".fna.gz",
-    )
-    unsupported = [
-        str(path)
-        for path in paths
-        if not str(path).lower().endswith(allowed_suffixes)
-    ]
-    if unsupported:
-        return (
-            [],
-            "Hifiasm ONT mode requires FASTA or FASTQ reads "
-            f"(extensions: {', '.join(allowed_suffixes)}). "
-            f"Unsupported files: {unsupported}",
-        )
+    # Validate FASTQ format requirement for ONT mode
+    non_fastq = [str(path) for path in paths if not (str(path).endswith(('.fastq', '.fq', '.fastq.gz', '.fq.gz')))]
+    if non_fastq:
+        return [], f"Hifiasm ONT mode requires FASTQ format (not FASTA). Non-FASTQ files: {non_fastq}"
 
     return paths, None
 

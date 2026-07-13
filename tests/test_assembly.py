@@ -21,7 +21,6 @@ from app.stages.assembly.method_application import nextdenovo as nextdenovo_grap
 from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
-from app.stages.assembly.method_application.hifiasm_ont import _read_paths as hifiasm_ont_read_paths
 
 
 class AssemblyDescriptorTests(unittest.TestCase):
@@ -859,50 +858,6 @@ class AssemblyStageTests(unittest.TestCase):
                 / "run_hifiasm_ont.sh"
             ).read_text(encoding="utf-8")
             self.assertIn("--ont", script)
-
-    def test_hifiasm_ont_read_paths_accepts_fasta_and_fastq(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for name in ("reads.fa", "reads.fasta", "reads.fna", "reads.fastq", "reads.fq"):
-                p = Path(tmpdir) / name
-                p.write_text(">r1\nACGT\n" if name.endswith(("fa", "fasta", "fna")) else "@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-                paths, err = hifiasm_ont_read_paths(str(p), "clean_long_reads")
-                self.assertIsNone(err, msg=name)
-                self.assertEqual(paths, [p])
-
-            bad = Path(tmpdir) / "reads.bam"
-            bad.write_bytes(b"")
-            paths, err = hifiasm_ont_read_paths(str(bad), "clean_long_reads")
-            self.assertEqual(paths, [])
-            self.assertIn("FASTA or FASTQ", err)
-            self.assertIn(str(bad), err)
-
-    def test_local_hifiasm_ont_execution_accepts_fasta_fofn(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reads = Path(tmpdir) / "filtered_long_reads.fasta"
-            reads.write_text(">r1\nACGT\n", encoding="utf-8")
-            fofn = Path(tmpdir) / "long_reads.fofn"
-            fofn.write_text(f"{reads}\n", encoding="utf-8")
-            fake_bin = self._fake_hifiasm_bin(tmpdir)
-            registry = self._write_registry(tmpdir, assets=[])
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
-                "assembly": {
-                    "assembly_route": "ont",
-                    "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
-                    "hifiasm_ont_parameters": {"read_type": "ont"},
-                },
-            }
-
-            result = self._invoke_with_parameter_approvals(state)
-
-            self.assertEqual(result["current_stage"], "assembly_dedup")
-            assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["primary_method"], "assembly.candidate.hifiasm_ont")
-            self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
-            self.assertNotIn("requires FASTQ", str(assembly.get("last_error", "")))
 
     def test_local_hifiasm_rejects_invalid_threads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
