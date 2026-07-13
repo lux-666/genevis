@@ -476,7 +476,8 @@ def _assemble_prompt_payload(
                 "catalog_default",
             ],
             "case_citation_rule": (
-                "case_ids and span_ids are required only when evidence basis is case"
+                "when evidence basis is case, cite selected case_ids; "
+                "include span_ids only for cases that expose Methods spans in the prompt"
             ),
             "no_case_behavior": (
                 "continue with readonly L1 facts, SKILL heuristics, retry context, "

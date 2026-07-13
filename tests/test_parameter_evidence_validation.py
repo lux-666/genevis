@@ -199,3 +199,109 @@ def test_each_cited_case_requires_its_own_visible_span():
     assert result["valid"] is False
     assert "cases without a span" in result["violations"][0]["reason"]
     assert "case_b" in result["violations"][0]["reason"]
+
+
+def _legacy_payload_without_spans() -> dict:
+    """Flye-like prompt: selected cases present, no Methods span surface."""
+    return {
+        "task": "recommend_initial",
+        "prompt_profile": {
+            "assets": {"read_type": "ont"},
+            "read_qc": {"total_bases": 1e10, "read_n50": 25000},
+            "genome_survey": {"estimated_genome_size": 1e8, "repeat_content": 0.4},
+            "sample": {"target_level": "draft"},
+        },
+        "case_selection": {
+            "selected_case_ids": [
+                "ont_vertebrate_moderate_coverage",
+                "ont_large_plant_high_repeat",
+            ],
+            "selected_count": 2,
+        },
+        "selected_cases": [
+            {
+                "case_id": "ont_vertebrate_moderate_coverage",
+                "source": "knowledge_pack",
+                "params": {"asm_coverage": 50},
+            },
+            {
+                "case_id": "ont_large_plant_high_repeat",
+                "source": "knowledge_pack",
+                "params": {"min_overlap": 5000},
+            },
+        ],
+        "evidence_cases": [],
+    }
+
+
+def test_case_basis_without_span_surface_requires_only_case_ids():
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "asm_coverage": {
+                "bases": ["profile_fact", "skill_heuristic", "catalog_default", "case"],
+                "case_ids": [
+                    "ont_vertebrate_moderate_coverage",
+                    "ont_large_plant_high_repeat",
+                ],
+                "span_ids": [],
+                "fact_paths": ["assets.read_type", "read_qc.total_bases"],
+                "heuristic_labels": ["high_coverage_downsample"],
+            }
+        },
+        recommended_params={"asm_coverage": 100},
+        prompt_payload=_legacy_payload_without_spans(),
+    )
+
+    assert result["valid"] is True
+
+
+def test_case_basis_without_span_surface_rejects_unknown_case_id():
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "asm_coverage": {
+                "basis": "case",
+                "case_ids": ["not_in_prompt"],
+                "span_ids": [],
+            }
+        },
+        recommended_params={"asm_coverage": 100},
+        prompt_payload=_legacy_payload_without_spans(),
+    )
+
+    assert result["valid"] is False
+    assert "non-shortlisted" in result["violations"][0]["reason"]
+
+
+def test_case_basis_without_span_surface_rejects_floating_span_ids():
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "asm_coverage": {
+                "basis": "case",
+                "case_ids": ["ont_vertebrate_moderate_coverage"],
+                "span_ids": ["methods.invented"],
+            }
+        },
+        recommended_params={"asm_coverage": 100},
+        prompt_payload=_legacy_payload_without_spans(),
+    )
+
+    assert result["valid"] is False
+    assert "absent from the prompt" in result["violations"][0]["reason"]
+
+
+def test_case_basis_with_span_surface_still_requires_span_ids():
+    payload = _payload()
+    result = validate_parameter_evidence(
+        parameter_evidence={
+            "purge_level": {
+                "basis": "case",
+                "case_ids": ["case_a"],
+                "span_ids": [],
+            }
+        },
+        recommended_params={"purge_level": 1},
+        prompt_payload=payload,
+    )
+
+    assert result["valid"] is False
+    assert "span_ids" in result["violations"][0]["reason"]

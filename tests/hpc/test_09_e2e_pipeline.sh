@@ -246,9 +246,9 @@ else
 fi
 
 # ---- Verify genome_survey artifacts ----
-SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/survey_result.json"
+SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/genome_survey_result.json"
 if [[ -f "$SURVEY_RESULT" ]]; then
-    pass "survey_result.json produced"
+    pass "genome_survey_result.json produced"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "genome_survey skipped because assembly_fasta_registered was provided"
 else

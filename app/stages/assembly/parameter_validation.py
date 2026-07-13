@@ -219,6 +219,12 @@ def validate_parameter_evidence(
 
     Evidence remains optional for legacy recommendation contracts, but Task 4's
     hifiasm Methods-aware contract requires it for every rendered L2 value.
+
+    ``basis=case`` is surface-driven, not method-named:
+    - every cited case_id must be on the prompt shortlist / selected cases
+    - if a cited case exposes Methods spans in the prompt, at least one of those
+      spans must be cited and must be curated support for the parameter
+    - if a cited case has no span surface, case_id binding alone is enough
     """
 
     violations: list[dict[str, Any]] = []
@@ -230,6 +236,12 @@ def validate_parameter_evidence(
         or case_retrieval.get("selected_case_ids")
         or []
     )
+    # Cases actually present in the prompt are always citable by id.
+    for case_list_key in ("selected_cases", "evidence_cases"):
+        for case in prompt_payload.get(case_list_key) or []:
+            if isinstance(case, dict) and case.get("case_id"):
+                selected_ids.add(str(case["case_id"]))
+
     uses_hifiasm_evidence = case_retrieval.get("retrieval_backend") in {
         "hifiasm_numeric",
     }
@@ -288,15 +300,7 @@ def validate_parameter_evidence(
             for parameter in missing_evidence
         )
 
-    spans_by_case = {
-        str(case.get("case_id")): {
-            str(span.get("span_id"))
-            for span in case.get("source_excerpts") or []
-            if isinstance(span, dict) and span.get("span_id")
-        }
-        for case in prompt_payload.get("evidence_cases") or []
-        if isinstance(case, dict)
-    }
+    cases_by_id, spans_by_case = _case_surfaces(prompt_payload)
 
     for parameter, evidence in parameter_evidence.items():
         if parameter not in recommended_params:
@@ -335,92 +339,19 @@ def validate_parameter_evidence(
                 }
             )
         if "case" in bases:
-            case_ids = evidence.get("case_ids") or []
-            span_ids = evidence.get("span_ids") or []
-            if (
-                not isinstance(case_ids, list)
-                or not case_ids
-                or not all(isinstance(case_id, str) for case_id in case_ids)
-                or not isinstance(span_ids, list)
-                or not span_ids
-                or not all(isinstance(span_id, str) for span_id in span_ids)
-            ):
-                violations.append(
-                    {
-                        "param": parameter,
-                        "reason": "basis=case requires non-empty case_ids and span_ids",
-                        "severity": "critical",
-                    }
+            violations.extend(
+                _case_basis_violations(
+                    parameter=parameter,
+                    evidence=evidence,
+                    allowed_case_ids=(
+                        declared_selected_ids
+                        if declared_selected_ids is not None
+                        else selected_ids
+                    ),
+                    cases_by_id=cases_by_id,
+                    spans_by_case=spans_by_case,
                 )
-            else:
-                allowed_case_ids = declared_selected_ids if declared_selected_ids is not None else selected_ids
-                invalid_cases = sorted(set(case_ids) - allowed_case_ids)
-                if invalid_cases:
-                    violations.append(
-                        {
-                            "param": parameter,
-                            "reason": f"case evidence cites non-shortlisted cases: {invalid_cases}",
-                            "severity": "critical",
-                        }
-                    )
-                visible_spans = set().union(*(spans_by_case.get(str(case_id), set()) for case_id in case_ids))
-                invalid_spans = sorted(set(span_ids) - visible_spans)
-                if invalid_spans:
-                    violations.append(
-                        {
-                            "param": parameter,
-                            "reason": f"case evidence cites spans absent from the prompt: {invalid_spans}",
-                            "severity": "critical",
-                        }
-                    )
-                cases_without_cited_span = sorted(
-                    case_id
-                    for case_id in case_ids
-                    if not (spans_by_case.get(str(case_id), set()) & set(span_ids))
-                )
-                if cases_without_cited_span:
-                    violations.append(
-                        {
-                            "param": parameter,
-                            "reason": (
-                                "case evidence cites cases without a span from that case: "
-                                f"{cases_without_cited_span}"
-                            ),
-                            "severity": "critical",
-                        }
-                    )
-                cases_by_id = {
-                    str(case.get("case_id")): case
-                    for case in prompt_payload.get("evidence_cases") or []
-                    if isinstance(case, dict) and case.get("case_id")
-                }
-                unsupported_spans_by_case = {
-                    str(case_id): sorted(
-                        (spans_by_case.get(str(case_id), set()) & set(span_ids))
-                        - allowed_parameter_evidence_span_ids(
-                            cases_by_id.get(str(case_id), {}),
-                            parameter,
-                        )
-                    )
-                    for case_id in case_ids
-                }
-                unsupported_spans_by_case = {
-                    case_id: unsupported
-                    for case_id, unsupported in unsupported_spans_by_case.items()
-                    if unsupported
-                }
-                if unsupported_spans_by_case:
-                    violations.append(
-                        {
-                            "param": parameter,
-                            "reason": (
-                                "case evidence cites visible spans that are not curated support "
-                                "for that parameter or its effect area: "
-                                f"{unsupported_spans_by_case}"
-                            ),
-                            "severity": "critical",
-                        }
-                    )
+            )
         if "profile_fact" in bases:
             fact_paths = evidence.get("fact_paths") or []
             if not isinstance(fact_paths, list) or not fact_paths:
@@ -539,3 +470,157 @@ def validate_parameter_evidence(
             )
 
     return {"valid": not violations, "violations": violations, "warnings": []}
+
+
+def _case_surfaces(
+    prompt_payload: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, set[str]]]:
+    """Index prompt cases and the Methods spans each case exposes."""
+
+    cases_by_id: dict[str, dict[str, Any]] = {}
+    spans_by_case: dict[str, set[str]] = {}
+    # Prefer evidence_cases for span surfaces; still index selected_cases by id.
+    for case_list_key in ("selected_cases", "evidence_cases"):
+        for case in prompt_payload.get(case_list_key) or []:
+            if not isinstance(case, dict) or not case.get("case_id"):
+                continue
+            case_id = str(case["case_id"])
+            cases_by_id[case_id] = case
+            spans = {
+                str(span.get("span_id"))
+                for span in case.get("source_excerpts") or []
+                if isinstance(span, dict) and span.get("span_id")
+            }
+            if spans:
+                spans_by_case[case_id] = spans
+            elif case_id not in spans_by_case:
+                spans_by_case[case_id] = set()
+    return cases_by_id, spans_by_case
+
+
+def _case_basis_violations(
+    *,
+    parameter: str,
+    evidence: dict[str, Any],
+    allowed_case_ids: set[str],
+    cases_by_id: dict[str, dict[str, Any]],
+    spans_by_case: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    """Validate one parameter's case citations against visible prompt surfaces."""
+
+    violations: list[dict[str, Any]] = []
+    case_ids = evidence.get("case_ids") or []
+    span_ids = evidence.get("span_ids") or []
+
+    if (
+        not isinstance(case_ids, list)
+        or not case_ids
+        or not all(isinstance(case_id, str) for case_id in case_ids)
+    ):
+        return [
+            {
+                "param": parameter,
+                "reason": "basis=case requires non-empty case_ids",
+                "severity": "critical",
+            }
+        ]
+    if not isinstance(span_ids, list) or not all(isinstance(span_id, str) for span_id in span_ids):
+        return [
+            {
+                "param": parameter,
+                "reason": "span_ids must be a list of strings when provided",
+                "severity": "critical",
+            }
+        ]
+
+    invalid_cases = sorted(set(case_ids) - allowed_case_ids)
+    if invalid_cases:
+        violations.append(
+            {
+                "param": parameter,
+                "reason": f"case evidence cites non-shortlisted cases: {invalid_cases}",
+                "severity": "critical",
+            }
+        )
+
+    # Span rules apply per cited case: only cases that expose spans require them.
+    cases_with_span_surface = [
+        case_id for case_id in case_ids if spans_by_case.get(str(case_id))
+    ]
+    if cases_with_span_surface:
+        if not span_ids:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": "basis=case requires non-empty span_ids when cited cases expose Methods spans",
+                    "severity": "critical",
+                }
+            )
+            return violations
+
+        visible_spans = set().union(
+            *(spans_by_case.get(str(case_id), set()) for case_id in case_ids)
+        )
+        invalid_spans = sorted(set(span_ids) - visible_spans)
+        if invalid_spans:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": f"case evidence cites spans absent from the prompt: {invalid_spans}",
+                    "severity": "critical",
+                }
+            )
+        cases_without_cited_span = sorted(
+            case_id
+            for case_id in cases_with_span_surface
+            if not (spans_by_case.get(str(case_id), set()) & set(span_ids))
+        )
+        if cases_without_cited_span:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": (
+                        "case evidence cites cases without a span from that case: "
+                        f"{cases_without_cited_span}"
+                    ),
+                    "severity": "critical",
+                }
+            )
+        unsupported_spans_by_case = {
+            str(case_id): sorted(
+                (spans_by_case.get(str(case_id), set()) & set(span_ids))
+                - allowed_parameter_evidence_span_ids(
+                    cases_by_id.get(str(case_id), {}),
+                    parameter,
+                )
+            )
+            for case_id in cases_with_span_surface
+        }
+        unsupported_spans_by_case = {
+            case_id: unsupported
+            for case_id, unsupported in unsupported_spans_by_case.items()
+            if unsupported
+        }
+        if unsupported_spans_by_case:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": (
+                        "case evidence cites visible spans that are not curated support "
+                        "for that parameter or its effect area: "
+                        f"{unsupported_spans_by_case}"
+                    ),
+                    "severity": "critical",
+                }
+            )
+    elif span_ids:
+        # No cited case exposes spans; any span_id is floating and invalid.
+        violations.append(
+            {
+                "param": parameter,
+                "reason": f"case evidence cites spans absent from the prompt: {sorted(set(span_ids))}",
+                "severity": "critical",
+            }
+        )
+
+    return violations
