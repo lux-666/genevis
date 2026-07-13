@@ -5,8 +5,9 @@ Entry point: `gene-agent tui`
 Flow:
   1. User types a natural-language request (same as `gene-agent ask`)
   2. LLM parses intent, materializes manifest
-  3. Interactive plan selection (stages, methods, parameters)
-  4. Execution with automatic human-gate handling (no exit on blocked_human)
+  3. Interactive execution-route plan (stages, methods, known static inputs)
+  4. Runtime-derived proposals appear only when prerequisite evidence exists
+  5. The same conversation handles every reached human gate and resumes execution
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ import argparse
 import sys
 
 
-def run_tui(data_dir: str) -> int:
-    """Top-level TUI entry. Returns CLI exit code."""
+def run_tui(data_dir: str, *, resume_session: str | None = None) -> int:
+    """Launch a conversational workflow or reconnect to one durable human gate."""
     try:
+        if resume_session:
+            from app.entrypoints.review_interactive import run_interactive_review
+
+            return run_interactive_review(resume_session, data_dir)
         return _tui_main(data_dir)
     except (KeyboardInterrupt, EOFError):
         print("\nAborted during interactive planning.")

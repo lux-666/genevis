@@ -374,6 +374,23 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(summary["decision_requirements"]["stage"], "hic_scaffolding")
         self.assertIn("hic_scaffolding.candidate.yahs", summary["decision_requirements"]["candidate_methods"])
         self.assertEqual(summary["latest_artifact_refs"]["hic_scaffolding"]["scaffold_plan_ref"], "plan.json")
+        proposal = summary["decision_requirements"]["runtime_proposal"]
+        self.assertEqual(proposal["kind"], "scaffolding_method_or_candidate_review")
+        self.assertEqual(proposal["parameter_recommendation_status"], "not_implemented")
+
+    def test_assembly_review_runtime_proposal_points_rerun_to_parameter_gate(self):
+        summary = inspect_state(_assembly_blocked_state())
+
+        proposal = summary["decision_requirements"]["runtime_proposal"]
+        self.assertEqual(proposal["kind"], "assembly_candidate_review")
+        self.assertEqual(proposal["parameter_recommendation_status"], "mixed")
+        self.assertEqual(
+            proposal["related_parameter_gate"],
+            {"stage": "assembly", "gate_id": "parameter_approval"},
+        )
+        self.assertTrue(any("legacy manual Flye" in note for note in proposal["parameter_recommendation_notes"]))
+        template = build_resume_decision_template(summary)
+        self.assertEqual(template["metadata"]["template_guidance"]["runtime_proposal"], proposal)
 
     def test_inspect_hic_uses_interrupt_decisions_allowed(self):
         state = _hic_blocked_state()
@@ -522,6 +539,77 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(guidance["report_refs"]["assembly_review_report"], "reports/assembly_review_report.md")
         self.assertEqual(guidance["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
         self.assertEqual(sorted(guidance["candidate_ids"]), ["canu", "flye"])
+
+    def test_parameter_approval_template_copies_exact_resume_bindings(self):
+        bindings = {
+            "attempt_id": 2,
+            "task": "retry_after_review_failure",
+            "previous_attempt_id": 1,
+            "recommendation_hash": "a" * 64,
+        }
+        summary = {
+            "session_id": "s1",
+            "decision_requirements": {
+                "stage": "assembly",
+                "gate_id": "parameter_approval",
+                "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "resume_metadata": bindings,
+            },
+        }
+
+        template = build_resume_decision_template(summary)
+
+        self.assertEqual(template["decision"], "approve_parameters")
+        self.assertEqual(
+            {key: template["metadata"][key] for key in bindings},
+            bindings,
+        )
+
+    def test_parameter_approval_inspect_exposes_exact_resume_bindings(self):
+        bindings = {
+            "attempt_id": 1,
+            "task": "retry_after_execution_failure",
+            "previous_attempt_id": 0,
+            "recommendation_hash": "c" * 64,
+        }
+        interrupt = {
+            "stage": "assembly",
+            "gate_id": "parameter_approval",
+            "decisions_allowed": ["approve_parameters", "reject_parameters"],
+            "parameter_diff": {"purge_level": {"from": 1, "to": 2}},
+            "rationale": "review evidence supports stronger purging",
+            "failure_facts": {"review_failure": {"status": "failed"}},
+            "evidence_refs": {"evidence_payload_ref": "data/evidence.json"},
+            **bindings,
+        }
+        state = {
+            "session_id": "s1",
+            "current_stage": "assembly",
+            "supervision_state": "blocked_human",
+            "active_interrupt": interrupt,
+            "stage_outputs": {"assembly": {"status": "blocked_human"}},
+        }
+
+        summary = inspect_state(state)
+
+        self.assertEqual(
+            summary["decision_requirements"]["resume_metadata"],
+            bindings,
+        )
+        self.assertEqual(
+            summary["decision_requirements"]["runtime_proposal"],
+            {
+                "kind": "parameter_recommendation",
+                "label": "Assembly parameter proposal",
+                "parameter_recommendation_status": "implemented",
+                "human_confirmation_required": True,
+            },
+        )
+        self.assertEqual(
+            summary["decision_requirements"]["parameter_diff"],
+            interrupt["parameter_diff"],
+        )
+        self.assertEqual(summary["decision_requirements"]["evidence_refs"], interrupt["evidence_refs"])
 
     def test_decision_requirements_uses_artifact_meta_file_path_key(self):
         with tempfile.TemporaryDirectory() as tmp:

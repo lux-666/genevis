@@ -885,8 +885,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Inputs:", rendered)
         self.assertIn("raw_long_reads [ont/fastq]: /in/reads.fastq.gz", rendered)
 
-    def test_confirm_render_output_unchanged_for_final_plan(self):
-        """Final Run Plan output keeps its exact shape (no pending lines)."""
+    def test_confirm_render_labels_execution_plan_without_claiming_final_runtime_values(self):
         summary = {
             "session_id": "s1",
             "data_dir": "data",
@@ -903,7 +902,7 @@ class PlanPreviewRenderTests(unittest.TestCase):
         with patch("sys.stdout", new_callable=io.StringIO) as stdout:
             _render_confirm(req)
         rendered = stdout.getvalue()
-        self.assertIn("Run Plan", rendered)
+        self.assertIn("Execution Plan", rendered)
         self.assertIn("assembly: assembly.candidate.flye", rendered)
         self.assertNotIn("pending", rendered)
         self.assertNotIn("Advisory preview.", rendered)
@@ -932,10 +931,102 @@ class PlanPreviewRenderTests(unittest.TestCase):
             self.assertIn(f"raw_long_reads [ont/fastq]: {reads}", rendered)
             self.assertIn("This draft becomes the working plan.", rendered)
             self.assertIn("Execution will NOT start yet.", rendered)
+            self.assertIn("Runtime-derived proposals are deferred", rendered)
             self.assertIn("assembly.candidate.flye", rendered)
             self.assertIn("estimated_genome_size: missing", rendered)
             self.assertIn("[flye] threads: 4  (default)", rendered)
             self.assertIn("Needs attention:", rendered)
+
+    def test_plan_summary_exposes_generic_deferred_human_gate_contract(self):
+        plan = _base_plan(
+            selected_stages=["assembly", "assembly_review", "hic_scaffolding", "t2t"],
+            resolved_execution_order=["assembly", "assembly_review", "hic_scaffolding", "t2t"],
+            selected_methods={},
+        )
+
+        summary = build_run_plan_summary(plan)
+        ordered_keys = [
+            (point["stage"], point["gate_id"])
+            for point in summary["runtime_decision_points"]
+        ]
+        self.assertLess(
+            ordered_keys.index(("assembly", "route_selection")),
+            ordered_keys.index(("assembly", "parameter_approval")),
+        )
+        self.assertLess(
+            ordered_keys.index(("assembly", "parameter_approval")),
+            ordered_keys.index(("assembly_review", "assembly_review")),
+        )
+        points = {
+            (point["stage"], point["gate_id"]): point
+            for point in summary["runtime_decision_points"]
+        }
+
+        parameter_gate = points[("assembly", "parameter_approval")]
+        self.assertEqual(parameter_gate["status"], "deferred")
+        self.assertEqual(parameter_gate["proposal_kind"], "parameter_recommendation")
+        self.assertEqual(parameter_gate["parameter_recommendation_status"], "implemented")
+        self.assertIn("prerequisite results/evidence", parameter_gate["trigger"])
+        self.assertIn(("assembly_review", "assembly_review"), points)
+        self.assertEqual(
+            points[("hic_scaffolding", "hic_scaffolding")]["parameter_recommendation_status"],
+            "not_implemented",
+        )
+        self.assertEqual(
+            points[("t2t", "t2t_review")]["parameter_recommendation_status"],
+            "not_implemented",
+        )
+
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _render_plan_summary(summary, title="Execution Plan")
+        rendered = stdout.getvalue()
+        self.assertIn("Runtime human gates (proposals are not available yet):", rendered)
+        self.assertIn("Assembly parameter proposal: deferred", rendered)
+        self.assertIn("The TUI pauses at each reached gate", rendered)
+
+    def test_ont_t2t_draft_defers_hifiasm_l2_until_runtime_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reads = Path(tmp) / "ont.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = Path(tmp) / "manifest.yaml"
+            manifest.write_text(
+                f"session_id: s1\nassets:\n"
+                f"  - asset_type: raw_long_reads\n    paths:\n      - {reads}\n"
+                "    format: fastq\n    platform: ont\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                manifest_ref=str(manifest),
+                data_dir=tmp,
+                entry_request={"requested_stages": ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]},
+                selected_stages=["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"],
+                resolved_execution_order=["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"],
+                selected_methods={"assembly": "assembly.candidate.hifiasm_ont"},
+                method_parameters={
+                    "assembly.candidate.hifiasm_ont": {
+                        "threads": 32,
+                        "kmer_length": 31,
+                        "purge_level": 2,
+                    }
+                },
+            )
+
+            summary = build_run_plan_summary(plan)
+            contract = summary["runtime_parameter_contracts"][0]
+            self.assertEqual(contract["status"], "deferred")
+            self.assertIn("kmer_length", contract["parameter_names"])
+            self.assertIn("purge_level", contract["parameter_names"])
+            self.assertEqual(contract["user_constraints"], {"kmer_length": 31, "purge_level": 2})
+
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                _render_draft_review(plan, summary)
+            rendered = stdout.getvalue()
+            self.assertIn("[hifiasm_ont] threads: 32", rendered)
+            self.assertNotIn("[hifiasm_ont] kmer_length: 31", rendered)
+            self.assertNotIn("[hifiasm_ont] purge_level: 2", rendered)
+            self.assertIn("runtime-derived parameters [hifiasm_ont]: deferred", rendered)
+            self.assertIn("user constraints (not frozen values)", rendered)
+            self.assertIn("Assembly parameter proposal: deferred", rendered)
 
     def test_plan_draft_multi_stage_goal_marks_requested_targets_only(self):
         with tempfile.TemporaryDirectory() as tmp:

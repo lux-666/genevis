@@ -279,9 +279,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     tui_parser = subparsers.add_parser(
         "tui",
-        help="Interactive workflow launcher with automatic human-gate handling",
+        help="Launch a workflow or interactively review a blocked session",
     )
     tui_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    tui_parser.add_argument(
+        "--resume-session",
+        default=None,
+        metavar="SESSION_ID",
+        help="Attach to one blocked durable workflow session and review its active gate",
+    )
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
@@ -1230,7 +1236,7 @@ def _run_tui(args: argparse.Namespace) -> int:
     from app.entrypoints.tui import run_tui
 
     data_dir = _resolve_data_dir(args.data_dir)
-    return run_tui(data_dir)
+    return run_tui(data_dir, resume_session=getattr(args, "resume_session", None))
 
 
 def _run_bootstrap(args: argparse.Namespace) -> int:

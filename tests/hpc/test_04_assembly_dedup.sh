@@ -118,6 +118,7 @@ cd "${PROJECT_ROOT}"
 info "Running assembly + dedup session: ${SID}"
 info "  Method: ${ASSEMBLY_METHOD}"
 info "  This may take a while for real assembly..."
+RUN_EXITCODE=0
 if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
@@ -127,7 +128,32 @@ if GA run \
     2>&1; then
     pass "assembly + dedup session completed without CLI error"
 else
-    fail "assembly + dedup session returned a CLI error"
+    RUN_EXITCODE=$?
+    warn "initial assembly invocation returned ${RUN_EXITCODE}; inspecting durable gate state"
+fi
+
+PARAMETER_RESUME_STATUS=0
+resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+if (( PARAMETER_RESUME_STATUS == 3 )); then
+    info "[SKIP] Test 04 paused at an intentional parameter approval gate."
+    info "Resume the printed session, then rerun Test 04 assertions or continue with Test 05."
+    exit 77
+elif (( PARAMETER_RESUME_STATUS != 0 )); then
+    fail "parameter-approval handling failed"
+elif (( RUN_EXITCODE != 0 )); then
+    # A non-zero initial invocation is acceptable only when a durable
+    # parameter gate was successfully resumed above. Artifact assertions below
+    # determine whether execution actually completed.
+    info "continuing after successful durable parameter-gate handling"
+fi
+
+GATE_STATUS=0
+report_session_gate "$SID" || GATE_STATUS=$?
+if (( GATE_STATUS == 3 )); then
+    info "[SKIP] Test 04 is durably paused at a human gate."
+    exit 77
+elif (( GATE_STATUS != 0 )); then
+    fail "could not determine the post-resume session state"
 fi
 
 # ---- Verify assembly outputs ----
@@ -232,6 +258,12 @@ argv = command.get("argv")
 assert isinstance(argv, list) and argv, "command.json missing argv"
 assert command.get("command"), "command.json missing rendered command string"
 
+validated_path = attempt_dir / "validated_recommendation.json"
+assert validated_path.is_file(), f"missing validated recommendation: {validated_path}"
+validated = json.loads(validated_path.read_text(encoding="utf-8"))
+validated_attempt = validated.get("attempt") or {}
+assert validated_attempt.get("validation", {}).get("valid") is True, validated_attempt.get("validation")
+
 if method_slug in {"hifiasm", "hifiasm_ont"}:
     assert argv[0] == "hifiasm", argv
     assert "-t" in argv, f"hifiasm argv missing -t threads flag: {argv}"
@@ -240,6 +272,36 @@ if method_slug in {"hifiasm", "hifiasm_ont"}:
         assert "--ont" in argv, f"hifiasm_ont argv missing --ont: {argv}"
     else:
         assert "--ont" not in argv, f"hifiasm HiFi argv should not contain --ont: {argv}"
+
+    prompt_path = attempt_dir / "prompt_payload.json"
+    evidence_path = attempt_dir / "evidence_payload.json"
+    approval_path = attempt_dir / "parameter_approval_decision.json"
+    for required_path in (prompt_path, evidence_path, approval_path):
+        assert required_path.is_file(), f"missing Phase 11 artifact: {required_path}"
+    prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    retrieval = prompt.get("case_retrieval") or {}
+    prompt_cases = prompt.get("evidence_cases") or []
+    prompt_ids = [case.get("case_id") for case in prompt_cases]
+    assert retrieval.get("retrieval_backend") == "hifiasm_numeric", retrieval
+    assert len(prompt_ids) == 5, f"production top-five expected, got {prompt_ids}"
+    assert prompt.get("selected_cases") == [], "legacy selected_cases must stay empty for hifiasm"
+    for field in ("candidate_case_ids", "selected_case_ids", "evidence_case_ids"):
+        assert retrieval.get(field) == prompt_ids, f"{field} does not match prompt evidence"
+    for case in prompt_cases:
+        source = case.get("source") or {}
+        excerpts = case.get("source_excerpts") or []
+        assert source.get("kind") == "paper", source
+        assert source.get("doi"), source
+        assert excerpts, case.get("case_id")
+        assert all(item.get("span_id") and item.get("quote") for item in excerpts), excerpts
+    assert evidence.get("cases") == prompt_cases, "evidence payload differs from canonical prompt cases"
+    recommendation_case_ids = validated_attempt.get("selected_case_ids") or []
+    assert recommendation_case_ids, "validated hifiasm recommendation cited no paper case"
+    assert set(recommendation_case_ids) <= set(prompt_ids), recommendation_case_ids
+    assert validated_attempt.get("retrieval_backend") == "hifiasm_numeric"
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    assert approval.get("decision") == "approve_parameters", approval
 elif method_slug == "nextdenovo":
     rendered = command.get("rendered_parameters")
     assert isinstance(rendered, dict) and rendered, "NextDenovo command.json missing rendered_parameters"
@@ -294,6 +356,9 @@ if checkpoint_path.exists():
     ]
     assert attempts, f"checkpoint state has no current parameter_attempt for {method_id}"
     assert attempts[-1].get("status") == "executed", attempts[-1]
+    if method_slug in {"hifiasm", "hifiasm_ont"}:
+        assert attempts[-1].get("parameter_approval_decision_ref"), attempts[-1]
+        assert attempts[-1].get("parameter_approval_recommendation_hash") == attempts[-1].get("parameter_recommendation_hash")
     compact_attempt_status = attempts[-1].get("status")
 else:
     compact_attempt_status = "skipped_no_sqlite_checkpoint"

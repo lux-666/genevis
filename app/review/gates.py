@@ -29,6 +29,12 @@ class ReviewGateDeclaration:
     template_preferred_decision: str | None = None
     required_resume_fields: tuple[str, ...] = field(default_factory=tuple)
     timeout_applier: str | None = None
+    proposal_kind: str = "human_review"
+    proposal_label: str | None = None
+    parameter_recommendation_status: str = "not_applicable"
+    related_parameter_gate: tuple[str, str] | None = None
+    parameter_recommendation_notes: tuple[str, ...] = field(default_factory=tuple)
+    plan_order: int = 100
 
     @property
     def key(self) -> tuple[str, str]:
@@ -94,6 +100,24 @@ def registered_review_stages() -> tuple[str, ...]:
     return tuple(dict.fromkeys(stage for stage, _ in _DECLARATIONS))
 
 
+def planned_review_gates(stages: list[str] | tuple[str, ...]) -> list[ReviewGateDeclaration]:
+    """Return registered runtime gates in workflow and declaration order."""
+
+    stage_order = {stage: index for index, stage in enumerate(stages)}
+    indexed = [
+        (index, gate)
+        for index, gate in enumerate(_DECLARATIONS.values())
+        if gate.stage in stage_order
+    ]
+    return [
+        gate
+        for _, gate in sorted(
+            indexed,
+            key=lambda item: (stage_order[item[1].stage], item[1].plan_order, item[0]),
+        )
+    ]
+
+
 def registered_review_stage_label() -> str:
     stages = registered_review_stages()
     return ", ".join(stages) if stages else "<none>"
@@ -134,6 +158,10 @@ register_review_gate(
         decisions_allowed=("approve_parameters", "reject_parameters"),
         decision_applier="app.stages.assembly.nodes:apply_parameter_approval_decision",
         prompt_adapter="generic",
+        proposal_kind="parameter_recommendation",
+        proposal_label="Assembly parameter proposal",
+        parameter_recommendation_status="implemented",
+        plan_order=20,
     )
 )
 
@@ -165,6 +193,14 @@ register_review_gate(
         prompt_adapter="assembly_review",
         template_preferred_decision="accept",
         required_resume_fields=("candidate_id", "final_assembly_ref"),
+        proposal_kind="assembly_candidate_review",
+        proposal_label="Assembly result and evidence review",
+        parameter_recommendation_status="mixed",
+        related_parameter_gate=("assembly", "parameter_approval"),
+        parameter_recommendation_notes=(
+            "Phase 11 quality-gate failures route to assembly parameter recommendation and approval.",
+            "A human-selected rerun still uses the legacy manual Flye parameter path.",
+        ),
     )
 )
 
@@ -178,6 +214,7 @@ register_review_gate(
         prompt_bundle="assembly.route_selector",
         prompt_adapter="generic",
         template_preferred_decision="select_ont",
+        plan_order=10,
     )
 )
 
@@ -190,6 +227,9 @@ register_review_gate(
         prompt_adapter="hic_scaffolding",
         template_preferred_decision="select_method",
         required_resume_fields=("method_name",),
+        proposal_kind="scaffolding_method_or_candidate_review",
+        proposal_label="Hi-C scaffolding method or result review",
+        parameter_recommendation_status="not_implemented",
     )
 )
 
@@ -202,6 +242,9 @@ register_review_gate(
         prompt_adapter="t2t",
         template_preferred_decision="accept_selected_candidates",
         required_resume_fields=("candidate_ids",),
+        proposal_kind="finishing_candidate_review",
+        proposal_label="T2T finishing candidate review",
+        parameter_recommendation_status="not_implemented",
     )
 )
 

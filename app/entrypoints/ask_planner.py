@@ -21,6 +21,7 @@ from app.schemas.manifest import InputManifest
 from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.schemas.warnings import PlanWarning
+from app.review.gates import planned_review_gates
 from app.stages import STAGE_ORDER
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
 
@@ -619,6 +620,12 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["method_parameters"] = plan.method_parameters
     if plan.stage_parameters:
         summary["stage_parameters"] = plan.stage_parameters
+    runtime_parameter_contracts = _runtime_parameter_contracts(plan)
+    if runtime_parameter_contracts:
+        summary["runtime_parameter_contracts"] = runtime_parameter_contracts
+    decision_points = _runtime_decision_points(plan.resolved_execution_order or [])
+    if decision_points:
+        summary["runtime_decision_points"] = decision_points
     # Load manifest once and pass it through to all parameter inference functions
     manifest = _load_manifest(plan.manifest_ref)
     missing_fields, parameter_defaults, shared_parameter_defaults, stage_parameter_defaults, param_warnings = (
@@ -657,6 +664,73 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["run_config_preview"] = None
         summary["run_config_preview_error"] = str(exc)
     return summary
+
+
+def _runtime_decision_points(stages: list[str]) -> list[dict[str, Any]]:
+    """Describe future human interactions without fabricating their payloads.
+
+    The review-gate registry is the single source of truth.  A plan only says
+    that a proposal will be created later; the runtime interrupt and its
+    artifacts remain authoritative for the actual values and choices.
+    """
+
+    points: list[dict[str, Any]] = []
+    for gate in planned_review_gates(stages):
+        point: dict[str, Any] = {
+            "stage": gate.stage,
+            "gate_id": gate.gate_id,
+            "proposal_kind": gate.proposal_kind,
+            "label": gate.proposal_label or gate.gate_id.replace("_", " ").title(),
+            "status": "deferred",
+            "trigger": (
+                f"when {gate.stage} reaches the {gate.gate_id} gate and "
+                "its prerequisite results/evidence are available"
+            ),
+            "decisions_allowed": list(gate.decisions_allowed),
+            "parameter_recommendation_status": gate.parameter_recommendation_status,
+        }
+        related_parameter_gate = getattr(gate, "related_parameter_gate", None)
+        if related_parameter_gate:
+            point["related_parameter_gate"] = {
+                "stage": related_parameter_gate[0],
+                "gate_id": related_parameter_gate[1],
+            }
+        recommendation_notes = list(getattr(gate, "parameter_recommendation_notes", ()) or ())
+        if recommendation_notes:
+            point["parameter_recommendation_notes"] = recommendation_notes
+        points.append(point)
+    return points
+
+
+def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
+    """Expose catalog L2 fields as deferred, never as planning-time decisions."""
+
+    from app.stages.assembly.parameter_catalog import load_parameter_catalog
+
+    contracts: list[dict[str, Any]] = []
+    for stage, method in _iter_selected_methods(plan):
+        if stage != "assembly":
+            continue
+        try:
+            catalog = load_parameter_catalog(method)
+        except (FileNotFoundError, ValueError):
+            continue
+        dynamic_names = [name for name, spec in catalog.parameters.items() if spec.level == 2]
+        if not dynamic_names:
+            continue
+        supplied = dict((plan.method_parameters or {}).get(method) or {})
+        constraints = {name: supplied[name] for name in dynamic_names if name in supplied}
+        contract: dict[str, Any] = {
+            "stage": stage,
+            "method": method,
+            "status": "deferred",
+            "trigger_gate": {"stage": "assembly", "gate_id": "parameter_approval"},
+            "parameter_names": dynamic_names,
+        }
+        if constraints:
+            contract["user_constraints"] = constraints
+        contracts.append(contract)
+    return contracts
 
 
 def _next_action(ask_plan_ref: str) -> dict[str, Any]:

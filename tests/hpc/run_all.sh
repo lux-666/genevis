@@ -11,7 +11,7 @@
 #  Examples:
 #    ./run_all.sh          # run all tests from the beginning
 #    ./run_all.sh 3        # start from test_03 (skip 00-02)
-#    ./run_all.sh 0        # only run test_00 (entrypoints + unit tests)
+#    ./run_all.sh 0        # run the full suite starting at test_00
 #
 #  Each test_n*.sh can also be run independently:
 #    ./test_04_assembly_dedup.sh
@@ -20,8 +20,9 @@
 #    test_04 produces an assembly → test_05 reviews it → test_06 scaffolds it
 #
 #  Output:
-#    Per-test PASS/FAIL summary printed to stdout.
-#    Full logs saved to ${TEST_DATA_ROOT}/_test_*.log
+#    Per-test PASS/SKIP/FAIL summary printed to stdout. Exit 77 means either an
+#    optional real-data fixture is absent or a durable human gate is waiting.
+#    Full logs are kept under ${TEST_DATA_ROOT}/test_logs/run-all-*/.
 # ============================================================
 set -euo pipefail
 
@@ -38,6 +39,13 @@ source hpc_env.sh
 source common.sh
 
 START_STEP="${1:-0}"
+if [[ ! "$START_STEP" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: start_step must be a non-negative integer (for example 0, 4, or 9)."
+    exit 2
+fi
+RUN_ALL_ID="run-all-$(date +%Y%m%d-%H%M%S)"
+RUN_ALL_LOG_DIR="${TEST_DATA_ROOT}/test_logs/${RUN_ALL_ID}"
+mkdir -p "$RUN_ALL_LOG_DIR"
 ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
 [[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
 
@@ -48,6 +56,7 @@ echo "  Project: ${PROJECT_ROOT}"
 echo "  Data:    ${TEST_DATA_ROOT}"
 echo "  Envs:    ${ENV_CONFIG}"
 echo "  Start:   Step ${START_STEP}"
+echo "  Logs:    ${RUN_ALL_LOG_DIR}"
 echo "  Time:    $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
 echo ""
@@ -102,6 +111,7 @@ TESTS=(
 
 MASTER_PASS=0
 MASTER_FAIL=0
+MASTER_SKIP=0
 RESULTS=()
 
 for entry in "${TESTS[@]}"; do
@@ -113,7 +123,7 @@ for entry in "${TESTS[@]}"; do
     fi
 
     echo ""
-    LOG_FILE="${TEST_DATA_ROOT}/_test_$(printf '%02d' "$step")_${script%.sh}.log"
+    LOG_FILE="${RUN_ALL_LOG_DIR}/test_$(printf '%02d' "$step")_${script%.sh}.log"
 
     info "Running step ${step}: ${label}"
     info "  Script: ${script}"
@@ -121,12 +131,22 @@ for entry in "${TESTS[@]}"; do
 
     START_TIME=$(date +%s)
 
-    if bash "${SCRIPT_DIR}/${script}" 2>&1 | tee "$LOG_FILE"; then
+    set +e
+    bash "${SCRIPT_DIR}/${script}" 2>&1 | tee "$LOG_FILE"
+    TEST_STATUS=${PIPESTATUS[0]}
+    set -e
+    if (( TEST_STATUS == 0 )); then
         END_TIME=$(date +%s)
         ELAPSED=$(( END_TIME - START_TIME ))
         printf "${GREEN}[MASTER]${NC} Step %d: %s — ${GREEN}PASS${NC} (%ds)\n" "$step" "$label" "$ELAPSED"
         RESULTS+=("PASS  Step ${step}: ${label} (${ELAPSED}s)")
         (( ++MASTER_PASS ))
+    elif (( TEST_STATUS == 77 )); then
+        END_TIME=$(date +%s)
+        ELAPSED=$(( END_TIME - START_TIME ))
+        printf "${YELLOW}[MASTER]${NC} Step %d: %s — ${YELLOW}SKIP${NC} (%ds)\n" "$step" "$label" "$ELAPSED"
+        RESULTS+=("SKIP  Step ${step}: ${label} (${ELAPSED}s)")
+        (( ++MASTER_SKIP ))
     else
         END_TIME=$(date +%s)
         ELAPSED=$(( END_TIME - START_TIME ))
@@ -145,23 +165,29 @@ echo "============================================================"
 for r in "${RESULTS[@]}"; do
     if [[ "$r" == PASS* ]]; then
         printf "  ${GREEN}%s${NC}\n" "$r"
+    elif [[ "$r" == SKIP* ]]; then
+        printf "  ${YELLOW}%s${NC}\n" "$r"
     else
         printf "  ${RED}%s${NC}\n" "$r"
     fi
 done
 echo ""
-printf "  Total: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}\n" "$MASTER_PASS" "$MASTER_FAIL"
+printf "  Total: ${GREEN}%d passed${NC}, ${YELLOW}%d skipped${NC}, ${RED}%d failed${NC}\n" "$MASTER_PASS" "$MASTER_SKIP" "$MASTER_FAIL"
 echo ""
 
 if (( MASTER_FAIL > 0 )); then
     printf "  ${RED}${BOLD}OVERALL: FAIL${NC}\n"
     echo ""
-    echo "  Check individual logs in: ${TEST_DATA_ROOT}/_test_*.log"
+    echo "  Check individual logs in: ${RUN_ALL_LOG_DIR}/"
     echo "  Session data in:          ${TEST_DATA_ROOT}/runs/"
     exit 1
 else
     printf "  ${GREEN}${BOLD}OVERALL: PASS${NC}\n"
     echo ""
-    echo "  All tests passed. Session data in: ${TEST_DATA_ROOT}/runs/"
+    echo "  All runnable tests passed. Session data in: ${TEST_DATA_ROOT}/runs/"
+    if (( MASTER_SKIP > 0 )); then
+        echo "  SKIP can mean optional data was absent or a durable human gate is awaiting TUI review."
+        echo "  The per-test log prints the exact session ID and resume command."
+    fi
     exit 0
 fi

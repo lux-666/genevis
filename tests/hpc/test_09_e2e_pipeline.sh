@@ -174,6 +174,16 @@ else
     warn "Pipeline invocation returned exit code ${RUN_EXITCODE}; inspecting durable state"
 fi
 
+PARAMETER_RESUME_STATUS=0
+resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+if (( PARAMETER_RESUME_STATUS == 3 )); then
+    info "[SKIP] E2E session is intentionally paused at parameter_approval."
+    info "Resume the printed session in the TUI; the same session will continue to later gates."
+    exit 77
+elif (( PARAMETER_RESUME_STATUS != 0 )); then
+    fail "E2E parameter-approval handling failed"
+fi
+
 # ---- Verify read_qc artifacts ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
 ARTIFACT_DIR="${RUN_DIR}/artifacts"

@@ -257,6 +257,30 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Aborted during request entry.", stdout.getvalue())
 
+    def test_tui_resume_session_uses_durable_interactive_review(self):
+        with patch(
+            "app.entrypoints.review_interactive.run_interactive_review",
+            return_value=0,
+        ) as review:
+            code = run_tui("/tmp/gene-agent-data", resume_session="blocked-session")
+
+        self.assertEqual(code, 0)
+        review.assert_called_once_with("blocked-session", "/tmp/gene-agent-data")
+
+    def test_tui_parser_accepts_blocked_session_attachment(self):
+        args = _parse_args(
+            [
+                "tui",
+                "--data-dir",
+                "out",
+                "--resume-session",
+                "blocked-session",
+            ]
+        )
+
+        self.assertEqual(args.command, "tui")
+        self.assertEqual(args.resume_session, "blocked-session")
+
     def test_ask_args_parse_minimal_defaults(self):
         args = _parse_args(["ask", "use inputs/manifest.yaml to start s1", "--session-id", "s1", "--data-dir", "out"])
 

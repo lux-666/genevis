@@ -79,8 +79,8 @@ fi
 PREV_ASM="${REVIEW_ASSEMBLY:-}"
 if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
     fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
-    summary "Test 05: Assembly Review (SKIPPED - invalid REVIEW_ASSEMBLY)"
-    exit 0
+    summary "Test 05: Assembly Review (invalid REVIEW_ASSEMBLY)" || true
+    exit 1
 fi
 if [[ -z "$PREV_ASM" ]]; then
     PREV_ASM=$(latest_test04_assembly || true)
@@ -91,9 +91,9 @@ if [[ -z "$PREV_ASM" ]]; then
 fi
 
 if [[ -z "$PREV_ASM" || ! -f "$PREV_ASM" ]]; then
-    fail "No assembly FASTA found from Test 04. Run test_04 first or provide your own."
-    summary "Test 05: Assembly Review (SKIPPED - no assembly)"
-    exit 0
+    info "[SKIP] No assembly FASTA is available yet."
+    info "Test 04 may be waiting at a human gate; resume that session first, or set REVIEW_ASSEMBLY."
+    exit 77
 fi
 info "Using assembly: ${PREV_ASM}"
 SEQ_COUNT=$(count_fasta_seqs "$PREV_ASM")
@@ -276,7 +276,7 @@ GA review \
     --dry-run \
     2>&1 && pass "review --dry-run succeeded" || warn "review --dry-run returned non-zero (may need different state)"
 
-info "Manual TUI smoke step: run 'python3 -m app.entrypoints.run tui --data-dir ${TEST_DATA_ROOT}', drive the blocked review gate, and record the operator decision."
+info "Manual TUI smoke step: run 'gene-agent tui --resume-session ${SID} --data-dir ${TEST_DATA_ROOT}', drive the blocked review gate, and record the operator decision."
 
 # ---- Inspect with trace ----
 cd "${PROJECT_ROOT}"

@@ -96,9 +96,11 @@ Retry has none of the following:
 
 Phase 11 does not introduce PDF download/OCR, GROBID, GraphRAG, LLM Wiki,
 embeddings, a vector database, generic RRF, cross-tool parameter translation,
-or evidence migration for Flye, NextDenovo, or hifiasm-ont. TUI implementation
-and presentation are also out of scope; a later TUI may consume the generic
-human-review interrupt contract.
+or evidence migration for Flye, NextDenovo, or hifiasm-ont. Task 6 did not own
+TUI presentation, but the subsequent
+[Phase 11 TUI and HPC runtime contract](tui_hpc_runtime_contract.md) connects
+the generic human-review interrupt to hash-bound parameter approval and durable
+HPC resume. A persistent attempt timeline and scheduler UI remain future work.
 
 ## Task Index
 

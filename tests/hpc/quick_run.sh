@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-USE_BUILTIN_HPC_ENV="${USE_BUILTIN_HPC_ENV:-true}"
+USE_BUILTIN_HPC_ENV="${USE_BUILTIN_HPC_ENV:-false}"
 
 # Color helpers
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -32,6 +32,11 @@ section() { printf "\n${BOLD}=== %s ===${NC}\n" "$*"; }
 # ============================================================
 write_builtin_hpc_env() {
     [[ "${USE_BUILTIN_HPC_ENV}" == "true" ]] || return 0
+
+    if [[ -f "${SCRIPT_DIR}/hpc_env.sh" ]]; then
+        warn "USE_BUILTIN_HPC_ENV=true ignored because hpc_env.sh already exists"
+        return 0
+    fi
 
     cat > "${SCRIPT_DIR}/hpc_env.sh" <<'EOF'
 # ============================================================

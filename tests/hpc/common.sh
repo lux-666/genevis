@@ -443,6 +443,172 @@ GA() {
     fi
 }
 
+resume_configured_parameter_gates() {
+    # Resume Phase 11's parameter gate only when hpc_env.sh explicitly opts
+    # into unattended approval. Production defaults remain human-reviewed.
+    # Return 3 when a manual approval is required.
+    local session_id="$1"
+    local mode="${HPC_PARAMETER_APPROVAL_MODE:-manual}"
+    local max_approvals="${HPC_MAX_PARAMETER_APPROVALS:-3}"
+    local inspect_json decision_json gate supervision approval_count=0
+
+    case "$mode" in
+        manual|approve) ;;
+        *) fail "invalid HPC_PARAMETER_APPROVAL_MODE=${mode} (expected manual or approve)"; return 2 ;;
+    esac
+    [[ "$max_approvals" =~ ^[1-9][0-9]*$ ]] || {
+        fail "HPC_MAX_PARAMETER_APPROVALS must be a positive integer"
+        return 2
+    }
+
+    inspect_json="${TEST_DATA_ROOT}/_${session_id}_inspect.json"
+    decision_json="${TEST_DATA_ROOT}/_${session_id}_parameter_decision.json"
+    while true; do
+        if ! python3 -m app.entrypoints.run inspect \
+            --session-id "$session_id" --data-dir "$TEST_DATA_ROOT" --json \
+            > "$inspect_json" 2>/dev/null; then
+            fail "cannot inspect session while checking parameter approval: ${session_id}"
+            return 1
+        fi
+        read -r supervision gate < <(python3 - "$inspect_json" <<'PY'
+import json
+import sys
+
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+requirements = summary.get("decision_requirements") or {}
+interrupt = summary.get("active_interrupt") or {}
+print(
+    summary.get("supervision_state") or "unknown",
+    requirements.get("gate_id") or interrupt.get("gate_id") or "none",
+)
+PY
+)
+        if [[ "$supervision" != "blocked_human" || "$gate" != "parameter_approval" ]]; then
+            return 0
+        fi
+
+        if [[ "$mode" == "manual" ]]; then
+            warn "session ${session_id} is waiting at Phase 11 parameter_approval"
+            info "Review it in the TUI, or generate a bound decision template:"
+            info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${decision_json}"
+            info "  python3 -m app.entrypoints.run resume --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --decision-file ${decision_json} --checkpointer ${CHECKPOINTER}"
+            info "For an explicitly unattended smoke test, set HPC_PARAMETER_APPROVAL_MODE=approve in hpc_env.sh."
+            return 3
+        fi
+
+        if (( approval_count >= max_approvals )); then
+            fail "session exceeded HPC_MAX_PARAMETER_APPROVALS=${max_approvals}"
+            return 1
+        fi
+        (( ++approval_count ))
+
+        info "Generating bound decision template for parameter approval ${approval_count}/${max_approvals}"
+        if ! python3 -m app.entrypoints.run inspect \
+            --session-id "$session_id" --data-dir "$TEST_DATA_ROOT" \
+            --write-decision-template "$decision_json" >/dev/null; then
+            fail "could not generate parameter-approval decision template"
+            return 1
+        fi
+        if ! python3 - "$decision_json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+decision = json.load(open(path, encoding="utf-8"))
+assert decision.get("stage") == "assembly", decision
+assert decision.get("gate_id") == "parameter_approval", decision
+assert decision.get("decision") == "approve_parameters", decision
+metadata = decision.get("metadata") or {}
+for key in ("attempt_id", "task", "previous_attempt_id", "recommendation_hash"):
+    assert key in metadata, f"decision template missing bound metadata.{key}"
+decision["notes"] = ["Explicit unattended HPC integration-test approval"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(decision, handle, ensure_ascii=False, indent=2)
+PY
+        then
+            fail "parameter-approval template is not bound to the exact recommendation"
+            return 1
+        fi
+
+        info "Resuming ${session_id} with explicit test-only parameter approval"
+        if ! GA resume \
+            --session-id "$session_id" \
+            --data-dir "$TEST_DATA_ROOT" \
+            --decision-file "$decision_json" \
+            --checkpointer "$CHECKPOINTER" 2>&1; then
+            fail "parameter approval resume failed"
+            return 1
+        fi
+    done
+}
+
+inspect_session_gate() {
+    # Print: supervision_state<TAB>gate_id<TAB>stage. The inspect summary is
+    # the durable source of truth after a graph invocation returns to its
+    # caller; do not infer a gate from the CLI exit code alone.
+    local session_id="$1"
+    local inspect_json="${TEST_DATA_ROOT}/_${session_id}_inspect.json"
+    python3 -m app.entrypoints.run inspect \
+        --session-id "$session_id" --data-dir "$TEST_DATA_ROOT" --json \
+        > "$inspect_json" 2>/dev/null || return 1
+    python3 - "$inspect_json" <<'PY'
+import json
+import sys
+
+summary = json.load(open(sys.argv[1], encoding="utf-8"))
+requirements = summary.get("decision_requirements") or {}
+interrupt = summary.get("active_interrupt") or {}
+print(
+    summary.get("supervision_state") or "unknown",
+    requirements.get("gate_id") or interrupt.get("gate_id") or "none",
+    requirements.get("stage") or interrupt.get("stage") or summary.get("current_stage") or "unknown",
+    sep="\t",
+)
+PY
+}
+
+report_session_gate() {
+    # Return 3 when a durable human gate is active. Callers map this to exit
+    # 77: waiting for a person is an intentional incomplete smoke, not FAIL.
+    local session_id="$1"
+    local details supervision gate stage
+    if ! details=$(inspect_session_gate "$session_id"); then
+        fail "cannot inspect durable session: ${session_id}"
+        return 1
+    fi
+    IFS=$'\t' read -r supervision gate stage <<< "$details"
+    if [[ "$supervision" != "blocked_human" ]]; then
+        return 0
+    fi
+    warn "session ${session_id} is waiting for human input"
+    info "  stage: ${stage}"
+    info "  gate:  ${gate}"
+    info "Continue the same conversation/session with:"
+    info "  gene-agent tui --resume-session ${session_id} --data-dir ${TEST_DATA_ROOT}"
+    info "Non-interactive inspection/template flow:"
+    info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${TEST_DATA_ROOT}/_${session_id}_${gate}_decision.json"
+    info "Run directory: ${TEST_DATA_ROOT}/runs/${session_id}"
+    return 3
+}
+
+latest_hic_scaffold() {
+    local -a runs
+    local run candidate i
+    runs=("${TEST_DATA_ROOT}"/runs/hpc-test06-* "${TEST_DATA_ROOT}"/runs/hpc-test09-*)
+    for (( i=${#runs[@]} - 1; i >= 0; i-- )); do
+        run="${runs[$i]}"
+        [[ -d "$run" ]] || continue
+        for candidate in "$run"/artifacts/hic_scaffolding/*/*scaffolded*.fasta \
+                         "$run"/artifacts/hic_scaffolding/*/*FINAL*.fasta; do
+            if [[ -s "$candidate" ]] && grep -q '^>' "$candidate" 2>/dev/null; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 # -------------------------------------------------------------------
 #  Load config
 # -------------------------------------------------------------------

@@ -14,6 +14,7 @@ from app.entrypoints.review_interactive import (
     build_decision_brief,
     collect_gate_decision,
     prompt_assembly_review_decision,
+    prompt_generic_gate_decision,
     prompt_hic_scaffolding_decision,
     render_blocked_summary,
     render_decision_brief,
@@ -114,6 +115,28 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
 
 
 class PromptAssemblyReviewTests(unittest.TestCase):
+    def test_parameter_approval_prompt_copies_exact_resume_bindings(self):
+        bindings = {
+            "attempt_id": 1,
+            "task": "retry_after_execution_failure",
+            "previous_attempt_id": 0,
+            "recommendation_hash": "b" * 64,
+        }
+        requirements = {
+            "stage": "assembly",
+            "gate_id": "parameter_approval",
+            "decisions_allowed": ["approve_parameters", "reject_parameters"],
+            "resume_metadata": bindings,
+        }
+        inputs = iter(["1", "approve exact recommendation"])
+
+        with patch("builtins.input", side_effect=lambda _: next(inputs)):
+            decision = prompt_generic_gate_decision(requirements)
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision["decision"], "approve_parameters")
+        self.assertEqual(decision["metadata"], bindings)
+
     def test_prompt_choice_retries_invalid_input(self):
         inputs = iter(["bad", "2"])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
@@ -758,6 +781,80 @@ class ValidationTests(unittest.TestCase):
 
 
 class DecisionBriefTests(unittest.TestCase):
+    def test_parameter_approval_brief_renders_diff_failure_and_top5_paper_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence_path = root / "evidence_payload.json"
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "case_id": f"paper-{index}",
+                                "source": {"doi": f"10.1000/{index}"},
+                                "source_excerpts": [
+                                    {"span_id": f"methods-{index}", "quote": f"Exact methods quote {index}."}
+                                ],
+                            }
+                            for index in range(6)
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            recommendation_path = root / "validated_recommendation.json"
+            recommendation_path.write_text(
+                json.dumps(
+                    {
+                        "attempt": {
+                            "attempt_id": 1,
+                            "task": "retry_after_execution_failure",
+                            "previous_attempt_id": 0,
+                            "recommended_params": {"purge_level": 2},
+                            "selected_case_ids": [f"paper-{index}" for index in range(5)],
+                            "evidence_payload_ref": {"path_ref": str(evidence_path)},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = {
+                "session_id": "s1",
+                "supervision_state": "blocked_human",
+                "decision_requirements": {
+                    "stage": "assembly",
+                    "gate_id": "parameter_approval",
+                    "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                    "resume_metadata": {
+                        "attempt_id": 1,
+                        "task": "retry_after_execution_failure",
+                        "previous_attempt_id": 0,
+                        "recommendation_hash": "d" * 64,
+                    },
+                    "recommendation_ref": {"path_ref": str(recommendation_path)},
+                    "parameter_diff": {"purge_level": {"from": 1, "to": 2}},
+                    "rationale": "retry after OOM",
+                    "failure_facts": {"signals": {"return_code": 137}},
+                    "evidence_refs": {"evidence_payload_ref": str(evidence_path)},
+                },
+                "latest_review_request_artifact": None,
+                "next_action": {},
+            }
+
+            brief = build_decision_brief(summary, tmp)
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                render_decision_brief(brief)
+
+        proposal = brief["parameter_proposal"]
+        self.assertEqual(proposal["parameter_diff"]["purge_level"]["to"], 2)
+        self.assertEqual(proposal["failure_facts"]["signals"]["return_code"], 137)
+        self.assertEqual(len(proposal["evidence_cases"]), 5)
+        rendered = out.getvalue()
+        self.assertIn("production paper evidence (5, top-5 maximum)", rendered)
+        self.assertIn("doi=10.1000/0", rendered)
+        self.assertIn("Exact methods quote 0.", rendered)
+
     def test_assembly_review_brief_structure(self):
         summary = {
             "session_id": "s1",
@@ -876,6 +973,14 @@ class DecisionBriefTests(unittest.TestCase):
             "supervision_state": "blocked_human",
             "decisions_allowed": ["accept", "pass"],
             "review_request_ref": "/tmp/request.json",
+            "runtime_proposal": {
+                "kind": "assembly_candidate_review",
+                "label": "Assembly result and evidence review",
+                "parameter_recommendation_status": "mixed",
+                "related_parameter_gate": {"stage": "assembly", "gate_id": "parameter_approval"},
+                "parameter_recommendation_notes": ["Human rerun remains a legacy manual path."],
+                "human_confirmation_required": True,
+            },
             "candidates": [
                 {"id": "flye", "ref": "/tmp/draft.fasta", "method": "assembly.candidate.flye", "exists": False},
             ],
@@ -887,6 +992,33 @@ class DecisionBriefTests(unittest.TestCase):
             "relevant_refs": ["/tmp/ref1"],
         }
         render_decision_brief(brief)
+
+    def test_t2t_runtime_proposal_does_not_claim_parameter_recommender(self):
+        summary = {
+            "session_id": "s1",
+            "supervision_state": "blocked_human",
+            "decision_requirements": {
+                "stage": "t2t",
+                "gate_id": "t2t_review",
+                "decisions_allowed": ["continue_without_patch"],
+                "runtime_proposal": {
+                    "kind": "finishing_candidate_review",
+                    "label": "T2T finishing candidate review",
+                    "parameter_recommendation_status": "not_implemented",
+                    "human_confirmation_required": True,
+                },
+            },
+            "latest_review_request_artifact": None,
+            "next_action": {},
+        }
+
+        brief = build_decision_brief(summary, "/tmp")
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            render_decision_brief(brief)
+
+        self.assertEqual(brief["runtime_proposal"]["parameter_recommendation_status"], "not_implemented")
+        self.assertIn("parameter recommendation: not_implemented", out.getvalue())
 
     def test_empty_brief_renders_without_error(self):
         brief = {

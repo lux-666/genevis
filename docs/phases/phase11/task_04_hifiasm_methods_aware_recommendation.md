@@ -101,7 +101,9 @@ task, previous attempt, and recommendation hash.
 
 Missing/wrong gate IDs, unknown decisions, stale hashes, changed attempt heads,
 and duplicate decisions fail closed. The gate reuses the generic review/resume
-lifecycle. TUI implementation or presentation is not part of Task 4 or Task 6.
+lifecycle. TUI implementation was not part of Task 4 or Task 6; the later
+[runtime contract](tui_hpc_runtime_contract.md) now defines how the generic gate
+is presented and resumed without changing this recommendation boundary.
 
 ## Acceptance Criteria
 

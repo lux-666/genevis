@@ -7,6 +7,7 @@ in `_run_session`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -70,6 +71,8 @@ DECISION_LABELS = {
     "request_rerun": "request rerun",
     "stop": "stop workflow",
     "continue": "continue",
+    "approve_parameters": "approve recommended parameters",
+    "reject_parameters": "reject recommended parameters",
 }
 
 DECISION_HELP = {
@@ -90,6 +93,8 @@ DECISION_HELP = {
     "request_rerun": "ask for another run before continuing.",
     "stop": "stop the workflow here.",
     "continue": "continue past this gate.",
+    "approve_parameters": "approve this exact, hash-bound parameter recommendation and continue execution.",
+    "reject_parameters": "reject this parameter recommendation and stop the current workflow attempt.",
 }
 
 
@@ -504,6 +509,9 @@ def prompt_generic_gate_decision(
         "notes": [notes_raw] if notes_raw else ["interactive review"],
         "decided_by": "human",
     }
+    resume_metadata = requirements.get("resume_metadata")
+    if isinstance(resume_metadata, dict) and resume_metadata:
+        result["metadata"] = dict(resume_metadata)
     if candidate_id:
         result["candidate_id"] = candidate_id
         result["rejected_candidates"] = [candidate for candidate in candidate_ids if candidate != candidate_id]
@@ -712,6 +720,7 @@ def build_decision_brief(
         "stage": stage,
         "supervision_state": summary.get("supervision_state"),
         "decisions_allowed": requirements.get("decisions_allowed", []),
+        "runtime_proposal": dict(requirements.get("runtime_proposal") or {}),
     }
 
     request_artifact = summary.get("latest_review_request_artifact")
@@ -719,7 +728,15 @@ def build_decision_brief(
         brief["review_request_ref"] = request_artifact["file_path"]
     request_payload = _load_artifact_payload(request_artifact)
 
-    if stage == "assembly_review":
+    if requirements.get("gate_id") == "parameter_approval":
+        brief["parameter_proposal"] = _brief_parameter_approval(
+            requirements,
+            request_payload,
+            data_dir,
+        )
+        brief["candidates"] = []
+        brief["evidence"] = {}
+    elif stage == "assembly_review":
         brief["candidates"] = _brief_assembly_candidates(requirements, request_payload)
         brief["evidence"] = _brief_assembly_evidence(requirements, request_payload, data_dir, summary)
     elif stage == "hic_scaffolding":
@@ -748,6 +765,51 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
 
     if brief.get("review_request_ref"):
         print(f"Request:  {brief['review_request_ref']}")
+
+    runtime_proposal = brief.get("runtime_proposal") or {}
+    if runtime_proposal:
+        print("\nRuntime proposal:")
+        print(f"  scope:    {runtime_proposal.get('label')}")
+        print(f"  kind:     {runtime_proposal.get('kind')}")
+        print(
+            "  parameter recommendation: "
+            f"{runtime_proposal.get('parameter_recommendation_status')}"
+        )
+        related_gate = runtime_proposal.get("related_parameter_gate") or {}
+        if related_gate:
+            print(f"  related parameter gate: {related_gate.get('stage')}/{related_gate.get('gate_id')}")
+        for note in runtime_proposal.get("parameter_recommendation_notes") or []:
+            print(f"  note: {note}")
+        if runtime_proposal.get("human_confirmation_required"):
+            print("  confirmation: human decision required before continuing")
+
+    proposal = brief.get("parameter_proposal") or {}
+    if proposal:
+        print("\nParameter proposal:")
+        print(f"  attempt:  {proposal.get('attempt_id')} ({proposal.get('task')})")
+        print(f"  previous: {proposal.get('previous_attempt_id')}")
+        print(f"  hash:     {proposal.get('recommendation_hash')}")
+        if proposal.get("rationale"):
+            print(f"  rationale: {proposal['rationale']}")
+        if proposal.get("parameter_diff"):
+            print("  changes:")
+            for name, change in proposal["parameter_diff"].items():
+                print(f"    {name}: {change}")
+        if proposal.get("failure_facts"):
+            print(f"  failure_facts: {proposal['failure_facts']}")
+        if proposal.get("evidence_refs"):
+            print("  evidence_refs:")
+            for name, ref in proposal["evidence_refs"].items():
+                print(f"    {name}: {ref}")
+        cases = proposal.get("evidence_cases") or []
+        if cases:
+            print(f"  production paper evidence ({len(cases)}, top-5 maximum):")
+            for case in cases:
+                doi = f" doi={case['doi']}" if case.get("doi") else ""
+                print(f"    - {case.get('case_id')}{doi}")
+                for excerpt in case.get("source_excerpts") or []:
+                    span_id = excerpt.get("span_id") or "span"
+                    print(f"      {span_id}: {excerpt.get('quote')}")
 
     candidates = brief.get("candidates") or []
     if candidates:
@@ -803,6 +865,67 @@ def _load_artifact_payload(artifact: dict[str, Any] | None) -> dict[str, Any] | 
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _brief_parameter_approval(
+    requirements: dict[str, Any],
+    request_payload: dict[str, Any] | None,
+    data_dir: str,
+) -> dict[str, Any]:
+    """Build the minimum informed-consent view for a parameter approval gate."""
+
+    source = {**(request_payload or {}), **requirements}
+    proposal = dict(source.get("resume_metadata") or {})
+    for key in ("recommendation_ref", "parameter_diff", "rationale", "failure_facts", "evidence_refs"):
+        if source.get(key) is not None:
+            proposal[key] = source.get(key)
+
+    recommendation = _load_ref_payload(source.get("recommendation_ref"), data_dir)
+    attempt = recommendation.get("attempt") if isinstance(recommendation, dict) else None
+    if isinstance(attempt, dict):
+        proposal.setdefault("attempt_id", attempt.get("attempt_id"))
+        proposal.setdefault("task", attempt.get("task"))
+        proposal.setdefault("previous_attempt_id", attempt.get("previous_attempt_id"))
+        proposal["recommended_params"] = dict(attempt.get("recommended_params") or {})
+        proposal["selected_case_ids"] = list(attempt.get("selected_case_ids") or [])
+        evidence_payload = _load_ref_payload(attempt.get("evidence_payload_ref"), data_dir)
+        if isinstance(evidence_payload, dict):
+            proposal["evidence_cases"] = [
+                {
+                    "case_id": case.get("case_id"),
+                    "doi": (case.get("source") or {}).get("doi"),
+                    "source_excerpts": list(case.get("source_excerpts") or []),
+                }
+                for case in (evidence_payload.get("cases") or [])[:5]
+                if isinstance(case, dict)
+            ]
+    return proposal
+
+
+def _load_ref_payload(ref: Any, data_dir: str) -> dict[str, Any] | None:
+    expected_sha256 = ref.get("sha256") if isinstance(ref, dict) else None
+    if isinstance(ref, dict):
+        raw_path = ref.get("file_path") or ref.get("path_ref") or ref.get("path")
+    else:
+        raw_path = ref
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    candidates = [path]
+    if not path.is_absolute():
+        root = Path(data_dir)
+        candidates.extend((root / path, root / str(path).removeprefix("data/"), root.parent / path))
+    resolved = next((candidate for candidate in candidates if candidate.exists()), None)
+    if resolved is None:
+        return None
+    try:
+        raw = resolved.read_bytes()
+        if expected_sha256 and hashlib.sha256(raw).hexdigest() != expected_sha256:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _brief_assembly_candidates(

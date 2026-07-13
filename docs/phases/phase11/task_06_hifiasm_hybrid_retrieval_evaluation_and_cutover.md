@@ -175,7 +175,9 @@ task, previous attempt for retry, parameter diff, rationale/failure facts, and
 evidence/policy refs. Resume must explicitly provide the gate ID and matching
 identity/hash metadata. Only approval may freeze, append, increment, or
 execute. Rejection terminates with no execution. The generic review/resume
-contract is reused; TUI work is explicitly out of scope.
+contract is reused. TUI presentation was outside Task 6's delivery scope; the
+later [TUI and HPC runtime contract](tui_hpc_runtime_contract.md) connects this
+gate to durable interactive review and resume.
 
 ## Acceptance Matrix
 
@@ -192,7 +194,7 @@ contract is reused; TUI work is explicitly out of scope.
 | Review retry | Directional diagnosis and review budget owned by review stage |
 | Approval | Every valid actionable initial/retry parameter candidate blocks at `parameter_approval`; `stop` and `expert_review` do not |
 | Approval decision | Approve executes; reject terminates without retry budget use |
-| Presentation | No TUI implementation in Task 6 |
+| Presentation | Task 6 exposes the generic gate; the later runtime contract supplies TUI/HPC attachment |
 
 ## Completion Criteria
 

@@ -40,9 +40,9 @@ SPECIES="Danio rerio"             # for related-species sanity check
 # session artifacts.
 REVIEW_ASSEMBLY=""
 
-# Optional materialized assembly for a future real-data T2T smoke run. Leave
-# empty to run only schema/unit tests; test_07 intentionally does not require
-# a permanent project dataset while the stage is being tuned.
+# Optional real-data inputs for test_07. Set both to execute the local T2T
+# stage; leave both empty for an explicit SKIP (exit 77), not a schema-only
+# PASS. The reads may be FASTA/FASTQ and may be gzip-compressed.
 T2T_ASSEMBLY=""
 T2T_ONT_READS=""
 
@@ -90,6 +90,14 @@ CHECKPOINTER="sqlite"
 
 # ---- Run unit tests first? (true/false) ----
 RUN_UNIT_TESTS=true
+
+# ---- Phase 11 parameter approval ----
+# "manual" preserves every production human gate. run_all reports a blocked
+# smoke as SKIP (77), prints its session ID, and continues independent tests.
+# "approve" only auto-approves hash-bound assembly parameter recommendations;
+# it never silently accepts assembly-review, Hi-C, or T2T biological decisions.
+HPC_PARAMETER_APPROVAL_MODE="manual"   # manual | approve
+HPC_MAX_PARAMETER_APPROVALS=3
 
 # ---- Optional Read-QC length-filter coverage ----
 # test_02 uses this executable subgraph instead of only the default skip path.

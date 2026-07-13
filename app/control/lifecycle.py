@@ -455,8 +455,62 @@ def _candidate_methods(payload: dict[str, Any]) -> list[str]:
     ]
 
 
+_PARAMETER_APPROVAL_BINDING_FIELDS = (
+    "attempt_id",
+    "task",
+    "previous_attempt_id",
+    "recommendation_hash",
+)
+
+_PARAMETER_APPROVAL_CONTEXT_FIELDS = (
+    "recommendation_ref",
+    "parameter_diff",
+    "rationale",
+    "failure_facts",
+    "evidence_refs",
+)
+
+
+def _parameter_approval_resume_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("gate_id") != "parameter_approval":
+        return {}
+    return {
+        key: payload.get(key)
+        for key in _PARAMETER_APPROVAL_BINDING_FIELDS
+        if key in payload
+    }
+
+
+def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
+    """Describe what this existing gate proposes without implying a recommender exists."""
+
+    proposal = {
+        "kind": gate.proposal_kind,
+        "label": gate.proposal_label or gate.gate_id.replace("_", " "),
+        "parameter_recommendation_status": gate.parameter_recommendation_status,
+        "human_confirmation_required": True,
+    }
+    if gate.related_parameter_gate is not None:
+        proposal["related_parameter_gate"] = {
+            "stage": gate.related_parameter_gate[0],
+            "gate_id": gate.related_parameter_gate[1],
+        }
+    if gate.parameter_recommendation_notes:
+        proposal["parameter_recommendation_notes"] = list(gate.parameter_recommendation_notes)
+    return proposal
+
+
 def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(requirements)
+    gate = find_review_gate(active_interrupt.get("stage"), active_interrupt.get("gate_id"))
+    if gate is not None:
+        enriched["runtime_proposal"] = _runtime_proposal_requirements(gate)
+    resume_metadata = _parameter_approval_resume_metadata(active_interrupt)
+    if resume_metadata:
+        enriched["resume_metadata"] = resume_metadata
+        for key in _PARAMETER_APPROVAL_CONTEXT_FIELDS:
+            if key in active_interrupt:
+                enriched[key] = active_interrupt.get(key)
     for key in ("auto_decidable", "pending_human_confirmation", "review_request_artifact_ref"):
         if key in active_interrupt:
             enriched[key] = active_interrupt.get(key)
@@ -668,6 +722,8 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "decisions_allowed": decisions_allowed,
         "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
     }
+    if requirements.get("runtime_proposal"):
+        guidance["runtime_proposal"] = dict(requirements["runtime_proposal"])
     if requirements.get("report_refs"):
         guidance["report_refs"] = dict(requirements.get("report_refs") or {})
     if requirements.get("candidate_comparison_context"):
@@ -678,7 +734,10 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "gate_id": gate.gate_id,
         "decision": decision,
         "notes": ["replace this note with the operator rationale"],
-        "metadata": {"template_guidance": guidance},
+        "metadata": {
+            **dict(requirements.get("resume_metadata") or {}),
+            "template_guidance": guidance,
+        },
         "decided_by": "human",
         "rationale_artifact_ref": None,
     }
@@ -1005,6 +1064,14 @@ def _decision_requirements_from_artifact(
         "decisions_allowed": decisions_allowed,
         "requires_structured_resume": True,
     }
+    if gate is not None:
+        requirements["runtime_proposal"] = _runtime_proposal_requirements(gate)
+    resume_metadata = _parameter_approval_resume_metadata(payload)
+    if resume_metadata:
+        requirements["resume_metadata"] = resume_metadata
+        for key in _PARAMETER_APPROVAL_CONTEXT_FIELDS:
+            if key in payload:
+                requirements[key] = payload.get(key)
     candidates = payload.get("candidates")
     if isinstance(candidates, list):
         requirements["candidate_ids"] = [
