@@ -7,7 +7,6 @@ assets without transforming the files.
 
 from __future__ import annotations
 
-import gzip
 import re
 from pathlib import Path
 from typing import Any, Literal

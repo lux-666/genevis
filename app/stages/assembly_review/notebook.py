@@ -11,7 +11,6 @@ in a vivid red), light reference gridlines only, and 300+ dpi PNG plus vector PD
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -819,7 +818,7 @@ axes[1].set_xlabel("Total sequence length (bp)")
 axes[1].set_ylabel("Count")
 
 fig.tight_layout()
-plt.show()
+fig
 '''
 
 

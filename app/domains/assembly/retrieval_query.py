@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup
 from app.domains.assembly.selection import parameter_case_read_type
 
 
@@ -72,17 +73,6 @@ def _build_query(
         "categorical_context": {"clade": _lookup(prompt_profile, "sample.clade")},
     }
     return query
-
-
-def _lookup(values: Any, path: str) -> Any:
-    current = values
-    for part in path.split("."):
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-        if current is None:
-            return None
-    return current
 
 
 def _number_record(value: Any, source_ref: str | None) -> dict[str, float | str | None]:

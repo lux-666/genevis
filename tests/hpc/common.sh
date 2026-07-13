@@ -627,3 +627,7 @@ fi
 
 export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
 export GENE_AGENT_CHECKPOINTER="${CHECKPOINTER}"
+
+ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
+[[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
+export GENE_AGENT_ENVS_CONFIG="$ENV_CONFIG"

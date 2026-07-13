@@ -10,6 +10,7 @@ from app.domains.assembly.evidence_case import (
     validate_hifiasm_evidence_cases,
 )
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
+from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
 from app.domains.assembly.selection import parameter_case_read_type
 from app.knowledge.selectors import SelectionResult
@@ -389,17 +390,6 @@ def _case_score(
         matched.append("read_n50_bucket_match")
 
     return score, matched
-
-
-def _lookup(values: Any, path: str) -> Any:
-    current = values
-    for part in path.split("."):
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-        if current is None:
-            return None
-    return current
 
 
 def evidence_read_type_matches(left: Any, right: Any) -> bool:

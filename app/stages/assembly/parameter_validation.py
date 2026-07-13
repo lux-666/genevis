@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.domains.assembly.methods_evidence import allowed_parameter_evidence_span_ids
+from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup_path
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
 from app.stages.assembly.parameter_profile import flatten_profile_facts
 
@@ -538,14 +539,3 @@ def validate_parameter_evidence(
             )
 
     return {"valid": not violations, "violations": violations, "warnings": []}
-
-
-def _lookup_path(values: Any, path: str) -> Any:
-    current = values
-    for part in path.split("."):
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-        if current is None:
-            return None
-    return current

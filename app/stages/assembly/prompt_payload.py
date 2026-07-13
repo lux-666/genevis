@@ -11,9 +11,7 @@ import stat
 import sys
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Literal
-
-import yaml
+from typing import Any
 
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.artifacts import (
@@ -41,6 +39,7 @@ from app.domains.assembly.numeric_case_retriever import (
     _RANKED_SELECTION_FIELD,
     _project_hifiasm_attested_selection_audit,
 )
+from app.stages.assembly.parameter_profile import ParameterPromptTask, build_prompt_profile
 
 _SECURE_ARTIFACT_DIR_FD_SUPPORTED = (
     os.name == "posix"
@@ -52,14 +51,6 @@ _SECURE_ARTIFACT_DIR_FD_SUPPORTED = (
     )
     and os.link in os.supports_follow_symlinks
 )
-
-# Avoid circular import by using local import in function
-ParameterPromptTask = Literal[
-    "recommend_initial",
-    "retry_after_execution_failure",
-    "retry_after_review_failure",
-]
-
 
 def build_prompt_payload(
     *,
@@ -134,9 +125,6 @@ def build_prompt_payload(
         profile_hash_ref = input_profile_hash
 
     # 2. Slice profile by task (reuse existing logic)
-    # Import here to avoid circular dependency
-    from app.stages.assembly.parameter_profile import build_prompt_profile
-
     prompt_profile = build_prompt_profile(full_profile, task)
 
     initial_prompt = (

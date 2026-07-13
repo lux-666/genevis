@@ -46,8 +46,7 @@ fi
 RUN_ALL_ID="run-all-$(date +%Y%m%d-%H%M%S)"
 RUN_ALL_LOG_DIR="${TEST_DATA_ROOT}/test_logs/${RUN_ALL_ID}"
 mkdir -p "$RUN_ALL_LOG_DIR"
-ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
-[[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
+ENV_CONFIG="${GENE_AGENT_ENVS_CONFIG}"
 
 echo ""
 echo "============================================================"

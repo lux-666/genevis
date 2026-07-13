@@ -15,6 +15,7 @@ from typing import Any
 
 from app.domains.assembly.evidence_case import _project_hifiasm_ranked_prompt_case
 from app.domains.assembly.numeric_case_retriever import _validate_hifiasm_ranked_selection
+from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup_path
 from app.knowledge.evidence_cases import MAX_SOURCE_EXCERPTS_PER_CASE
 
 HIFIASM_EFFECT_AREAS = (
@@ -1487,17 +1488,6 @@ def _visible_retry_signal_refs(prompt_payload: dict[str, Any]) -> set[str]:
                 if isinstance(value, str) and value.strip():
                     visible.add(value)
     return visible
-
-
-def _lookup_path(values: Any, path: str) -> Any:
-    current = values
-    for part in path.split("."):
-        if not isinstance(current, dict):
-            return None
-        current = current.get(part)
-        if current is None:
-            return None
-    return current
 
 
 def _string_list(value: Any, *, field: str, require_nonempty: bool = False) -> list[str]:

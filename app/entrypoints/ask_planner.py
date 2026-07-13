@@ -20,12 +20,15 @@ from app.schemas.ask_plan import (
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
-from app.schemas.warnings import PlanWarning
+from app.schemas.warnings import PlanWarning as PlanWarning
 from app.review.gates import planned_review_gates
 from app.stages import STAGE_ORDER
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
 
-from .planner_catalog import build_planner_method_catalog, load_planner_method_catalog
+from .planner_catalog import (
+    build_planner_method_catalog as build_planner_method_catalog,
+    load_planner_method_catalog,
+)
 
 FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
 FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
