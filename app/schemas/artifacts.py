@@ -5,9 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
@@ -117,13 +125,35 @@ class ArtifactRef(BaseModel):
     artifact_type: str
 
 
+ParameterAttemptStatus = Literal[
+    "recommended",
+    "validation_failed",
+    "parameters_recommended",
+    "frozen",
+    "execution_failed",
+    "executed",
+]
+ParameterAttemptTask = Literal[
+    "recommend_initial",
+    "retry_after_execution_failure",
+    "retry_after_review_failure",
+]
+ParameterFailureClass = Annotated[str, Field(min_length=1)]
+
+
 class ParameterAttempt(BaseModel):
     """Compact replay record for one assembly parameter recommendation attempt."""
 
-    attempt_id: int
-    method_id: str
-    status: str
-    task: str | None = None
+    # Attempt artifacts are durable and can outlive the code that produced them.
+    # Preserve fields added by newer producers instead of silently dropping them
+    # during validation and sealing on an older runtime.
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: Literal[1] | None = None
+    attempt_id: int = Field(ge=0)
+    method_id: str = Field(min_length=1)
+    status: ParameterAttemptStatus
+    task: ParameterAttemptTask | None = None
     input_profile_ref: ArtifactRef
     prompt_payload_ref: ArtifactRef
     retrieval_backend: str | None = None
@@ -132,7 +162,7 @@ class ParameterAttempt(BaseModel):
     retrieval_trace_ref: ArtifactRef | None = None
     evidence_payload_ref: ArtifactRef | None = None
     retrieval_candidate_case_ids: list[str] = Field(default_factory=list)
-    retrieval_eligible_case_count: int | None = None
+    retrieval_eligible_case_count: int | None = Field(default=None, ge=0)
     retrieval_warning: str | None = None
     llm_response_ref: ArtifactRef | None = None
     validation_ref: ArtifactRef | None = None
@@ -154,11 +184,11 @@ class ParameterAttempt(BaseModel):
     argv: list[str] = Field(default_factory=list)
     validation: dict[str, Any] = Field(default_factory=dict)
     reasoning: str | None = None
-    confidence: float | None = None
-    previous_attempt_id: int | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    previous_attempt_id: int | None = Field(default=None, ge=0)
     failure_signature: dict[str, Any] | None = None
     execution_result: dict[str, Any] | None = None
-    failure_class: str | None = None
+    failure_class: ParameterFailureClass | None = None
     failure_log_tail: str | None = None
     stderr_tail: str | None = None
     stdout_tail: str | None = None
@@ -167,7 +197,7 @@ class ParameterAttempt(BaseModel):
     attempt_kind: Literal["initial", "retry"] = "initial"
     initial_recommendation_contract: Literal["legacy_initial", "curated_initial_v1"] | None = None
     retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
-    inherited_initial_attempt_id: int | None = None
+    inherited_initial_attempt_id: int | None = Field(default=None, ge=0)
     inherited_initial_snapshot_ref: str | None = None
     inherited_evidence_payload_ref: ArtifactRef | None = None
     inherited_profile_ref: ArtifactRef | None = None
@@ -178,6 +208,41 @@ class ParameterAttempt(BaseModel):
     parameter_approval_recommendation_hash: str | None = None
     sealed_at: str | None = None
     seal_hash: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_parameter_attempt(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Keep unversioned legacy records unversioned during round trips."""
+
+        data: dict[str, Any] = handler(self)
+        if self.schema_version is None:
+            data.pop("schema_version", None)
+        return data
+
+    @model_validator(mode="after")
+    def validate_attempt_kind_for_task(self) -> "ParameterAttempt":
+        """Reject explicit task/lifecycle contradictions without breaking legacy records."""
+
+        if self.task is None:
+            return self
+
+        expected_kind = "initial" if self.task == "recommend_initial" else "retry"
+        if "attempt_kind" in self.model_fields_set and self.attempt_kind != expected_kind:
+            raise ValueError(
+                f"task {self.task!r} requires attempt_kind {expected_kind!r}"
+            )
+
+        expected_origin = {
+            "retry_after_execution_failure": "assembly_execution",
+            "retry_after_review_failure": "assembly_review",
+        }.get(self.task)
+        if "retry_origin" in self.model_fields_set and self.retry_origin != expected_origin:
+            raise ValueError(
+                f"task {self.task!r} requires retry_origin {expected_origin!r}"
+            )
+        return self
 
 
 class AssemblyParameterLoopState(BaseModel):

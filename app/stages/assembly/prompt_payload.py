@@ -52,6 +52,7 @@ _SECURE_ARTIFACT_DIR_FD_SUPPORTED = (
     and os.link in os.supports_follow_symlinks
 )
 
+
 def build_prompt_payload(
     *,
     method_id: str,
@@ -98,35 +99,20 @@ def build_prompt_payload(
     write_artifacts=True, session_id, and attempt_id so refs are replayable paths.
     """
     artifact_plan: list[tuple[bytes, ArtifactRef, str]] = []
-    session_component: str | None = None
-    attempt_number: int | None = None
-    if write_artifacts:
-        if session_id is None or attempt_id is None:
-            raise ValueError("session_id and attempt_id are required when write_artifacts=True")
-        session_component = _validate_session_id_component(session_id)
-        attempt_number = _validate_attempt_id(attempt_id)
+    session_component, attempt_number = _resolve_artifact_scope(
+        write_artifacts=write_artifacts,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    )
+    input_profile_ref, profile_hash_ref = _prepare_input_profile_binding(
+        full_profile=full_profile,
+        write_artifacts=write_artifacts,
+        session_component=session_component,
+        attempt_number=attempt_number,
+        artifact_plan=artifact_plan,
+    )
 
-    # 1. Generate input profile reference (for replay)
-    input_profile_hash = generate_profile_ref(full_profile)
-
-    if write_artifacts:
-        profile_serialized, profile_ref = _prepare_json_artifact(
-            value=full_profile,
-            session_id=session_component,
-            attempt_id=attempt_number,
-            filename="input_profile.json",
-            artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
-        )
-        artifact_plan.append((profile_serialized, profile_ref, "input_profile.json"))
-        input_profile_ref = profile_ref.path_ref
-        profile_hash_ref = profile_ref.sha256
-    else:
-        input_profile_ref = input_profile_hash
-        profile_hash_ref = input_profile_hash
-
-    # 2. Slice profile by task (reuse existing logic)
     prompt_profile = build_prompt_profile(full_profile, task)
-
     initial_prompt = (
         _load_initial_prompt_snapshot(
             initial_attempt_snapshot or {},
@@ -136,32 +122,150 @@ def build_prompt_payload(
         if task != "recommend_initial"
         else {}
     )
-    # 3. Load policy only for attempt 0. Retries inherit the exact prompt snapshot.
-    if task == "recommend_initial":
-        knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
-    else:
-        knowledge_pack = {
-            "cases": [],
-            "rules": dict(initial_prompt.get("rules") or {}),
-            "skill": str(initial_prompt.get("skill_instructions") or ""),
-        }
+    knowledge_pack = _load_prompt_knowledge(
+        task=task,
+        initial_prompt=initial_prompt,
+        knowledge_pack_id=knowledge_pack_id,
+        knowledge_root=knowledge_root,
+    )
+    readonly_params, adjustable_params, catalog_subset = _partition_prompt_catalog(catalog)
+    selected_cases, case_selection = _select_prompt_cases(
+        task=task,
+        knowledge_pack=knowledge_pack,
+        method_id=method_id,
+        prompt_profile=prompt_profile,
+        session_id=session_id,
+        attempt_id=attempt_id,
+        initial_prompt=initial_prompt,
+        initial_attempt_snapshot=initial_attempt_snapshot,
+    )
+    evidence_context = _prepare_evidence_context(
+        task=task,
+        selected_cases=selected_cases,
+        case_selection=case_selection,
+        adjustable_params=adjustable_params,
+        initial_prompt=initial_prompt,
+        write_artifacts=write_artifacts,
+        session_component=session_component,
+        attempt_number=attempt_number,
+        artifact_plan=artifact_plan,
+    )
+    payload = _assemble_prompt_payload(
+        method_id=method_id,
+        task=task,
+        input_profile_ref=input_profile_ref,
+        profile_hash_ref=profile_hash_ref,
+        prompt_profile=prompt_profile,
+        catalog_subset=catalog_subset,
+        knowledge_pack=knowledge_pack,
+        readonly_params=readonly_params,
+        adjustable_params=adjustable_params,
+        evidence_context=evidence_context,
+    )
+    payload, uses_methods_contract = _close_methods_payload_boundary(
+        payload=payload,
+        task=task,
+        initial_prompt=initial_prompt,
+        catalog_subset=catalog_subset,
+        readonly_params=readonly_params,
+        adjustable_params=adjustable_params,
+    )
+    return _seal_and_publish_prompt_payload(
+        payload=payload,
+        uses_methods_contract=uses_methods_contract,
+        write_artifacts=write_artifacts,
+        session_component=session_component,
+        attempt_number=attempt_number,
+        artifact_plan=artifact_plan,
+        data_dir=data_dir,
+    )
 
-    # 4. Filter catalog to L1 (readonly) + L2 (adjustable)
-    readonly_params = {}
-    adjustable_params = {}
+
+def _resolve_artifact_scope(
+    *,
+    write_artifacts: bool,
+    session_id: str | None,
+    attempt_id: int | None,
+) -> tuple[str | None, int | None]:
+    if not write_artifacts:
+        return None, None
+    if session_id is None or attempt_id is None:
+        raise ValueError("session_id and attempt_id are required when write_artifacts=True")
+    return _validate_session_id_component(session_id), _validate_attempt_id(attempt_id)
+
+
+def _prepare_input_profile_binding(
+    *,
+    full_profile: dict[str, Any],
+    write_artifacts: bool,
+    session_component: str | None,
+    attempt_number: int | None,
+    artifact_plan: list[tuple[bytes, ArtifactRef, str]],
+) -> tuple[str, str]:
+    input_profile_hash = generate_profile_ref(full_profile)
+    if not write_artifacts:
+        return input_profile_hash, input_profile_hash
+
+    profile_serialized, profile_ref = _prepare_json_artifact(
+        value=full_profile,
+        session_id=session_component,
+        attempt_id=attempt_number,
+        filename="input_profile.json",
+        artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    )
+    artifact_plan.append((profile_serialized, profile_ref, "input_profile.json"))
+    return profile_ref.path_ref, profile_ref.sha256
+
+
+def _load_prompt_knowledge(
+    *,
+    task: ParameterPromptTask,
+    initial_prompt: dict[str, Any],
+    knowledge_pack_id: str,
+    knowledge_root: Path | None,
+) -> dict[str, Any]:
+    if task == "recommend_initial":
+        return load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
+    return {
+        "cases": [],
+        "rules": dict(initial_prompt.get("rules") or {}),
+        "skill": str(initial_prompt.get("skill_instructions") or ""),
+    }
+
+
+def _partition_prompt_catalog(
+    catalog: MethodParameterCatalog,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    readonly_params: dict[str, Any] = {}
+    adjustable_params: dict[str, Any] = {}
     for key, spec in catalog.parameters.items():
         if spec.level == 1:
             readonly_params[key] = spec.model_dump()
         elif spec.level == 2:
             adjustable_params[key] = spec.model_dump()
+    return (
+        readonly_params,
+        adjustable_params,
+        {
+            "readonly_params": readonly_params,
+            "adjustable_params": adjustable_params,
+        },
+    )
 
-    catalog_subset = {
-        "readonly_params": readonly_params,
-        "adjustable_params": adjustable_params,
-    }
 
+def _select_prompt_cases(
+    *,
+    task: ParameterPromptTask,
+    knowledge_pack: dict[str, Any],
+    method_id: str,
+    prompt_profile: dict[str, Any],
+    session_id: str | None,
+    attempt_id: int | None,
+    initial_prompt: dict[str, Any],
+    initial_attempt_snapshot: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if task == "recommend_initial":
-        selected_cases, case_selection = select_evidence_cases(
+        return select_evidence_cases(
             knowledge_pack["cases"],
             method_id=method_id,
             task=task,
@@ -174,40 +278,55 @@ def build_prompt_payload(
                 else None
             ),
         )
-    else:
-        # Retry is a transition inside one run.  It must inherit attempt 0's
-        # exact evidence selection and must never invoke a selector/retriever.
-        selected_cases = list(
-            initial_prompt.get("evidence_cases")
-            or initial_prompt.get("selected_cases")
-            or []
-        )
-        inherited_selection = initial_prompt.get("case_retrieval") or initial_prompt.get("case_selection")
-        case_selection = dict(inherited_selection or {})
-        if not case_selection:
-            case_selection = {
-                "retrieval_backend": None,
-                "selected_case_ids": list((initial_attempt_snapshot or {}).get("selected_case_ids") or []),
-                "candidate_case_ids": [],
-                "selected_count": len((initial_attempt_snapshot or {}).get("selected_case_ids") or []),
-                "eligible_case_count": None,
-                "total_cases": None,
-                "evidence_available": False,
-                "case_evidence_required": False,
-                "warning": "retry_inherits_attempt_0_without_retrieval",
-            }
 
+    # Retry is a transition inside one run. It inherits attempt 0's exact
+    # evidence selection and never invokes a selector or retriever.
+    selected_cases = list(
+        initial_prompt.get("evidence_cases")
+        or initial_prompt.get("selected_cases")
+        or []
+    )
+    inherited_selection = initial_prompt.get("case_retrieval") or initial_prompt.get(
+        "case_selection"
+    )
+    case_selection = dict(inherited_selection or {})
+    if not case_selection:
+        selected_case_ids = list(
+            (initial_attempt_snapshot or {}).get("selected_case_ids") or []
+        )
+        case_selection = {
+            "retrieval_backend": None,
+            "selected_case_ids": selected_case_ids,
+            "candidate_case_ids": [],
+            "selected_count": len(selected_case_ids),
+            "eligible_case_count": None,
+            "total_cases": None,
+            "evidence_available": False,
+            "case_evidence_required": False,
+            "warning": "retry_inherits_attempt_0_without_retrieval",
+        }
+    return selected_cases, case_selection
+
+
+def _prepare_evidence_context(
+    *,
+    task: ParameterPromptTask,
+    selected_cases: list[dict[str, Any]],
+    case_selection: dict[str, Any],
+    adjustable_params: dict[str, Any],
+    initial_prompt: dict[str, Any],
+    write_artifacts: bool,
+    session_component: str | None,
+    attempt_number: int | None,
+    artifact_plan: list[tuple[bytes, ArtifactRef, str]],
+) -> dict[str, Any]:
     uses_hifiasm_evidence = case_selection.get("retrieval_backend") in {
         "hifiasm_numeric",
     }
-    retrieval_query_payload = None
-    retrieval_trace_payload = None
     if uses_hifiasm_evidence and task == "recommend_initial":
-        (
-            case_selection,
-            retrieval_query_payload,
-            retrieval_trace_payload,
-        ) = _materialize_retrieval_artifacts(case_selection)
+        case_selection, retrieval_query_payload, retrieval_trace_payload = (
+            _materialize_retrieval_artifacts(case_selection)
+        )
         if write_artifacts:
             query_serialized, query_artifact = _prepare_json_artifact(
                 value=retrieval_query_payload,
@@ -242,12 +361,12 @@ def build_prompt_payload(
                 "trace_hash": trace_hash,
             }
         )
+
     evidence_cases = (
         selected_cases[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
         if uses_hifiasm_evidence
         else []
     )
-    legacy_selected_cases = [] if uses_hifiasm_evidence else selected_cases
     evidence_payload_ref = None
     evidence_payload_hash = None
     methods_evidence = None
@@ -287,17 +406,49 @@ def build_prompt_payload(
             "evidence_payload_ref": evidence_payload_ref,
             "evidence_payload_hash": evidence_payload_hash,
         }
-        methods_evidence = dict(initial_prompt.get("methods_evidence") or {}) if task != "recommend_initial" else {
-            "effect_areas": list(HIFIASM_EFFECT_AREAS),
-            "max_evidence_cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
-            "response_contract": "case_assessments_and_recommendation",
-            "assessment_rule": "assess only numeric-shortlist cases and cite only visible spans",
-            "recommendation_rule": (
-                "return L2 decisions with set, keep_default, or omit actions and at least one evidence basis"
-            ),
-        }
+        methods_evidence = (
+            dict(initial_prompt.get("methods_evidence") or {})
+            if task != "recommend_initial"
+            else {
+                "effect_areas": list(HIFIASM_EFFECT_AREAS),
+                "max_evidence_cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
+                "response_contract": "case_assessments_and_recommendation",
+                "assessment_rule": (
+                    "assess only numeric-shortlist cases and cite only visible spans"
+                ),
+                "recommendation_rule": (
+                    "return L2 decisions with set, keep_default, or omit actions "
+                    "and at least one evidence basis"
+                ),
+            }
+        )
 
-    # 5. Build complete payload
+    return {
+        "uses_hifiasm_evidence": uses_hifiasm_evidence,
+        "case_selection": case_selection,
+        "legacy_selected_cases": [] if uses_hifiasm_evidence else selected_cases,
+        "evidence_cases": evidence_cases,
+        "evidence_payload_ref": evidence_payload_ref,
+        "evidence_payload_hash": evidence_payload_hash,
+        "methods_evidence": methods_evidence,
+    }
+
+
+def _assemble_prompt_payload(
+    *,
+    method_id: str,
+    task: ParameterPromptTask,
+    input_profile_ref: str,
+    profile_hash_ref: str,
+    prompt_profile: dict[str, Any],
+    catalog_subset: dict[str, Any],
+    knowledge_pack: dict[str, Any],
+    readonly_params: dict[str, Any],
+    adjustable_params: dict[str, Any],
+    evidence_context: dict[str, Any],
+) -> dict[str, Any]:
+    uses_hifiasm_evidence = evidence_context["uses_hifiasm_evidence"]
+    case_selection = evidence_context["case_selection"]
     payload = {
         "method_id": method_id,
         "task": task,
@@ -306,10 +457,10 @@ def build_prompt_payload(
         "prompt_profile": prompt_profile,
         "catalog_subset": catalog_subset,
         "rules": knowledge_pack["rules"],
-        "selected_cases": legacy_selected_cases,
+        "selected_cases": evidence_context["legacy_selected_cases"],
         "case_selection": case_selection,
         "case_retrieval": case_selection if uses_hifiasm_evidence else None,
-        "evidence_cases": evidence_cases,
+        "evidence_cases": evidence_context["evidence_cases"],
         "recommendation_policy": {
             "parameter_levels": {
                 "L0": "fixed by executor/run configuration; never recommend or modify",
@@ -328,8 +479,8 @@ def build_prompt_payload(
                 "case_ids and span_ids are required only when evidence basis is case"
             ),
             "no_case_behavior": (
-                "continue with readonly L1 facts, SKILL heuristics, retry context, and catalog defaults; "
-                "prefer conservative L2 changes"
+                "continue with readonly L1 facts, SKILL heuristics, retry context, "
+                "and catalog defaults; prefer conservative L2 changes"
             ),
         },
         "skill_instructions": knowledge_pack["skill"],
@@ -339,61 +490,71 @@ def build_prompt_payload(
     if uses_hifiasm_evidence:
         payload.update(
             {
-                "evidence_payload_ref": evidence_payload_ref,
-                "evidence_payload_hash": evidence_payload_hash,
-                "methods_evidence": methods_evidence,
+                "evidence_payload_ref": evidence_context["evidence_payload_ref"],
+                "evidence_payload_hash": evidence_context["evidence_payload_hash"],
+                "methods_evidence": evidence_context["methods_evidence"],
             }
         )
         if task != "recommend_initial":
-            payload["retry_evidence"] = _build_retry_evidence(
-                prompt_profile,
-                task=task,
-            )
+            payload["retry_evidence"] = _build_retry_evidence(prompt_profile, task=task)
+    return payload
 
-    # 6. Close the structured hifiasm Methods boundary before hashing or publishing.
-    # Numeric retrieval is shared by hifiasm-family methods, but the response
-    # contract remains an independent method-level concern.
+
+def _close_methods_payload_boundary(
+    *,
+    payload: dict[str, Any],
+    task: ParameterPromptTask,
+    initial_prompt: dict[str, Any],
+    catalog_subset: dict[str, Any],
+    readonly_params: dict[str, Any],
+    adjustable_params: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
     uses_methods_contract = uses_hifiasm_methods_contract(payload)
-    if uses_methods_contract:
-        authoritative_catalog_snapshot = {
-            "catalog_subset": deepcopy(catalog_subset),
-            "readonly_params": deepcopy(readonly_params),
-            "adjustable_params": deepcopy(adjustable_params),
-        }
-        if task == "recommend_initial":
-            payload = sanitize_hifiasm_methods_prompt_payload(
-                payload,
-                authoritative_catalog_snapshot=authoritative_catalog_snapshot,
-            )
-        else:
-            payload = rehydrate_hifiasm_methods_retry_prompt_payload(
-                initial_prompt,
-                payload,
-                authoritative_catalog_snapshot=authoritative_catalog_snapshot,
-            )
+    if not uses_methods_contract:
+        return payload, False
 
-    # 7. Generate prompt payload reference (for audit)
-    # CANONICAL HASH SEMANTICS: We compute the hash by excluding self-referential
-    # fields (prompt_payload_ref, prompt_payload_hash) to avoid circular dependencies.
-    # This means prompt_payload_hash is NOT a hash of the complete file content,
-    # but rather a "canonical hash" of the payload's semantic content for deduplication
-    # and verification. Future ledger validation code must exclude these fields before
-    # comparing hashes.
-    payload_for_hash = {k: v for k, v in payload.items() if k not in ("prompt_payload_ref", "prompt_payload_hash")}
-    payload_hash = generate_payload_ref(payload_for_hash)
-
-    # Bind the final ref/hash before preparing any publication. Task 4's registry
-    # proof covers these exact final values even though the canonical hash excludes
-    # the two self-referential fields.
-    if write_artifacts:
-        prompt_payload_ref = _artifact_path_ref(
-            session_component,
-            attempt_number,
-            "prompt_payload.json",
+    authoritative_catalog_snapshot = {
+        "catalog_subset": deepcopy(catalog_subset),
+        "readonly_params": deepcopy(readonly_params),
+        "adjustable_params": deepcopy(adjustable_params),
+    }
+    if task == "recommend_initial":
+        payload = sanitize_hifiasm_methods_prompt_payload(
+            payload,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
     else:
-        prompt_payload_ref = payload_hash
+        payload = rehydrate_hifiasm_methods_retry_prompt_payload(
+            initial_prompt,
+            payload,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
+        )
+    return payload, True
 
+
+def _seal_and_publish_prompt_payload(
+    *,
+    payload: dict[str, Any],
+    uses_methods_contract: bool,
+    write_artifacts: bool,
+    session_component: str | None,
+    attempt_number: int | None,
+    artifact_plan: list[tuple[bytes, ArtifactRef, str]],
+    data_dir: Path | None,
+) -> dict[str, Any]:
+    # Canonical hash semantics intentionally exclude the two self-referential
+    # fields. This is a semantic-content hash, not the serialized file hash.
+    payload_for_hash = {
+        key: value
+        for key, value in payload.items()
+        if key not in ("prompt_payload_ref", "prompt_payload_hash")
+    }
+    payload_hash = generate_payload_ref(payload_for_hash)
+    prompt_payload_ref = (
+        _artifact_path_ref(session_component, attempt_number, "prompt_payload.json")
+        if write_artifacts
+        else payload_hash
+    )
     if uses_methods_contract:
         payload = _seal_attested_hifiasm_methods_prompt_payload(
             payload,
@@ -422,7 +583,6 @@ def build_prompt_payload(
                 filename=filename,
                 data_dir=data_dir,
             )
-
     return payload
 
 
