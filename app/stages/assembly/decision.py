@@ -198,7 +198,6 @@ def _default_parameter_recommendation(
                 "basis": basis,
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "confidence": "weak",
                 "reason": reason,
             }
             if has_previous:
@@ -219,4 +218,4 @@ def _default_parameter_recommendation(
             },
             prompt_payload,
         )
-    return {"params": {}, "reasoning": reason, "confidence": 0.0}
+    return {"params": {}, "reasoning": reason}

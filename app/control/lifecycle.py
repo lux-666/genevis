@@ -104,11 +104,18 @@ def inspect_session(
     )
     latest_operator_report_payload = _read_json_artifact(latest_operator_report)
 
+    report_supervision_state = (
+        latest_operator_report_payload.get("supervision_state")
+        if isinstance(latest_operator_report_payload, dict)
+        else None
+    )
     supervision_state = "unknown"
     if latest_unresolved_review_request:
         supervision_state = "blocked_human"
     elif latest_final_report or latest_function_bundle:
         supervision_state = "completed"
+    elif report_supervision_state in {"blocked_human", "failed_terminal"}:
+        supervision_state = str(report_supervision_state)
     elif latest_failed_report:
         supervision_state = "failed_terminal"
     elif latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_decision":
@@ -120,12 +127,38 @@ def inspect_session(
     durable_available = db_path.exists()
     checkpoint_persistence = "sqlite" if durable_available else "memory_only"
 
-    decision_requirements = _decision_requirements_from_artifact(latest_request_artifact) if latest_unresolved_review_request else None
+    decision_requirements = (
+        _decision_requirements_from_artifact(latest_request_artifact)
+        if latest_unresolved_review_request
+        else None
+    )
+    report_interrupt = (
+        latest_operator_report_payload.get("active_interrupt")
+        if isinstance(latest_operator_report_payload, dict)
+        else None
+    )
+    if (
+        decision_requirements is None
+        and supervision_state == "blocked_human"
+        and isinstance(report_interrupt, dict)
+    ):
+        decision_requirements = _decision_requirements(report_interrupt)
 
     summary: dict[str, Any] = {
         "session_id": session_id,
         "session": session,
+        "current_stage": (
+            latest_operator_report_payload.get("current_stage")
+            if isinstance(latest_operator_report_payload, dict)
+            else None
+        ),
         "supervision_state": supervision_state,
+        "active_interrupt": report_interrupt,
+        "route_trace": (
+            list(latest_operator_report_payload.get("route_trace_tail") or [])
+            if isinstance(latest_operator_report_payload, dict)
+            else []
+        ),
         "checkpoint_persistence": checkpoint_persistence,
         "durable_resume_available": durable_available,
         "ledger_event_count": len(events),

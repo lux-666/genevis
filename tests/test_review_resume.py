@@ -20,6 +20,7 @@ from app.control.lifecycle import (
     resume_review_state,
 )
 from app.review.base import ResumeReviewRequest, load_resume_review_request
+from app.reports.review_report import write_operator_report
 from app.schemas.artifacts import ArtifactMeta
 
 
@@ -671,6 +672,35 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertEqual(summary["supervision_state"], "blocked_human")
         self.assertEqual(summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding")
+
+    def test_inspect_session_recovers_blocked_state_from_operator_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "operator-report-only"
+            interrupt = {
+                "stage": "assembly",
+                "gate_id": "route_selection",
+                "decisions_allowed": ["select_ont", "stop_human_review"],
+                "reason": "assembly_route_insufficient_data",
+            }
+            write_operator_report(
+                data_dir,
+                session_id,
+                {
+                    "current_stage": "assembly",
+                    "supervision_state": "blocked_human",
+                    "active_interrupt": interrupt,
+                    "route_trace": ["inventory_stage", "read_qc_stage"],
+                },
+            )
+
+            summary = inspect_session(session_id, data_dir)
+
+            self.assertEqual(summary["supervision_state"], "blocked_human")
+            self.assertEqual(summary["current_stage"], "assembly")
+            self.assertEqual(summary["route_trace"], ["inventory_stage", "read_qc_stage"])
+            self.assertEqual(summary["decision_requirements"]["stage"], "assembly")
+            self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
 
     def test_inspect_session_reports_durable_timeout_status(self):
         state = _assembly_blocked_state()

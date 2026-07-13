@@ -6,7 +6,7 @@
 - supported_methods: hifiasm, hifiasm_ont
 - parameter_model: L0/L1/L2
 - primary_inputs: method catalog, read_qc, genome_survey, selected evidence cases, hard validation rules
-- output_contract: JSON with params, reasoning, confidence, selected_case_ids, omitted_parameters, uncertainty_notes
+- output_contract: JSON with params, reasoning, selected_case_ids, omitted_parameters, uncertainty_notes
 
 ## Responsibility
 

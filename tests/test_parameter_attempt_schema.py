@@ -55,7 +55,6 @@ def test_explicit_schema_version_is_preserved() -> None:
         ("failure_class", ""),
         ("attempt_id", -1),
         ("retrieval_eligible_case_count", -1),
-        ("confidence", 1.01),
     ],
 )
 def test_obvious_scalar_contracts_reject_invalid_values(field: str, value: object) -> None:

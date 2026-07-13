@@ -315,6 +315,8 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     function_out = _function_output(state)
     if function_out.get("status") != "provenance_validated":
         return {}
+    if function_out.get("execution_mode") != "local":
+        return _update_function_output(state, {"status": "diamond_completed"})
 
     db_provenance = function_out.get("database_provenance") or []
     db_path = None
@@ -325,6 +327,10 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     if not db_path:
         return _update_function_output(state, {"status": "diamond_completed"})
 
+    database_source = Path(str(db_path)).expanduser()
+    if not database_source.is_file():
+        return _fail_update(state, f"diamond database source not found: {database_source}")
+
     proteins_ref = function_out.get("proteins_fasta_ref")
     if not proteins_ref:
         return _fail_update(state, "diamond requires proteins_fasta_ref")
@@ -332,7 +338,8 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     working_dir = data_dir / "work" / "function_annotation" / session_id / "diamond"
-    dmnd_index = working_dir / "reference.dmnd"
+    database_is_index = database_source.suffix.lower() == ".dmnd"
+    dmnd_index = database_source if database_is_index else working_dir / "reference.dmnd"
 
     cfg = FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD]
     artifact_dir = data_dir / "artifacts" / "function_annotation" / session_id / cfg["suffix"]
@@ -344,9 +351,12 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     except (TypeError, ValueError):
         threads = 4
 
+    setup_command = "" if database_is_index else (
+        f"diamond makedb --in {shlex.quote(str(database_source))} -d {shlex.quote(str(dmnd_index))}\n"
+    )
     script = (
         "set -e\n"
-        f"diamond makedb --in {shlex.quote(str(db_path))} -d {shlex.quote(str(dmnd_index))}\n"
+        f"{setup_command}"
         f"diamond blastp --db {shlex.quote(str(dmnd_index))} --query {shlex.quote(str(proteins_ref))}"
         f" --outfmt 6 --threads {threads} --out {shlex.quote(str(output_tsv))}\n"
         f"test -f {shlex.quote(str(output_tsv))}\n"
@@ -357,7 +367,13 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
         method_name=DIAMOND_METHOD,
         cfg=cfg,
         script_body=script,
-        extra_metadata={"database_source_ref": db_path, "dmnd_index": str(dmnd_index), "threads": threads},
+        extra_metadata={
+            "database_source_ref": str(database_source),
+            "database_index_ref": str(dmnd_index),
+            "database_source_kind": "diamond_index" if database_is_index else "sequence_fasta",
+            "dmnd_index": str(dmnd_index),
+            "threads": threads,
+        },
     )
 
 

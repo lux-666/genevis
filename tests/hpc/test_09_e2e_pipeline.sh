@@ -60,6 +60,26 @@ else
     info "No Hi-C data provided (HIC_R1/HIC_R2 not set), Hi-C stage will be skipped"
 fi
 
+T2T_AVAILABLE=false
+if [[ "${PLATFORM:-}" == "ont" || "${PLATFORM:-}" == "cycloneseq" ]]; then
+    read -r -a _test09_long_reads <<< "${LONG_READS:-}"
+    if (( ${#_test09_long_reads[@]} > 0 )); then
+        T2T_AVAILABLE=true
+        for read_path in "${_test09_long_reads[@]}"; do
+            if [[ ! -s "$read_path" ]]; then
+                T2T_AVAILABLE=false
+                break
+            fi
+        done
+    fi
+fi
+
+if [[ "$HIC_AVAILABLE" != true || "$T2T_AVAILABLE" != true ]]; then
+    info "[SKIP] Full E2E requires configured Hi-C reads and ONT/CycloneSeq reads for T2T."
+    info "Use Test 06 or Test 07 for an independently configured stage smoke."
+    exit 77
+fi
+
 # ---- Session setup ----
 SID="hpc-test09-e2e-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test09_manifest.yaml"
@@ -67,12 +87,16 @@ mkdir -p "${TEST_DATA_ROOT}"
 
 # Conditionally add Hi-C reads to manifest
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
     if [[ "$HIC_AVAILABLE" == true ]]; then
         write_manifest "$MANIFEST" "$SID" \
             "assembly_fasta_registered:${PREV_ASM}:unknown:unknown" \
+            "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
             "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
     else
-        write_manifest "$MANIFEST" "$SID" "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
+        write_manifest "$MANIFEST" "$SID" \
+            "assembly_fasta_registered:${PREV_ASM}:unknown:unknown" \
+            "raw_long_reads:${LR_PATHS}:${PLATFORM}:single"
     fi
 else
     LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
@@ -441,7 +465,7 @@ fi
 section "Phase 5: TUI Interaction Points Summary"
 
 info "TUI blocking points in the pipeline:"
-info "  1. Assembly route selection (if confidence < threshold)"
+info "  1. Assembly route selection (when platform/coverage evidence is insufficient)"
 info "  2. Assembly candidate selection (if multiple candidates)"
 info "  3. Assembly review human gate (always blocks unless auto policy)"
 info "  4. Hi-C scaffolding (blocks if execution_mode != local)"
@@ -572,26 +596,12 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         fi
     fi
 
-    # Verify Hi-C assets in registry
+    # The asset registry records declared inputs. Derived outputs are verified
+    # through the stage artifact directory and ledger above.
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
         info "Hi-C asset registry check deferred until after assembly_review accept"
-    elif [[ -f "$REGISTRY" ]]; then
-        cd "${PROJECT_ROOT}"
-        python3 <<EOPYTHON
-import json
-from pathlib import Path
-
-reg = json.loads(Path("${REGISTRY}").read_text())
-assets = reg.get('assets', [])
-
-hic_assets = [a for a in assets if a.get('stage') == 'hic_scaffolding']
-if hic_assets:
-    print(f"✓ Hi-C assets registered: {len(hic_assets)} entries")
-    for asset in hic_assets:
-        print(f"  - {asset.get('asset_type')}: {asset.get('path')}")
-else:
-    print("No Hi-C assets registered yet")
-EOPYTHON
+    else
+        info "Derived Hi-C outputs are tracked in artifact records, not the input asset registry"
     fi
 else
     info "Hi-C data not available, Phase 8 skipped"
@@ -651,34 +661,44 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         fi
     fi
 
-    # Verify T2T assets in registry
+    # The asset registry records declared inputs. Derived outputs are verified
+    # through the stage artifact directory and ledger above.
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
         info "T2T asset registry check deferred until after assembly_review accept"
-    elif [[ -f "$REGISTRY" ]]; then
-        cd "${PROJECT_ROOT}"
-        python3 <<EOPYTHON
-import json
-from pathlib import Path
-
-reg = json.loads(Path("${REGISTRY}").read_text())
-assets = reg.get('assets', [])
-
-t2t_assets = [a for a in assets if a.get('stage') == 't2t']
-if t2t_assets:
-    print(f"✓ T2T assets registered: {len(t2t_assets)} entries")
-    for asset in t2t_assets:
-        print(f"  - {asset.get('asset_type')}: {asset.get('path')}")
-else:
-    print("No T2T assets registered yet")
-EOPYTHON
+    else
+        info "Derived T2T outputs are tracked in artifact records, not the input asset registry"
     fi
 else
     info "Hi-C data not available, Phase 9 (T2T) skipped"
 fi
 
 # ============================================================
-# Summary
+# Completion gate: a full E2E must finish every requested stage. Human gates
+# and missing downstream artifacts are explicit SKIP/FAIL outcomes, never PASS.
 # ============================================================
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline" || true
+    exit 1
+fi
+if [[ "$SUPERVISION_STATE" == "blocked_human" ]]; then
+    info "[SKIP] E2E session is durably waiting at ${CURRENT_STAGE}; it has not completed."
+    info "Resume the same session with an explicit review decision, then rerun the completion assertions."
+    exit 77
+fi
+if [[ "$SUPERVISION_STATE" != "completed" ]]; then
+    fail "E2E session did not reach completed state (got ${SUPERVISION_STATE})"
+fi
+if [[ "$HIC_RAN" != true ]]; then
+    fail "Full E2E completed without verifiable Hi-C work or artifacts"
+fi
+if [[ "$T2T_RAN" != true ]]; then
+    fail "Full E2E completed without verifiable T2T work or artifacts"
+fi
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline" || true
+    exit 1
+fi
+
 summary "Test 09: End-to-End Pipeline"
 
 info ""

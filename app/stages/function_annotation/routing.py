@@ -25,7 +25,7 @@ def route_after_provenance_validation(state: TopLevelState) -> str:
     if status == "failed":
         return "fail"
     if status == "provenance_validated":
-        return "freeze_diamond"
+        return "freeze_diamond" if _output(state).get("execution_mode") == "local" else "commit"
     if status == "diamond_frozen":
         return "run_diamond"
     if status == "diamond_ran":

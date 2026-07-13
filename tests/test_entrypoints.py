@@ -2110,10 +2110,12 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
         gene_models = root / "gene_models.gff3"
         proteins = root / "predicted_proteins.fasta"
         transcripts = root / "transcripts.fa"
+        database_fasta = root / "uniprot.fasta"
         assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         gene_models.write_text("##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n", encoding="utf-8")
         proteins.write_text(">prot1\nMACGT\n", encoding="utf-8")
         transcripts.write_text(">tx1\nACGTACGT\n", encoding="utf-8")
+        database_fasta.write_text(">sp|P12345\nMACGT\n", encoding="utf-8")
         manifest = root / "manifest.yaml"
         manifest.write_text(
             "\n".join(
@@ -2144,7 +2146,7 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                         "database_name": "UniProt",
                         "database_version": "2026_02",
                         "snapshot_date": "2026-05-25",
-                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "database_source_ref": str(database_fasta),
                         "descriptor_version": "diamond.yaml",
                         "input_proteins_ref": str(proteins),
                     }
@@ -2271,16 +2273,37 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             )
 
             decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
-            resume_code, resume_stdout, resume_stderr = _capture_cli(
-                _run_resume,
-                argparse.Namespace(
-                    session_id=session_id,
-                    decision_file=str(decision),
-                    data_dir=str(data_dir),
-                    checkpointer="sqlite",
-                    max_blocked_seconds=None,
-                ),
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_diamond = fake_bin / "diamond"
+            fake_diamond.write_text(
+                "#!/bin/sh\n"
+                "out=''\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = '--out' ]; then out=\"$2\"; shift 2; continue; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ -n \"$out\" ]; then\n"
+                "  printf 'prot1\\tsp|P12345\\t100.0\\t5\\t0\\t0\\t1\\t5\\t1\\t5\\t0.0\\t10\\n' > \"$out\"\n"
+                "fi\n",
+                encoding="utf-8",
             )
+            fake_diamond.chmod(0o755)
+            fake_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            with patch(
+                "app.stages.function_annotation.nodes.resolve_method_env",
+                return_value=(None, [], None),
+            ), patch.dict(os.environ, {"PATH": fake_path}):
+                resume_code, resume_stdout, resume_stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id=session_id,
+                        decision_file=str(decision),
+                        data_dir=str(data_dir),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
 
             self.assertEqual(resume_code, 0, resume_stderr)
             self.assertIn("current_stage: done", resume_stdout)
@@ -2296,7 +2319,10 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
             self.assertEqual(bundle["proteins_fasta_ref"], str(proteins_file))
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
-            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/uniprot/2026_02.dmnd")
+            self.assertEqual(
+                bundle["database_provenance"][0]["database_source_ref"],
+                str(root / "uniprot.fasta"),
+            )
 
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("function_annotation.plan", artifact_types)

@@ -263,7 +263,7 @@ exit 127
         pass "Juicer helper scripts available"
     else
         fail "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
-        info "Install/expose Java and set HIC_JUICER_SCRIPTS_DIR to the Juicer root containing common/chimeric_blacklist.awk."
+        info "Use the exact prerequisite error printed above; only install or configure the item it names."
         summary "Test 06: Hi-C Scaffolding (runtime preflight failed)" || true
         exit 1
     fi

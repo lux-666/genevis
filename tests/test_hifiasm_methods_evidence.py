@@ -245,7 +245,6 @@ def _response() -> dict:
                     "basis": "case",
                     "supporting_case_ids": ["case_a"],
                     "supporting_span_ids": ["methods.case_a"],
-                    "confidence": "strong",
                     "reason": "The accepted case directly supports less aggressive purging.",
                 },
                 "kmer_length": {
@@ -254,7 +253,6 @@ def _response() -> dict:
                     "basis": "catalog_default",
                     "supporting_case_ids": [],
                     "supporting_span_ids": [],
-                    "confidence": "weak",
                     "reason": "No visible evidence supports changing the default.",
                 },
             }
@@ -1124,7 +1122,6 @@ def test_no_case_response_can_use_profile_fact_and_catalog_default():
                     "fact_paths": ["genome_survey.heterozygosity"],
                     "supporting_case_ids": [],
                     "supporting_span_ids": [],
-                    "confidence": "medium",
                     "reason": "Use the readonly heterozygosity fact conservatively.",
                 },
                 "kmer_length": {
@@ -1133,7 +1130,6 @@ def test_no_case_response_can_use_profile_fact_and_catalog_default():
                     "basis": "catalog_default",
                     "supporting_case_ids": [],
                     "supporting_span_ids": [],
-                    "confidence": "weak",
                     "reason": "Keep the catalog default without case evidence.",
                 },
             }
@@ -1187,7 +1183,6 @@ def test_decision_boundary_uses_the_existing_canonical_prompt_without_rebuilding
             "basis": "catalog_default",
             "supporting_case_ids": [],
             "supporting_span_ids": [],
-            "confidence": "weak",
         }
     )
 
@@ -1332,7 +1327,7 @@ def test_explicit_legacy_contract_remains_compatible_and_stays_out_of_model_json
     captured = {}
 
     class _Response:
-        content = json.dumps({"params": {}, "reasoning": "legacy", "confidence": 0.5})
+        content = json.dumps({"params": {}, "reasoning": "legacy"})
 
     class _Model:
         def invoke(self, messages):

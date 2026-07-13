@@ -57,6 +57,7 @@ def _provenance_state(tmpdir: str, **func_updates):
     state["stage_outputs"] = {
         "function_annotation": {
             "status": "provenance_validated",
+            "execution_mode": "local",
             "proteins_fasta_ref": proteins_ref,
             "expected_outputs": {"gene_function_tsv": str(Path(tmpdir) / "gene_function.tsv")},
             "database_provenance": [
@@ -78,6 +79,16 @@ def _provenance_state(tmpdir: str, **func_updates):
 
 
 class DiamondFreezeTests(unittest.TestCase):
+    def test_freeze_skips_execution_when_local_execution_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _provenance_state(tmpdir, execution_mode="planned")
+
+            result = freeze_diamond_attempt(state)
+
+            func_out = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(func_out["status"], "diamond_completed")
+            self.assertNotIn("diamond_frozen_attempt", func_out)
+
     def test_freeze_requires_provenance_validated_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = _provenance_state(tmpdir, status="resolved")
@@ -124,6 +135,38 @@ class DiamondFreezeTests(unittest.TestCase):
             self.assertEqual(attempt.stage, "function_annotation")
             self.assertEqual(attempt.method_name, "function_annotation.candidate.diamond")
             self.assertIn("swissprot.fasta", script)
+
+    def test_freeze_uses_prebuilt_diamond_index_without_rebuilding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index = Path(tmpdir) / "swissprot.dmnd"
+            index.write_bytes(b"test-index")
+            state = _provenance_state(tmpdir)
+            state["stage_outputs"]["function_annotation"]["database_provenance"][0][
+                "database_source_ref"
+            ] = str(index)
+
+            result = freeze_diamond_attempt(state)
+
+            func_out = result["stage_outputs"]["function_annotation"]
+            attempt = FrozenAttemptSpec.model_validate(func_out["diamond_frozen_attempt"])
+            script = attempt.script_path.read_text(encoding="utf-8")
+            self.assertNotIn("diamond makedb", script)
+            self.assertIn(f"diamond blastp --db {index}", script)
+            self.assertEqual(attempt.metadata["database_source_kind"], "diamond_index")
+
+    def test_freeze_reports_missing_database_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _provenance_state(tmpdir)
+            missing = Path(tmpdir) / "missing.dmnd"
+            state["stage_outputs"]["function_annotation"]["database_provenance"][0][
+                "database_source_ref"
+            ] = str(missing)
+
+            result = freeze_diamond_attempt(state)
+
+            func_out = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(func_out["status"], "failed")
+            self.assertIn("database source not found", func_out["reason"])
 
     def test_freeze_creates_working_directory_and_script(self):
         with tempfile.TemporaryDirectory() as tmpdir:

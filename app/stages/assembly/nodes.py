@@ -1036,7 +1036,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         recommendation_summary=parsed.get("summary"),
         validation=validation,
         reasoning=parsed.get("reasoning"),
-        confidence=parsed.get("confidence"),
         previous_attempt_id=previous_attempt.get("attempt_id") if previous_attempt else None,
         failure_signature=(
             dict((prompt_payload.get("retry_evidence") or {}))
@@ -2067,7 +2066,7 @@ def _parameter_recommender_system_prompt(
         "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts. "
         "Evidence cases are optional, not a prerequisite. If no compatible case is available, "
         "continue from readonly L1 facts, SKILL heuristics, retry context, and catalog defaults. "
-        "Prefer conservative changes under weak evidence. When parameter_evidence is returned, "
+        "Prefer conservative changes when evidence is limited. When parameter_evidence is returned, "
         "use only the allowed evidence bases in recommendation_policy and cite case/span IDs only "
         "for basis=case.\n\n"
         + str(prompt_payload.get("skill_instructions") or "")
@@ -2082,11 +2081,11 @@ def _parameter_recommender_system_prompt(
         "recommendation.adjustable_params must contain exactly one decision for every catalog L2 "
         "parameter. Each decision must "
         "choose action set, keep_previous, keep_default, or omit; on retries use keep_previous for "
-        "unchanged prior values and never reset them with keep_default; include confidence strong, medium, or weak; include "
-        "a non-empty reason; and declare at least one evidence basis. basis=case requires selected, "
+        "unchanged prior values and never reset them with keep_default; include a non-empty reason; "
+        "and declare at least one evidence basis. basis=case requires selected, "
         "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts or "
         "catalog defaults. Never invent cases, spans, parameters, effect areas, or profile facts. "
-        "Weak or absent case evidence is not a hard blocker; prefer conservative defaults. No "
+        "Limited or absent case evidence is not a hard blocker; prefer conservative defaults. No "
         "structured prompt-visible heuristic registry is available, so do not use skill_heuristic "
         "or heuristic_labels. retry_signals must be visible structured retry_evidence signal IDs or "
         "paths; if none are present, do not use retry_failure as an evidence basis.\n\n"

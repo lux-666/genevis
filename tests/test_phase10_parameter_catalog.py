@@ -117,7 +117,6 @@ def _complete_hifiasm_methods_response(*, purge_level: int = 1) -> dict:
                 "heuristic_labels": ["conservative HiFi purging"],
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "confidence": "weak",
                 "reason": "Use conservative SKILL guidance for purging.",
             }
         elif spec.default is not None:
@@ -127,7 +126,6 @@ def _complete_hifiasm_methods_response(*, purge_level: int = 1) -> dict:
                 "basis": "catalog_default",
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "confidence": "weak",
                 "reason": "No specific evidence supports changing the catalog default.",
             }
         else:
@@ -136,7 +134,6 @@ def _complete_hifiasm_methods_response(*, purge_level: int = 1) -> dict:
                 "basis": "catalog_default",
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "confidence": "weak",
                 "reason": "No specific evidence supports rendering this optional parameter.",
             }
     return {
@@ -160,7 +157,6 @@ def _complete_hifiasm_ont_legacy_response(**overrides: int | bool | str) -> dict
     return {
         "params": dict(overrides),
         "reasoning": "Bounded ONT parameters without claimed paper support.",
-        "confidence": 0.8,
         "selected_case_ids": [],
         "omitted_parameters": sorted(l2_parameters - set(overrides)),
         "uncertainty_notes": [],
@@ -1180,7 +1176,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             payload = {
                 "params": {"purge_level": 1},
                 "reasoning": "Use the pre-cutover compatibility backend conservatively.",
-                "confidence": 0.8,
                 "selected_case_ids": [],
                 "omitted_parameters": [],
                 "uncertainty_notes": [],
@@ -1305,7 +1300,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
     def test_invalid_level_recommendation_stops_before_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            payload = {"params": {"threads": 64, "purge_level": 1}, "reasoning": "bad", "confidence": 0.2}
+            payload = {"params": {"threads": 64, "purge_level": 1}, "reasoning": "bad"}
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
                 result = recommend_assembly_parameters(state)
 

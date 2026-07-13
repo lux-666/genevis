@@ -270,11 +270,15 @@ fi
 # ---- Test gene-agent review --dry-run ----
 info "Testing review dry-run"
 cd "${PROJECT_ROOT}"
-GA review \
+if printf '1\n\n' | python3 -m app.entrypoints.run review \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --dry-run \
-    2>&1 && pass "review --dry-run succeeded" || warn "review --dry-run returned non-zero (may need different state)"
+    2>&1; then
+    pass "review --dry-run accepted a deterministic test decision"
+else
+    fail "review --dry-run failed for the blocked assembly_review gate"
+fi
 
 info "Manual TUI smoke step: run 'gene-agent tui --resume-session ${SID} --data-dir ${TEST_DATA_ROOT}', drive the blocked review gate, and record the operator decision."
 

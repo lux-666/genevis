@@ -184,7 +184,6 @@ class ParameterAttempt(BaseModel):
     argv: list[str] = Field(default_factory=list)
     validation: dict[str, Any] = Field(default_factory=dict)
     reasoning: str | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     previous_attempt_id: int | None = Field(default=None, ge=0)
     failure_signature: dict[str, Any] | None = None
     execution_result: dict[str, Any] | None = None

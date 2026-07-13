@@ -68,11 +68,14 @@ else
 fi
 
 # ---- Test 3: inspect --json gives structured output ----
-INSPECT_JSON=$(GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json 2>&1 || true)
+INSPECT_JSON=$(python3 -m app.entrypoints.run inspect \
+    --session-id "$SID" \
+    --data-dir "$TEST_DATA_ROOT" \
+    --json 2>&1 || true)
 if echo "$INSPECT_JSON" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
     pass "inspect --json produces valid JSON"
 else
-    warn "inspect --json output not valid JSON (may be expected if inspect doesn't support --json yet)"
+    fail "inspect --json output is not valid JSON"
 fi
 
 # ---- Test 4: Check sqlite checkpoint was created ----

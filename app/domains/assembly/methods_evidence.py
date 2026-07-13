@@ -39,7 +39,6 @@ _PROMPT_SCHEMA_VERSION_FIELD = "hifiasm_methods_prompt_schema_version"
 
 _ALLOWED_RELEVANCE = {"strong", "medium", "weak", "not_relevant"}
 _ALLOWED_ACTIONS = {"set", "keep_previous", "keep_default", "omit"}
-_ALLOWED_CONFIDENCE = {"strong", "medium", "weak"}
 _ALLOWED_EVIDENCE_BASES = {
     "case",
     "profile_fact",
@@ -1147,9 +1146,12 @@ def normalize_hifiasm_methods_response(
 
     summary = _nonempty_string(response.get("summary"), field="summary")
     normalized = deepcopy(response)
+    normalized_recommendation = deepcopy(recommendation)
+    normalized_recommendation["adjustable_params"] = deepcopy(parameter_decisions)
     normalized.update(
         {
             "case_assessments": assessments,
+            "recommendation": normalized_recommendation,
             "parameter_decisions": parameter_decisions,
             "params": params,
             "parameter_evidence": parameter_evidence,
@@ -1259,9 +1261,6 @@ def _validate_parameter_decision(
         raise ValueError(f"parameter {parameter!r} has no explicit catalog default to keep")
     if action == "omit" and parameter_spec.get("default") is not None:
         raise ValueError(f"parameter {parameter!r} has an explicit catalog default; use keep_default")
-    confidence = raw_decision.get("confidence")
-    if confidence not in _ALLOWED_CONFIDENCE:
-        raise ValueError(f"parameter confidence must be one of {sorted(_ALLOWED_CONFIDENCE)}")
     reason = _nonempty_string(raw_decision.get("reason"), field=f"{parameter}.reason")
 
     raw_bases = raw_decision.get("bases", raw_decision.get("basis"))
@@ -1401,7 +1400,6 @@ def _validate_parameter_decision(
             )
 
     decision = {
-        **deepcopy(raw_decision),
         "action": action,
         "bases": list(dict.fromkeys(bases)),
         "supporting_case_ids": supporting_case_ids,
@@ -1409,9 +1407,10 @@ def _validate_parameter_decision(
         "fact_paths": fact_paths,
         "heuristic_labels": heuristic_labels,
         "retry_signals": retry_signals,
-        "confidence": confidence,
         "reason": reason,
     }
+    if "value" in raw_decision:
+        decision["value"] = deepcopy(raw_decision["value"])
     evidence = {
         "bases": decision["bases"],
         "case_ids": supporting_case_ids,
