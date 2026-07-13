@@ -323,35 +323,42 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         _validate_retry_evidence(retry_evidence)
 
 
-def _validate_authoritative_l2_projection(
+def _validate_authoritative_catalog_snapshot(
     prompt_payload: dict[str, Any],
     *,
-    authoritative_l2_projection: dict[str, Any],
+    authoritative_catalog_snapshot: dict[str, Any],
 ) -> None:
-    """Bind both prompt catalog projections to the caller-owned current catalog."""
+    """Bind every prompt catalog projection to the caller-owned current catalog."""
 
-    if not isinstance(authoritative_l2_projection, dict) or any(
-        not isinstance(parameter, str)
-        or not parameter
-        or not isinstance(spec, dict)
-        for parameter, spec in authoritative_l2_projection.items()
-    ):
-        raise ValueError("authoritative L2 projection must contain canonical parameter specs")
-    adjustable = prompt_payload.get("adjustable_params")
-    catalog_subset = prompt_payload.get("catalog_subset")
-    subset_adjustable = (
-        catalog_subset.get("adjustable_params")
-        if isinstance(catalog_subset, dict)
-        else None
-    )
-    if not isinstance(adjustable, dict) or not isinstance(subset_adjustable, dict):
-        raise ValueError("hifiasm prompt requires both adjustable parameter projections")
-    if adjustable != authoritative_l2_projection:
-        raise ValueError("top-level adjustable_params differ from authoritative L2 catalog projection")
-    if subset_adjustable != authoritative_l2_projection:
-        raise ValueError(
-            "catalog_subset.adjustable_params differ from authoritative L2 catalog projection"
+    required_fields = ("catalog_subset", "readonly_params", "adjustable_params")
+    if not isinstance(authoritative_catalog_snapshot, dict) or set(
+        authoritative_catalog_snapshot
+    ) != set(required_fields):
+        raise ValueError("authoritative catalog snapshot must use the closed catalog structure")
+    readonly = authoritative_catalog_snapshot.get("readonly_params")
+    adjustable = authoritative_catalog_snapshot.get("adjustable_params")
+    subset = authoritative_catalog_snapshot.get("catalog_subset")
+    if (
+        not isinstance(readonly, dict)
+        or not isinstance(adjustable, dict)
+        or not isinstance(subset, dict)
+        or set(subset) != {"readonly_params", "adjustable_params"}
+        or subset.get("readonly_params") != readonly
+        or subset.get("adjustable_params") != adjustable
+        or any(
+            not isinstance(parameter, str)
+            or not parameter
+            or not isinstance(spec, dict)
+            for projection in (readonly, adjustable)
+            for parameter, spec in projection.items()
         )
+    ):
+        raise ValueError("authoritative catalog snapshot contains inconsistent projections")
+    for field in required_fields:
+        if prompt_payload.get(field) != authoritative_catalog_snapshot[field]:
+            raise ValueError(
+                f"{field} differs from the authoritative catalog snapshot"
+            )
 
 
 def _validate_retry_evidence(value: Any) -> None:
@@ -845,7 +852,7 @@ def _build_prompt_sanitizer():
         persisted_initial_prompt: dict[str, Any],
         retry_overlay: dict[str, Any],
         *,
-        authoritative_l2_projection: dict[str, Any],
+        authoritative_catalog_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         """Re-attest a verified JSON attempt-0 prompt for one same-run retry."""
 
@@ -853,20 +860,31 @@ def _build_prompt_sanitizer():
         if persisted_initial_prompt.get("task") != "recommend_initial":
             raise ValueError("retry replay requires the canonical attempt 0 prompt")
         _validate_canonical_hifiasm_methods_prompt_payload(persisted_initial_prompt)
-        _validate_authoritative_l2_projection(
+        _validate_authoritative_catalog_snapshot(
             persisted_initial_prompt,
-            authoritative_l2_projection=authoritative_l2_projection,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
         if retry_overlay.get("task") not in {
             "retry_after_execution_failure",
             "retry_after_review_failure",
         }:
             raise ValueError("retry replay has an unsupported task")
-        _validate_authoritative_l2_projection(
+        _validate_authoritative_catalog_snapshot(
             retry_overlay,
-            authoritative_l2_projection=authoritative_l2_projection,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
+        immutable_catalog_fields = (
+            "catalog_subset",
+            "readonly_params",
+            "adjustable_params",
+        )
+        for field in immutable_catalog_fields:
+            if retry_overlay.get(field) != persisted_initial_prompt.get(field):
+                raise ValueError(
+                    f"retry replay {field} differs from the canonical attempt 0 catalog"
+                )
         inherited_fields = {
+            *immutable_catalog_fields,
             "rules",
             "recommendation_policy",
             "skill_instructions",
@@ -900,24 +918,32 @@ def _build_prompt_sanitizer():
                 continue
             if field in retry_overlay:
                 canonical[field] = deepcopy(retry_overlay[field])
+        initial_profile = persisted_initial_prompt.get("prompt_profile")
+        retry_profile = retry_overlay.get("prompt_profile")
+        if not isinstance(initial_profile, dict) or not isinstance(retry_profile, dict):
+            raise ValueError("retry replay requires initial and retry prompt profiles")
+        canonical["prompt_profile"] = deepcopy(initial_profile)
+        for field in ("previous_attempt", "assembly_review"):
+            if field in retry_profile:
+                canonical["prompt_profile"][field] = deepcopy(retry_profile[field])
         canonical["selected_cases"] = []
         canonical["retry_evidence"] = deepcopy(retry_overlay.get("retry_evidence"))
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
-        _validate_authoritative_l2_projection(
+        _validate_authoritative_catalog_snapshot(
             attested,
-            authoritative_l2_projection=authoritative_l2_projection,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
         return attested
 
     def _sanitize(
         prompt_payload: dict[str, Any],
         *,
-        authoritative_l2_projection: dict[str, Any],
+        authoritative_catalog_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
-        _validate_authoritative_l2_projection(
+        _validate_authoritative_catalog_snapshot(
             prompt_payload,
-            authoritative_l2_projection=authoritative_l2_projection,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
         if _PROMPT_SCHEMA_VERSION_FIELD in prompt_payload:
             _require_attested(prompt_payload)
@@ -928,7 +954,7 @@ def _build_prompt_sanitizer():
         evidence_payload = build_hifiasm_evidence_payload(
             evidence_cases=prompt_payload.get("evidence_cases") or [],
             case_retrieval=raw_retrieval,
-            allowed_parameter_ids=set(authoritative_l2_projection),
+            allowed_parameter_ids=set(authoritative_catalog_snapshot["adjustable_params"]),
         )
         case_retrieval = _project_case_retrieval(
             raw_retrieval,
@@ -963,9 +989,9 @@ def _build_prompt_sanitizer():
             )
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
-        _validate_authoritative_l2_projection(
+        _validate_authoritative_catalog_snapshot(
             attested,
-            authoritative_l2_projection=authoritative_l2_projection,
+            authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
         return attested
 

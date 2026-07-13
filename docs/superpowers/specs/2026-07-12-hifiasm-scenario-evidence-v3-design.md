@@ -1,12 +1,12 @@
 # Hifiasm Paper EvidenceCase v3 Design
 
 **Date:** 2026-07-12
-**Status:** approved for implementation
+**Status:** Implemented historical scope; the production corpus was subsequently expanded to 10 cases
 
 ## 1. Scope
 
-This change turns four curated hifiasm papers into small, reviewable knowledge
-units. Each paper is represented by exactly two files:
+This original scoped change turned four curated hifiasm papers into small,
+reviewable knowledge units. Each paper is represented by exactly two files:
 
 ```text
 cases/hifiasm/papers/<paper-id>/
@@ -164,13 +164,15 @@ The broader assembly method catalog remains four method families:
 
 ## 7. Manifest and curation
 
-The v2 pack manifest lists the four paper shards. The obsolete empty
-`cases/hifiasm/initial.yaml` is deleted. Each new case is `approved`; draft and
-rejected eligibility rules remain unchanged.
+For this original change, the v2 pack manifest listed four paper shards. The
+obsolete empty `cases/hifiasm/initial.yaml` is deleted. Each new case is
+`approved`; draft and rejected eligibility rules remain unchanged. The current
+production manifest contains 10 approved paper shards; Phase 11 task documents
+are authoritative for the completed corpus inventory.
 
 ## 8. Verification
 
-Focused tests cover:
+The original focused tests covered:
 
 - methods-only schema and path validation;
 - rejection of removed v2 fields;
@@ -179,3 +181,6 @@ Focused tests cover:
 - preservation of missing numeric values;
 - loading all four approved paper shards;
 - unchanged attestation, prompt budgets, and artifact/replay provenance.
+
+The completed Phase 11 suite now asserts the exact 10-case production inventory
+and validates every shard through the real loader and prompt projection path.

@@ -1,9 +1,9 @@
 # Phase 11: Hifiasm Initial Evidence And Same-Run Retry
 
 **Phase**: 11
-**Status**: Tasks 2-4 are verified; Task 6 implementation and regression verification pass, while the 10-case MVP corpus remains incomplete (4 approved)
+**Status**: Complete; Tasks 2-4 and Task 6 are implemented, the 10-case MVP corpus is present, and regression verification passes
 **Created**: 2026-07-07
-**Updated**: 2026-07-12
+**Updated**: 2026-07-13
 
 ## Goal
 
@@ -46,7 +46,10 @@ structured EvidenceCase YAML
 ```
 
 The project validates and consumes those inputs. It does not download or parse
-papers. The initial path is:
+papers. These approved paper cases are active production evidence: they are
+ranked and the selected cases are projected into the parameter recommendation
+prompt, so their content can affect the resulting recommendation. Only the
+separate offline evaluation report is observational. The initial path is:
 
 ```text
 manual initial case/Methods pair
@@ -67,8 +70,8 @@ ID. Task 6A adds no maximum distance, minimum coverage, case-count,
 query-count, evaluation-result, recorded-recommendation, scientific-approval,
 non-inferiority, or other activation threshold. The 10-query evaluation target
 is not a gate. Task 6 retains a reduced MVP delivery target of 10 approved
-initial cases; the current approved corpus contains 4, and corpus completion
-still does not gate the production path.
+hifiasm-family initial cases; the current corpus contains all 10, while corpus
+size still does not gate the production path.
 
 ## Same-Run Retry Boundary
 
@@ -123,9 +126,11 @@ The old Task 5 retry database/retrieval/promotion design is not a dependency.
 Phase 11 is complete when the implementation and regression suite confirm that:
 
 - hifiasm initial retrieval preserves Task 3 scoring and fixed top-5 selection;
+- approved paper-derived cases are loaded and consumed as production evidence,
+  rather than treated as an observational-only evaluation corpus;
 - observational evaluation has no activation or forward-progress effect;
-- the MVP evaluation corpus contains 10 approved initial cases, without making
-  corpus size a production activation gate;
+- the MVP production EvidenceCase corpus contains 10 approved hifiasm-family
+  initial cases, without making corpus size a production activation gate;
 - retry uses only the current run's immutable attempt chain and structured
   failure facts;
 - execution and review budgets remain independent;

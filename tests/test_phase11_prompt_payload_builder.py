@@ -1070,11 +1070,12 @@ class TestArtifactWriter:
         assert content2["prompt_profile"]["sample"]["organism"] == "Mus musculus"
 
     @pytest.mark.parametrize(
-        ("retry_task", "tamper_semantic_hash"),
+        ("retry_task", "tamper_semantic_hash", "catalog_drift"),
         [
-            ("retry_after_execution_failure", False),
-            ("retry_after_review_failure", False),
-            ("retry_after_execution_failure", True),
+            ("retry_after_execution_failure", False, False),
+            ("retry_after_review_failure", False, False),
+            ("retry_after_execution_failure", True, False),
+            ("retry_after_execution_failure", False, True),
         ],
     )
     def test_hifiasm_retry_rehydrates_json_attempt_zero_without_registry_state(
@@ -1085,6 +1086,7 @@ class TestArtifactWriter:
         monkeypatch,
         retry_task,
         tamper_semantic_hash,
+        catalog_drift,
     ):
         case = _legal_hifiasm_case(
             "case_replay", quote="Curated Methods evidence.", distance=0.1
@@ -1132,9 +1134,11 @@ class TestArtifactWriter:
             persisted["prompt_payload_hash"] = "0" * 64
             initial_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
         retry_profile = json.loads(json.dumps(sample_full_profile))
+        retry_profile["sample"]["organism"] = "mutated after attempt 0"
         retry_profile["previous_attempt"] = {
-            "execution_result": {"status": "failed", "exit_code": 2},
-            "rendered_parameters": {
+            "execution_status": "failed",
+            "exit_code": 2,
+            "params": {
                 "threads": 16,
                 "kmer_size": 51,
                 "purge_level": 1,
@@ -1144,9 +1148,14 @@ class TestArtifactWriter:
             "failure_mode": "under_purged",
             "busco_duplicate": 0.12,
         }
+        retry_catalog = catalog.model_copy(deep=True)
+        if catalog_drift:
+            retry_catalog.parameters["read_type"] = retry_catalog.parameters[
+                "read_type"
+            ].model_copy(update={"description": "drifted L1 catalog description"})
         retry_kwargs = {
             "method_id": "hifiasm",
-            "catalog": catalog,
+            "catalog": retry_catalog,
             "full_profile": retry_profile,
             "task": retry_task,
             "write_artifacts": True,
@@ -1164,9 +1173,21 @@ class TestArtifactWriter:
             with pytest.raises(ValueError, match="prompt_payload_hash does not match"):
                 build_prompt_payload(**retry_kwargs)
             return
+        if catalog_drift:
+            with pytest.raises(
+                ValueError,
+                match="catalog_subset differs from the authoritative catalog snapshot",
+            ):
+                build_prompt_payload(**retry_kwargs)
+            return
         retry = build_prompt_payload(**retry_kwargs)
 
         assert retry["task"] == retry_task
+        for field in ("sample", "assets", "read_qc", "genome_survey"):
+            assert retry["prompt_profile"][field] == persisted["prompt_profile"][field]
+        assert retry["prompt_profile"]["previous_attempt"]
+        if retry_task == "retry_after_review_failure":
+            assert retry["prompt_profile"]["assembly_review"]
         assert retry["evidence_cases"] == persisted["evidence_cases"]
         assert retry["case_retrieval"] == persisted["case_retrieval"]
         assert retry["methods_evidence"] == persisted["methods_evidence"]
@@ -1507,6 +1528,52 @@ class TestRealCatalogCompatibility:
         assert payload["prompt_profile"]["assets"]["read_type"] == read_type
         assert payload["method_id"] == method_id
 
+
+def test_production_hifiasm_prompt_consumes_ranked_real_paper_evidence(
+    sample_full_profile,
+):
+    """The production pack, selector, top-five, and prompt projection stay connected."""
+    from app.stages.assembly.parameter_catalog import load_parameter_catalog
+
+    pack = load_knowledge_pack("parameter_recommender")
+    approved_papers = {
+        case["case_id"]: case
+        for case in pack["cases"]
+        if case.get("schema_version") == 3
+        and (case.get("source") or {}).get("kind") == "paper"
+        and (case.get("curation") or {}).get("status") == "approved"
+    }
+    assert len(approved_papers) == 10
+
+    payload = build_prompt_payload(
+        method_id="hifiasm",
+        catalog=load_parameter_catalog("hifiasm"),
+        full_profile=sample_full_profile,
+        task="recommend_initial",
+    )
+
+    retrieval = payload["case_retrieval"]
+    prompt_cases = payload["evidence_cases"]
+    prompt_case_ids = [case["case_id"] for case in prompt_cases]
+    assert retrieval["retrieval_backend"] == "hifiasm_numeric"
+    assert len(prompt_case_ids) == 5
+    assert prompt_case_ids == retrieval["candidate_case_ids"]
+    assert prompt_case_ids == retrieval["selected_case_ids"]
+    assert prompt_case_ids == retrieval["evidence_case_ids"]
+    assert set(prompt_case_ids) <= set(approved_papers)
+    assert payload["selected_cases"] == []
+
+    for prompt_case in prompt_cases:
+        source_case = approved_papers[prompt_case["case_id"]]
+        source_quotes = {
+            span["span_id"]: span["quote"] for span in source_case["evidence_spans"]
+        }
+        assert prompt_case["source"]["doi"] == source_case["source"]["doi"]
+        assert prompt_case["source_excerpts"]
+        assert {
+            excerpt["span_id"]: excerpt["quote"]
+            for excerpt in prompt_case["source_excerpts"]
+        } == source_quotes
 
 
 def test_hifiasm_writes_ref_backed_methods_evidence_payload(

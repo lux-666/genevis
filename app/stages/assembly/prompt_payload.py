@@ -367,17 +367,21 @@ def build_prompt_payload(
     # contract remains an independent method-level concern.
     uses_methods_contract = uses_hifiasm_methods_contract(payload)
     if uses_methods_contract:
-        authoritative_l2_projection = deepcopy(adjustable_params)
+        authoritative_catalog_snapshot = {
+            "catalog_subset": deepcopy(catalog_subset),
+            "readonly_params": deepcopy(readonly_params),
+            "adjustable_params": deepcopy(adjustable_params),
+        }
         if task == "recommend_initial":
             payload = sanitize_hifiasm_methods_prompt_payload(
                 payload,
-                authoritative_l2_projection=authoritative_l2_projection,
+                authoritative_catalog_snapshot=authoritative_catalog_snapshot,
             )
         else:
             payload = rehydrate_hifiasm_methods_retry_prompt_payload(
                 initial_prompt,
                 payload,
-                authoritative_l2_projection=authoritative_l2_projection,
+                authoritative_catalog_snapshot=authoritative_catalog_snapshot,
             )
 
     # 7. Generate prompt payload reference (for audit)

@@ -4,6 +4,11 @@ The offline runner compares the legacy initial selector with the hifiasm
 numeric initial retriever on the same version-controlled initial queries. It is
 deterministic, network-free, and observational only.
 
+This describes the runner and its report, not the approved paper knowledge
+base. The paper-derived EvidenceCases are production inputs: when the numeric
+path is enabled, they are ranked, shortlisted, and projected into the parameter
+recommendation prompt. Their evidence can therefore change the recommendation.
+
 The curated fixture uses the EvidenceCase v3 methods-only source contract:
 each case declares a pack-root-relative `methods_path` plus bounded
 `evidence_spans`. It has no `body.md`, `source_documents`, or source-file SHA.
@@ -11,13 +16,15 @@ each case declares a pack-root-relative `methods_path` plus bounded
 attributes available to scoring; the evaluation runner does not turn them into
 a separate discrete-routing layer.
 
-Evaluation is not an activation or forward-progress gate. A report cannot
+Offline evaluation is not an activation or forward-progress gate. A report cannot
 enable or disable `initial_cutover_enabled`, reject a shortlist, stop a
 recommendation, or authorize execution. Corpus size, query count, scores,
 coverage, scientific assessment, recorded recommendations, and other reported
 metrics have no controlling threshold. Phase 11's reduced MVP delivery target
-is 10 approved initial cases (synthetic fixtures excluded), but it is not a
-production activation requirement; neither is the 10-query evaluation target.
+is 10 approved hifiasm-family initial cases (synthetic fixtures excluded), but
+it is not a runtime minimum or activation requirement; production ranks the
+eligible cases actually present, whether their count is below, equal to, or
+above 10. Neither is the 10-query evaluation target a runtime threshold.
 
 ## Run the fixture
 

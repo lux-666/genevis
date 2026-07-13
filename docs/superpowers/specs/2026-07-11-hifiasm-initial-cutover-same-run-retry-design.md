@@ -1,7 +1,7 @@
 # Hifiasm Initial Cutover and Same-Run Retry Design
 
 **Date:** 2026-07-11
-**Status:** Approved design boundary; implementation pending
+**Status:** Implemented; retained as the Phase 11 architectural decision record
 **Phase:** 11
 **Supersedes:** The Task 5/6 design that treats retry as a separately curated evidence-retrieval space
 
@@ -620,7 +620,7 @@ Implementation should follow existing boundaries and avoid new modules unless de
 | `app/domains/assembly/retrieval_query.py` | Keep initial query building; remove retry retrieval-query contracts and projections |
 | `app/domains/assembly/case_selector.py` | Remove retry backend registration/dispatch; declare only the initial hifiasm evidence selector where applicable |
 | `app/domains/assembly/methods_evidence.py` | Keep initial Methods payload validation/budgeting; remove retry-case/candidate-promotion assumptions |
-| `app/domains/assembly/hifiasm_evaluation.py` | Keep optional observational reports; remove cutover permission, minimum corpus/query requirements, pass/fail thresholds, and any ability to block activation or recommendation |
+| `app/domains/assembly/hifiasm_evaluation.py` | Keep optional observational reports; remove runtime cutover permission, corpus/query thresholds, pass/fail thresholds, and any ability to block activation or recommendation |
 | `app/schemas/artifacts.py` | Remove candidate `EvidenceCase` and retry-retrieval-only fields/types; retain or minimally extend the typed attempt chain |
 | `app/stages/assembly/nodes.py` | Keep execution retry at the assembly failure boundary; remove candidate-case emission and retry retrieval; emit execution-specific exhaustion |
 | `app/stages/assembly_review/*` | Own review diagnosis, review counter/limit, typed retry-request construction, and review-specific exhaustion; route the request to assembly, which must not reconstruct review semantics |
@@ -629,7 +629,7 @@ Implementation should follow existing boundaries and avoid new modules unless de
 | `app/review/base.py`, review gate registry, `app/control/lifecycle.py` | Reuse `ReviewPayload`, `ResumeReviewRequest`, `blocked_human`, durable decision artifacts, and resume dispatch; make only the minimal generic extension needed for exact recommendation/attempt/hash binding |
 | `app/stages/assembly/routing.py`, `builder.py` | Preserve distinct execution and review nodes/routes; route every validated initial/retry recommendation through the shared `parameter_approval` gate; remove retry-selector assumptions |
 | TUI and interactive presentation | No change | A later task wraps the generic `active_interrupt`; Task 6A/6B expose the contract only |
-| Descriptor knowledge packs and fixtures | Retain eligible initial cases; remove retry case types/shards/fixtures and candidate-promotion metadata; add no minimum case count |
+| Descriptor knowledge packs and fixtures | Retain eligible initial cases; remove retry case types/shards/fixtures and candidate-promotion metadata; keep the 10-case MVP delivery target separate from runtime activation |
 | Phase 11/operator docs | Rewrite Task 5/6 and cutover guidance to Task 6A/6B; remove retry corpus creation/promotion instructions |
 | Tests | Delete retry-retrieval/candidate-promotion assertions; add the acceptance coverage below |
 

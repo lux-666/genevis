@@ -99,12 +99,18 @@ they are not placeholders for information already preserved in `methods.md`.
 
 ## Current Curated Cases
 
-The initial v3 corpus contains the four supplied paper summaries:
+The initial v3 corpus contains 10 approved paper summaries:
 
 - `s41587-022-01261-x` — HiFi hifiasm with reported Hi-C and HiFi-only commands;
 - `s41592-024-02269-8` — HiFi plus UL-ONT context and reported filtering;
 - `s41586-026-10105-6` — ONT simplex hifiasm mode;
-- `s41586-022-05325-5` — Trio hifiasm plus documentary downstream gap filling.
+- `s41586-022-05325-5` — Trio hifiasm plus documentary downstream gap filling;
+- `s41467-024-54188-z` — goat T2T assembly with HiFi, UL-ONT, Hi-C, optical maps, and parental reads;
+- `s41588-025-02273-4` — heterozygous pear haplotype assemblies with cross-assembler gap repair;
+- `s41467-025-65778-w` — cattle T2T candidate comparison with HiFi and corrected ONT context;
+- `s41467-025-65870-1` — single-insect T2T assembly with explicit transferable hifiasm L2 settings;
+- `s41597-024-03664-8` — repeat-rich sorghum assembly using default hifiasm parameters;
+- `s41588-025-02137-x` — large hexaploid wheat assembly with multi-assembler validation and repair.
 
 Hi-C, UL-ONT, Trio, and telomere details belong in `methods.md` and evidence
 text; they are not topology conditions.
@@ -115,5 +121,5 @@ text; they are not topology conditions.
 - [x] v2 source-document fields are rejected rather than adapted.
 - [x] approved/draft/rejected eligibility semantics remain explicit.
 - [x] downstream excerpts preserve stable span IDs and `document: methods`.
-- [x] all four paper shards are listed in the manifest and load independently.
+- [x] all 10 paper shards are listed in the manifest and load independently.
 - [x] missing numeric facts remain missing.

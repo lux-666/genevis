@@ -34,14 +34,19 @@ from app.knowledge.packs import load_knowledge_pack
 
 
 def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
+    prompt.setdefault("readonly_params", {})
     if "catalog_subset" not in prompt:
         prompt["catalog_subset"] = {
-            "readonly_params": {},
+            "readonly_params": deepcopy(prompt["readonly_params"]),
             "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
         }
     return _sanitize_hifiasm_methods_prompt_payload(
         prompt,
-        authoritative_l2_projection=deepcopy(prompt.get("adjustable_params") or {}),
+        authoritative_catalog_snapshot={
+            "catalog_subset": deepcopy(prompt["catalog_subset"]),
+            "readonly_params": deepcopy(prompt["readonly_params"]),
+            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
+        },
     )
 
 

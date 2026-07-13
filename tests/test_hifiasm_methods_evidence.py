@@ -36,14 +36,19 @@ _SOURCE_ROOT = Path(_SOURCE_DIR.name)
 
 
 def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
+    prompt.setdefault("readonly_params", {})
     if "catalog_subset" not in prompt:
         prompt["catalog_subset"] = {
-            "readonly_params": {},
+            "readonly_params": deepcopy(prompt.get("readonly_params") or {}),
             "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
         }
     return _sanitize_hifiasm_methods_prompt_payload(
         prompt,
-        authoritative_l2_projection=deepcopy(prompt.get("adjustable_params") or {}),
+        authoritative_catalog_snapshot={
+            "catalog_subset": deepcopy(prompt["catalog_subset"]),
+            "readonly_params": deepcopy(prompt.get("readonly_params") or {}),
+            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
+        },
     )
 
 
@@ -403,13 +408,53 @@ def test_canonical_prompt_cannot_self_authorize_forged_adjustable_parameter(
         )
         target["forged_flag"] = {"level": 2, "default": 1}
 
-    with pytest.raises(ValueError, match="authoritative L2 catalog"):
+    with pytest.raises(ValueError, match="authoritative catalog snapshot"):
         _sanitize_hifiasm_methods_prompt_payload(
             prompt,
-            authoritative_l2_projection={
-                "purge_level": {"level": 2, "default": 0},
-                "kmer_length": {"level": 2, "default": 51},
+            authoritative_catalog_snapshot={
+                "catalog_subset": {
+                    "readonly_params": {},
+                    "adjustable_params": {
+                        "purge_level": {"level": 2, "default": 0},
+                        "kmer_length": {"level": 2, "default": 51},
+                    },
+                },
+                "readonly_params": {},
+                "adjustable_params": {
+                    "purge_level": {"level": 2, "default": 0},
+                    "kmer_length": {"level": 2, "default": 51},
+                },
             },
+        )
+
+
+@pytest.mark.parametrize("forged_projection", ["top", "subset", "both"])
+def test_canonical_prompt_cannot_self_authorize_forged_readonly_parameter(
+    forged_projection,
+):
+    prompt = _prompt_payload()
+    readonly = {"read_type": {"level": 1, "value_type": "string"}}
+    prompt["readonly_params"] = deepcopy(readonly)
+    prompt["catalog_subset"] = {
+        "readonly_params": deepcopy(readonly),
+        "adjustable_params": deepcopy(prompt["adjustable_params"]),
+    }
+    authoritative = {
+        "catalog_subset": deepcopy(prompt["catalog_subset"]),
+        "readonly_params": deepcopy(readonly),
+        "adjustable_params": deepcopy(prompt["adjustable_params"]),
+    }
+    if forged_projection in {"top", "both"}:
+        prompt["readonly_params"]["read_type"]["value_type"] = "FORGED"
+    if forged_projection in {"subset", "both"}:
+        prompt["catalog_subset"]["readonly_params"]["read_type"][
+            "value_type"
+        ] = "FORGED"
+
+    with pytest.raises(ValueError, match="authoritative catalog snapshot"):
+        _sanitize_hifiasm_methods_prompt_payload(
+            prompt,
+            authoritative_catalog_snapshot=authoritative,
         )
 
 
@@ -420,7 +465,11 @@ def test_retry_rehydration_rejects_plain_json_dict_without_loader_attestation():
         rehydrate_hifiasm_methods_retry_prompt_payload(
             persisted,
             {},
-            authoritative_l2_projection=deepcopy(persisted["adjustable_params"]),
+            authoritative_catalog_snapshot={
+                "catalog_subset": deepcopy(persisted["catalog_subset"]),
+                "readonly_params": deepcopy(persisted["readonly_params"]),
+                "adjustable_params": deepcopy(persisted["adjustable_params"]),
+            },
         )
 
 
@@ -648,6 +697,7 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
         "rules",
             "recommendation_policy",
             "catalog_subset",
+            "readonly_params",
             "adjustable_params",
         "selected_cases",
         "case_selection",

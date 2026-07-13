@@ -1,10 +1,10 @@
 # Task 6: Hifiasm Initial Cutover And Same-Run Retry
 
 **Phase**: 11
-**Status**: Task 6A and Task 6B are implemented and regression-verified; the 10-case MVP corpus remains incomplete (4 approved)
+**Status**: Complete; Task 6A and Task 6B are implemented and regression-verified, with 10 approved hifiasm-family MVP cases
 **Depends on**: Tasks 2-4 and the Phase 10 typed parameter-attempt lifecycle; the superseded Task 5 design is not a dependency
 **Created**: 2026-07-10
-**Updated**: 2026-07-12
+**Updated**: 2026-07-13
 
 ## Decision
 
@@ -39,20 +39,30 @@ Task 6A then selects the first five. With one to four eligible cases it selects
 all; with none it preserves the existing no-case behavior. Task 6A changes only
 the shortlist truncation and does not introduce a second combined score.
 
-### Evaluation Is Observational
+### Production Evidence Versus Offline Evaluation
+
+The approved paper-derived EvidenceCase corpus is a production input, not an
+observational sidecar. When the numeric path is enabled, its eligible cases are
+loaded, scored, truncated to the top five, and projected into the Task 4
+recommendation prompt. Consequently, case content and ranking can directly
+change the recommended parameters. The term *observational* below applies only
+to the offline comparison runner and its reports.
 
 The deterministic offline runner may compare the legacy initial selector with
 the numeric initial retriever and report Recall@k, nDCG@k, reciprocal rank,
 evidence coverage, leakage/holdout observations, and replay hashes. Reports
 must declare that they are observational and have no activation effect.
 
-For the Phase 11 MVP, the curation target is **10 approved hifiasm initial
-cases**. This is a delivery/completeness target for the evaluation corpus, not
-a runtime activation threshold; synthetic fixtures do not count toward it.
+For the Phase 11 MVP, the curation target is **10 approved hifiasm-family initial
+cases**. This is a delivery/completeness target for the production EvidenceCase
+corpus, not a runtime activation threshold; synthetic evaluation fixtures do
+not count toward it.
 
-No report, corpus, label, metric, or operator assessment can enable/disable the
-switch, reject a shortlist, or stop recommendation. Reaching the 10-case MVP
-target is not required to exercise the production path, and there is no
+No offline report, evaluation fixture, label, metric, or operator assessment can
+enable/disable the switch, reject a shortlist, or stop recommendation. This
+does not make the approved paper corpus inert: its cases are the evidence ranked
+and consumed by the production recommendation path. Reaching the 10-case MVP
+target is not required to exercise that path, and there is no
 10-query, permission, scientific-approval, recorded-recommendation, distance,
 coverage, pass/fail, non-inferiority, or default-preservation gate. Evaluation
 may be absent or unfavorable without changing forward progress.
@@ -86,6 +96,11 @@ It performs no cross-run/cross-sample lookup, paper retrieval, policy reload,
 case ranking, or evidence payload construction. Current observations may block
 execution for safety, but they may not select or justify a different retry
 delta. A policy snapshot mismatch fails closed and requires a new run.
+
+Prompt rehydration inherits attempt 0's sample/assets/read-QC/genome-survey
+profile and its L1/L2 catalog projections verbatim. It may add only the
+immediately preceding attempt and the current execution/review diagnosis;
+profile or catalog drift fails closed before model invocation.
 
 ### Explicit Absences
 
@@ -168,8 +183,9 @@ contract is reused; TUI work is explicitly out of scope.
 |---|---|
 | Initial ranking | Preserve Task 3 unified score and its lexicographic tie-breaks exactly |
 | Initial shortlist | Fixed first five, all 1-4, existing no-case behavior for 0 |
-| MVP evaluation corpus | 10 approved initial cases; delivery target only, never an activation gate |
-| Evaluation | Observational only; no activation or progress effect |
+| MVP production evidence corpus | 10 approved hifiasm-family initial cases; delivery target only, never an activation gate |
+| Production evidence | Approved paper cases are ranked and projected into the recommendation prompt; their content can affect the recommendation |
+| Offline evaluation | Observational only; no activation or progress effect |
 | Retry inputs | Attempt 0 snapshot + preceding attempt + structured failure only |
 | Retry retrieval | No database/retriever/backend/query/shard or candidate promotion |
 | Execution retry | No repairability gate; execution budget owned by execution stage |
@@ -182,7 +198,8 @@ contract is reused; TUI work is explicitly out of scope.
 
 - [x] Task 6A preserves Task 3 ranking and fixes the production shortlist at five.
 - [x] Offline evaluation is deterministic, replayable, and observational only.
-- [x] The MVP evaluation corpus contains 10 approved initial cases.
+- [x] The MVP production EvidenceCase corpus contains 10 approved
+  hifiasm-family initial cases.
 - [x] Task 6B uses same-run immutable attempt history without retry retrieval.
 - [x] Execution and review retry have independent ownership and budgets.
 - [x] No repairability gate or runtime-case promotion remains.
