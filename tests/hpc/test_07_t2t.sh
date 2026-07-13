@@ -11,25 +11,46 @@ source common.sh
 
 section "Test 07: T2T Telomere Finishing"
 
-# In a sequential run_all invocation, reuse the newest real Hi-C scaffold (or
-# assembly smoke output) unless the operator explicitly selected a T2T input.
-if [[ -z "${T2T_ASSEMBLY:-}" ]]; then
-    T2T_ASSEMBLY=$(latest_hic_scaffold || true)
-    [[ -n "$T2T_ASSEMBLY" ]] || T2T_ASSEMBLY=$(latest_hpc_assembly || true)
-    [[ -z "$T2T_ASSEMBLY" ]] || info "Reusing upstream assembly for T2T: ${T2T_ASSEMBLY}"
-fi
-if [[ -z "${T2T_ONT_READS:-}" && ( "${PLATFORM:-}" == "ont" || "${PLATFORM:-}" == "cycloneseq" ) ]]; then
-    # T2T accepts one read file. Do not silently collapse a multi-file input.
-    read -r -a _t2t_read_paths <<< "${LONG_READS:-}"
-    if (( ${#_t2t_read_paths[@]} == 1 )); then
-        T2T_ONT_READS="${_t2t_read_paths[0]}"
+# Explicit T2T inputs are an all-or-nothing pair. Invalid or incomplete
+# operator input is a configuration error; only fully automatic discovery may
+# turn missing inputs into an explicit SKIP.
+if [[ -n "${T2T_ASSEMBLY:-}" || -n "${T2T_ONT_READS:-}" ]]; then
+    if [[ -z "${T2T_ASSEMBLY:-}" || -z "${T2T_ONT_READS:-}" ]]; then
+        fail "T2T_ASSEMBLY and T2T_ONT_READS must be configured together"
+        summary "Test 07: T2T Telomere Finishing (incomplete explicit inputs)" || true
+        exit 1
+    fi
+    if [[ ! -s "$T2T_ASSEMBLY" || ! -s "$T2T_ONT_READS" ]]; then
+        [[ -s "$T2T_ASSEMBLY" ]] || fail "T2T_ASSEMBLY is missing or empty: ${T2T_ASSEMBLY}"
+        [[ -s "$T2T_ONT_READS" ]] || fail "T2T_ONT_READS is missing or empty: ${T2T_ONT_READS}"
+        summary "Test 07: T2T Telomere Finishing (invalid explicit inputs)" || true
+        exit 1
+    fi
+else
+    _auto_t2t_assembly=$(latest_hic_scaffold || true)
+    [[ -n "$_auto_t2t_assembly" ]] || _auto_t2t_assembly=$(latest_hpc_assembly || true)
+    _auto_t2t_reads=""
+    if [[ "${PLATFORM:-}" == "ont" || "${PLATFORM:-}" == "cycloneseq" ]]; then
+        # T2T accepts one read file. Do not silently collapse a multi-file input.
+        read -r -a _t2t_read_paths <<< "${LONG_READS:-}"
+        if (( ${#_t2t_read_paths[@]} == 1 )) && [[ -s "${_t2t_read_paths[0]}" ]]; then
+            _auto_t2t_reads="${_t2t_read_paths[0]}"
+        fi
+    fi
+    if [[ -n "$_auto_t2t_assembly" && -n "$_auto_t2t_reads" ]]; then
+        T2T_ASSEMBLY="$_auto_t2t_assembly"
+        T2T_ONT_READS="$_auto_t2t_reads"
+        info "Reusing upstream assembly for T2T: ${T2T_ASSEMBLY}"
         info "Reusing the configured long-read input for T2T: ${T2T_ONT_READS}"
+    else
+        T2T_ASSEMBLY=""
+        T2T_ONT_READS=""
     fi
 fi
 
 cd "${PROJECT_ROOT}"
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
-    python3 -m pytest tests/test_t2t.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_t2t.py -v --tb=short 2>&1 && \
         pass "unit tests: test_t2t.py" || fail "unit tests: test_t2t.py"
 fi
 
@@ -50,12 +71,6 @@ if [[ -z "${T2T_ASSEMBLY:-}" && -z "${T2T_ONT_READS:-}" ]]; then
     info "[SKIP] Real T2T smoke not configured. Set both T2T_ASSEMBLY and T2T_ONT_READS."
     exit 77
 fi
-if [[ -z "${T2T_ASSEMBLY:-}" || -z "${T2T_ONT_READS:-}" ]]; then
-    fail "T2T_ASSEMBLY and T2T_ONT_READS must be configured together"
-    summary "Test 07: T2T Telomere Finishing" || true
-    exit 1
-fi
-
 assert_file_nonempty "$T2T_ASSEMBLY" "T2T input assembly"
 assert_file_nonempty "$T2T_ONT_READS" "T2T ONT reads"
 if ! python3 - "$T2T_ASSEMBLY" <<'PY'

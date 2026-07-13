@@ -31,6 +31,19 @@ summary() {
     fi
 }
 
+run_pytest() {
+    # hpc_env.sh configures the real smoke commands below, but unit tests must
+    # remain hermetic. In particular, an HPC-local method map must not replace
+    # the repository defaults used by pytest fixtures, and unit tests must not
+    # accidentally call the operator's live LLM endpoint.
+    (
+        unset GENE_AGENT_ENVS_CONFIG
+        unset GENE_AGENT_LLM_API_KEY GENE_AGENT_LLM_BASE_URL GENE_AGENT_LLM_MODEL
+        unset OPENAI_API_KEY OPENAI_BASE_URL
+        python3 -m pytest "$@"
+    )
+}
+
 # -------------------------------------------------------------------
 #  File / directory assertions
 # -------------------------------------------------------------------
@@ -451,6 +464,7 @@ resume_configured_parameter_gates() {
     local mode="${HPC_PARAMETER_APPROVAL_MODE:-manual}"
     local max_approvals="${HPC_MAX_PARAMETER_APPROVALS:-3}"
     local inspect_json decision_json gate supervision approval_count=0
+    HPC_PARAMETER_APPROVALS_RESUMED=0
 
     case "$mode" in
         manual|approve) ;;
@@ -539,6 +553,7 @@ PY
             fail "parameter approval resume failed"
             return 1
         fi
+        (( ++HPC_PARAMETER_APPROVALS_RESUMED ))
     done
 }
 
@@ -577,18 +592,34 @@ report_session_gate() {
         return 1
     fi
     IFS=$'\t' read -r supervision gate stage <<< "$details"
-    if [[ "$supervision" != "blocked_human" ]]; then
-        return 0
-    fi
-    warn "session ${session_id} is waiting for human input"
-    info "  stage: ${stage}"
-    info "  gate:  ${gate}"
-    info "Continue the same conversation/session with:"
-    info "  gene-agent tui --resume-session ${session_id} --data-dir ${TEST_DATA_ROOT}"
-    info "Non-interactive inspection/template flow:"
-    info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${TEST_DATA_ROOT}/_${session_id}_${gate}_decision.json"
-    info "Run directory: ${TEST_DATA_ROOT}/runs/${session_id}"
-    return 3
+    case "$supervision" in
+        blocked_human)
+            warn "session ${session_id} is waiting for human input"
+            info "  stage: ${stage}"
+            info "  gate:  ${gate}"
+            info "Continue the same conversation/session with:"
+            info "  gene-agent tui --resume-session ${session_id} --data-dir ${TEST_DATA_ROOT}"
+            info "Non-interactive inspection/template flow:"
+            info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${TEST_DATA_ROOT}/_${session_id}_${gate}_decision.json"
+            info "Run directory: ${TEST_DATA_ROOT}/runs/${session_id}"
+            return 3
+            ;;
+        failed_terminal)
+            fail "session ${session_id} is durably failed at stage ${stage}"
+            return 1
+            ;;
+        unknown|"")
+            fail "session ${session_id} has unknown durable supervision state at stage ${stage}"
+            return 1
+            ;;
+        idle|running_stage|reviewing|completed)
+            return 0
+            ;;
+        *)
+            fail "session ${session_id} has unsupported durable supervision state: ${supervision}"
+            return 1
+            ;;
+    esac
 }
 
 latest_hic_scaffold() {

@@ -47,6 +47,8 @@ RUN_ALL_ID="run-all-$(date +%Y%m%d-%H%M%S)"
 RUN_ALL_LOG_DIR="${TEST_DATA_ROOT}/test_logs/${RUN_ALL_ID}"
 mkdir -p "$RUN_ALL_LOG_DIR"
 ENV_CONFIG="${GENE_AGENT_ENVS_CONFIG}"
+GIT_COMMIT=$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || printf 'unknown')
+GIT_BRANCH=$(git -C "${PROJECT_ROOT}" branch --show-current 2>/dev/null || printf 'unknown')
 
 echo ""
 echo "============================================================"
@@ -56,6 +58,8 @@ echo "  Data:    ${TEST_DATA_ROOT}"
 echo "  Envs:    ${ENV_CONFIG}"
 echo "  Start:   Step ${START_STEP}"
 echo "  Logs:    ${RUN_ALL_LOG_DIR}"
+echo "  Run ID:  ${RUN_ALL_ID}"
+echo "  Git:     ${GIT_BRANCH} @ ${GIT_COMMIT}"
 echo "  Time:    $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
 echo ""
@@ -130,8 +134,16 @@ for entry in "${TESTS[@]}"; do
 
     START_TIME=$(date +%s)
 
+    {
+        printf 'run_all_id: %s\n' "$RUN_ALL_ID"
+        printf 'git_branch: %s\n' "$GIT_BRANCH"
+        printf 'git_commit: %s\n' "$GIT_COMMIT"
+        printf 'test_step: %s\n' "$step"
+        printf 'test_script: %s\n\n' "$script"
+    } | tee "$LOG_FILE"
+
     set +e
-    bash "${SCRIPT_DIR}/${script}" 2>&1 | tee "$LOG_FILE"
+    bash "${SCRIPT_DIR}/${script}" 2>&1 | tee -a "$LOG_FILE"
     TEST_STATUS=${PIPESTATUS[0]}
     set -e
     if (( TEST_STATUS == 0 )); then

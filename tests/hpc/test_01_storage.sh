@@ -20,7 +20,7 @@ section "Test 01: Storage Layer"
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     info "Running unit tests: test_storage_paths.py"
     cd "${PROJECT_ROOT}"
-    if python3 -m pytest tests/test_storage_paths.py -v --tb=short 2>&1; then
+    if run_pytest tests/test_storage_paths.py -v --tb=short 2>&1; then
         pass "unit tests: test_storage_paths.py"
     else
         fail "unit tests: test_storage_paths.py"
@@ -34,19 +34,31 @@ MANIFEST="${TEST_DATA_ROOT}/_test01_manifest.yaml"
 mkdir -p "${TEST_DATA_ROOT}"
 write_manifest "$MANIFEST" "$SID" "raw_long_reads:${LONG_READS}:${PLATFORM}:single"
 
-# ---- Test 1: Run with minimal config (inventory only) and check layout ----
-info "Running inventory-only session: ${SID}"
+# ---- Test 1: Run a bounded dry-run and check layout ----
+info "Running bounded storage session: ${SID}"
 cd "${PROJECT_ROOT}"
 RC="${TEST_DATA_ROOT}/_test01_rc.json"
-echo '{}' > "$RC"
+python3 - "$RC" <<'PY'
+import json
+import sys
 
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({"requested_stages": ["read_qc"], "local_exec": []}, handle)
+PY
+
+RUN_EXITCODE=0
 GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --run-config "$RC" \
     --checkpointer "$CHECKPOINTER" \
-    2>&1 || true   # pipeline may block at later stages; we only need inventory
+    2>&1 || RUN_EXITCODE=$?
+if (( RUN_EXITCODE == 0 )); then
+    pass "bounded storage session returned success"
+else
+    fail "bounded storage session returned exit code ${RUN_EXITCODE}"
+fi
 
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
 assert_dir_exists "${RUN_DIR}"                  "run_dir created: runs/${SID}"
@@ -68,12 +80,27 @@ else
 fi
 
 # ---- Test 3: inspect --json gives structured output ----
-INSPECT_JSON=$(python3 -m app.entrypoints.run inspect \
+INSPECT_JSON="${TEST_DATA_ROOT}/_${SID}_inspect.json"
+if python3 -m app.entrypoints.run inspect \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
-    --json 2>&1 || true)
-if echo "$INSPECT_JSON" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
+    --json > "$INSPECT_JSON"; then
     pass "inspect --json produces valid JSON"
+else
+    fail "inspect --json command failed"
+fi
+
+# JSON validity is an inspect/storage contract. The run's terminal state is
+# verified independently from the durable checkpoint below; inspect may not
+# infer completion when a deliberately short run has no operator report.
+if python3 - "$INSPECT_JSON" <<'PY'
+import json
+import sys
+
+json.load(open(sys.argv[1], encoding="utf-8"))
+PY
+then
+    pass "inspect --json output is valid JSON"
 else
     fail "inspect --json output is not valid JSON"
 fi
@@ -96,6 +123,33 @@ PY
     else
         fail "checkpoint DB has no tables"
     fi
+
+    # The bounded run requests read_qc planning without local execution. Read
+    # the checkpoint itself so unknown/failed inspect fallbacks cannot be
+    # mistaken for a successful terminal run.
+    if python3 - "${RUN_DIR}" "${SID}" <<'PY'
+import sys
+
+from app.graph.builder import build_graph
+
+run_dir, session_id = sys.argv[1:]
+graph = build_graph(backend="sqlite", data_dir=run_dir)
+try:
+    snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
+    state = dict(snapshot.values or {})
+finally:
+    connection = getattr(getattr(graph, "checkpointer", None), "conn", None)
+    if connection is not None:
+        connection.close()
+
+assert state.get("current_stage") == "done", state
+assert state.get("supervision_state") in {"idle", "completed"}, state
+PY
+    then
+        pass "checkpoint reached expected terminal state: done"
+    else
+        fail "checkpoint did not reach expected terminal state"
+    fi
 else
     fail "sqlite checkpoint DB not found"
 fi
@@ -106,7 +160,7 @@ if [[ -f "$EVENTS" ]]; then
     LINE_COUNT=$(wc -l < "$EVENTS")
     pass "ledger events.jsonl exists with ${LINE_COUNT} events"
 else
-    warn "ledger events.jsonl not found (may not be created in inventory-only run)"
+    warn "ledger events.jsonl not found for bounded storage run"
 fi
 
 # ---- Test 6: Replay-safe publish (manual test) ----

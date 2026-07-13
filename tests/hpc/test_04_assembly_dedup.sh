@@ -26,10 +26,10 @@ section "Test 04: Assembly + Assembly Dedup"
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_assembly.py"
-    python3 -m pytest tests/test_assembly.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_assembly.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly.py" || fail "unit tests: test_assembly.py"
     info "Running unit tests: test_assembly_dedup.py"
-    python3 -m pytest tests/test_assembly_dedup.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_assembly_dedup.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly_dedup.py" || fail "unit tests: test_assembly_dedup.py"
     cd "${SCRIPT_DIR}"
 fi
@@ -141,10 +141,13 @@ if (( PARAMETER_RESUME_STATUS == 3 )); then
 elif (( PARAMETER_RESUME_STATUS != 0 )); then
     fail "parameter-approval handling failed"
 elif (( RUN_EXITCODE != 0 )); then
-    # A non-zero initial invocation is acceptable only when a durable
-    # parameter gate was successfully resumed above. Artifact assertions below
-    # determine whether execution actually completed.
-    info "continuing after successful durable parameter-gate handling"
+    if (( ${HPC_PARAMETER_APPROVALS_RESUMED:-0} > 0 )); then
+        info "continuing after ${HPC_PARAMETER_APPROVALS_RESUMED} successful durable parameter approval(s)"
+    else
+        fail "assembly invocation failed with exit code ${RUN_EXITCODE} and no parameter gate was resumed"
+        summary "Test 04: Assembly + Assembly Dedup (run failed)" || true
+        exit 1
+    fi
 fi
 
 GATE_STATUS=0
@@ -154,6 +157,8 @@ if (( GATE_STATUS == 3 )); then
     exit 77
 elif (( GATE_STATUS != 0 )); then
     fail "could not determine the post-resume session state"
+    summary "Test 04: Assembly + Assembly Dedup (durable state failed)" || true
+    exit 1
 fi
 
 # ---- Verify assembly outputs ----

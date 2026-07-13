@@ -57,7 +57,7 @@ PLATFORM="ont"
 SAMPLE_ID="hpc_test_sample"
 SPECIES="白海豚"
 
-REVIEW_ASSEMBLY="${REVIEW_ASSEMBLY:-/data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta}"
+REVIEW_ASSEMBLY="${REVIEW_ASSEMBLY:-}"
 TEST09_REUSE_ASSEMBLY="${TEST09_REUSE_ASSEMBLY:-true}"
 NCBI_REFERENCE_SOURCE_DIR="/data/input/Files/genevis/Metazoa.ncbi"
 
@@ -109,18 +109,18 @@ check_config() {
     if [[ -z "${LONG_READS:-}" ]]; then
         error "LONG_READS not configured"
         ((missing++))
-    elif [[ ! -f "$LONG_READS" ]]; then
-        error "LONG_READS file not found: $LONG_READS"
+    elif [[ ! -s "$LONG_READS" ]]; then
+        error "LONG_READS file missing or empty: $LONG_READS"
         ((missing++))
     else
         ok "Long reads: $LONG_READS"
     fi
 
     if [[ -n "${REVIEW_ASSEMBLY:-}" ]]; then
-        if [[ -f "$REVIEW_ASSEMBLY" ]]; then
+        if [[ -s "$REVIEW_ASSEMBLY" ]]; then
             ok "Review assembly: $REVIEW_ASSEMBLY"
         else
-            error "REVIEW_ASSEMBLY file not found: $REVIEW_ASSEMBLY"
+            error "REVIEW_ASSEMBLY file missing or empty: $REVIEW_ASSEMBLY"
             ((missing++))
         fi
     elif [[ "${TEST09_REUSE_ASSEMBLY:-true}" == "true" ]]; then
@@ -135,6 +135,11 @@ check_config() {
         fi
     else
         info "Review assembly reuse disabled; will assemble from reads"
+    fi
+
+    if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
+        error "HIC_CHROM_SIZES file missing or empty: $HIC_CHROM_SIZES"
+        ((missing++))
     fi
 
     if [[ -z "${GENOME_SIZE_ESTIMATE:-}" ]]; then
@@ -155,25 +160,34 @@ check_config() {
         ok "BUSCO lineage: $BUSCO_LINEAGE_NAME"
     fi
 
-    # Check optional Hi-C data
-    if [[ -n "${HIC_R1:-}" && -f "$HIC_R1" && -n "${HIC_R2:-}" && -f "$HIC_R2" ]]; then
-        ok "Hi-C reads available"
-        if [[ -z "${HIC_RESTRICTION_ENZYME:-}" ]]; then
-            warn "HIC_RESTRICTION_ENZYME not set"
+    # Check optional Hi-C data. Once either mate is configured, both paths are
+    # explicit operator input and must be valid; do not silently downgrade a
+    # typo to a skipped stage.
+    if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
+        if [[ -z "${HIC_R1:-}" || -z "${HIC_R2:-}" ]]; then
+            error "HIC_R1 and HIC_R2 must be configured together"
+            ((missing++))
+        elif [[ ! -s "$HIC_R1" || ! -s "$HIC_R2" ]]; then
+            [[ -s "$HIC_R1" ]] || error "HIC_R1 file missing or empty: $HIC_R1"
+            [[ -s "$HIC_R2" ]] || error "HIC_R2 file missing or empty: $HIC_R2"
+            ((missing++))
         else
-            ok "  Restriction enzyme: $HIC_RESTRICTION_ENZYME"
-        fi
-        if [[ -z "${HIC_CHROMOSOME_COUNT:-}" ]]; then
-            warn "HIC_CHROMOSOME_COUNT not set"
-        else
-            ok "  Expected chromosomes: $HIC_CHROMOSOME_COUNT"
-        fi
-        if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-            ok "  chrom.sizes: auto-generate from assembly"
-        elif [[ ! -f "$HIC_CHROM_SIZES" ]]; then
-            warn "  HIC_CHROM_SIZES file not found: $HIC_CHROM_SIZES"
-        else
-            ok "  chrom.sizes: $HIC_CHROM_SIZES"
+            ok "Hi-C reads available"
+            if [[ -z "${HIC_RESTRICTION_ENZYME:-}" ]]; then
+                warn "HIC_RESTRICTION_ENZYME not set"
+            else
+                ok "  Restriction enzyme: $HIC_RESTRICTION_ENZYME"
+            fi
+            if [[ -z "${HIC_CHROMOSOME_COUNT:-}" ]]; then
+                warn "HIC_CHROMOSOME_COUNT not set"
+            else
+                ok "  Expected chromosomes: $HIC_CHROMOSOME_COUNT"
+            fi
+            if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
+                ok "  chrom.sizes: auto-generate from assembly"
+            else
+                ok "  chrom.sizes: $HIC_CHROM_SIZES"
+            fi
         fi
     else
         warn "Hi-C reads not configured - will skip scaffolding stage"

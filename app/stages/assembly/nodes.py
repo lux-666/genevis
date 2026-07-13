@@ -883,10 +883,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             session_id=session_id,
             prompt_contract=prompt_contract,
             prompt_payload=prompt_payload,
-            system_prompt=_parameter_recommender_system_prompt(
-                prompt_payload,
-                prompt_contract,
-            ),
             allow_default_on_error=bool(
                 _parameter_recommendation_config(state, assembly_out).get("allow_model_unavailable_defaults", False)
             ),
@@ -2055,42 +2051,6 @@ def build_parameter_attempt_timeline(
 def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
     typed = [ParameterAttempt.model_validate(item).model_dump(mode="json") for item in attempts if isinstance(item, dict)]
     return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
-
-
-def _parameter_recommender_system_prompt(
-    prompt_payload: dict[str, Any],
-    prompt_contract: AssemblyPromptContract,
-) -> str:
-    base = (
-        "You are an assembly parameter advisor. Return only JSON matching the required output. "
-        "Recommend only catalog L2 parameters in params; do not write L0 or L1 facts. "
-        "Evidence cases are optional, not a prerequisite. If no compatible case is available, "
-        "continue from readonly L1 facts, SKILL heuristics, retry context, and catalog defaults. "
-        "Prefer conservative changes when evidence is limited. When parameter_evidence is returned, "
-        "use only the allowed evidence bases in recommendation_policy and cite case/span IDs only "
-        "for basis=case.\n\n"
-        + str(prompt_payload.get("skill_instructions") or "")
-    )
-    if prompt_contract != "hifiasm_methods_v1":
-        return base
-    return (
-        "You are a hifiasm Methods-aware parameter advisor. Return only JSON with four top-level "
-        "fields: case_assessments, recommendation, selected_case_ids, and summary. Assess only cases "
-        "in case_retrieval.evidence_case_ids. transferable_findings must use one published "
-        "methods_evidence.effect_areas value and cite span IDs visible in that same case. "
-        "recommendation.adjustable_params must contain exactly one decision for every catalog L2 "
-        "parameter. Each decision must "
-        "choose action set, keep_previous, keep_default, or omit; on retries use keep_previous for "
-        "unchanged prior values and never reset them with keep_default; include a non-empty reason; "
-        "and declare at least one evidence basis. basis=case requires selected, "
-        "accepted case IDs and visible span IDs. Non-case decisions may use readonly profile facts or "
-        "catalog defaults. Never invent cases, spans, parameters, effect areas, or profile facts. "
-        "Limited or absent case evidence is not a hard blocker; prefer conservative defaults. No "
-        "structured prompt-visible heuristic registry is available, so do not use skill_heuristic "
-        "or heuristic_labels. retry_signals must be visible structured retry_evidence signal IDs or "
-        "paths; if none are present, do not use retry_failure as an evidence basis.\n\n"
-        + str(prompt_payload.get("skill_instructions") or "")
-    )
 
 
 def _parameter_prompt_contract(

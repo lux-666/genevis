@@ -1,0 +1,67 @@
+
+[1m=== Test 01: Storage Layer ===[0m
+[0;34m[INFO][0m Running unit tests: test_storage_paths.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 7 items
+
+tests/test_storage_paths.py::SessionPathsTests::test_existing_flat_session_remains_discoverable PASSED [ 14%]
+tests/test_storage_paths.py::SessionPathsTests::test_new_layout_uses_one_ledger_and_artifact_index_per_run PASSED [ 28%]
+tests/test_storage_paths.py::SessionPathsTests::test_new_session_paths_are_contained_under_runs_session PASSED [ 42%]
+tests/test_storage_paths.py::SessionPathsTests::test_runner_returns_published_log_paths_before_collectors_build_state PASSED [ 57%]
+tests/test_storage_paths.py::SessionPathsTests::test_shell_publish_replay_reuses_identical_snapshot PASSED [ 71%]
+tests/test_storage_paths.py::SessionPathsTests::test_work_backed_artifact_replay_rejects_different_snapshot PASSED [ 85%]
+tests/test_storage_paths.py::SessionPathsTests::test_work_backed_artifact_replay_reuses_identical_snapshot PASSED [100%]
+
+============================== 7 passed in 0.27s ===============================
+[0;32m[PASS][0m unit tests: test_storage_paths.py
+[0;34m[INFO][0m Running inventory-only session: hpc-test01-20260713-151924
+[0;34m[INFO][0m gene-agent run --manifest /data/work/genevis/data_hpc_test/_test01_manifest.yaml --session-id hpc-test01-20260713-151924 --data-dir /data/work/genevis/data_hpc_test --run-config /data/work/genevis/data_hpc_test/_test01_rc.json --checkpointer sqlite
+error: local_execution_not_enabled
+session_id: hpc-test01-20260713-151924
+current_stage: genome_survey
+supervision_state: failed_terminal
+checkpoint_persistence: sqlite
+route_trace: ['inventory_stage', 'read_qc_stage']
+asset_registry_ref: /data/work/genevis/data_hpc_test/runs/hpc-test01-20260713-151924/artifacts/asset_registry/hpc-test01-20260713-151924/registry.json
+run_config_ref: /data/work/genevis/data_hpc_test/_test01_rc.json
+[0;32m[PASS][0m dir exists: run_dir created: runs/hpc-test01-20260713-151924
+[0;32m[PASS][0m dir exists: control/ subdir
+[0;32m[PASS][0m dir exists: artifacts/ subdir
+[0;32m[PASS][0m dir exists: work/ subdir
+[0;32m[PASS][0m dir exists: ledger/ subdir
+[0;32m[PASS][0m dir exists: checkpoints/ subdir
+[0;32m[PASS][0m file exists: manifest copied to control/
+[0;34m[INFO][0m Inspecting session hpc-test01-20260713-151924
+[0;34m[INFO][0m gene-agent inspect --session-id hpc-test01-20260713-151924 --data-dir /data/work/genevis/data_hpc_test
+session_id: hpc-test01-20260713-151924
+supervision_state: failed_terminal
+checkpoint_persistence: sqlite
+durable_resume_available: true
+artifact_count: 2
+decisions_by_origin: {'human': 0, 'llm_provisional': 0, 'auto_rule': 0}
+latest_operator_report: {'artifact_id': 'operator_report:operator_report.failed_terminal:failed_terminal_report.json', 'file_path': '/data/work/genevis/data_hpc_test/runs/hpc-test01-20260713-151924/artifacts/operator_report/hpc-test01-20260713-151924/failed_terminal_report.json', 'file_hash': 'b16097ea368c0ea987d5bb4915c6fd7ff9d8fe0f2946b0549340be11cc546666', 'file_size_bytes': 1269, 'artifact_type': 'operator_report.failed_terminal', 'stage': 'operator_report', 'method_name': 'operator_report.failed_terminal', 'created_at': '2026-07-13T07:19:34.676783Z', 'metadata': {'supervision_state': 'failed_terminal', 'current_stage': 'genome_survey'}}
+next_action.kind: failed_terminal
+next_action.summary: local_execution_not_enabled
+next_action.relevant_refs: ['/data/work/genevis/data_hpc_test/runs/hpc-test01-20260713-151924/artifacts/asset_registry/hpc-test01-20260713-151924/registry.json']
+[0;32m[PASS][0m gene-agent inspect works with new layout
+[0;32m[PASS][0m inspect --json produces valid JSON
+[0;32m[PASS][0m sqlite checkpoint DB created at checkpoints/checkpoints.sqlite
+[0;32m[PASS][0m checkpoint DB has 2 tables
+[0;32m[PASS][0m ledger events.jsonl exists with 3 events
+[0;34m[INFO][0m Testing publish_file() replay safety
+publish_file: all replay-safe checks passed
+[0;32m[PASS][0m publish_file() replay safety
+SessionPaths: all paths correct
+[0;32m[PASS][0m SessionPaths layout validation
+locate_session_data_dir: backward compat OK
+[0;32m[PASS][0m locate_session_data_dir backward compat
+
+[1m--- Test 01: Storage Layer Summary ---[0m
+  Passed: [0;32m16[0m
+  Failed: [0;31m0[0m
+  [0;32mRESULT: PASS[0m

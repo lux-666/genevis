@@ -20,12 +20,15 @@ info "Running full unit test suite"
 UNIT_LOG="${TEST_DATA_ROOT}/_unit_test_output.log"
 mkdir -p "${TEST_DATA_ROOT}"
 
-if python3 -m pytest tests/ -v --tb=short -x 2>&1 | tee "$UNIT_LOG"; then
-    TOTAL_PASS=$(grep -c "PASSED" "$UNIT_LOG" 2>/dev/null || echo 0)
+if run_pytest tests/ -v --tb=short -x 2>&1 | tee "$UNIT_LOG"; then
+    TOTAL_PASS=$(grep -Ec '^tests/.*[[:space:]]PASSED([[:space:]]|$)' "$UNIT_LOG" 2>/dev/null || true)
     pass "full unit test suite: ${TOTAL_PASS} passed"
 else
-    TOTAL_PASS=$(grep -c "PASSED" "$UNIT_LOG" 2>/dev/null || echo 0)
-    TOTAL_FAIL=$(grep -c "FAILED" "$UNIT_LOG" 2>/dev/null || echo 0)
+    # Count pytest's per-test progress records only. Summary lines such as
+    # "1 failed" and the later "FAILED tests/..." section describe the same
+    # failure and must not inflate the diagnostic count.
+    TOTAL_PASS=$(grep -Ec '^tests/.*[[:space:]]PASSED([[:space:]]|$)' "$UNIT_LOG" 2>/dev/null || true)
+    TOTAL_FAIL=$(grep -Ec '^tests/.*[[:space:]]FAILED([[:space:]]|$)' "$UNIT_LOG" 2>/dev/null || true)
     fail "unit tests: ${TOTAL_PASS} passed, ${TOTAL_FAIL} failed"
     info "Full log at: ${UNIT_LOG}"
 
@@ -39,7 +42,7 @@ cd "${PROJECT_ROOT}"
 for test_file in test_entrypoints.py test_run_config.py test_ask_plan.py test_ask_interactive.py test_durable_resume.py test_storage_paths.py; do
     if [[ -f "tests/${test_file}" ]]; then
         info "Running: ${test_file}"
-        if python3 -m pytest "tests/${test_file}" -v --tb=short 2>&1; then
+        if run_pytest "tests/${test_file}" -v --tb=short 2>&1; then
             pass "unit: ${test_file}"
         else
             fail "unit: ${test_file}"

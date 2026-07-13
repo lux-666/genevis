@@ -1,0 +1,124 @@
+
+[1m=== Test 05: Assembly Review ===[0m
+usage: gene-agent tui [-h] [--data-dir DATA_DIR] [--resume-session SESSION_ID]
+
+options:
+  -h, --help            show this help message and exit
+  --data-dir DATA_DIR   Workflow data root
+  --resume-session SESSION_ID
+                        Attach to one blocked durable workflow session and
+                        review its active gate
+[0;32m[PASS][0m tui entrypoint help
+[0;34m[INFO][0m Checking NCBI Metazoa reference data
+[0;32m[PASS][0m file exists: species_alias.tsv
+[0;32m[PASS][0m file exists: reference_manifest.json
+[0;32m[PASS][0m NCBI Metazoa reference data is installed
+[0;34m[INFO][0m Running unit tests: test_assembly_review.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 49 items
+
+tests/test_assembly_review.py::AssemblyReviewDescriptorTests::test_descriptor_registry_loads_assembly_review_methods PASSED [  2%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_assembly_stage_executed_candidate_ref_points_to_real_fasta PASSED [  4%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_auto_decidable_false_does_not_call_recommender PASSED [  6%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_auto_decidable_false_when_no_available_eval_signal PASSED [  8%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_auto_decidable_requires_quast_and_busco PASSED [ 10%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_auto_policy_recommender_failure_falls_back_to_blocked_human PASSED [ 12%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_auto_resume_validation_failure_falls_back_to_blocked_human PASSED [ 14%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_consumes_assembly_stage_selected_candidate_refs PASSED [ 16%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_default_review_planning_does_not_run_quast PASSED [ 18%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_default_review_report_shows_missing_or_pending_signals PASSED [ 20%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_does_not_auto_advance_from_single_metric PASSED [ 22%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_existing_assembly_blocks_for_human_review PASSED [ 24%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_existing_assembly_writes_review_requested_ledger PASSED [ 26%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_human_gate_writes_review_requested_ledger PASSED [ 28%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_busco_failure_marks_signal_failed_and_still_blocks PASSED [ 30%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_busco_missing_lineage_marks_signal_missing PASSED [ 32%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_busco_success_updates_signals_and_review_request PASSED [ 34%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_quast_failure_marks_signal_failed_and_still_blocks PASSED [ 36%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_quast_missing_draft_marks_signal_missing_without_attempt PASSED [ 38%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_quast_success_updates_signals_and_review_request PASSED [ 40%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_local_quast_success_writes_quast_summary_artifact PASSED [ 42%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_metric_method_modules_do_not_depend_on_parent_stage_modules PASSED [ 44%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_multiple_candidates_block_human PASSED [ 46%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_no_candidates_fails_terminally PASSED [ 48%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_outer_graph_routes_to_metric_subgraphs PASSED [ 51%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_pending_contamination_signal_does_not_disable_auto_decidable PASSED [ 53%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_planned_signals_include_merqury_when_short_reads_available PASSED [ 55%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_planned_signals_include_quast_and_busco PASSED [ 57%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_rejected_candidates_remain_traceable PASSED [ 59%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_relative_data_dir_resolves_to_absolute_paths_in_quast_script PASSED [ 61%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_review_decision_artifact_allows_post_review_actions PASSED [ 63%]
+tests/test_assembly_review.py::AssemblyReviewStageTests::test_single_assembly_candidate_blocks_human PASSED [ 65%]
+tests/test_assembly_review.py::AssemblyReviewSchemaTests::test_assembly_review_plan_has_no_threshold_defaults PASSED [ 67%]
+tests/test_assembly_review.py::AssemblyReviewSchemaTests::test_review_decision_artifact_allows_all_decision_types 
+tests/test_assembly_review.py::AssemblyReviewSchemaTests::test_review_decision_artifact_allows_all_decision_types PASSED [ 69%]
+tests/test_assembly_review.py::AssemblyReviewSchemaTests::test_review_payload_includes_all_allowed_decisions PASSED [ 71%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_candidate_comparison_replay_reuses_existing_artifact PASSED [ 73%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_after_failed_attempt_uses_next_index PASSED [ 75%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_after_failed_then_successful_attempt_uses_next_free_index PASSED [ 77%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_bounded_by_max_reruns PASSED [ 79%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_creates_distinct_candidate_with_provenance PASSED [ 81%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_decision_validates_flye_parameters PASSED [ 83%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_does_not_restart_from_inventory PASSED [ 85%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_failed_assembly_does_not_discard_prior_candidates PASSED [ 87%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_generates_candidate_comparison_artifact PASSED [ 89%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_rejects_unknown_source_candidate PASSED [ 91%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_replay_rejects_existing_bundle_with_different_parameters PASSED [ 93%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_replay_reuses_existing_completed_bundle_without_side_effects PASSED [ 95%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_rerun_requires_rerun_parameters_in_metadata PASSED [ 97%]
+tests/test_assembly_review.py::AssemblyRerunTests::test_review_report_replay_does_not_duplicate_artifact_records PASSED [100%]
+
+============== 49 passed, 7 subtests passed in 131.68s (0:02:11) ===============
+[0;32m[PASS][0m unit tests: test_assembly_review.py
+[0;34m[INFO][0m Running unit tests: test_related_species_evidence.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 9 items
+
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_alias_reverse_lookup_supplies_family_and_order_fallback_hints PASSED [ 11%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_assembly_review_node_skips_all_failure_statuses_without_artifact 
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_assembly_review_node_skips_all_failure_statuses_without_artifact PASSED [ 22%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_assembly_review_node_writes_pack_from_manifest_user_metadata PASSED [ 33%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_hap1_hap2_and_parental_haplotypes_never_enter_primary_evidence PASSED [ 44%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_missing_target_is_non_blocking_and_exposes_source_provenance PASSED [ 55%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_review_report_and_llm_payload_receive_structured_evidence PASSED [ 66%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_same_genus_deduplicates_gcf_gca_and_marks_alternates PASSED [ 77%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_same_order_is_used_after_same_family_has_no_records PASSED [ 88%]
+tests/test_related_species_evidence.py::RelatedSpeciesEvidenceTests::test_source_provenance_contains_verified_hashes_and_rejects_changed_snapshot PASSED [100%]
+
+===================== 9 passed, 3 subtests passed in 7.71s =====================
+[0;32m[PASS][0m unit tests: test_related_species_evidence.py
+[0;34m[INFO][0m Running unit tests: test_review_recommender.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 7 items
+
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_context_includes_related_species_evidence_pack PASSED [ 14%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_handles_llm_invocation_exception PASSED [ 28%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_normalizes_common_llm_shape PASSED [ 42%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_rejects_disallowed_decision PASSED [ 57%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_rejects_invalid_json PASSED [ 71%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_recommender_writes_artifact_and_returns_llm_request PASSED [ 85%]
+tests/test_review_recommender.py::ReviewRecommenderTests::test_review_prompt_bundle_loads_and_renders_context PASSED [100%]
+
+============================== 7 passed in 0.31s ===============================
+[0;32m[PASS][0m unit tests: test_review_recommender.py
+[0;31m[FAIL][0m REVIEW_ASSEMBLY does not exist: /data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta
+
+[1m--- Test 05: Assembly Review (invalid REVIEW_ASSEMBLY) Summary ---[0m
+  Passed: [0;32m7[0m
+  Failed: [0;31m1[0m
+  [0;31mRESULT: FAIL[0m

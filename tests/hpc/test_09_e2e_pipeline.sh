@@ -23,8 +23,10 @@ section "Test 09: End-to-End Pipeline"
 info "Checking input data"
 USE_EXISTING_ASSEMBLY=false
 PREV_ASM="${REVIEW_ASSEMBLY:-}"
-if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
-    fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
+if [[ -n "$PREV_ASM" && ! -s "$PREV_ASM" ]]; then
+    fail "REVIEW_ASSEMBLY is missing or empty: ${PREV_ASM}"
+    summary "Test 09: End-to-End Pipeline (invalid explicit assembly)" || true
+    exit 1
 fi
 if [[ -z "$PREV_ASM" && "${TEST09_REUSE_ASSEMBLY:-true}" == "true" ]]; then
     PREV_ASM=$(latest_hpc_assembly || true)
@@ -39,25 +41,42 @@ if [[ -n "$PREV_ASM" ]]; then
         fail "REVIEW_ASSEMBLY is not a FASTA file: ${PREV_ASM}"
     fi
 else
-    for f in $LONG_READS; do
+    for f in ${LONG_READS:-}; do
         assert_file_nonempty "$f" "input long reads: $(basename "$f")"
     done
+fi
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline (invalid explicit inputs)" || true
+    exit 1
 fi
 
 # ---- Check Hi-C data availability ----
 HIC_AVAILABLE=false
-if [[ -n "${HIC_R1:-}" ]] && [[ -n "${HIC_R2:-}" ]]; then
-    if [[ -f "$HIC_R1" ]] && [[ -f "$HIC_R2" ]]; then
+if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
+    if [[ -z "${HIC_R1:-}" || -z "${HIC_R2:-}" ]]; then
+        fail "HIC_R1 and HIC_R2 must be configured together"
+        summary "Test 09: End-to-End Pipeline (incomplete explicit Hi-C inputs)" || true
+        exit 1
+    elif [[ -s "$HIC_R1" ]] && [[ -s "$HIC_R2" ]]; then
         info "Hi-C data detected:"
         info "  R1: ${HIC_R1}"
         info "  R2: ${HIC_R2}"
         HIC_AVAILABLE=true
         pass "Hi-C data available for scaffolding"
     else
-        warn "HIC_R1/HIC_R2 set but files not found, skipping Hi-C"
+        [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
+        [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
+        summary "Test 09: End-to-End Pipeline (invalid explicit Hi-C inputs)" || true
+        exit 1
     fi
 else
     info "No Hi-C data provided (HIC_R1/HIC_R2 not set), Hi-C stage will be skipped"
+fi
+
+if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
+    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
+    summary "Test 09: End-to-End Pipeline (invalid explicit chrom.sizes)" || true
+    exit 1
 fi
 
 T2T_AVAILABLE=false

@@ -23,10 +23,35 @@ source common.sh
 section "Test 06: Hi-C Scaffolding"
 
 # ---- Verify input data ----
-if [[ -z "${HIC_R1}" || ! -f "${HIC_R1}" || -z "${HIC_R2}" || ! -f "${HIC_R2}" ]]; then
-    warn "Hi-C reads not configured or missing (HIC_R1/HIC_R2 in hpc_env.sh)"
+if [[ -n "${REVIEW_ASSEMBLY:-}" && ! -s "$REVIEW_ASSEMBLY" ]]; then
+    fail "REVIEW_ASSEMBLY is missing or empty: ${REVIEW_ASSEMBLY}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit assembly)" || true
+    exit 1
+fi
+if [[ -n "${REVIEW_ASSEMBLY:-}" ]] && ! grep -q '^>' "$REVIEW_ASSEMBLY" 2>/dev/null; then
+    fail "REVIEW_ASSEMBLY is not a FASTA file: ${REVIEW_ASSEMBLY}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit assembly)" || true
+    exit 1
+fi
+if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
+    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit chrom.sizes)" || true
+    exit 1
+fi
+
+if [[ -z "${HIC_R1:-}" && -z "${HIC_R2:-}" ]]; then
+    warn "Hi-C reads not configured (HIC_R1/HIC_R2 in hpc_env.sh)"
     info "Running schema + unit tests only (no real Hi-C execution)"
     HIC_AVAILABLE=false
+elif [[ -z "${HIC_R1:-}" || -z "${HIC_R2:-}" ]]; then
+    fail "HIC_R1 and HIC_R2 must be configured together"
+    summary "Test 06: Hi-C Scaffolding (incomplete explicit inputs)" || true
+    exit 1
+elif [[ ! -s "$HIC_R1" || ! -s "$HIC_R2" ]]; then
+    [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
+    [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit inputs)" || true
+    exit 1
 else
     assert_file_nonempty "$HIC_R1" "Hi-C R1"
     assert_file_nonempty "$HIC_R2" "Hi-C R2"
@@ -37,15 +62,15 @@ fi
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_hic_scaffolding.py"
-    python3 -m pytest tests/test_hic_scaffolding.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_hic_scaffolding.py -v --tb=short 2>&1 && \
         pass "unit tests: test_hic_scaffolding.py" || fail "unit tests: test_hic_scaffolding.py"
 
     info "Running unit tests: test_run_config.py (Hi-C schema)"
-    python3 -m pytest tests/test_run_config.py -v --tb=short -k "hic or HiC or hic_scaffolding" 2>&1 && \
+    run_pytest tests/test_run_config.py -v --tb=short -k "hic or HiC or hic_scaffolding" 2>&1 && \
         pass "unit tests: test_run_config.py (Hi-C)" || fail "unit tests: test_run_config.py (Hi-C)"
 
     info "Running unit tests: test_ask_interactive.py"
-    python3 -m pytest tests/test_ask_interactive.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_ask_interactive.py -v --tb=short 2>&1 && \
         pass "unit tests: test_ask_interactive.py" || fail "unit tests: test_ask_interactive.py"
     cd "${SCRIPT_DIR}"
 fi
@@ -176,16 +201,11 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     # artifact from the newest Test 04 session, then any existing assembly
     # artifact.
     PREV_ASM="${REVIEW_ASSEMBLY:-}"
-    if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
-        fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
-        summary "Test 06: Hi-C Scaffolding" || true
-        exit 1
-    fi
     if [[ -z "$PREV_ASM" ]]; then
         PREV_ASM=$(latest_test04_assembly || true)
     fi
     if [[ -z "$PREV_ASM" ]]; then
-        PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
+        PREV_ASM=$(latest_hpc_assembly || true)
     fi
     if [[ -z "$PREV_ASM" ]]; then
         info "[SKIP] No assembly FASTA is available for Hi-C scaffolding."

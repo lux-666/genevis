@@ -557,7 +557,45 @@ def _run_session(args: argparse.Namespace) -> int:
 
     graph = build_graph(backend=backend, data_dir=request.data_dir)
     config = {"configurable": {"thread_id": request.session_id}}
-    result = graph.invoke(state, config=config)
+    try:
+        result = graph.invoke(state, config=config)
+    except Exception as exc:
+        # A stage bug must still leave an operator-readable durable terminal
+        # record.  Prefer the latest checkpoint values because the in-memory
+        # initial state may be several stages behind the node that raised.
+        latest_state = dict(state)
+        try:
+            snapshot = graph.get_state(config)
+            snapshot_values = getattr(snapshot, "values", None)
+            if isinstance(snapshot_values, dict):
+                latest_state.update(snapshot_values)
+        except Exception:
+            # Failure reporting must not hide the original graph exception when
+            # a backend cannot expose a checkpoint snapshot.
+            pass
+        error = f"{type(exc).__name__}: {exc}"
+        failure_result = {
+            **latest_state,
+            "session_id": request.session_id,
+            "data_dir": request.data_dir,
+            "input_manifest_ref": str(manifest_path),
+            "supervision_state": "failed_terminal",
+            "last_error": error,
+            "checkpoint_persistence": backend,
+        }
+        Ledger(request.data_dir).record_event(
+            request.session_id,
+            "run_failed",
+            {
+                "current_stage": failure_result.get("current_stage"),
+                "error": error,
+            },
+        )
+        from app.reports.review_report import write_operator_report
+
+        write_operator_report(request.data_dir, request.session_id, failure_result)
+        print(f"error: workflow invoke failed: {error}", file=sys.stderr)
+        return 1
 
     interactive_gate = getattr(args, "_interactive_gate", None)
     if interactive_gate is None:

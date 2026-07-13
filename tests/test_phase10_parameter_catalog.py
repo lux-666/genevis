@@ -960,6 +960,46 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
         self.assertIn("assembly.parameter.input_profile", artifact_types)
         self.assertIn("assembly.parameter.prompt_payload", artifact_types)
 
+    def test_array_valued_parameter_evidence_is_persisted_as_validation_failed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            payload = _complete_hifiasm_ont_legacy_response(purge_level=1)
+            payload["parameter_evidence"]["purge_level"] = [
+                {
+                    "basis": "profile_fact",
+                    "fact_paths": ["genome_survey.heterozygosity"],
+                }
+            ]
+            model = _FakeModel(payload)
+
+            with patch(
+                "app.stages.assembly.decision.build_chat_model",
+                return_value=model,
+            ):
+                result = recommend_assembly_parameters(state)
+
+            assembly = result["stage_outputs"]["assembly"]
+            attempt = assembly["failed_parameter_recommendation"]
+            self.assertEqual(assembly["status"], "parameter_validation_failed")
+            self.assertEqual(attempt["status"], "validation_failed")
+            self.assertEqual(attempt["parameter_evidence"], {})
+            self.assertIn(
+                "must map each parameter to one object",
+                attempt["validation"]["violations"][0]["reason"],
+            )
+            prompt_example = json.loads(model.messages[2]["content"])
+            self.assertEqual(model.messages[2]["role"], "assistant")
+            self.assertTrue(prompt_example["parameter_evidence"])
+            self.assertTrue(
+                all(
+                    isinstance(evidence, dict)
+                    for evidence in prompt_example["parameter_evidence"].values()
+                )
+            )
+            recommendation_ref = attempt["parameter_recommendation_ref"]
+            recommendation_path = Path(tmpdir) / recommendation_ref["path_ref"].removeprefix("data/")
+            self.assertTrue(recommendation_path.is_file())
+
     def test_hifiasm_recommendation_indexes_numeric_retrieval_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             knowledge_root = self._numeric_cutover_knowledge_root(tmpdir)
@@ -1035,7 +1075,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "data/"
             )
             replay_prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
-            model_prompt = json.loads(model.messages[1]["content"])
+            model_prompt = json.loads(model.messages[-1]["content"])
             self.assertEqual(model_prompt, replay_prompt)
             self.assertEqual(
                 model_prompt["methods_evidence"]["evidence_budget"],
@@ -1122,7 +1162,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "data/"
             )
             replay_prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
-            model_prompt = json.loads(model.messages[1]["content"])
+            model_prompt = json.loads(model.messages[-1]["content"])
             omitted_spans = replay_prompt["methods_evidence"]["evidence_budget"][
                 "omitted_spans"
             ]
@@ -1227,7 +1267,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             )
             self.assertNotIn(
                 "prompt_contract",
-                json.loads(model.messages[1]["content"]),
+                json.loads(model.messages[-1]["content"]),
             )
 
             artifact_types = {record["artifact_type"] for record in artifact_records}

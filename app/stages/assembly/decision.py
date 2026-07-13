@@ -11,6 +11,7 @@ from app.domains.assembly.methods_evidence import (
     _require_final_attested_hifiasm_methods_prompt_payload,
     normalize_hifiasm_methods_response,
 )
+from app.llm.assembly_parameter_prompts import render_assembly_parameter_messages
 from app.llm.factory import build_chat_model
 
 AssemblyDecisionKind = Literal["route_selection", "parameter_recommendation"]
@@ -29,7 +30,7 @@ class AssemblyDecisionRequest(BaseModel):
     # validation-owned Task 4 attestation. ``Any`` plus this identity-preserving
     # validator retains the exact object crossing the decision boundary.
     prompt_payload: Any
-    system_prompt: str
+    system_prompt: str | None = None
     allowed_actions: list[str] = Field(default_factory=list)
     allow_default_on_error: bool = False
     _validated_prompt_contract: AssemblyPromptContract | None = PrivateAttr(default=None)
@@ -45,6 +46,8 @@ class AssemblyDecisionRequest(BaseModel):
     def _validate_explicit_prompt_contract(self) -> "AssemblyDecisionRequest":
         if self.prompt_contract == "hifiasm_methods_v1" and self.kind != "parameter_recommendation":
             raise ValueError("hifiasm_methods_v1 is only valid for parameter recommendations")
+        if self.kind == "route_selection" and not self.system_prompt:
+            raise ValueError("route_selection requires system_prompt")
         self._validated_prompt_contract = self.prompt_contract
         self._require_current_prompt_attestation()
         return self
@@ -75,10 +78,16 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
     """Render prompt, call the model, and parse a JSON decision."""
 
     prompt_payload = request._require_current_prompt_attestation()
-    messages = [
-        {"role": "system", "content": request.system_prompt},
-        {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, indent=2)},
-    ]
+    if request.system_prompt:
+        messages = [
+            {"role": "system", "content": request.system_prompt},
+            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, indent=2)},
+        ]
+    else:
+        messages = render_assembly_parameter_messages(
+            prompt_payload,
+            prompt_contract=request._validated_prompt_contract or request.prompt_contract,
+        )
     try:
         model = build_chat_model()
         response = model.invoke(messages)
@@ -163,8 +172,20 @@ def _validate_parameter_recommendation(
         raise ValueError("parameter recommendation requires params")
     if not isinstance(parsed.get("params"), dict):
         raise ValueError("params must be an object")
-    if "parameter_evidence" in parsed and not isinstance(parsed.get("parameter_evidence"), dict):
-        raise ValueError("parameter_evidence must be an object")
+    if "parameter_evidence" in parsed:
+        parameter_evidence = parsed.get("parameter_evidence")
+        if not isinstance(parameter_evidence, dict):
+            raise ValueError("parameter_evidence must be an object")
+        invalid_entries = sorted(
+            str(parameter)
+            for parameter, evidence in parameter_evidence.items()
+            if not isinstance(evidence, dict)
+        )
+        if invalid_entries:
+            raise ValueError(
+                "parameter_evidence must map each parameter to one object; "
+                f"non-object entries={invalid_entries}"
+            )
     return parsed
 
 

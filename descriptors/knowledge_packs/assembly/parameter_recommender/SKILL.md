@@ -3,14 +3,14 @@
 ## Pack Metadata
 
 - domain: assembly.parameter_recommendation
-- supported_methods: hifiasm, hifiasm_ont
+- supported_methods: flye, nextdenovo, hifiasm, hifiasm_ont
 - parameter_model: L0/L1/L2
 - primary_inputs: method catalog, read_qc, genome_survey, selected evidence cases, hard validation rules
-- output_contract: JSON with params, reasoning, selected_case_ids, omitted_parameters, uncertainty_notes
+- output_contract: selected method prompt bundle in app/llm
 
 ## Responsibility
 
-Use evidence and conservative assembly experience to recommend only cataloged L2 parameters. Treat L1 values as facts. Never change L0 or L1 parameters, never invent parameter keys, and never use this text as a substitute for hard validation rules.
+Use evidence and conservative assembly experience to recommend cataloged L2 parameters. Treat L0 and L1 values as immutable context. Hard validation remains the authority for parameter levels, keys, values, and evidence references.
 
 This pack is not an optimizer. It should choose a small, explainable parameter adjustment set from the complete L2 surface. Omit an L2 parameter when the available evidence does not justify overriding the method catalog default.
 
@@ -22,7 +22,7 @@ This pack is not an optimizer. It should choose a small, explainable parameter a
 
 ## Initial Recommendation Heuristics
 
-For hifiasm, compare the current sample with approved cases using continuous numeric distance for genome size, coverage, read N50, heterozygosity, and ploidy. Treat evidence coverage separately from numeric similarity: missing values never make a case more similar. Prefer exact method/read-type compatibility over broad biological similarity. Methods excerpts may guide parameter choices only when they are present in the selected evidence payload.
+For hifiasm, compare the current sample with approved cases using continuous numeric distance for genome size, coverage, read N50, heterozygosity, and ploidy. Treat evidence coverage separately from numeric similarity: similarity is based on the values present in both profiles. Prefer exact method/read-type compatibility over broad biological similarity. Methods excerpts may guide parameter choices when they are present in the selected evidence payload.
 
 Cases are optional evidence, not a prerequisite for recommendation. When no compatible case exists, continue from readonly L1 facts, these curated heuristics, retry context, and catalog defaults. Under weak combined evidence, prefer the default. A parameter override should be tied to at least one of: a strong input fact, a close evidence case, an applicable curated heuristic, or a known failure mode from a previous attempt.
 
@@ -34,7 +34,7 @@ Genome size affects memory-sensitive knobs. Large genomes or repeat-rich profile
 
 ## Retry After Execution Failure
 
-Use the previous attempt, exit code, failure class, and the last log lines to decide whether parameter retry is meaningful. If the log indicates missing inputs, binary errors, permission failures, invalid CLI syntax, or environment problems, do not random-walk parameters; explain the likely non-parameter issue.
+Use the previous attempt, exit code, failure class, and the last log lines to decide whether parameter retry is meaningful. Treat missing inputs, binary errors, permission failures, invalid CLI syntax, and environment problems as non-parameter issues and keep the parameter set stable.
 
 For memory exhaustion, reduce graph/overlap pressure or choose memory-saving settings when those parameters exist in the L2 catalog. For parameter parse errors, remove or correct only the parameters implicated by the log. For timeout or stalled overlap stages, prefer small targeted changes rather than many simultaneous overrides.
 
@@ -47,6 +47,6 @@ Use review metrics as diagnosis rather than as a new blind search space.
 - Fragmented: high contig count and low N50 can justify preserving connectivity, reducing over-cleaning, or revisiting overlap sensitivity.
 - Low completeness: distinguish missing biological content from contamination or over-filtering before changing many knobs.
 
-## Output Discipline
+## Response Guidance
 
-Return JSON only. Put only L2 keys under `params`. Keep reasoning short and tied to current facts, selected case IDs, rules, curated heuristics, or retry context. Include every selected case you used in `selected_case_ids`; leave it empty if none were informative. When returning `parameter_evidence`, use only `case`, `profile_fact`, `skill_heuristic`, `retry_failure`, or `catalog_default`; case/span citations are required only for `case` evidence.
+Follow the selected method example supplied by `app/llm`. Keep reasoning short and tied to current facts, selected case IDs, rules, curated heuristics, or retry context. Record the selected cases and evidence references that actually support the recommendation.

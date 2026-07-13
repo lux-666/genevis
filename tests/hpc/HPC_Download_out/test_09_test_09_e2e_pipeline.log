@@ -1,0 +1,130 @@
+
+[1m=== Test 09: End-to-End Pipeline ===[0m
+[0;34m[INFO][0m Checking input data
+[0;31m[FAIL][0m REVIEW_ASSEMBLY does not exist: /data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta
+[0;31m[FAIL][0m file empty or missing: input existing assembly: draft_assembly.fasta (/data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta)
+[0;31m[FAIL][0m REVIEW_ASSEMBLY is not a FASTA file: /data/work/genevis/data_hpc_test/runs/hpc-test09-e2e-20260629-153820/artifacts/assembly/hpc-test09-e2e-20260629-153820/flye/draft_assembly.fasta
+[0;34m[INFO][0m Hi-C data detected:
+[0;34m[INFO][0m   R1: /data/input/Files/genevis/bht_Hic_1_toy10000/bht_Hic_1_1.first10000.fq.gz
+[0;34m[INFO][0m   R2: /data/input/Files/genevis/bht_Hic_1_toy10000/bht_Hic_1_2.first10000.fq.gz
+[0;32m[PASS][0m Hi-C data available for scaffolding
+manifest schema validation OK
+[0;34m[INFO][0m HIC_CHROM_SIZES is empty; Juicer run-config will use chrom_sizes_ref=auto
+[0;34m[INFO][0m Run config written: /data/work/genevis/data_hpc_test/_test09_rc.json
+run-config schema validation OK
+[0;34m[INFO][0m Phase 1: Read QC + Genome Survey (non-blocking stages)
+[0;34m[INFO][0m gene-agent run --manifest /data/work/genevis/data_hpc_test/_test09_manifest.yaml --session-id hpc-test09-e2e-20260713-153236 --data-dir /data/work/genevis/data_hpc_test --run-config /data/work/genevis/data_hpc_test/_test09_rc.json --checkpointer sqlite
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/data/work/genevis/app/entrypoints/run.py", line 1355, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/data/work/genevis/app/entrypoints/run.py", line 1337, in main
+    return _run_session(args)
+           ^^^^^^^^^^^^^^^^^^
+  File "/data/work/genevis/app/entrypoints/run.py", line 560, in _run_session
+    result = graph.invoke(state, config=config)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 3880, in invoke
+    for chunk in self.stream(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 2936, in stream
+    for _ in runner.tick(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_runner.py", line 207, in tick
+    run_with_retry(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_retry.py", line 585, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 684, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 3880, in invoke
+    for chunk in self.stream(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 2936, in stream
+    for _ in runner.tick(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_runner.py", line 207, in tick
+    run_with_retry(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_retry.py", line 585, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 684, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 426, in invoke
+    ret = self.func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/genevis/app/stages/assembly/nodes.py", line 971, in recommend_assembly_parameters
+    attempt = ParameterAttempt(
+              ^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/pydantic/main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ParameterAttempt
+parameter_evidence.asm_coverage
+  Input should be a valid dictionary [type=dict_type, input_value=[{'basis': 'profile_fact'...nging multiple knobs.'}], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+During task with name 'recommend_parameters' and id '6ce74c6f-f503-07af-2e16-488173693871'
+During task with name 'assembly_stage' and id '921a1063-8448-1711-5080-dda7d9a6a6ac'
+[1;33m[WARN][0m Pipeline invocation returned exit code 1; inspecting durable state
+[0;32m[PASS][0m dir exists: run directory exists
+[0;32m[PASS][0m dir exists: artifacts directory exists
+[0;32m[PASS][0m read_qc_summary.json produced
+[0;32m[PASS][0m summary has method_name
+[0;34m[INFO][0m genome_survey skipped or not yet reached
+[0;34m[INFO][0m Inspecting session state after Phase 1
+[0;34m[INFO][0m   current_stage: unknown
+[0;34m[INFO][0m   supervision_state: running_or_completed_unknown
+[0;31m[FAIL][0m Pipeline failed with exit code 1
+
+[1m=== Phase 2: Blocking Behavior Analysis ===[0m
+[1;33m[WARN][0m Unexpected supervision_state: running_or_completed_unknown
+
+[1m=== Phase 3: Stage Transition Validation ===[0m
+[0;34m[INFO][0m Analyzing route trace
+Stage sequence: 
+route_trace not available in inspect summary; stage order check skipped
+[0;32m[PASS][0m Stage transition analysis complete
+
+[1m=== Phase 4: Asset Registry Propagation ===[0m
+Total assets: 3
+Asset types: {'hic_reads_registered', 'raw_long_reads'}
+✓ raw_long_reads input asset registered: 1 entries
+✓ hic_reads_registered input asset registered: 2 entries
+[0;32m[PASS][0m Asset registry propagation validated
+
+[1m=== Phase 5: TUI Interaction Points Summary ===[0m
+[0;34m[INFO][0m TUI blocking points in the pipeline:
+[0;34m[INFO][0m   1. Assembly route selection (when platform/coverage evidence is insufficient)
+[0;34m[INFO][0m   2. Assembly candidate selection (if multiple candidates)
+[0;34m[INFO][0m   3. Assembly review human gate (always blocks unless auto policy)
+[0;34m[INFO][0m   4. Hi-C scaffolding (blocks if execution_mode != local)
+[0;34m[INFO][0m   5. T2T review gate (if significant changes proposed)
+[0;34m[INFO][0m Current blocking pattern verification:
+[0;34m[INFO][0m   - blocked_human → sets supervision_state = 'blocked_human'
+[0;34m[INFO][0m   - blocked_human → exposes active_interrupt or durable decision_requirements
+[0;34m[INFO][0m   - Stage graph routes to END (clean exit)
+[0;34m[INFO][0m   - TUI can inspect decision requirements and present choices
+[0;34m[INFO][0m   - Resume via review_interactive endpoint with decision
+
+[1m=== Phase 6: Tool Execution Verification ===[0m
+[0;34m[INFO][0m Checking tool execution artifacts
+[0;32m[PASS][0m file exists: seqkit script generated
+[0;32m[PASS][0m jellyfish script generated
+
+[1m=== Phase 7: Checkpoint Persistence ===[0m
+[0;32m[PASS][0m Checkpoints persisted (1 files)
+
+[1m=== Phase 8: Hi-C Scaffolding Verification ===[0m
+[0;34m[INFO][0m Verifying Hi-C scaffolding execution
+[1;33m[WARN][0m Hi-C work directory not found (stage may not have executed)
+[0;34m[INFO][0m Derived Hi-C outputs are tracked in artifact records, not the input asset registry
+
+[1m=== Phase 9: T2T Polishing Verification ===[0m
+[0;34m[INFO][0m Verifying T2T polishing execution
+[1;33m[WARN][0m T2T work directory not found (stage may not have executed)
+[0;34m[INFO][0m Derived T2T outputs are tracked in artifact records, not the input asset registry
+
+[1m--- Test 09: End-to-End Pipeline Summary ---[0m
+  Passed: [0;32m10[0m
+  Failed: [0;31m4[0m
+  [0;31mRESULT: FAIL[0m

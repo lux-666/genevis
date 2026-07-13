@@ -1,0 +1,223 @@
+
+[1m=== Test 04: Assembly + Assembly Dedup ===[0m
+[0;34m[INFO][0m Running unit tests: test_assembly.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 29 items
+
+tests/test_assembly.py::AssemblyDescriptorTests::test_descriptor_registry_loads_assembly_candidates PASSED [  3%]
+tests/test_assembly.py::AssemblyDescriptorTests::test_shared_read_type_mapping_covers_manifest_platforms_and_methods 
+tests/test_assembly.py::AssemblyDescriptorTests::test_shared_read_type_mapping_covers_manifest_platforms_and_methods PASSED [  6%]
+tests/test_assembly.py::AssemblyStageTests::test_auto_planning_without_genome_size_selects_only_flye PASSED [ 10%]
+tests/test_assembly.py::AssemblyStageTests::test_auto_planning_without_human_decision_selects_no_more_than_primary_and_fallback PASSED [ 13%]
+tests/test_assembly.py::AssemblyStageTests::test_default_planning_does_not_execute_flye PASSED [ 17%]
+tests/test_assembly.py::AssemblyStageTests::test_explicit_hifiasm_request_remains_allowed_as_compatibility_route PASSED [ 20%]
+tests/test_assembly.py::AssemblyStageTests::test_failed_local_flye_records_failed_attempt_without_fallback_execution PASSED [ 24%]
+tests/test_assembly.py::AssemblyStageTests::test_failed_local_hifiasm_records_failed_attempt PASSED [ 27%]
+tests/test_assembly.py::AssemblyStageTests::test_local_flye_execution_from_multi_line_read_qc_fofn PASSED [ 31%]
+tests/test_assembly.py::AssemblyStageTests::test_local_flye_execution_from_read_qc_fofn PASSED [ 34%]
+tests/test_assembly.py::AssemblyStageTests::test_local_flye_execution_writes_draft_assembly_and_ledger PASSED [ 37%]
+tests/test_assembly.py::AssemblyStageTests::test_local_flye_rejects_invalid_threads PASSED [ 41%]
+tests/test_assembly.py::AssemblyStageTests::test_local_hifiasm_execution_from_fofn_uses_ont_flag PASSED [ 44%]
+tests/test_assembly.py::AssemblyStageTests::test_local_hifiasm_execution_writes_draft_assembly_and_ledger PASSED [ 48%]
+tests/test_assembly.py::AssemblyStageTests::test_local_hifiasm_rejects_invalid_threads PASSED [ 51%]
+tests/test_assembly.py::AssemblyStageTests::test_local_nextdenovo_execution_writes_draft_assembly_and_ledger PASSED [ 55%]
+tests/test_assembly.py::AssemblyStageTests::test_local_nextdenovo_omitted_read_cutoff_uses_catalog_default PASSED [ 58%]
+tests/test_assembly.py::AssemblyStageTests::test_method_subgraphs_do_not_import_parent_graph_modules PASSED [ 62%]
+tests/test_assembly.py::AssemblyStageTests::test_missing_assembly_inputs_fails_terminally PASSED [ 65%]
+tests/test_assembly.py::AssemblyStageTests::test_missing_genome_size_rejects_methods_that_require_it PASSED [ 68%]
+tests/test_assembly.py::AssemblyStageTests::test_outer_graph_routes_to_method_subgraphs PASSED [ 72%]
+tests/test_assembly.py::AssemblyStageTests::test_plans_primary_and_one_fallback_from_fofn_and_genome_size_prior PASSED [ 75%]
+tests/test_assembly.py::AssemblyStageTests::test_raw_long_reads_with_pacbio_hifi_platform_count_as_hifi_route PASSED [ 79%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_flye_command_keeps_reads_after_read_type_and_excludes_l1_context PASSED [ 82%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_flye_omitted_threads_uses_catalog_default PASSED [ 86%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_missing_flye_params_blocks_with_blocked_param_status PASSED [ 89%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_shared_parameters_fill_flye_read_type_and_genome_size PASSED [ 93%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_unknown_read_type_is_reported_as_invalid_param PASSED [ 96%]
+tests/test_assembly.py::Phase4FlyeParameterTests::test_validated_params_are_passed_to_flye_command_and_metadata PASSED [100%]
+
+==================== 29 passed, 5 subtests passed in 21.07s ====================
+[0;32m[PASS][0m unit tests: test_assembly.py
+[0;34m[INFO][0m Running unit tests: test_assembly_dedup.py
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /data/work/conda_envs/gene_agent/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/work/genevis
+configfile: pyproject.toml
+plugins: anyio-4.13.0, langsmith-0.8.4
+collecting ... collected 4 items
+
+tests/test_assembly_dedup.py::AssemblyDedupStageTests::test_assembly_review_preserves_raw_and_adds_dedup_output PASSED [ 25%]
+tests/test_assembly_dedup.py::AssemblyDedupStageTests::test_default_auto_purge_dups_writes_purged_candidate_without_overwriting_raw PASSED [ 50%]
+tests/test_assembly_dedup.py::AssemblyDedupStageTests::test_passes_through_when_assembly_output_is_absent PASSED [ 75%]
+tests/test_assembly_dedup.py::AssemblyDedupStageTests::test_passes_through_when_candidate_is_not_materialized PASSED [100%]
+
+============================== 4 passed in 3.15s ===============================
+[0;32m[PASS][0m unit tests: test_assembly_dedup.py
+RequestableStage values include assembly_dedup
+[0;32m[PASS][0m assembly_dedup in RequestableStage
+DomainStage includes assembly_dedup
+[0;32m[PASS][0m assembly_dedup in DomainStage
+[0;34m[INFO][0m Preflighting with config/envs.local.yaml
+[0;32m[PASS][0m configured method ready: read_qc.long_read_stats.seqkit_stats (/data/work/conda_envs/env_geno_exec)
+[0;32m[PASS][0m configured method ready: assembly.candidate.flye (/data/work/conda_envs/env_geno_exec)
+[0;32m[PASS][0m configured method ready: assembly_dedup.purge_dups (/data/work/conda_envs/env_geno_exec)
+[0;34m[INFO][0m Running assembly + dedup session: hpc-test04-20260713-152733
+[0;34m[INFO][0m   Method: flye
+[0;34m[INFO][0m   This may take a while for real assembly...
+[0;34m[INFO][0m gene-agent run --manifest /data/work/genevis/data_hpc_test/_test04_manifest.yaml --session-id hpc-test04-20260713-152733 --data-dir /data/work/genevis/data_hpc_test --run-config /data/work/genevis/data_hpc_test/_test04_rc.json --checkpointer sqlite
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/data/work/genevis/app/entrypoints/run.py", line 1355, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/data/work/genevis/app/entrypoints/run.py", line 1337, in main
+    return _run_session(args)
+           ^^^^^^^^^^^^^^^^^^
+  File "/data/work/genevis/app/entrypoints/run.py", line 560, in _run_session
+    result = graph.invoke(state, config=config)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 3880, in invoke
+    for chunk in self.stream(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 2936, in stream
+    for _ in runner.tick(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_runner.py", line 207, in tick
+    run_with_retry(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_retry.py", line 585, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 684, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 3880, in invoke
+    for chunk in self.stream(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/main.py", line 2936, in stream
+    for _ in runner.tick(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_runner.py", line 207, in tick
+    run_with_retry(
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/pregel/_retry.py", line 585, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 684, in invoke
+    input = context.run(step.invoke, input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/langgraph/_internal/_runnable.py", line 426, in invoke
+    ret = self.func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/work/genevis/app/stages/assembly/nodes.py", line 971, in recommend_assembly_parameters
+    attempt = ParameterAttempt(
+              ^^^^^^^^^^^^^^^^^
+  File "/data/work/conda_envs/gene_agent/lib/python3.11/site-packages/pydantic/main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 2 validation errors for ParameterAttempt
+parameter_evidence.asm_coverage
+  Input should be a valid dictionary [type=dict_type, input_value=[{'basis': 'profile_fact'...ient assembly signal.'}], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+parameter_evidence.min_overlap
+  Input should be a valid dictionary [type=dict_type, input_value=[{'basis': 'catalog_defau... the initial attempt.'}], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/dict_type
+During task with name 'recommend_parameters' and id '114376e0-2a42-a350-cc1f-64b1027be073'
+During task with name 'assembly_stage' and id '5efd6991-57e5-7066-170c-f4605b8bf70a'
+[1;33m[WARN][0m initial assembly invocation returned 1; inspecting durable gate state
+[0;34m[INFO][0m continuing after successful durable parameter-gate handling
+[0;34m[INFO][0m Checking assembly outputs
+[0;31m[FAIL][0m draft assembly FASTA not found
+[0;31m[FAIL][0m assembly method script not found
+[1;33m[WARN][0m assembly candidate bundle not found (may be at different path)
+[0;34m[INFO][0m Checking assembly parameter recommendation artifacts
+Traceback (most recent call last):
+  File "<stdin>", line 16, in <module>
+AssertionError: no command.json for assembly.candidate.flye under /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/parameter_attempt_*
+[0;31m[FAIL][0m assembly parameter closed-loop artifacts invalid
+[0;34m[INFO][0m Checking assembly_dedup outputs
+[0;34m[INFO][0m purge_dups script not found — checking if dedup was skipped
+[0;31m[FAIL][0m file empty or missing: minimap2 alignment BAM (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/reads_to_raw_assembly.bam)
+[0;31m[FAIL][0m file empty or missing: minimap2 alignment PAF for pbcstat (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/reads_to_raw_assembly.paf.gz)
+[0;31m[FAIL][0m file empty or missing: split assembly for purge_dups (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/raw_assembly.split.fasta)
+[0;31m[FAIL][0m file empty or missing: pbcstat base coverage (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/PB.base.cov)
+[0;31m[FAIL][0m file empty or missing: pbcstat statistics (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/PB.stat)
+[0;31m[FAIL][0m file empty or missing: calcuts cutoffs (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/cutoffs)
+[0;31m[FAIL][0m file empty or missing: self-alignment PAF (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/self.paf.gz)
+[0;31m[FAIL][0m file empty or missing: purge_dups BED file (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/dups.bed)
+[0;31m[FAIL][0m file empty or missing: purged assembly FASTA (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/purged_assembly.fasta)
+[0;31m[FAIL][0m file empty or missing: purged_candidate.json bundle (/data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly_dedup/hpc-test04-20260713-152733/purged_candidate.json)
+[0;34m[INFO][0m Checking stage handoff
+No assembly_dedup events found (stage may have been skipped)
+[0;31m[FAIL][0m ledger succeeded: assembly.candidate.flye
+[0;31m[FAIL][0m ledger succeeded: assembly_dedup.purge_dups
+[0;32m[PASS][0m assembly/dedup ledger has no duplicate attempts
+[0;34m[INFO][0m gene-agent inspect --session-id hpc-test04-20260713-152733 --data-dir /data/work/genevis/data_hpc_test --trace
+session_id: hpc-test04-20260713-152733
+supervision_state: running_or_completed_unknown
+checkpoint_persistence: sqlite
+durable_resume_available: true
+artifact_count: 12
+decisions_by_origin: {'human': 0, 'llm_provisional': 0, 'auto_rule': 0}
+next_action.kind: unknown
+next_action.summary: No active operator action was inferred from durable ledger and artifact records.
+trace_json: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/run_trace/hpc-test04-20260713-152733/run_trace.json
+trace_markdown: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/run_trace/hpc-test04-20260713-152733/run_trace.md
+
+# Run Trace: hpc-test04-20260713-152733
+
+- supervision_state: running_or_completed_unknown
+- final_or_current_stage: assembly (source: checkpoint_only)
+- manifest: /data/work/genevis/data_hpc_test/_test04_manifest.yaml
+- data_dir: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733
+- checkpoint_persistence: sqlite
+- created_at: 2026-07-13T07:27:45.292118+00:00
+- ledger_events: 9, artifacts: 12
+- decisions_by_origin: {'human': 0, 'llm_provisional': 0, 'auto_rule': 0}
+
+## Stages
+
+### inventory — no_durable_evidence
+
+### read_qc — executed
+- timing: started_at=2026-07-13T07:27:55.373664+00:00 finished_at=2026-07-13T07:28:00.288606+00:00
+- method read_qc.long_read_stats.seqkit_stats: succeeded
+- artifact read_qc.long_read_stats: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/read_qc/hpc-test04-20260713-152733/seqkit_stats.tsv
+- artifact read_qc.long_read_summary: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/read_qc/hpc-test04-20260713-152733/read_qc_summary.json
+- artifact read_qc.long_reads.fofn: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/read_qc/hpc-test04-20260713-152733/long_reads.fofn
+
+### genome_survey — planned_only
+- artifact genome_survey_result: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/genome_survey/hpc-test04-20260713-152733/genome_survey_result.json
+
+### assembly — planned_only
+- artifact assembly.input_profile: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/input_profile.json
+- artifact assembly.route_decision: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/route_decision.json
+- artifact assembly.parameter.input_profile: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/parameter_attempt_0/input_profile.json
+- artifact assembly.parameter.prompt_payload: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/parameter_attempt_0/prompt_payload.json
+- artifact assembly.parameter.llm_response: /data/work/genevis/data_hpc_test/runs/hpc-test04-20260713-152733/artifacts/assembly/hpc-test04-20260713-152733/parameter_attempt_0/llm_response.json
+
+### assembly_dedup — no_durable_evidence
+
+### assembly_review — no_durable_evidence
+
+### hic_scaffolding — no_durable_evidence
+
+### t2t — no_durable_evidence
+
+### repeat_annotation — no_durable_evidence
+
+### gene_annotation — no_durable_evidence
+
+### function_annotation — no_durable_evidence
+
+## Durable-Record Gaps
+
+- route_trace [checkpoint_only]: The authoritative ordered route_trace lives only in checkpoint/in-memory state. The trace reconstructs an evidence-based stage path from ledger and artifact records instead.
+- skip_reasons [checkpoint_only]: Per-stage skip reasons are state fields not persisted to the ledger. Stages without durable evidence are reported as no_durable_evidence rather than skipped-with-reason.
+
+[0;32m[PASS][0m inspect assembly+dedup session
+
+[1m--- Test 04: Assembly + Assembly Dedup Summary ---[0m
+  Passed: [0;32m9[0m
+  Failed: [0;31m15[0m
+  [0;31mRESULT: FAIL[0m

@@ -27,7 +27,7 @@ done
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_read_qc.py"
-    if python3 -m pytest tests/test_read_qc.py -v --tb=short 2>&1; then
+    if run_pytest tests/test_read_qc.py -v --tb=short 2>&1; then
         pass "unit tests: test_read_qc.py"
     else
         fail "unit tests: test_read_qc.py"

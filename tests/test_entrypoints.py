@@ -1397,6 +1397,56 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
             self.assertEqual(paths.run_config_path.read_text(encoding="utf-8"), config_path.read_text(encoding="utf-8"))
 
+    def test_run_session_invoke_exception_writes_durable_failed_terminal_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            data_dir = root / "data"
+
+            class _ExplodingGraph:
+                def invoke(self, state, config):
+                    raise RuntimeError("parameter artifact validation exploded")
+
+                def get_state(self, config):
+                    return SimpleNamespace(
+                        values={
+                            "current_stage": "assembly",
+                            "route_trace": ["inventory_stage", "assembly_stage"],
+                        }
+                    )
+
+            with patch("app.entrypoints.run.build_graph", return_value=_ExplodingGraph()):
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(data_dir),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("workflow invoke failed: RuntimeError", stderr)
+            self.assertNotIn("Traceback", stderr)
+
+            session_dir = SessionPaths(data_dir, "s1").run_dir
+            report_path = (
+                session_dir
+                / "artifacts"
+                / "operator_report"
+                / "s1"
+                / "failed_terminal_report.json"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["supervision_state"], "failed_terminal")
+            self.assertEqual(report["current_stage"], "assembly")
+            self.assertIn("parameter artifact validation exploded", report["last_error"])
+            self.assertEqual(report["next_action"]["kind"], "failed_terminal")
+
+            events = Ledger(session_dir).read_events("s1")
+            self.assertTrue(any(event["event_type"] == "run_failed" for event in events))
+
     def test_run_config_seeds_nextdenovo_method_and_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
