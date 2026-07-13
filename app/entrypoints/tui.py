@@ -1,6 +1,6 @@
 """Interactive TUI for gene-agent.
 
-Entry point: `gene-agent tui`
+Entry point: `gene-agent tui` (optional `--data-dir` only).
 
 Flow:
   1. User types a natural-language request (same as `gene-agent ask`)
@@ -8,6 +8,16 @@ Flow:
   3. Interactive execution-route plan (stages, methods, known static inputs)
   4. Runtime-derived proposals appear only when prerequisite evidence exists
   5. The same conversation handles every reached human gate and resumes execution
+
+Operator entry surfaces (do not mix):
+  - `gene-agent tui` — conversational plan/run/gates. Start the TUI; use an
+    in-app command such as `/resume` to open a session picker and continue a
+    blocked durable session. Do not stitch `tui --resume-session <id>` as the
+    product resume path (that flag is a temporary CLI hook, not TUI UX).
+  - `gene-agent review --session-id ...` — interactive Decision Brief for one
+    known blocked session; not the full TUI chat.
+  - `gene-agent resume --session-id ... --decision-file ...` — non-interactive
+    bound resume after `inspect --write-decision-template` (smoke/scripts).
 """
 
 from __future__ import annotations

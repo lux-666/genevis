@@ -22,7 +22,7 @@ FLYE_READ_TYPE_FLAGS = {
     "pacbio-hifi": "--pacbio-hifi",
 }
 
-# Hifiasm defaults to HiFi (no flag). ONT mode (--ont) requires FASTQ input.
+# Hifiasm defaults to HiFi (no flag). ONT mode uses --ont; reads may be FASTA or FASTQ.
 # CLR ("not_preferred") is intentionally excluded so it is rejected as an invalid read type.
 HIFIASM_READ_TYPE_FLAGS = {
     "hifi": "",
