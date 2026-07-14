@@ -143,14 +143,24 @@ cd "${SCRIPT_DIR}"
 # ---- Write run-config with all stages, auto policy for assembly routing ----
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
+# TEST09_SKIP_UPSTREAM=true skips expensive read_qc + genome_survey and jumps to
+# assembly using raw long reads + GENOME_SIZE_ESTIMATE (shared_parameters).
+SKIP_UPSTREAM="${TEST09_SKIP_UPSTREAM:-false}"
+
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     LOCAL_EXEC_STAGES=("t2t")
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    LOCAL_EXEC_STAGES=("assembly" "assembly_review" "t2t")
+    info "TEST09_SKIP_UPSTREAM=true: skipping read_qc and genome_survey"
+    info "  assembly will use raw_long_reads + GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE}"
 else
     LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 fi
 if [[ "$HIC_AVAILABLE" == true ]]; then
     if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
         LOCAL_EXEC_STAGES=("hic_scaffolding" "t2t")
+    elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+        LOCAL_EXEC_STAGES=("assembly" "assembly_review" "hic_scaffolding" "t2t")
     else
         LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
     fi
@@ -159,22 +169,37 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
     fi
 fi
 
-READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
-READ_QC_LENGTH_FILTER_APPROVED="True"
+if [[ "$SKIP_UPSTREAM" != "true" && "$USE_EXISTING_ASSEMBLY" != true ]]; then
+    READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
+    READ_QC_LENGTH_FILTER_APPROVED="True"
+fi
 write_run_config_stages "$RC" "${LOCAL_EXEC_STAGES[@]}"
 unset READ_QC_LENGTH_FILTER_METHOD READ_QC_LENGTH_FILTER_APPROVED
 
-python3 - "$RC" "$HIC_AVAILABLE" "$USE_EXISTING_ASSEMBLY" <<'PY'
+python3 - "$RC" "$HIC_AVAILABLE" "$USE_EXISTING_ASSEMBLY" "$SKIP_UPSTREAM" <<'PY'
 import json
 import sys
 
-path, hic_available, use_existing = sys.argv[1], sys.argv[2] == "true", sys.argv[3] == "true"
+path = sys.argv[1]
+hic_available = sys.argv[2] == "true"
+use_existing = sys.argv[3] == "true"
+skip_upstream = sys.argv[4] == "true"
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 
-requested = ["t2t"] if use_existing else ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
+if use_existing:
+    requested = ["t2t"]
+elif skip_upstream:
+    requested = ["assembly", "assembly_review", "t2t"]
+else:
+    requested = ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
 if hic_available:
-    insert_at = 0 if use_existing else 4
+    if use_existing:
+        insert_at = 0
+    elif skip_upstream:
+        insert_at = 2
+    else:
+        insert_at = 4
     requested.insert(insert_at, "hic_scaffolding")
 config["requested_stages"] = requested
 config["review_policy"] = {"mode": "auto"}
@@ -241,6 +266,8 @@ if [[ -f "$READQC_SUMMARY" ]]; then
     assert_file_contains "$READQC_SUMMARY" "method_name" "summary has method_name"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "read_qc skipped because assembly_fasta_registered was provided"
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    info "read_qc skipped because TEST09_SKIP_UPSTREAM=true"
 else
     warn "read_qc_summary.json not found (may have stopped earlier)"
 fi
@@ -251,6 +278,8 @@ if [[ -f "$SURVEY_RESULT" ]]; then
     pass "genome_survey_result.json produced"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "genome_survey skipped because assembly_fasta_registered was provided"
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    info "genome_survey skipped because TEST09_SKIP_UPSTREAM=true"
 else
     info "genome_survey skipped or not yet reached"
 fi
@@ -398,7 +427,7 @@ section "Phase 3: Stage Transition Validation"
 if [[ -f "$INSPECT_JSON" ]]; then
     info "Analyzing route trace"
     cd "${PROJECT_ROOT}"
-    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" "$HIC_AVAILABLE" <<'PY'
+    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" "$HIC_AVAILABLE" "$SKIP_UPSTREAM" <<'PY'
 import json
 import sys
 
@@ -407,11 +436,14 @@ trace = summary.get("route_trace") or []
 stages = [str(item).removesuffix("_stage") for item in trace]
 use_existing = sys.argv[2] == "true"
 hic_available = sys.argv[3] == "true"
+skip_upstream = sys.argv[4] == "true"
 
 print(f"Stage sequence: {' → '.join(stages)}")
 
 if use_existing:
     expected_start = ['inventory', 'hic_scaffolding'] if hic_available else ['inventory', 't2t']
+elif skip_upstream:
+    expected_start = ['inventory', 'assembly']
 else:
     expected_start = ['inventory', 'read_qc', 'genome_survey', 'assembly']
 actual_start = stages[:len(expected_start)]
@@ -730,7 +762,11 @@ if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     fi
     info "  - Existing assembly shortcut: read_qc/genome_survey/assembly/assembly_review skipped"
 else
-    info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+    if [[ "$SKIP_UPSTREAM" == "true" ]]; then
+        info "  - Pipeline stages flow: inventory → assembly → ... (TEST09_SKIP_UPSTREAM)"
+    else
+        info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+    fi
 fi
 if [[ "$HIC_AVAILABLE" == true && "$USE_EXISTING_ASSEMBLY" != true ]]; then
         info "    → assembly_review → hic_scaffolding → t2t"

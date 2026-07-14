@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Mapping
 
+from app.llm.assembly_parameter_context import build_assembly_parameter_context
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
 
@@ -21,9 +22,10 @@ def render_assembly_parameter_messages(
     *,
     prompt_contract: str,
 ) -> list[dict[str, str]]:
-    """Render a method-specific positive example followed by the live payload."""
+    """Render a positive example followed by the allowlisted model context."""
 
-    method_id = _normalized_method_id(prompt_payload.get("method_id"))
+    model_context = build_assembly_parameter_context(prompt_payload)
+    method_id = _normalized_method_id(model_context.get("method_id"))
     try:
         bundle_name = _BUNDLE_BY_METHOD[method_id]
         example_builder = _EXAMPLE_BY_METHOD[method_id]
@@ -31,7 +33,7 @@ def render_assembly_parameter_messages(
         raise ValueError(f"Unsupported assembly parameter prompt method: {method_id!r}") from exc
 
     bundle = load_prompt_bundle(bundle_name)
-    prompt_payload_json = json.dumps(prompt_payload, ensure_ascii=False, indent=2)
+    prompt_payload_json = json.dumps(model_context, ensure_ascii=False, indent=2)
     rendered = render_prompt_messages(
         bundle,
         {
@@ -39,7 +41,7 @@ def render_assembly_parameter_messages(
             "prompt_payload_json": prompt_payload_json,
         },
     )
-    example = example_builder(prompt_payload, prompt_contract)
+    example = example_builder(model_context, prompt_contract)
     return [
         rendered[0],
         {
@@ -92,7 +94,7 @@ def _legacy_response(
 
     params: dict[str, Any] = {}
     parameter_evidence: dict[str, dict[str, Any]] = {}
-    profile_fact_path = _first_profile_fact_path(prompt_payload.get("prompt_profile") or {})
+    observation_id = _first_observation_id(prompt_payload)
     retry_evidence = prompt_payload.get("retry_evidence") or {}
     retry_signals = [
         str(item)
@@ -109,7 +111,7 @@ def _legacy_response(
                 "bases": ["catalog_default"],
                 "case_ids": [],
                 "span_ids": [],
-                "fact_paths": [],
+                "evidence_ids": [],
                 "heuristic_labels": [],
                 "retry_signals": [],
             }
@@ -118,16 +120,16 @@ def _legacy_response(
                 "bases": ["retry_failure"],
                 "case_ids": [],
                 "span_ids": [],
-                "fact_paths": [],
+                "evidence_ids": [],
                 "heuristic_labels": [],
                 "retry_signals": retry_signals,
             }
-        elif profile_fact_path:
+        elif observation_id:
             parameter_evidence[parameter] = {
                 "bases": ["profile_fact"],
                 "case_ids": [],
                 "span_ids": [],
-                "fact_paths": [profile_fact_path],
+                "evidence_ids": [observation_id],
                 "heuristic_labels": [],
                 "retry_signals": [],
             }
@@ -163,10 +165,7 @@ def _hifiasm_example(prompt_payload: Mapping[str, Any], contract: str) -> dict[s
         adjustable = {}
     task = str(prompt_payload.get("task") or "recommend_initial")
     is_retry = task != "recommend_initial"
-    previous_params = (
-        ((prompt_payload.get("prompt_profile") or {}).get("previous_attempt") or {}).get("params")
-        or {}
-    )
+    previous_params = _previous_parameters(prompt_payload)
     retry_evidence = prompt_payload.get("retry_evidence") or {}
     retry_signals = [
         str(item)
@@ -185,7 +184,7 @@ def _hifiasm_example(prompt_payload: Mapping[str, Any], contract: str) -> dict[s
                 "basis": basis,
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "fact_paths": [],
+                "evidence_ids": [],
                 "heuristic_labels": [],
                 "retry_signals": retry_signals if basis == "retry_failure" else [],
                 "reason": "Preserve the approved value while evaluating the current retry signal.",
@@ -197,7 +196,7 @@ def _hifiasm_example(prompt_payload: Mapping[str, Any], contract: str) -> dict[s
                 "basis": "catalog_default",
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "fact_paths": [],
+                "evidence_ids": [],
                 "heuristic_labels": [],
                 "retry_signals": [],
                 "reason": "Use the catalog default when the current evidence supports a conservative choice.",
@@ -208,7 +207,7 @@ def _hifiasm_example(prompt_payload: Mapping[str, Any], contract: str) -> dict[s
                 "basis": "catalog_default",
                 "supporting_case_ids": [],
                 "supporting_span_ids": [],
-                "fact_paths": [],
+                "evidence_ids": [],
                 "heuristic_labels": [],
                 "retry_signals": [],
                 "reason": "Leave the optional setting unset when the current evidence does not justify a value.",
@@ -244,33 +243,42 @@ def _representative_value(parameter: str, spec: Mapping[str, Any]) -> Any:
     return None
 
 
-def _first_profile_fact_path(profile: Any, prefix: str = "") -> str | None:
-    if not isinstance(profile, Mapping):
-        return prefix or None
-    for key in sorted(profile):
-        path = f"{prefix}.{key}" if prefix else str(key)
-        value = profile[key]
-        if isinstance(value, Mapping):
-            nested = _first_profile_fact_path(value, path)
-            if nested:
-                return nested
-        elif value is not None and not _is_retry_failure_path(path):
-            return path
+def _first_observation_id(prompt_payload: Any) -> str | None:
+    """Return one non-retry observation ID for a representative citation."""
+
+    if not isinstance(prompt_payload, Mapping):
+        return None
+    observations = prompt_payload.get("observations")
+    if not isinstance(observations, list):
+        return None
+    for observation in observations:
+        if not isinstance(observation, Mapping):
+            continue
+        section = str(observation.get("section") or "").strip()
+        evidence_id = str(observation.get("id") or "").strip()
+        if evidence_id and section not in {"previous_attempt", "assembly_review"}:
+            return evidence_id
     return None
 
 
-def _is_retry_failure_path(path: str) -> bool:
-    retry_roots = (
-        "assembly_review",
-        "previous_attempt.failure_class",
-        "previous_attempt.execution_status",
-        "previous_attempt.execution_status_detail",
-        "previous_attempt.exit_code",
-        "previous_attempt.stderr_ref",
-        "previous_attempt.stdout_ref",
-        "previous_attempt.resource_facts",
-    )
-    return any(path == root or path.startswith(f"{root}.") for root in retry_roots)
+def _previous_parameters(prompt_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Recover path-free previous parameter values from retry observations."""
+
+    previous: dict[str, Any] = {}
+    observations = prompt_payload.get("observations")
+    if not isinstance(observations, list):
+        return previous
+    for observation in observations:
+        if not isinstance(observation, Mapping):
+            continue
+        if observation.get("section") != "previous_attempt":
+            continue
+        if observation.get("group") != "params":
+            continue
+        parameter = str(observation.get("name") or "").strip()
+        if parameter and "value" in observation:
+            previous[parameter] = observation["value"]
+    return previous
 
 
 _EXAMPLE_BY_METHOD: dict[

@@ -25,6 +25,7 @@ from app.domains.assembly.methods_evidence import (
     rehydrate_hifiasm_methods_retry_prompt_payload,
     sanitize_hifiasm_methods_prompt_payload as _sanitize_hifiasm_methods_prompt_payload,
 )
+from app.domains.assembly.profile_evidence import build_profile_evidence
 from app.knowledge.evidence_cases import EvidenceCaseValidationError
 from app.knowledge.packs import load_knowledge_pack
 from app.stages.assembly.decision import AssemblyDecisionRequest, make_assembly_decision
@@ -197,6 +198,9 @@ def _prompt_payload(
         "case_selection": _case_retrieval(evidence_cases, backend=backend),
         "evidence_cases": evidence_cases,
     }
+    payload["observations"], payload["evidence_registry"] = build_profile_evidence(
+        payload["prompt_profile"]
+    )
     if retry_evidence is not None:
         payload["retry_evidence"] = retry_evidence
     return payload
@@ -214,6 +218,14 @@ def _seal_canonical(canonical: dict) -> dict:
 def _canonical_prompt(*, cases: list[dict] | None = None) -> dict:
     return _seal_canonical(
         sanitize_hifiasm_methods_prompt_payload(_prompt_payload(cases=cases))
+    )
+
+
+def _profile_evidence_id_for_source(prompt: dict, source_path: str) -> str:
+    return next(
+        evidence_id
+        for evidence_id, registered_path in prompt["evidence_registry"].items()
+        if registered_path == source_path
     )
 
 
@@ -666,6 +678,8 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
         "method_id",
         "task",
         "prompt_profile",
+        "observations",
+        "evidence_registry",
         "rules",
         "recommendation_policy",
         "readonly_params",
@@ -685,6 +699,10 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
         "retry_evidence",
     }
     assert "skill_heuristic" not in canonical["recommendation_policy"]["allowed_evidence_bases"]
+    observations, evidence_registry = build_profile_evidence(canonical["prompt_profile"])
+    assert canonical["observations"] == observations
+    assert canonical["evidence_registry"] == evidence_registry
+    assert "profile_fact_citation_rule" in canonical["recommendation_policy"]
     for leaked in (
         "secret query",
         "secret trace",
@@ -989,23 +1007,26 @@ def test_retry_failure_basis_fails_closed_without_structured_retry_evidence():
 
 
 @pytest.mark.parametrize(
-    "fact_path",
+    "source_path",
     ["previous_attempt.failure_class", "assembly_review.busco_duplicate"],
 )
-def test_retry_failure_facts_cannot_bypass_retry_failure_basis(fact_path):
+def test_retry_failure_facts_cannot_bypass_retry_failure_basis(source_path):
     prompt = dict(_canonical_prompt())
     prompt["task"] = "retry_after_review_failure"
     prompt["prompt_profile"] = {
         "previous_attempt": {"failure_class": "failed"},
         "assembly_review": {"busco_duplicate": 0.21},
     }
+    prompt["observations"], prompt["evidence_registry"] = build_profile_evidence(
+        prompt["prompt_profile"]
+    )
     response = _response()
     response["recommendation"]["retry_disposition"] = "retry"
     decision = response["recommendation"]["adjustable_params"]["purge_level"]
     decision.update(
         {
             "basis": "profile_fact",
-            "fact_paths": [fact_path],
+            "evidence_ids": [_profile_evidence_id_for_source(prompt, source_path)],
             "supporting_case_ids": [],
             "supporting_span_ids": [],
         }
@@ -1100,7 +1121,11 @@ def test_no_case_response_can_use_profile_fact_and_catalog_default():
                     "action": "set",
                     "value": 1,
                     "basis": "profile_fact",
-                    "fact_paths": ["genome_survey.heterozygosity"],
+                    "evidence_ids": [
+                        _profile_evidence_id_for_source(
+                            prompt, "genome_survey.heterozygosity"
+                        )
+                    ],
                     "supporting_case_ids": [],
                     "supporting_span_ids": [],
                     "reason": "Use the readonly heterozygosity fact conservatively.",
@@ -1151,7 +1176,6 @@ def test_decision_boundary_uses_the_existing_canonical_prompt_without_rebuilding
         for index, char in enumerate("abcd")
     ])])
     canonical = _seal_canonical(sanitize_hifiasm_methods_prompt_payload(raw_prompt))
-    expected_budget = deepcopy(canonical["methods_evidence"]["evidence_budget"])
     captured = {}
     response = _response()
     response["case_assessments"] = []
@@ -1190,9 +1214,14 @@ def test_decision_boundary_uses_the_existing_canonical_prompt_without_rebuilding
 
     rendered = json.loads(captured["messages"][1]["content"])
     assert result.valid is True
-    assert rendered == canonical
+    assert rendered != canonical
+    assert rendered["observations"] == canonical["observations"]
+    assert "prompt_profile" not in rendered
+    assert "evidence_registry" not in rendered
+    assert "input_profile_ref" not in rendered
+    assert "prompt_payload_ref" not in rendered
     assert "prompt_contract" not in rendered
-    assert rendered["methods_evidence"]["evidence_budget"] == expected_budget
+    assert rendered["methods_evidence"]["effect_areas"] == list(HIFIASM_EFFECT_AREAS)
 
 
 def test_decision_request_rejects_json_roundtrip_with_recomputed_self_hash():
@@ -1295,6 +1324,7 @@ def test_explicit_legacy_contract_remains_compatible_and_stays_out_of_model_json
 ):
     prompt_payload = {
         "method_id": "hifiasm",
+        "observations": [],
         "case_selection": {
             "retrieval_backend": "structured_default",
             "hifiasm_numeric_gate": {
@@ -1326,8 +1356,9 @@ def test_explicit_legacy_contract_remains_compatible_and_stays_out_of_model_json
     )
 
     assert result.valid is True
-    assert json.loads(captured["messages"][1]["content"]) == prompt_payload
-    assert "prompt_contract" not in json.loads(captured["messages"][1]["content"])
+    rendered = json.loads(captured["messages"][1]["content"])
+    assert rendered == {"method_id": "hifiasm", "observations": []}
+    assert "prompt_contract" not in rendered
 
 
 @pytest.mark.parametrize(

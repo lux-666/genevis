@@ -13,17 +13,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from app.knowledge.packs import load_knowledge_pack
-from app.schemas.artifacts import (
-    ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
-    ASSEMBLY_PARAMETER_INPUT_PROFILE,
-    ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
-    ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
-    ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
-    ArtifactRef,
-    file_sha256,
-)
-from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.domains.assembly.case_selector import select_evidence_cases
 from app.domains.assembly.methods_evidence import (
     HIFIASM_EFFECT_AREAS,
@@ -39,6 +28,18 @@ from app.domains.assembly.numeric_case_retriever import (
     _RANKED_SELECTION_FIELD,
     _project_hifiasm_attested_selection_audit,
 )
+from app.domains.assembly.profile_evidence import build_profile_evidence
+from app.knowledge.packs import load_knowledge_pack
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
+    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
+    ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
+    ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
+    ArtifactRef,
+    file_sha256,
+)
+from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.stages.assembly.parameter_profile import ParameterPromptTask, build_prompt_profile
 
 _SECURE_ARTIFACT_DIR_FD_SUPPORTED = (
@@ -87,6 +88,8 @@ def build_prompt_payload(
         - prompt_payload_ref: Path ref when artifacts are written, otherwise hash
         - prompt_payload_hash: Canonical hash (excludes self-ref fields)
         - prompt_profile: Task-scoped profile slice
+        - observations: Model-facing profile facts with opaque evidence IDs
+        - evidence_registry: Internal ID-to-source binding for validation/audit
         - rules: Domain constraint rules
         - selected_cases: Legacy evidence subset (non-methods paths only)
         - case_selection: Lean selection metadata (ids, warning, counts)
@@ -467,12 +470,15 @@ def _assemble_prompt_payload(
 ) -> dict[str, Any]:
     uses_hifiasm_evidence = evidence_context["uses_hifiasm_evidence"]
     case_selection = evidence_context["case_selection"]
+    observations, evidence_registry = build_profile_evidence(prompt_profile)
     payload = {
         "method_id": method_id,
         "task": task,
         "input_profile_ref": input_profile_ref,
         "input_profile_hash": profile_hash_ref,
         "prompt_profile": prompt_profile,
+        "observations": observations,
+        "evidence_registry": evidence_registry,
         "rules": knowledge_pack["rules"],
         "case_selection": case_selection,
         "recommendation_policy": {
@@ -492,6 +498,10 @@ def _assemble_prompt_payload(
             "case_citation_rule": (
                 "when evidence basis is case, cite selected case_ids; "
                 "include span_ids only for cases that expose Methods spans in the prompt"
+            ),
+            "profile_fact_citation_rule": (
+                "when evidence basis is profile_fact, cite evidence_ids from observations; "
+                "never invent evidence IDs"
             ),
             "no_case_behavior": (
                 "continue with readonly L1 facts, SKILL heuristics, retry context, "

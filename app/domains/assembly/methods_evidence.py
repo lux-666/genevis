@@ -15,6 +15,12 @@ from typing import Any
 
 from app.domains.assembly.evidence_case import _project_hifiasm_ranked_prompt_case
 from app.domains.assembly.numeric_case_retriever import _validate_hifiasm_ranked_selection
+from app.domains.assembly.profile_evidence import (
+    build_profile_evidence,
+    missing_profile_evidence_ids,
+    profile_evidence_ids_requiring_retry_basis,
+    validate_profile_evidence_projection,
+)
 from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup_path
 from app.knowledge.evidence_cases import MAX_SOURCE_EXCERPTS_PER_CASE
 
@@ -33,7 +39,7 @@ HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE = 12
 HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE = 6_000
 HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS = 24_000
 HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES = 65_536
-HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 2
+HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 3
 
 _PROMPT_SCHEMA_VERSION_FIELD = "hifiasm_methods_prompt_schema_version"
 
@@ -224,6 +230,9 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
 
     required_fields = {
         _PROMPT_SCHEMA_VERSION_FIELD,
+        "prompt_profile",
+        "observations",
+        "evidence_registry",
         "case_selection",
         "evidence_cases",
         "methods_evidence",
@@ -238,6 +247,7 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
             "canonical hifiasm Methods prompt has invalid top-level fields; "
             f"missing={sorted(missing_fields)}, unexpected={sorted(unexpected_fields)}"
         )
+    validate_profile_evidence_projection(prompt_payload)
     # Dual-write / legacy containers must not re-enter the lean sealed prompt.
     for forbidden in ("catalog_subset", "case_retrieval", "selected_cases"):
         if forbidden in prompt_payload:
@@ -939,6 +949,9 @@ def _build_prompt_sanitizer():
             if field in retry_profile:
                 canonical["prompt_profile"][field] = deepcopy(retry_profile[field])
         canonical["retry_evidence"] = deepcopy(retry_overlay.get("retry_evidence"))
+        canonical["observations"], canonical["evidence_registry"] = build_profile_evidence(
+            canonical["prompt_profile"]
+        )
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
         _validate_authoritative_catalog_snapshot(
@@ -1003,6 +1016,13 @@ def _build_prompt_sanitizer():
                 "continue with readonly L1 facts and catalog defaults; "
                 "prefer conservative L2 changes"
             )
+            policy["profile_fact_citation_rule"] = (
+                "when evidence basis is profile_fact, cite evidence_ids from "
+                "observations; never invent evidence IDs"
+            )
+        canonical["observations"], canonical["evidence_registry"] = build_profile_evidence(
+            canonical.get("prompt_profile") or {}
+        )
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
         _validate_authoritative_catalog_snapshot(
@@ -1342,42 +1362,35 @@ def _validate_parameter_decision(
     elif supporting_case_ids or supporting_span_ids:
         raise ValueError(f"parameter {parameter!r} has case citations without basis=case")
 
-    fact_paths = _string_list(raw_decision.get("fact_paths") or [], field=f"{parameter}.fact_paths")
+    if "fact_paths" in raw_decision:
+        raise ValueError(
+            f"parameter {parameter!r} fact_paths is no longer supported; use evidence_ids"
+        )
+    evidence_ids = _string_list(
+        raw_decision.get("evidence_ids") or [],
+        field=f"{parameter}.evidence_ids",
+    )
     if "profile_fact" in bases:
-        if not fact_paths:
-            raise ValueError(f"parameter {parameter!r} basis=profile_fact requires fact_paths")
-        retry_fact_paths = [
-            path
-            for path in fact_paths
-            if path == "assembly_review"
-            or path.startswith("assembly_review.")
-            or path == "previous_attempt.failure_class"
-            or path.startswith("previous_attempt.failure_class.")
-            or path == "previous_attempt.execution_status"
-            or path.startswith("previous_attempt.execution_status.")
-            or path == "previous_attempt.execution_status_detail"
-            or path.startswith("previous_attempt.execution_status_detail.")
-            or path == "previous_attempt.exit_code"
-            or path.startswith("previous_attempt.exit_code.")
-            or path == "previous_attempt.stderr_ref"
-            or path.startswith("previous_attempt.stderr_ref.")
-            or path == "previous_attempt.stdout_ref"
-            or path.startswith("previous_attempt.stdout_ref.")
-            or path == "previous_attempt.resource_facts"
-            or path.startswith("previous_attempt.resource_facts.")
-        ]
-        if retry_fact_paths:
+        if not evidence_ids:
+            raise ValueError(f"parameter {parameter!r} basis=profile_fact requires evidence_ids")
+        retry_evidence_ids = profile_evidence_ids_requiring_retry_basis(
+            prompt_payload, evidence_ids
+        )
+        if retry_evidence_ids:
             raise ValueError(
                 f"parameter {parameter!r} retry failure facts require basis=retry_failure: "
-                f"{retry_fact_paths}"
+                f"{retry_evidence_ids}"
             )
-        missing_paths = [
-            path
-            for path in fact_paths
-            if _lookup_path(prompt_payload.get("prompt_profile") or {}, path) is None
-        ]
-        if missing_paths:
-            raise ValueError(f"parameter {parameter!r} cites profile facts absent from the prompt: {missing_paths}")
+        missing_ids = missing_profile_evidence_ids(prompt_payload, evidence_ids)
+        if missing_ids:
+            raise ValueError(
+                f"parameter {parameter!r} cites evidence IDs absent from observations: "
+                f"{missing_ids}"
+            )
+    elif evidence_ids:
+        raise ValueError(
+            f"parameter {parameter!r} evidence_ids require basis=profile_fact"
+        )
 
     heuristic_labels = _string_list(
         raw_decision.get("heuristic_labels") or [],
@@ -1420,7 +1433,7 @@ def _validate_parameter_decision(
         "bases": list(dict.fromkeys(bases)),
         "supporting_case_ids": supporting_case_ids,
         "supporting_span_ids": supporting_span_ids,
-        "fact_paths": fact_paths,
+        "evidence_ids": evidence_ids,
         "heuristic_labels": heuristic_labels,
         "retry_signals": retry_signals,
         "reason": reason,
@@ -1431,7 +1444,7 @@ def _validate_parameter_decision(
         "bases": decision["bases"],
         "case_ids": supporting_case_ids,
         "span_ids": supporting_span_ids,
-        "fact_paths": fact_paths,
+        "evidence_ids": evidence_ids,
         "heuristic_labels": heuristic_labels,
         "retry_signals": retry_signals,
     }

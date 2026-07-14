@@ -1067,7 +1067,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             payload["parameter_evidence"]["purge_level"] = [
                 {
                     "basis": "profile_fact",
-                    "fact_paths": ["genome_survey.heterozygosity"],
+                    "evidence_ids": ["pf_invalid_shape"],
                 }
             ]
             model = _FakeModel(payload)
@@ -1176,11 +1176,13 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             )
             replay_prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
             model_prompt = json.loads(model.messages[-1]["content"])
-            self.assertEqual(model_prompt, replay_prompt)
-            self.assertEqual(
-                model_prompt["methods_evidence"]["evidence_budget"],
-                replay_prompt["methods_evidence"]["evidence_budget"],
-            )
+            self.assertNotEqual(model_prompt, replay_prompt)
+            self.assertEqual(model_prompt["observations"], replay_prompt["observations"])
+            self.assertNotIn("prompt_profile", model_prompt)
+            self.assertNotIn("evidence_registry", model_prompt)
+            self.assertNotIn("input_profile_ref", model_prompt)
+            self.assertNotIn("prompt_payload_ref", model_prompt)
+            self.assertNotIn("evidence_budget", model_prompt["methods_evidence"])
             self.assertEqual(
                 replay_prompt["prompt_payload_hash"],
                 generate_payload_ref(
@@ -1267,7 +1269,12 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "omitted_spans"
             ]
 
-            self.assertEqual(model_prompt, replay_prompt)
+            self.assertNotEqual(model_prompt, replay_prompt)
+            self.assertEqual(model_prompt["observations"], replay_prompt["observations"])
+            self.assertNotIn("prompt_profile", model_prompt)
+            self.assertNotIn("evidence_registry", model_prompt)
+            self.assertNotIn("input_profile_ref", model_prompt)
+            self.assertNotIn("prompt_payload_ref", model_prompt)
             self.assertNotIn("prompt_contract", replay_prompt)
             self.assertEqual(
                 omitted_spans,
@@ -1279,10 +1286,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     }
                 ],
             )
-            self.assertEqual(
-                model_prompt["methods_evidence"]["evidence_budget"]["omitted_spans"],
-                omitted_spans,
-            )
+            self.assertNotIn("evidence_budget", model_prompt["methods_evidence"])
             self.assertEqual(
                 replay_prompt["prompt_payload_hash"],
                 generate_payload_ref(

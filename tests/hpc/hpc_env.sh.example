@@ -102,3 +102,8 @@ HPC_MAX_PARAMETER_APPROVALS=3
 # ---- Optional Read-QC length-filter coverage ----
 # test_02 uses this executable subgraph instead of only the default skip path.
 READ_QC_MIN_LEN=1000
+
+# ---- Test 09 assembly-focused smoke (skip expensive upstream stages) ----
+# true: skip read_qc + genome_survey; assembly uses raw long reads and
+# GENOME_SIZE_ESTIMATE from shared_parameters. Full e2e should leave this false.
+TEST09_SKIP_UPSTREAM=false

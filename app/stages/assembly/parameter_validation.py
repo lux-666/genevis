@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.domains.assembly.methods_evidence import allowed_parameter_evidence_span_ids
-from app.domains.assembly.profile_paths import lookup_mapping_path as _lookup_path
+from app.domains.assembly.profile_evidence import (
+    missing_profile_evidence_ids,
+    profile_evidence_ids_requiring_retry_basis,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
 from app.stages.assembly.parameter_profile import flatten_profile_facts
 
@@ -355,64 +358,63 @@ def validate_parameter_evidence(
                     spans_by_case=spans_by_case,
                 )
             )
+        if "fact_paths" in evidence:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": "fact_paths is no longer supported; use evidence_ids",
+                    "severity": "critical",
+                }
+            )
+        evidence_ids = evidence.get("evidence_ids") or []
         if "profile_fact" in bases:
-            fact_paths = evidence.get("fact_paths") or []
-            if not isinstance(fact_paths, list) or not fact_paths:
+            if (
+                not isinstance(evidence_ids, list)
+                or not evidence_ids
+                or not all(isinstance(evidence_id, str) for evidence_id in evidence_ids)
+            ):
                 violations.append(
                     {
                         "param": parameter,
-                        "reason": "basis=profile_fact requires fact_paths",
+                        "reason": "basis=profile_fact requires non-empty evidence_ids",
                         "severity": "critical",
                     }
                 )
             else:
-                retry_fact_paths = [
-                    path
-                    for path in fact_paths
-                    if isinstance(path, str)
-                    and (
-                        path == "assembly_review"
-                        or path.startswith("assembly_review.")
-                        or path == "previous_attempt.failure_class"
-                        or path.startswith("previous_attempt.failure_class.")
-                        or path == "previous_attempt.execution_status"
-                        or path.startswith("previous_attempt.execution_status.")
-                        or path == "previous_attempt.execution_status_detail"
-                        or path.startswith("previous_attempt.execution_status_detail.")
-                        or path == "previous_attempt.exit_code"
-                        or path.startswith("previous_attempt.exit_code.")
-                        or path == "previous_attempt.stderr_ref"
-                        or path.startswith("previous_attempt.stderr_ref.")
-                        or path == "previous_attempt.stdout_ref"
-                        or path.startswith("previous_attempt.stdout_ref.")
-                        or path == "previous_attempt.resource_facts"
-                        or path.startswith("previous_attempt.resource_facts.")
-                    )
-                ]
-                if retry_fact_paths:
+                retry_evidence_ids = profile_evidence_ids_requiring_retry_basis(
+                    prompt_payload, evidence_ids
+                )
+                if retry_evidence_ids:
                     violations.append(
                         {
                             "param": parameter,
                             "reason": (
                                 "retry failure facts require basis=retry_failure: "
-                                f"{retry_fact_paths}"
+                                f"{retry_evidence_ids}"
                             ),
                             "severity": "critical",
                         }
                     )
-                missing_paths = [
-                    path
-                    for path in fact_paths
-                    if not isinstance(path, str) or _lookup_path(prompt_payload.get("prompt_profile") or {}, path) is None
-                ]
-                if missing_paths:
+                missing_ids = missing_profile_evidence_ids(prompt_payload, evidence_ids)
+                if missing_ids:
                     violations.append(
                         {
                             "param": parameter,
-                            "reason": f"profile_fact paths are absent from the prompt: {missing_paths}",
+                            "reason": (
+                                "profile_fact evidence IDs are absent from observations: "
+                                f"{missing_ids}"
+                            ),
                             "severity": "critical",
                         }
                     )
+        elif evidence_ids:
+            violations.append(
+                {
+                    "param": parameter,
+                    "reason": "evidence_ids require basis=profile_fact",
+                    "severity": "critical",
+                }
+            )
         retry_signals = evidence.get("retry_signals") or []
         retry_evidence = prompt_payload.get("retry_evidence") or {}
         visible_retry_signals = {

@@ -691,6 +691,8 @@ class TestPayloadStructure:
             "input_profile_hash",
             "prompt_payload_hash",
             "prompt_profile",
+            "observations",
+            "evidence_registry",
             "rules",
             "selected_cases",
             "case_selection",
@@ -1804,7 +1806,7 @@ def test_hifiasm_prompt_artifact_is_absent_if_canonical_build_is_interrupted(
             if kwargs["filename"] != "prompt_payload.json":
                 return original_publish(**kwargs)
             payload = json.loads(kwargs["serialized"])
-            assert payload["hifiasm_methods_prompt_schema_version"] == 2
+            assert payload["hifiasm_methods_prompt_schema_version"] == 3
             assert payload["prompt_payload_hash"] == generate_payload_ref(
                 {
                     key: value

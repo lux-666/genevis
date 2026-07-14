@@ -11,6 +11,7 @@ from app.domains.assembly.methods_evidence import (
     _require_final_attested_hifiasm_methods_prompt_payload,
     normalize_hifiasm_methods_response,
 )
+from app.llm.assembly_parameter_context import build_assembly_parameter_context
 from app.llm.assembly_parameter_prompts import render_assembly_parameter_messages
 from app.llm.factory import build_chat_model
 
@@ -78,14 +79,22 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
     """Render prompt, call the model, and parse a JSON decision."""
 
     prompt_payload = request._require_current_prompt_attestation()
+    model_prompt_payload = (
+        build_assembly_parameter_context(prompt_payload)
+        if request.kind == "parameter_recommendation"
+        else prompt_payload
+    )
     if request.system_prompt:
         messages = [
             {"role": "system", "content": request.system_prompt},
-            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False, indent=2)},
+            {
+                "role": "user",
+                "content": json.dumps(model_prompt_payload, ensure_ascii=False, indent=2),
+            },
         ]
     else:
         messages = render_assembly_parameter_messages(
-            prompt_payload,
+            model_prompt_payload,
             prompt_contract=request._validated_prompt_contract or request.prompt_contract,
         )
     try:
