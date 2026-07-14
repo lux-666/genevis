@@ -26,7 +26,12 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
 from app.control.lifecycle import resume_review_state
 from app.review.base import ResumeReviewRequest
-from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
+from app.stages.assembly.command_builder import (
+    ParameterCommandError,
+    build_command,
+    build_parameter_sources,
+    format_hifiasm_hg_size,
+)
 from app.stages.assembly.constants import FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.hifiasm import freeze_hifiasm_attempt
 from app.stages.assembly.method_application.hifiasm_ont import freeze_hifiasm_ont_attempt
@@ -856,6 +861,101 @@ class CommandBuilderTests(unittest.TestCase):
 
                 self.assertEqual(sources["l0_fixed"]["threads"], 32)
                 self.assertEqual(argv[argv.index("-t") + 1], "32")
+
+
+    def test_format_hifiasm_hg_size_converts_bp_and_passthrough(self):
+        cases = [
+            (500_000_000, "500m"),
+            (3_100_000_000, "3.1g"),
+            (2_000_000, "2m"),
+            (12_345, "12.345k"),
+            (500, "0.5k"),
+            ("500m", "500m"),
+            ("1g", "1g"),
+            ("1G", "1g"),
+            ("0.5g", "0.5g"),
+            ("500000000", "500m"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(format_hifiasm_hg_size(raw), expected)
+
+    def test_format_hifiasm_hg_size_rejects_invalid(self):
+        for raw in (0, -1, "0", "abc", "500bp", True, None, ""):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ParameterCommandError):
+                    format_hifiasm_hg_size(raw)
+
+    def test_build_command_formats_bare_bp_hg_size(self):
+        argv = build_command(
+            method_id="hifiasm_ont",
+            catalog=self.catalog,
+            parameter_sources={
+                "l0_fixed": {
+                    "output_prefix": "asm",
+                    "threads": 4,
+                    "input_reads": ["reads.fq"],
+                    "ont_mode": True,
+                },
+                "l1_readonly": {"hg_size": 500_000_000},
+                "l2_recommended": {},
+            },
+        )
+        self.assertEqual(argv[argv.index("--hg-size") + 1], "500m")
+
+    def test_build_parameter_sources_formats_survey_genome_size_prior_bp(self):
+        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+        state["stage_outputs"] = {
+            "genome_survey": {
+                "genome_size_prior": 500_000_000,
+                "estimates": {"hom_cov": 30},
+            }
+        }
+        assembly_out = {"hifiasm_ont_parameters": {"read_type": "ont", "threads": 4}}
+
+        sources = build_parameter_sources(
+            method_id="hifiasm_ont",
+            catalog=self.catalog,
+            state=state,
+            assembly_out=assembly_out,
+            attempt_id=0,
+            recommended_params={},
+            execution_context={"output_prefix": "asm", "input_reads": ["reads.fq"]},
+        )
+        argv = build_command(
+            method_id="hifiasm_ont",
+            catalog=self.catalog,
+            parameter_sources=sources,
+        )
+
+        self.assertEqual(sources["l1_readonly"]["hg_size"], "500m")
+        self.assertEqual(argv[argv.index("--hg-size") + 1], "500m")
+
+    def test_build_parameter_sources_formats_shared_estimated_genome_size_bp(self):
+        for method_id, param_key in (
+            ("hifiasm", "hifiasm_parameters"),
+            ("hifiasm_ont", "hifiasm_ont_parameters"),
+        ):
+            with self.subTest(method_id=method_id):
+                catalog = load_parameter_catalog(method_id)
+                state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+                state["shared_parameters"] = {"estimated_genome_size": 3_100_000_000}
+                assembly_out = {
+                    param_key: {
+                        "read_type": "ont" if method_id.endswith("ont") else "hifi",
+                        "threads": 8,
+                    }
+                }
+                sources = build_parameter_sources(
+                    method_id=method_id,
+                    catalog=catalog,
+                    state=state,
+                    assembly_out=assembly_out,
+                    attempt_id=0,
+                    recommended_params={},
+                    execution_context={"output_prefix": "asm", "input_reads": ["reads.fq"]},
+                )
+                self.assertEqual(sources["l1_readonly"]["hg_size"], "3.1g")
 
 
 class ParameterRecommendationNodeTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
@@ -13,9 +14,99 @@ SOURCE_GROUP_LEVELS = {
     "l2_recommended": 2,
 }
 
+# hifiasm --hg-size accepts INT with a required k/m/g unit suffix.
+_HG_SIZE_WITH_UNIT_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?)(?P<unit>[kmgKMG])$")
+_HG_SIZE_BARE_INT_RE = re.compile(r"^\d+$")
+_HG_SIZE_BARE_FLOAT_RE = re.compile(r"^\d+\.\d+$")
+_HG_SIZE_UNIT_MULTIPLIER = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+
 
 class ParameterCommandError(ValueError):
     """Raised when parameter sources cannot be converted to a safe argv."""
+
+
+def format_hifiasm_hg_size(value: Any) -> str:
+    """Normalize genome size for hifiasm ``--hg-size``.
+
+    Accepts integer/float base-pair counts or strings such as ``"500m"`` / ``"1g"``
+    / bare bp integers. Always returns a hifiasm-legal ``INT(k|m|g)`` string.
+    """
+
+    if value is None or value == "" or value == "default":
+        raise ParameterCommandError(f"hg_size value is empty: {value!r}")
+
+    if isinstance(value, bool):
+        raise ParameterCommandError(f"hg_size must be a genome size, not boolean: {value!r}")
+
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
+        bp = int(value) if float(value).is_integer() else int(round(float(value)))
+        if bp <= 0:
+            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
+        return _bp_to_hifiasm_hg_size(bp)
+
+    if not isinstance(value, str):
+        raise ParameterCommandError(f"hg_size must be int/float/str, got {type(value).__name__}: {value!r}")
+
+    text = value.strip()
+    if not text:
+        raise ParameterCommandError(f"hg_size value is empty: {value!r}")
+
+    match = _HG_SIZE_WITH_UNIT_RE.fullmatch(text)
+    if match:
+        number = float(match.group("number"))
+        unit = match.group("unit").lower()
+        if number <= 0:
+            raise ParameterCommandError(f"hg_size must be positive: {value!r}")
+        # Pass through already-legal values with normalized unit case.
+        return f"{_format_hg_size_number(number)}{unit}"
+
+    if _HG_SIZE_BARE_INT_RE.fullmatch(text):
+        bp = int(text)
+        if bp <= 0:
+            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
+        return _bp_to_hifiasm_hg_size(bp)
+
+    if _HG_SIZE_BARE_FLOAT_RE.fullmatch(text):
+        bp = int(round(float(text)))
+        if bp <= 0:
+            raise ParameterCommandError(f"hg_size must be positive base pairs: {value!r}")
+        return _bp_to_hifiasm_hg_size(bp)
+
+    raise ParameterCommandError(
+        f"hg_size must be base-pair count or hifiasm form INT(k|m|g), got {value!r}"
+    )
+
+
+def _bp_to_hifiasm_hg_size(bp: int) -> str:
+    """Convert a positive base-pair count into hifiasm ``--hg-size`` form."""
+
+    if bp <= 0:
+        raise ParameterCommandError(f"hg_size must be positive base pairs: {bp!r}")
+
+    # Prefer the largest unit that keeps a compact, exact-or-3dp representation.
+    for unit, mult in (("g", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
+        if bp < mult and unit != "k":
+            continue
+        if bp % mult == 0:
+            return f"{bp // mult}{unit}"
+        if bp >= mult:
+            scaled = bp / mult
+            rounded = round(scaled, 3)
+            # Accept the unit when rounding to 3 decimals reconstructs bp closely.
+            if abs(rounded * mult - bp) <= 0.5:
+                return f"{_format_hg_size_number(rounded)}{unit}"
+
+    # Sub-kilobase genomes: still require a unit suffix for hifiasm.
+    return f"{_format_hg_size_number(bp / 1_000)}k"
+
+
+def _format_hg_size_number(number: float) -> str:
+    if float(number).is_integer():
+        return str(int(number))
+    text = f"{number:.3f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def build_command(
@@ -81,6 +172,8 @@ def build_parameter_sources(
         elif spec.level == 1:
             value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
             if value is not None:
+                if key == "hg_size" or spec.cli == "--hg-size":
+                    value = format_hifiasm_hg_size(value)
                 l1_readonly[key] = value
 
     return {
@@ -141,6 +234,8 @@ def _emit_parameter(spec: ParameterSpec, value: Any) -> tuple[list[str], list[st
         return [], [str(value)]
     if spec.value_type == "path_list" and isinstance(value, list):
         return [spec.cli, ",".join(str(item) for item in value)], []
+    if spec.cli == "--hg-size":
+        value = format_hifiasm_hg_size(value)
     return [spec.cli, str(value)], []
 
 
