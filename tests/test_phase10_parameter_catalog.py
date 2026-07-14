@@ -1256,7 +1256,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             prompt_path = Path(tmpdir) / attempt["prompt_payload_ref"]["path_ref"].removeprefix("data/")
             prompt_payload = json.loads(prompt_path.read_text(encoding="utf-8"))
             self.assertNotIn("prompt_contract", prompt_payload)
-            self.assertIsNone(prompt_payload["case_retrieval"])
+            self.assertNotIn("case_retrieval", prompt_payload)
             self.assertEqual(
                 prompt_payload["case_selection"]["retrieval_backend"],
                 "structured_default",

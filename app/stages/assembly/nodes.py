@@ -846,10 +846,27 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     replay_artifacts = []
     profile_ref = prompt_payload.get("input_profile_ref")
     prompt_ref = prompt_payload.get("prompt_payload_ref")
-    retrieval_metadata = prompt_payload.get("case_retrieval") or {}
-    retrieval_query_ref = retrieval_metadata.get("query_ref")
-    retrieval_trace_ref = retrieval_metadata.get("trace_ref")
+    retrieval_query_ref = prompt_payload.get("retrieval_query_ref")
+    retrieval_trace_ref = prompt_payload.get("retrieval_trace_ref")
+    # Backward-compatible read for pre-lean sealed payloads still carrying nested refs.
+    if not retrieval_query_ref or not retrieval_trace_ref:
+        nested = prompt_payload.get("case_selection") or prompt_payload.get("case_retrieval") or {}
+        retrieval_query_ref = retrieval_query_ref or nested.get("query_ref")
+        retrieval_trace_ref = retrieval_trace_ref or nested.get("trace_ref")
     evidence_payload_ref = prompt_payload.get("evidence_payload_ref")
+    case_selection = (
+        prompt_payload.get("case_selection")
+        or prompt_payload.get("case_retrieval")
+        or {}
+    )
+    retrieval_query_hash = (
+        prompt_payload.get("retrieval_query_hash")
+        or case_selection.get("query_hash")
+    )
+    retrieval_trace_hash = (
+        prompt_payload.get("retrieval_trace_hash")
+        or case_selection.get("trace_hash")
+    )
     artifact_specs = (
         (profile_ref, ASSEMBLY_PARAMETER_INPUT_PROFILE),
         (prompt_ref, ASSEMBLY_PARAMETER_PROMPT_PAYLOAD),
@@ -983,24 +1000,32 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             ),
             artifact_type="assembly.parameter.prompt_payload",
         ),
-        retrieval_backend=retrieval_metadata.get("retrieval_backend"),
-        retrieval_query_id=retrieval_metadata.get("query_id"),
+        retrieval_backend=(
+            case_selection.get("retrieval_backend")
+            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            else None
+        ),
+        retrieval_query_id=(
+            case_selection.get("query_id")
+            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            else None
+        ),
         retrieval_query_ref=(
             ArtifactRef(
                 path_ref=str(retrieval_query_ref),
-                sha256=str(retrieval_metadata["query_hash"]),
+                sha256=str(retrieval_query_hash),
                 artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
             )
-            if retrieval_query_ref
+            if retrieval_query_ref and retrieval_query_hash
             else None
         ),
         retrieval_trace_ref=(
             ArtifactRef(
                 path_ref=str(retrieval_trace_ref),
-                sha256=str(retrieval_metadata["trace_hash"]),
+                sha256=str(retrieval_trace_hash),
                 artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
             )
-            if retrieval_trace_ref
+            if retrieval_trace_ref and retrieval_trace_hash
             else None
         ),
         evidence_payload_ref=(
@@ -1013,10 +1038,20 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             else None
         ),
         retrieval_candidate_case_ids=list(
-            retrieval_metadata.get("candidate_case_ids") or []
+            case_selection.get("candidate_case_ids") or []
+            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            else []
         ),
-        retrieval_eligible_case_count=retrieval_metadata.get("eligible_case_count"),
-        retrieval_warning=retrieval_metadata.get("warning"),
+        retrieval_eligible_case_count=(
+            case_selection.get("eligible_case_count")
+            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            else None
+        ),
+        retrieval_warning=(
+            case_selection.get("warning")
+            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            else None
+        ),
         llm_response_ref=llm_response_ref,
         validation_ref=validation_ref,
         catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",

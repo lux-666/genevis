@@ -65,7 +65,16 @@ def enter_genome_survey(state: TopLevelState) -> dict:
 
 
 def resolve_survey_inputs(state: TopLevelState) -> dict:
-    """Resolve short-read and long-read survey inputs from the asset registry."""
+    """Resolve survey reads: short DNA from registry; long DNA prefer read_qc then registry.
+
+    Long-read priority matches assembly wiring:
+    1. stage_outputs.read_qc filtered/assembly input refs (post-QC)
+    2. asset_registry clean_long_reads
+    3. asset_registry raw_long_reads (via family selection)
+
+    Short DNA still wins over long DNA in `_survey_input_family` when present.
+    When short DNA is absent, post-QC long reads are required if read_qc declared them.
+    """
     from app.stages.base import load_assets_from_registry
 
     registry_ref = state.get("asset_registry_ref")
@@ -78,9 +87,16 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
 
     clean_short = load_assets_from_registry(state, ["clean_short_dna_reads"])
     raw_short = load_assets_from_registry(state, ["raw_short_dna_reads"])
-    clean_long = load_assets_from_registry(state, ["clean_long_reads"])
+    registry_clean_long = load_assets_from_registry(state, ["clean_long_reads"])
     raw_long = load_assets_from_registry(state, ["raw_long_reads"])
-    long_reads = load_assets_from_registry(state, ["raw_long_reads", "clean_long_reads"])
+    # Prefer post-QC long reads from read_qc stage_outputs over registry clean/raw.
+    # If read_qc declared long-read outputs, missing/unreadable paths fail hard —
+    # never silently fall back to raw registry paths.
+    qc_long, qc_error = _read_qc_clean_long_assets(state)
+    if qc_error:
+        return _fail_update(state, qc_error)
+    clean_long = qc_long or registry_clean_long
+    long_reads = [*clean_long, *raw_long] if clean_long or raw_long else []
 
     return _update_genome_survey_output(
         state,
@@ -98,6 +114,117 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
             },
         },
     )
+
+
+_READ_QC_READY_STATUSES = frozenset({"completed", "fofn_ready"})
+_READ_QC_LONG_READ_KEYS = (
+    "filtered_long_reads_refs",
+    "filtered_long_reads_ref",
+    "filtered_long_reads_fofn_ref",
+    "assembly_input_ref",
+    "long_reads_fofn_ref",
+)
+
+
+def _read_qc_clean_long_assets(state: TopLevelState) -> tuple[list[dict[str, Any]], str | None]:
+    """Materialize clean_long_reads-shaped assets from read_qc stage outputs.
+
+    Mirrors assembly's preference for filtered FOFN / assembly_input_ref without
+    requiring read_qc to re-register into the asset registry.
+
+    Returns:
+        (assets, error). When read_qc is ready and declares long-read outputs,
+        a resolution failure is returned as error (caller must not fall back).
+        When read_qc is absent/not ready/has no long-read keys, returns ([], None).
+    """
+    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
+    if not isinstance(read_qc_out, dict) or not read_qc_out:
+        return [], None
+
+    status = read_qc_out.get("status")
+    if status not in _READ_QC_READY_STATUSES:
+        return [], None
+
+    declared_keys = [key for key in _READ_QC_LONG_READ_KEYS if read_qc_out.get(key)]
+    if not declared_keys:
+        return [], None
+
+    paths, path_error = _read_qc_long_read_paths(read_qc_out)
+    if path_error:
+        return [], path_error
+    if not paths:
+        return [], (
+            "read_qc declared long-read outputs "
+            f"({', '.join(declared_keys)}) but no readable read paths were resolved"
+        )
+
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        preview = ", ".join(missing[:3])
+        more = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
+        return [], (
+            "read_qc long-read outputs are missing on disk: "
+            f"{preview}{more}; refusing to fall back to raw registry reads"
+        )
+
+    session_id = str(state.get("session_id") or "session")
+    assets: list[dict[str, Any]] = []
+    for path in paths:
+        assets.append(
+            {
+                "asset_id": f"{session_id}:clean_long_reads:read_qc:{path.name}",
+                "asset_type": "clean_long_reads",
+                "path": str(path),
+                "platform": read_qc_out.get("platform"),
+                "format": read_qc_out.get("format"),
+                "source": "read_qc",
+            }
+        )
+    return assets, None
+
+
+def _read_qc_long_read_paths(read_qc_out: dict[str, Any]) -> tuple[list[Path], str | None]:
+    """Expand read_qc long-read refs into concrete paths (FOFN relative to the FOFN file)."""
+    refs = read_qc_out.get("filtered_long_reads_refs")
+    if isinstance(refs, list) and refs:
+        return [Path(str(item)).expanduser() for item in refs if item], None
+    if read_qc_out.get("filtered_long_reads_ref"):
+        return [Path(str(read_qc_out["filtered_long_reads_ref"])).expanduser()], None
+
+    for key in ("filtered_long_reads_fofn_ref", "assembly_input_ref", "long_reads_fofn_ref"):
+        value = read_qc_out.get(key)
+        if not value:
+            continue
+        candidate = Path(str(value)).expanduser()
+        if candidate.suffix == ".fofn" or candidate.name.endswith(".fofn"):
+            if not candidate.exists():
+                return [], f"read_qc {key} FOFN not found: {candidate}"
+            paths = _paths_from_fofn(candidate)
+            if not paths:
+                return [], f"read_qc {key} FOFN is empty or unreadable: {candidate}"
+            return paths, None
+        return [candidate], None
+    return [], None
+
+
+def _paths_from_fofn(fofn_path: Path) -> list[Path]:
+    if not fofn_path.exists():
+        return []
+    try:
+        lines = fofn_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    base = fofn_path.parent
+    paths: list[Path] = []
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        path = Path(entry).expanduser()
+        if not path.is_absolute():
+            path = (base / path).resolve(strict=False)
+        paths.append(path)
+    return paths
 
 
 def select_survey_mode(state: TopLevelState) -> dict:

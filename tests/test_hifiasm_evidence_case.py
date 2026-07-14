@@ -35,15 +35,12 @@ from app.knowledge.packs import load_knowledge_pack
 
 def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
     prompt.setdefault("readonly_params", {})
-    if "catalog_subset" not in prompt:
-        prompt["catalog_subset"] = {
-            "readonly_params": deepcopy(prompt["readonly_params"]),
-            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
-        }
+    prompt.setdefault("adjustable_params", prompt.get("adjustable_params") or {})
+    if "case_selection" not in prompt and "case_retrieval" in prompt:
+        prompt["case_selection"] = prompt["case_retrieval"]
     return _sanitize_hifiasm_methods_prompt_payload(
         prompt,
         authoritative_catalog_snapshot={
-            "catalog_subset": deepcopy(prompt["catalog_subset"]),
             "readonly_params": deepcopy(prompt["readonly_params"]),
             "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
         },
@@ -157,7 +154,7 @@ def _methods_prompt(
         "rules": {"rules": []},
         "recommendation_policy": {"allowed_evidence_bases": ["case", "catalog_default"]},
         "adjustable_params": {"purge_level": {"level": 2, "default": 0}},
-        "case_retrieval": retrieval,
+        "case_selection": retrieval,
         "evidence_cases": cases,
     }
 
@@ -997,8 +994,8 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
         knowledge_root=tmp_path,
     )
 
-    assert payload["selected_cases"] == []
-    assert payload["case_retrieval"]["selected_case_ids"] == ["case_001"]
+    assert "selected_cases" not in payload
+    assert payload["case_selection"]["selected_case_ids"] == ["case_001"]
     assert [case["case_id"] for case in payload["evidence_cases"]] == ["case_001"]
     evidence_text = str(payload["evidence_cases"][0])
     assert "HiFi coverage was 30.0x" in evidence_text
@@ -1043,16 +1040,18 @@ def test_hifiasm_retrieval_query_and_trace_are_attempt_scoped_artifacts(tmp_path
         data_dir=data_dir,
     )
 
-    retrieval = payload["case_retrieval"]
-    assert retrieval == payload["case_selection"]
+    retrieval = payload["case_selection"]
+    assert "case_retrieval" not in payload
     assert "query" not in retrieval
     assert "trace" not in retrieval
+    assert "query_ref" not in retrieval
+    assert "trace_ref" not in retrieval
     assert retrieval["query_id"] == "session_a:parameter_attempt_2"
-    assert retrieval["query_ref"].endswith("parameter_attempt_2/retrieval_query.json")
-    assert retrieval["trace_ref"].endswith("parameter_attempt_2/retrieval_trace.json")
+    assert payload["retrieval_query_ref"].endswith("parameter_attempt_2/retrieval_query.json")
+    assert payload["retrieval_trace_ref"].endswith("parameter_attempt_2/retrieval_trace.json")
 
-    query_path = data_dir / retrieval["query_ref"].removeprefix("data/")
-    trace_path = data_dir / retrieval["trace_ref"].removeprefix("data/")
+    query_path = data_dir / payload["retrieval_query_ref"].removeprefix("data/")
+    trace_path = data_dir / payload["retrieval_trace_ref"].removeprefix("data/")
     query_artifact = json.loads(query_path.read_text(encoding="utf-8"))
     trace_artifact = json.loads(trace_path.read_text(encoding="utf-8"))
     assert query_artifact["query_id"] == retrieval["query_id"]

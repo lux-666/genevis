@@ -87,13 +87,13 @@ def build_prompt_payload(
         - prompt_payload_ref: Path ref when artifacts are written, otherwise hash
         - prompt_payload_hash: Canonical hash (excludes self-ref fields)
         - prompt_profile: Task-scoped profile slice
-        - catalog_subset: L1 (readonly) + L2 (adjustable) parameters
         - rules: Domain constraint rules
-        - selected_cases: Small evidence subset selected from the knowledge pack
-        - case_selection: Selection metadata, including selected_case_ids and warnings
+        - selected_cases: Legacy evidence subset (non-methods paths only)
+        - case_selection: Lean selection metadata (ids, warning, counts)
         - skill_instructions: LLM guidance
         - readonly_params: L1 parameter specs (context)
         - adjustable_params: L2 parameter specs (output targets)
+        - evidence_cases / methods_evidence: Methods contract evidence surface
 
     Hash fields are integrity fields. The running graph must call this with
     write_artifacts=True, session_id, and attempt_id so refs are replayable paths.
@@ -286,8 +286,8 @@ def _select_prompt_cases(
         or initial_prompt.get("selected_cases")
         or []
     )
-    inherited_selection = initial_prompt.get("case_retrieval") or initial_prompt.get(
-        "case_selection"
+    inherited_selection = initial_prompt.get("case_selection") or initial_prompt.get(
+        "case_retrieval"
     )
     case_selection = dict(inherited_selection or {})
     if not case_selection:
@@ -323,6 +323,8 @@ def _prepare_evidence_context(
     uses_hifiasm_evidence = case_selection.get("retrieval_backend") in {
         "hifiasm_numeric",
     }
+    retrieval_query_ref = retrieval_query_hash = None
+    retrieval_trace_ref = retrieval_trace_hash = None
     if uses_hifiasm_evidence and task == "recommend_initial":
         case_selection, retrieval_query_payload, retrieval_trace_payload = (
             _materialize_retrieval_artifacts(case_selection)
@@ -353,14 +355,12 @@ def _prepare_evidence_context(
         else:
             query_ref = query_hash = _canonical_json_hash(retrieval_query_payload)
             trace_ref = trace_hash = _canonical_json_hash(retrieval_trace_payload)
-        case_selection.update(
-            {
-                "query_ref": query_ref,
-                "query_hash": query_hash,
-                "trace_ref": trace_ref,
-                "trace_hash": trace_hash,
-            }
-        )
+        # Keep retrieval refs for attempt/ledger indexing; do not nest audit
+        # attestation into the sealed prompt selection surface.
+        retrieval_query_ref = query_ref
+        retrieval_query_hash = query_hash
+        retrieval_trace_ref = trace_ref
+        retrieval_trace_hash = trace_hash
 
     evidence_cases = (
         selected_cases[:HIFIASM_METHODS_EVIDENCE_CASE_LIMIT]
@@ -371,8 +371,22 @@ def _prepare_evidence_context(
     evidence_payload_hash = None
     methods_evidence = None
     if uses_hifiasm_evidence:
+        # Keep Task 3 attestation until sanitize builds the lean case_selection.
+        # Do not dual-write query/trace/evidence payload refs into selection.
         case_selection = {
-            **case_selection,
+            **{
+                key: value
+                for key, value in case_selection.items()
+                if key
+                not in {
+                    "query_ref",
+                    "query_hash",
+                    "trace_ref",
+                    "trace_hash",
+                    "evidence_payload_ref",
+                    "evidence_payload_hash",
+                }
+            },
             "evidence_case_ids": [case["case_id"] for case in evidence_cases],
         }
         if task == "recommend_initial":
@@ -401,11 +415,11 @@ def _prepare_evidence_context(
             evidence_payload_hash = initial_prompt.get("evidence_payload_hash")
             if not evidence_payload_ref or not evidence_payload_hash:
                 raise ValueError("curated retry is missing attempt 0 evidence payload binding")
-        case_selection = {
-            **case_selection,
-            "evidence_payload_ref": evidence_payload_ref,
-            "evidence_payload_hash": evidence_payload_hash,
-        }
+            retrieval_query_ref = initial_prompt.get("retrieval_query_ref")
+            retrieval_query_hash = initial_prompt.get("retrieval_query_hash")
+            retrieval_trace_ref = initial_prompt.get("retrieval_trace_ref")
+            retrieval_trace_hash = initial_prompt.get("retrieval_trace_hash")
+        # evidence_payload binding stays top-level only (no dual-write into selection).
         methods_evidence = (
             dict(initial_prompt.get("methods_evidence") or {})
             if task != "recommend_initial"
@@ -430,6 +444,10 @@ def _prepare_evidence_context(
         "evidence_cases": evidence_cases,
         "evidence_payload_ref": evidence_payload_ref,
         "evidence_payload_hash": evidence_payload_hash,
+        "retrieval_query_ref": retrieval_query_ref if uses_hifiasm_evidence else None,
+        "retrieval_query_hash": retrieval_query_hash if uses_hifiasm_evidence else None,
+        "retrieval_trace_ref": retrieval_trace_ref if uses_hifiasm_evidence else None,
+        "retrieval_trace_hash": retrieval_trace_hash if uses_hifiasm_evidence else None,
         "methods_evidence": methods_evidence,
     }
 
@@ -455,12 +473,8 @@ def _assemble_prompt_payload(
         "input_profile_ref": input_profile_ref,
         "input_profile_hash": profile_hash_ref,
         "prompt_profile": prompt_profile,
-        "catalog_subset": catalog_subset,
         "rules": knowledge_pack["rules"],
-        "selected_cases": evidence_context["legacy_selected_cases"],
         "case_selection": case_selection,
-        "case_retrieval": case_selection if uses_hifiasm_evidence else None,
-        "evidence_cases": evidence_context["evidence_cases"],
         "recommendation_policy": {
             "parameter_levels": {
                 "L0": "fixed by executor/run configuration; never recommend or modify",
@@ -491,13 +505,21 @@ def _assemble_prompt_payload(
     if uses_hifiasm_evidence:
         payload.update(
             {
+                "evidence_cases": evidence_context["evidence_cases"],
                 "evidence_payload_ref": evidence_context["evidence_payload_ref"],
                 "evidence_payload_hash": evidence_context["evidence_payload_hash"],
+                "retrieval_query_ref": evidence_context["retrieval_query_ref"],
+                "retrieval_query_hash": evidence_context["retrieval_query_hash"],
+                "retrieval_trace_ref": evidence_context["retrieval_trace_ref"],
+                "retrieval_trace_hash": evidence_context["retrieval_trace_hash"],
                 "methods_evidence": evidence_context["methods_evidence"],
             }
         )
         if task != "recommend_initial":
             payload["retry_evidence"] = _build_retry_evidence(prompt_profile, task=task)
+    else:
+        # Legacy non-methods contracts still carry selected case bodies.
+        payload["selected_cases"] = evidence_context["legacy_selected_cases"]
     return payload
 
 
@@ -514,8 +536,10 @@ def _close_methods_payload_boundary(
     if not uses_methods_contract:
         return payload, False
 
+    # catalog_subset is intentionally not part of the lean sealed prompt; the
+    # authoritative snapshot binds only the single L1/L2 projections.
+    del catalog_subset
     authoritative_catalog_snapshot = {
-        "catalog_subset": deepcopy(catalog_subset),
         "readonly_params": deepcopy(readonly_params),
         "adjustable_params": deepcopy(adjustable_params),
     }

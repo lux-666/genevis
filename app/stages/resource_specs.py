@@ -103,7 +103,15 @@ STAGE_REQUIREMENTS = {
             "spec": ResourceSpec(
                 resource_type="reads",
                 prefer_stages=["read_qc"],
-                output_keys={"read_qc": ["assembly_input_ref"]},
+                output_keys={
+                    "read_qc": [
+                        "assembly_input_ref",
+                        "filtered_long_reads_fofn_ref",
+                        "filtered_long_reads_ref",
+                        "filtered_long_reads_refs",
+                        "long_reads_fofn_ref",
+                    ]
+                },
                 asset_types=["clean_long_reads", "raw_long_reads", "clean_short_dna_reads", "raw_short_dna_reads"],
                 required=True,
             ),

@@ -33,7 +33,7 @@ HIFIASM_METHODS_EVIDENCE_SPAN_LIMIT_PER_CASE = 12
 HIFIASM_METHODS_EVIDENCE_EXCERPT_CHARS_PER_CASE = 6_000
 HIFIASM_METHODS_EVIDENCE_TOTAL_EXCERPT_CHARS = 24_000
 HIFIASM_METHODS_EVIDENCE_SERIALIZED_BYTES = 65_536
-HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 1
+HIFIASM_METHODS_PROMPT_SCHEMA_VERSION = 2
 
 _PROMPT_SCHEMA_VERSION_FIELD = "hifiasm_methods_prompt_schema_version"
 
@@ -69,7 +69,6 @@ _PROMPT_COPY_FIELDS = (
     "input_profile_ref",
     "input_profile_hash",
     "prompt_profile",
-    "catalog_subset",
     "rules",
     "recommendation_policy",
     "skill_instructions",
@@ -77,10 +76,16 @@ _PROMPT_COPY_FIELDS = (
     "adjustable_params",
     "evidence_payload_ref",
     "evidence_payload_hash",
+    "retrieval_query_ref",
+    "retrieval_query_hash",
+    "retrieval_trace_ref",
+    "retrieval_trace_hash",
     "retry_evidence",
 )
 _PROMPT_SELF_FIELDS = ("prompt_payload_ref", "prompt_payload_hash")
-_CASE_RETRIEVAL_SCALAR_FIELDS = (
+# Lean case_selection scalars only. Audit refs live at prompt top-level or
+# side artifacts (retrieval_query/trace, evidence_payload), not inside selection.
+_CASE_SELECTION_SCALAR_FIELDS = (
     "retrieval_backend",
     "query_id",
     "selected_count",
@@ -89,14 +94,8 @@ _CASE_RETRIEVAL_SCALAR_FIELDS = (
     "evidence_available",
     "case_evidence_required",
     "warning",
-    "query_ref",
-    "query_hash",
-    "trace_ref",
-    "trace_hash",
-    "evidence_payload_ref",
-    "evidence_payload_hash",
 )
-_CASE_RETRIEVAL_ID_FIELDS = (
+_CASE_SELECTION_ID_FIELDS = (
     "selected_case_ids",
     "candidate_case_ids",
     "evidence_case_ids",
@@ -111,10 +110,10 @@ _GATE_FIELDS = (
 def uses_hifiasm_methods_contract(prompt_payload: dict[str, Any]) -> bool:
     """Return whether the prompt uses the structured hifiasm Methods contract."""
 
-    retrieval = prompt_payload.get("case_retrieval") or prompt_payload.get("case_selection") or {}
+    selection = prompt_payload.get("case_selection") or prompt_payload.get("case_retrieval") or {}
     return (
         prompt_payload.get("method_id") == "hifiasm"
-        and retrieval.get("retrieval_backend") == "hifiasm_numeric"
+        and selection.get("retrieval_backend") == "hifiasm_numeric"
     )
 
 
@@ -225,11 +224,11 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
 
     required_fields = {
         _PROMPT_SCHEMA_VERSION_FIELD,
-        "selected_cases",
         "case_selection",
-        "case_retrieval",
         "evidence_cases",
         "methods_evidence",
+        "readonly_params",
+        "adjustable_params",
     }
     allowed_fields = set(_PROMPT_COPY_FIELDS) | set(_PROMPT_SELF_FIELDS) | required_fields
     missing_fields = required_fields - set(prompt_payload)
@@ -239,8 +238,12 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
             "canonical hifiasm Methods prompt has invalid top-level fields; "
             f"missing={sorted(missing_fields)}, unexpected={sorted(unexpected_fields)}"
         )
-    if prompt_payload["selected_cases"] != []:
-        raise ValueError("canonical hifiasm Methods prompt requires selected_cases=[]")
+    # Dual-write / legacy containers must not re-enter the lean sealed prompt.
+    for forbidden in ("catalog_subset", "case_retrieval", "selected_cases"):
+        if forbidden in prompt_payload:
+            raise ValueError(
+                f"canonical hifiasm Methods prompt must not include {forbidden}"
+            )
 
     prompt_ref = prompt_payload.get("prompt_payload_ref")
     if prompt_ref is not None and (not isinstance(prompt_ref, str) or not prompt_ref.strip()):
@@ -258,20 +261,18 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         if prompt_hash != expected_hash:
             raise ValueError("canonical prompt_payload_hash does not match canonical content")
 
-    case_retrieval = prompt_payload["case_retrieval"]
-    if not isinstance(case_retrieval, dict):
-        raise ValueError("canonical case_retrieval must be an object")
+    case_selection = prompt_payload["case_selection"]
+    if not isinstance(case_selection, dict):
+        raise ValueError("canonical case_selection must be an object")
     evidence_case_ids = _string_list(
-        case_retrieval.get("evidence_case_ids"),
+        case_selection.get("evidence_case_ids"),
         field="evidence_case_ids",
     )
-    if case_retrieval != _project_case_retrieval(
-        case_retrieval,
+    if case_selection != _project_case_selection(
+        case_selection,
         evidence_case_ids=evidence_case_ids,
     ):
-        raise ValueError("canonical case_retrieval contains non-projected fields")
-    if prompt_payload["case_selection"] != case_retrieval:
-        raise ValueError("canonical case_selection must equal case_retrieval")
+        raise ValueError("canonical case_selection contains non-projected fields")
 
     evidence_cases = prompt_payload["evidence_cases"]
     if not isinstance(evidence_cases, list):
@@ -287,7 +288,7 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         raise ValueError("canonical evidence cases do not match evidence_case_ids")
 
     candidate_case_ids = _string_list(
-        case_retrieval.get("candidate_case_ids") or [],
+        case_selection.get("candidate_case_ids") or [],
         field="candidate_case_ids",
     )
     if len(candidate_case_ids) != len(set(candidate_case_ids)):
@@ -307,7 +308,7 @@ def _validate_canonical_hifiasm_methods_prompt_payload(
         budget,
         evidence_cases=evidence_cases,
         candidate_case_ids=candidate_case_ids,
-        case_retrieval=case_retrieval,
+        case_selection=case_selection,
     )
 
     policy = prompt_payload.get("recommendation_policy")
@@ -328,23 +329,18 @@ def _validate_authoritative_catalog_snapshot(
     *,
     authoritative_catalog_snapshot: dict[str, Any],
 ) -> None:
-    """Bind every prompt catalog projection to the caller-owned current catalog."""
+    """Bind prompt catalog fields to the caller-owned current catalog."""
 
-    required_fields = ("catalog_subset", "readonly_params", "adjustable_params")
+    required_fields = ("readonly_params", "adjustable_params")
     if not isinstance(authoritative_catalog_snapshot, dict) or set(
         authoritative_catalog_snapshot
     ) != set(required_fields):
         raise ValueError("authoritative catalog snapshot must use the closed catalog structure")
     readonly = authoritative_catalog_snapshot.get("readonly_params")
     adjustable = authoritative_catalog_snapshot.get("adjustable_params")
-    subset = authoritative_catalog_snapshot.get("catalog_subset")
     if (
         not isinstance(readonly, dict)
         or not isinstance(adjustable, dict)
-        or not isinstance(subset, dict)
-        or set(subset) != {"readonly_params", "adjustable_params"}
-        or subset.get("readonly_params") != readonly
-        or subset.get("adjustable_params") != adjustable
         or any(
             not isinstance(parameter, str)
             or not parameter
@@ -390,7 +386,7 @@ def _validate_canonical_evidence_budget(
     *,
     evidence_cases: list[dict[str, Any]],
     candidate_case_ids: list[str],
-    case_retrieval: dict[str, Any],
+    case_selection: dict[str, Any],
 ) -> None:
     expected_limits = {
         "cases": HIFIASM_METHODS_EVIDENCE_CASE_LIMIT,
@@ -464,11 +460,11 @@ def _validate_canonical_evidence_budget(
         seen_omitted_spans.add(key)
 
     audit_payload = {
-        "retrieval_backend": case_retrieval.get("retrieval_backend"),
-        "query_id": _safe_optional_scalar(case_retrieval.get("query_id")),
+        "retrieval_backend": case_selection.get("retrieval_backend"),
+        "query_id": _safe_optional_scalar(case_selection.get("query_id")),
         "candidate_case_ids": visible_case_ids,
         "retrieval_candidate_case_ids": candidate_case_ids,
-        "warning": _safe_optional_scalar(case_retrieval.get("warning")),
+        "warning": _safe_optional_scalar(case_selection.get("warning")),
         "effect_areas": list(HIFIASM_EFFECT_AREAS),
         "cases": deepcopy(evidence_cases),
         "budget": deepcopy(budget),
@@ -480,16 +476,16 @@ def _validate_canonical_evidence_budget(
         raise ValueError("canonical evidence payload exceeds the serialized byte budget")
 
 
-def _project_case_retrieval(
+def _project_case_selection(
     raw_retrieval: dict[str, Any],
     *,
     evidence_case_ids: list[str],
 ) -> dict[str, Any]:
     projected: dict[str, Any] = {}
-    for field in _CASE_RETRIEVAL_SCALAR_FIELDS:
+    for field in _CASE_SELECTION_SCALAR_FIELDS:
         if field in raw_retrieval:
             projected[field] = _safe_optional_scalar(raw_retrieval[field])
-    for field in _CASE_RETRIEVAL_ID_FIELDS:
+    for field in _CASE_SELECTION_ID_FIELDS:
         if field in raw_retrieval:
             projected[field] = _string_list(raw_retrieval[field], field=field)
     backend = raw_retrieval.get("retrieval_backend")
@@ -506,6 +502,17 @@ def _project_case_retrieval(
         }
     return projected
 
+
+
+
+def _project_case_retrieval(
+    raw_retrieval: dict[str, Any],
+    *,
+    evidence_case_ids: list[str],
+) -> dict[str, Any]:
+    """Compatibility alias; prefer ``_project_case_selection``."""
+
+    return _project_case_selection(raw_retrieval, evidence_case_ids=evidence_case_ids)
 
 def _project_methods_evidence(budget: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -874,7 +881,6 @@ def _build_prompt_sanitizer():
             authoritative_catalog_snapshot=authoritative_catalog_snapshot,
         )
         immutable_catalog_fields = (
-            "catalog_subset",
             "readonly_params",
             "adjustable_params",
         )
@@ -890,16 +896,22 @@ def _build_prompt_sanitizer():
             "skill_instructions",
             "evidence_payload_ref",
             "evidence_payload_hash",
+            "retrieval_query_ref",
+            "retrieval_query_hash",
+            "retrieval_trace_ref",
+            "retrieval_trace_hash",
             "case_selection",
-            "case_retrieval",
             "evidence_cases",
             "methods_evidence",
         }
         selection_identity_fields = {
             "evidence_payload_ref",
             "evidence_payload_hash",
+            "retrieval_query_ref",
+            "retrieval_query_hash",
+            "retrieval_trace_ref",
+            "retrieval_trace_hash",
             "case_selection",
-            "case_retrieval",
             "evidence_cases",
             "methods_evidence",
         }
@@ -926,7 +938,6 @@ def _build_prompt_sanitizer():
         for field in ("previous_attempt", "assembly_review"):
             if field in retry_profile:
                 canonical["prompt_profile"][field] = deepcopy(retry_profile[field])
-        canonical["selected_cases"] = []
         canonical["retry_evidence"] = deepcopy(retry_overlay.get("retry_evidence"))
         attested = _new_registered(canonical)
         _validate_canonical_hifiasm_methods_prompt_payload(attested)
@@ -950,14 +961,18 @@ def _build_prompt_sanitizer():
             return deepcopy(prompt_payload)
         if not uses_hifiasm_methods_contract(prompt_payload):
             return deepcopy(prompt_payload)
-        raw_retrieval = prompt_payload.get("case_retrieval") or {}
+        raw_selection = (
+            prompt_payload.get("case_selection")
+            or prompt_payload.get("case_retrieval")
+            or {}
+        )
         evidence_payload = build_hifiasm_evidence_payload(
             evidence_cases=prompt_payload.get("evidence_cases") or [],
-            case_retrieval=raw_retrieval,
+            case_retrieval=raw_selection,
             allowed_parameter_ids=set(authoritative_catalog_snapshot["adjustable_params"]),
         )
-        case_retrieval = _project_case_retrieval(
-            raw_retrieval,
+        case_selection = _project_case_selection(
+            raw_selection,
             evidence_case_ids=evidence_payload["candidate_case_ids"],
         )
         canonical = {
@@ -966,12 +981,13 @@ def _build_prompt_sanitizer():
             if field in prompt_payload
             and (field != "retry_evidence" or prompt_payload.get("task") != "recommend_initial")
         }
+        # Drop dual-write / legacy containers if callers still supply them raw.
+        for forbidden in ("catalog_subset", "case_retrieval", "selected_cases"):
+            canonical.pop(forbidden, None)
         canonical.update(
             {
                 _PROMPT_SCHEMA_VERSION_FIELD: HIFIASM_METHODS_PROMPT_SCHEMA_VERSION,
-                "selected_cases": [],
-                "case_selection": deepcopy(case_retrieval),
-                "case_retrieval": case_retrieval,
+                "case_selection": case_selection,
                 "evidence_cases": evidence_payload["cases"],
                 "methods_evidence": _project_methods_evidence(evidence_payload["budget"]),
             }
@@ -1042,11 +1058,11 @@ def normalize_hifiasm_methods_response(
         for case in evidence_cases
         if isinstance(case, dict) and case.get("case_id")
     }
-    case_retrieval = prompt_payload.get("case_retrieval") or {}
+    case_selection = prompt_payload.get("case_selection") or {}
     shortlist_ids = set(
-        case_retrieval.get("evidence_case_ids")
-        or case_retrieval.get("candidate_case_ids")
-        or ((prompt_payload.get("case_selection") or {}).get("selected_case_ids"))
+        case_selection.get("evidence_case_ids")
+        or case_selection.get("candidate_case_ids")
+        or case_selection.get("selected_case_ids")
         or []
     )
     if set(cases_by_id) != shortlist_ids:

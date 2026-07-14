@@ -528,6 +528,220 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertTrue(Path(survey["kmer_hist_artifact_ref"]).exists())
             self.assertTrue(Path(survey["genomescope2_summary_ref"]).exists())
 
+    def test_prefers_read_qc_filtered_long_reads_over_raw_registry(self):
+        """Survey should consume post-QC long reads like assembly, not raw manifest paths."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_reads = Path(tmpdir) / "raw.fastq.gz"
+            raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            filtered = Path(tmpdir) / "filtered_long_reads.fastq"
+            filtered.write_text("@r1\nACGTACGT\n+\n!!!!!!!!\n", encoding="utf-8")
+            fofn = Path(tmpdir) / "filtered_long_reads.fofn"
+            fofn.write_text(f"{filtered}\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:raw.fastq.gz",
+                        "asset_type": "raw_long_reads",
+                        "path": str(raw_reads),
+                        "platform": "ont",
+                    }
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "status": "completed",
+                    "platform": "ont",
+                    "format": "fastq",
+                    "filtered_long_reads_ref": str(filtered),
+                    "filtered_long_reads_refs": [str(filtered)],
+                    "filtered_long_reads_fofn_ref": str(fofn),
+                    "assembly_input_ref": str(fofn),
+                },
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "clean_long_reads")
+            self.assertEqual(
+                survey["survey_input_refs"],
+                [f"s1:clean_long_reads:read_qc:{filtered.name}"],
+            )
+            # Jellyfish must have been pointed at filtered path, not raw gz.
+            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            self.assertTrue(script.exists(), "expected jellyfish script under work/")
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn(str(filtered), script_text)
+            self.assertNotIn(str(raw_reads), script_text)
+
+    def test_read_qc_declared_missing_paths_fail_without_raw_fallback(self):
+        """Declared QC long-read refs must not silently fall back to raw registry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_reads = Path(tmpdir) / "raw.fastq.gz"
+            raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            missing = Path(tmpdir) / "missing_filtered.fastq"
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:raw.fastq.gz",
+                        "asset_type": "raw_long_reads",
+                        "path": str(raw_reads),
+                        "platform": "ont",
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "status": "completed",
+                    "platform": "ont",
+                    "format": "fastq",
+                    "filtered_long_reads_ref": str(missing),
+                    "filtered_long_reads_refs": [str(missing)],
+                    "assembly_input_ref": str(missing),
+                },
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "failed")
+            self.assertIn("missing on disk", survey["reason"])
+            self.assertIn("refusing to fall back", survey["reason"])
+
+    def test_read_qc_fofn_relative_paths_resolve_against_fofn_dir(self):
+        """Relative entries in a QC FOFN resolve relative to the FOFN file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_reads = Path(tmpdir) / "raw.fastq.gz"
+            raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            qc_dir = Path(tmpdir) / "qc_out"
+            qc_dir.mkdir()
+            filtered = qc_dir / "filtered_long_reads.fastq"
+            filtered.write_text("@r1\nACGTACGT\n+\n!!!!!!!!\n", encoding="utf-8")
+            fofn = qc_dir / "filtered_long_reads.fofn"
+            fofn.write_text("filtered_long_reads.fastq\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_long_reads:raw.fastq.gz",
+                        "asset_type": "raw_long_reads",
+                        "path": str(raw_reads),
+                        "platform": "ont",
+                    }
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "status": "fofn_ready",
+                    "platform": "ont",
+                    "format": "fastq",
+                    "filtered_long_reads_fofn_ref": str(fofn),
+                    "assembly_input_ref": str(fofn),
+                },
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "clean_long_reads")
+            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn(str(filtered.resolve()), script_text)
+            self.assertNotIn(str(raw_reads), script_text)
+
+    def test_short_dna_still_preferred_over_read_qc_long(self):
+        """Short DNA family selection remains higher priority than QC long reads."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_reads = Path(tmpdir) / "short.fq"
+            short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            filtered = Path(tmpdir) / "filtered_long_reads.fastq"
+            filtered.write_text("@r1\nACGTACGT\n+\n!!!!!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_short_dna_reads:short.fq",
+                        "asset_type": "raw_short_dna_reads",
+                        "path": str(short_reads),
+                    }
+                ],
+            )
+            fake_bin = self._fake_survey_bin(tmpdir)
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"] = {
+                "read_qc": {
+                    "status": "completed",
+                    "platform": "ont",
+                    "format": "fastq",
+                    "filtered_long_reads_ref": str(filtered),
+                    "filtered_long_reads_refs": [str(filtered)],
+                },
+                "genome_survey": {
+                    "execution_mode": "local",
+                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                },
+            }
+
+            result = build_stage().invoke(state)
+
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn(str(short_reads), script_text)
+            self.assertNotIn(str(filtered), script_text)
+
+    def test_jellyfish_freeze_rejects_empty_input_paths(self):
+        """Local jellyfish freeze must fail closed when resolved assets are empty."""
+        from app.stages.genome_survey.method_application.jellyfish import freeze_jellyfish_attempt
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir, str(self._write_registry(tmpdir, assets=[])))
+            state["stage_outputs"] = {
+                "genome_survey": {
+                    "status": "local_execution_planned",
+                    "execution_mode": "local",
+                    "survey_input_family": "clean_long_reads",
+                    "survey_input_refs": [],
+                    "resolved_assets": {"clean_long_reads": []},
+                    "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
+                    "env_target": "local",
+                }
+            }
+
+            update = freeze_jellyfish_attempt(state)
+            survey = update["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["status"], "failed")
+            self.assertIn("no readable input paths", survey["reason"])
+
     def test_local_full_mode_requires_explicit_hash_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_reads = Path(tmpdir) / "short.fq"

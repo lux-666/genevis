@@ -44,6 +44,37 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     if output.get("status") != "local_execution_planned":
         return {}
 
+    params = dict(output["survey_parameters"])
+    input_family = output.get("survey_input_family") or "clean_short_dna_reads"
+    assets = (output.get("resolved_assets") or {}).get(input_family) or []
+    read_paths = [str(Path(asset["path"])) for asset in assets if asset.get("path")]
+    if not read_paths:
+        return update_genome_survey_output(
+            state,
+            {
+                "status": "failed",
+                "reason": (
+                    f"genome_survey jellyfish has no readable input paths for family "
+                    f"{input_family!r} (survey_input_refs="
+                    f"{output.get('survey_input_refs') or []})"
+                ),
+            },
+        )
+    missing = [path for path in read_paths if not Path(path).exists()]
+    if missing:
+        preview = ", ".join(missing[:3])
+        more = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
+        return update_genome_survey_output(
+            state,
+            {
+                "status": "failed",
+                "reason": (
+                    f"genome_survey jellyfish input paths missing on disk: "
+                    f"{preview}{more}"
+                ),
+            },
+        )
+
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, blocked = resolve_method_env(
@@ -62,10 +93,6 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    params = dict(output["survey_parameters"])
-    input_family = output.get("survey_input_family") or "clean_short_dna_reads"
-    assets = (output.get("resolved_assets") or {}).get(input_family) or []
-    read_paths = [str(Path(asset["path"])) for asset in assets]
     kmer_db = artifact_dir / "jellyfish_kmers.jf"
     kmer_hist = artifact_dir / "kmer_hist.tsv"
     script_path = working_dir / "run_jellyfish.sh"

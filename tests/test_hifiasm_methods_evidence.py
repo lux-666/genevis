@@ -37,15 +37,13 @@ _SOURCE_ROOT = Path(_SOURCE_DIR.name)
 
 def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
     prompt.setdefault("readonly_params", {})
-    if "catalog_subset" not in prompt:
-        prompt["catalog_subset"] = {
-            "readonly_params": deepcopy(prompt.get("readonly_params") or {}),
-            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
-        }
+    prompt.setdefault("adjustable_params", prompt.get("adjustable_params") or {})
+    # Accept pre-lean fixtures that still supply case_retrieval dual-write.
+    if "case_selection" not in prompt and "case_retrieval" in prompt:
+        prompt["case_selection"] = prompt["case_retrieval"]
     return _sanitize_hifiasm_methods_prompt_payload(
         prompt,
         authoritative_catalog_snapshot={
-            "catalog_subset": deepcopy(prompt["catalog_subset"]),
             "readonly_params": deepcopy(prompt.get("readonly_params") or {}),
             "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
         },
@@ -196,7 +194,7 @@ def _prompt_payload(
             "purge_level": {"level": 2, "default": 0},
             "kmer_length": {"level": 2, "default": 51},
         },
-        "case_retrieval": _case_retrieval(evidence_cases, backend=backend),
+        "case_selection": _case_retrieval(evidence_cases, backend=backend),
         "evidence_cases": evidence_cases,
     }
     if retry_evidence is not None:
@@ -384,39 +382,20 @@ def test_model_projection_suppresses_unknown_and_non_l2_parameters():
     assert set(canonical["evidence_cases"][0]["intervention"]["parameters"]) == {"purge_level"}
 
 
-@pytest.mark.parametrize("forged_projection", ["top", "subset", "both_spec"])
+@pytest.mark.parametrize("forged_projection", ["top", "both_spec"])
 def test_canonical_prompt_cannot_self_authorize_forged_adjustable_parameter(
     forged_projection,
 ):
     prompt = _prompt_payload()
-    prompt["catalog_subset"] = {
-        "readonly_params": {},
-        "adjustable_params": deepcopy(prompt["adjustable_params"]),
-    }
     if forged_projection == "both_spec":
         prompt["adjustable_params"]["purge_level"]["default"] = "FORGED"
-        prompt["catalog_subset"]["adjustable_params"]["purge_level"][
-            "default"
-        ] = "FORGED"
     else:
-        target = (
-            prompt["adjustable_params"]
-            if forged_projection == "top"
-            else prompt["catalog_subset"]["adjustable_params"]
-        )
-        target["forged_flag"] = {"level": 2, "default": 1}
+        prompt["adjustable_params"]["forged_flag"] = {"level": 2, "default": 1}
 
     with pytest.raises(ValueError, match="authoritative catalog snapshot"):
         _sanitize_hifiasm_methods_prompt_payload(
             prompt,
             authoritative_catalog_snapshot={
-                "catalog_subset": {
-                    "readonly_params": {},
-                    "adjustable_params": {
-                        "purge_level": {"level": 2, "default": 0},
-                        "kmer_length": {"level": 2, "default": 51},
-                    },
-                },
                 "readonly_params": {},
                 "adjustable_params": {
                     "purge_level": {"level": 2, "default": 0},
@@ -426,28 +405,19 @@ def test_canonical_prompt_cannot_self_authorize_forged_adjustable_parameter(
         )
 
 
-@pytest.mark.parametrize("forged_projection", ["top", "subset", "both"])
+@pytest.mark.parametrize("forged_projection", ["top"])
 def test_canonical_prompt_cannot_self_authorize_forged_readonly_parameter(
     forged_projection,
 ):
     prompt = _prompt_payload()
     readonly = {"read_type": {"level": 1, "value_type": "string"}}
     prompt["readonly_params"] = deepcopy(readonly)
-    prompt["catalog_subset"] = {
-        "readonly_params": deepcopy(readonly),
-        "adjustable_params": deepcopy(prompt["adjustable_params"]),
-    }
     authoritative = {
-        "catalog_subset": deepcopy(prompt["catalog_subset"]),
         "readonly_params": deepcopy(readonly),
         "adjustable_params": deepcopy(prompt["adjustable_params"]),
     }
-    if forged_projection in {"top", "both"}:
+    if forged_projection == "top":
         prompt["readonly_params"]["read_type"]["value_type"] = "FORGED"
-    if forged_projection in {"subset", "both"}:
-        prompt["catalog_subset"]["readonly_params"]["read_type"][
-            "value_type"
-        ] = "FORGED"
 
     with pytest.raises(ValueError, match="authoritative catalog snapshot"):
         _sanitize_hifiasm_methods_prompt_payload(
@@ -464,7 +434,6 @@ def test_retry_rehydration_rejects_plain_json_dict_without_loader_attestation():
             persisted,
             {},
             authoritative_catalog_snapshot={
-                "catalog_subset": deepcopy(persisted["catalog_subset"]),
                 "readonly_params": deepcopy(persisted["readonly_params"]),
                 "adjustable_params": deepcopy(persisted["adjustable_params"]),
             },
@@ -594,9 +563,9 @@ def test_task4_rejects_reordered_ranked_cases_even_when_outer_ids_are_swapped_to
     second = _case("case_b")
     prompt = _prompt_payload(cases=[first, second])
     prompt["evidence_cases"] = [second, first]
-    prompt["case_retrieval"]["candidate_case_ids"] = ["case_b", "case_a"]
-    prompt["case_retrieval"]["selected_case_ids"] = ["case_b", "case_a"]
-    prompt["case_retrieval"]["evidence_case_ids"] = ["case_b", "case_a"]
+    prompt["case_selection"]["candidate_case_ids"] = ["case_b", "case_a"]
+    prompt["case_selection"]["selected_case_ids"] = ["case_b", "case_a"]
+    prompt["case_selection"]["evidence_case_ids"] = ["case_b", "case_a"]
 
     with pytest.raises(EvidenceCaseValidationError, match="candidate_case_ids differ"):
         sanitize_hifiasm_methods_prompt_payload(prompt)
@@ -604,7 +573,7 @@ def test_task4_rejects_reordered_ranked_cases_even_when_outer_ids_are_swapped_to
 
 def test_task4_rejects_changed_evidence_id_order_before_budgeting():
     prompt = _prompt_payload(cases=[_case("case_a"), _case("case_b")])
-    prompt["case_retrieval"]["evidence_case_ids"] = ["case_b", "case_a"]
+    prompt["case_selection"]["evidence_case_ids"] = ["case_b", "case_a"]
 
     with pytest.raises(EvidenceCaseValidationError, match="evidence_case_ids differ"):
         sanitize_hifiasm_methods_prompt_payload(prompt)
@@ -613,7 +582,7 @@ def test_task4_rejects_changed_evidence_id_order_before_budgeting():
 def test_task4_rejects_empty_attested_prefix_before_budgeting():
     prompt = _prompt_payload(cases=[_case("case_a"), _case("case_b")])
     prompt["evidence_cases"] = []
-    prompt["case_retrieval"]["evidence_case_ids"] = []
+    prompt["case_selection"]["evidence_case_ids"] = []
 
     with pytest.raises(EvidenceCaseValidationError, match="complete attested shortlist prefix"):
         sanitize_hifiasm_methods_prompt_payload(prompt)
@@ -624,7 +593,7 @@ def test_task4_rejects_exchanged_attested_prefix_before_budgeting():
     second = _case("case_b")
     prompt = _prompt_payload(cases=[first, second])
     prompt["evidence_cases"] = [second, first]
-    prompt["case_retrieval"]["evidence_case_ids"] = ["case_b", "case_a"]
+    prompt["case_selection"]["evidence_case_ids"] = ["case_b", "case_a"]
 
     with pytest.raises(EvidenceCaseValidationError, match="shortlist order"):
         sanitize_hifiasm_methods_prompt_payload(prompt)
@@ -653,7 +622,7 @@ def test_legitimate_ranked_selection_survives_deepcopy_into_task4():
 
     canonical = sanitize_hifiasm_methods_prompt_payload(prompt)
 
-    assert canonical["case_retrieval"]["candidate_case_ids"] == ["case_a", "case_b"]
+    assert canonical["case_selection"]["candidate_case_ids"] == ["case_a", "case_b"]
     assert [case["case_id"] for case in canonical["evidence_cases"]] == ["case_a", "case_b"]
 
 
@@ -671,7 +640,7 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
             "debug_blob": {"secret": "top-level"},
         }
     )
-    prompt["case_retrieval"].update(
+    prompt["case_selection"].update(
         {
                 "query": {"raw": "secret query"},
                 "trace": [{"raw": "secret trace"}],
@@ -686,22 +655,34 @@ def test_closed_prompt_projection_drops_alternate_containers_and_debug_payloads(
     canonical = sanitize_hifiasm_methods_prompt_payload(prompt)
     rendered = json.dumps(canonical, sort_keys=True)
 
-    assert canonical["selected_cases"] == []
+    assert "selected_cases" not in canonical
+    assert "case_retrieval" not in canonical
+    assert "catalog_subset" not in canonical
+    # Task 3 attestation must not leak into the lean sealed prompt surface.
+    assert "_hifiasm_ranked_selection_attestation" not in canonical
+    assert "_hifiasm_ranked_selection_attestation" not in (canonical.get("case_selection") or {})
     assert set(canonical) <= {
         "hifiasm_methods_prompt_schema_version",
         "method_id",
         "task",
         "prompt_profile",
         "rules",
-            "recommendation_policy",
-            "catalog_subset",
-            "readonly_params",
-            "adjustable_params",
-        "selected_cases",
+        "recommendation_policy",
+        "readonly_params",
+        "adjustable_params",
         "case_selection",
-        "case_retrieval",
         "evidence_cases",
         "methods_evidence",
+        "evidence_payload_ref",
+        "evidence_payload_hash",
+        "retrieval_query_ref",
+        "retrieval_query_hash",
+        "retrieval_trace_ref",
+        "retrieval_trace_hash",
+        "skill_instructions",
+        "input_profile_ref",
+        "input_profile_hash",
+        "retry_evidence",
     }
     assert "skill_heuristic" not in canonical["recommendation_policy"]["allowed_evidence_bases"]
     for leaked in (
@@ -805,7 +786,7 @@ def test_self_signed_canonical_prompt_cannot_forge_omission_audit():
     "mutate",
     [
         lambda prompt: prompt.update({"debug_blob": "bypass"}),
-        lambda prompt: prompt["case_retrieval"].update({"debug_blob": "bypass"}),
+        lambda prompt: prompt["case_selection"].update({"debug_blob": "bypass"}),
         lambda prompt: prompt["methods_evidence"]["evidence_budget"]["used"].update(
             {"cases": 99}
         ),
@@ -1239,7 +1220,7 @@ def test_decision_request_rejects_json_roundtrip_with_recomputed_self_hash():
 def test_decision_request_rejects_json_roundtrip_downgraded_by_mutable_markers():
     forged = json.loads(json.dumps(_canonical_prompt()))
     forged.pop("hifiasm_methods_prompt_schema_version")
-    forged["case_retrieval"]["retrieval_backend"] = "structured_default"
+    forged["case_selection"]["retrieval_backend"] = "structured_default"
     forged["case_selection"]["retrieval_backend"] = "structured_default"
     forged["prompt_payload_hash"] = generate_payload_ref(
         {
@@ -1272,16 +1253,15 @@ def test_explicit_hifiasm_contract_rejects_no_case_prompt_with_all_recognizers_r
         "evidence_cases",
     ):
         forged.pop(field, None)
-    for field in ("case_retrieval", "case_selection"):
-        retrieval = forged[field]
-        retrieval["retrieval_backend"] = "structured_default"
-        for recognizer in (
-            "evidence_case_ids",
-            "evidence_payload_ref",
-            "evidence_payload_hash",
-            "hifiasm_numeric_gate",
-        ):
-            retrieval.pop(recognizer, None)
+    retrieval = forged["case_selection"]
+    retrieval["retrieval_backend"] = "structured_default"
+    for recognizer in (
+        "evidence_case_ids",
+        "evidence_payload_ref",
+        "evidence_payload_hash",
+        "hifiasm_numeric_gate",
+    ):
+        retrieval.pop(recognizer, None)
     forged["prompt_payload_hash"] = generate_payload_ref(
         {
             key: value
@@ -1417,7 +1397,7 @@ def test_decision_cannot_bypass_remembered_attestation_by_removing_markers(monke
         system_prompt="Return JSON.",
     )
     canonical.pop("hifiasm_methods_prompt_schema_version")
-    canonical["case_retrieval"]["retrieval_backend"] = "structured_default"
+    canonical["case_selection"]["retrieval_backend"] = "structured_default"
     canonical["case_selection"]["retrieval_backend"] = "structured_default"
     canonical["prompt_payload_hash"] = generate_payload_ref(
         {

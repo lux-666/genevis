@@ -259,10 +259,10 @@ class TestLevelSegregation:
             task="recommend_initial",
         )
 
-        # L0 params should not appear in catalog_subset at all
+        # L0 params should not appear in the lean L1/L2 prompt surfaces
         all_params_in_subset = {
-            **payload["catalog_subset"]["readonly_params"],
-            **payload["catalog_subset"]["adjustable_params"],
+            **payload["readonly_params"],
+            **payload["adjustable_params"],
         }
         assert "output_dir" not in all_params_in_subset
         assert "input_file" not in all_params_in_subset
@@ -313,7 +313,7 @@ class TestLevelSegregation:
         assert "kmer_size" not in payload["readonly_params"]
 
     def test_catalog_subset_only_l1_l2(self, sample_catalog, sample_full_profile):
-        """catalog_subset should only contain L1 and L2 parameters."""
+        """Lean sealed prompt exposes only L1 and L2 parameter surfaces."""
         payload = build_prompt_payload(
             method_id="test_method",
             catalog=sample_catalog,
@@ -322,17 +322,18 @@ class TestLevelSegregation:
         )
 
         all_subset_params = {
-            **payload["catalog_subset"]["readonly_params"],
-            **payload["catalog_subset"]["adjustable_params"],
+            **payload["readonly_params"],
+            **payload["adjustable_params"],
         }
+        assert "catalog_subset" not in payload
 
         # Check all params in subset are L1 or L2
         for key, spec in all_subset_params.items():
             assert spec["level"] in [1, 2], f"Parameter {key} has level {spec['level']}, expected 1 or 2"
 
         # Verify counts
-        assert len(payload["catalog_subset"]["readonly_params"]) == 2  # read_type, genome_size_hint
-        assert len(payload["catalog_subset"]["adjustable_params"]) == 3  # threads, kmer_size, purge_level
+        assert len(payload["readonly_params"]) == 2  # read_type, genome_size_hint
+        assert len(payload["adjustable_params"]) == 3  # threads, kmer_size, purge_level
 
 
 class TestTaskScopedSlicing:
@@ -690,12 +691,9 @@ class TestPayloadStructure:
             "input_profile_hash",
             "prompt_payload_hash",
             "prompt_profile",
-            "catalog_subset",
             "rules",
             "selected_cases",
             "case_selection",
-            "case_retrieval",
-            "evidence_cases",
             "recommendation_policy",
             "skill_instructions",
             "readonly_params",
@@ -703,6 +701,8 @@ class TestPayloadStructure:
         }
 
         assert set(payload.keys()) == required_keys
+        assert "catalog_subset" not in payload
+        assert "case_retrieval" not in payload
 
     def test_readonly_params_are_l1_only(self, sample_catalog, sample_full_profile):
         """readonly_params should only contain L1 parameters."""
@@ -729,7 +729,7 @@ class TestPayloadStructure:
             assert spec["level"] == 2, f"adjustable_params[{key}] has level {spec['level']}, expected 2"
 
     def test_catalog_subset_structure(self, sample_catalog, sample_full_profile):
-        """catalog_subset should have readonly_params and adjustable_params."""
+        """Lean sealed prompt keeps one L1 and one L2 catalog surface."""
         payload = build_prompt_payload(
             method_id="test_method",
             catalog=sample_catalog,
@@ -737,10 +737,9 @@ class TestPayloadStructure:
             task="recommend_initial",
         )
 
-        assert "readonly_params" in payload["catalog_subset"]
-        assert "adjustable_params" in payload["catalog_subset"]
-        assert isinstance(payload["catalog_subset"]["readonly_params"], dict)
-        assert isinstance(payload["catalog_subset"]["adjustable_params"], dict)
+        assert "catalog_subset" not in payload
+        assert isinstance(payload["readonly_params"], dict)
+        assert isinstance(payload["adjustable_params"], dict)
 
 
 class TestReferenceGeneration:
@@ -877,16 +876,17 @@ class TestReplayCapability:
         assert "method_id" in payload
         assert "task" in payload
         assert "prompt_profile" in payload
-        assert "catalog_subset" in payload
         assert "rules" in payload
         assert "selected_cases" in payload
         assert "case_selection" in payload
         assert "skill_instructions" in payload
+        assert "catalog_subset" not in payload
 
         # Verify we can reconstruct what was sent to LLM
         llm_input_components = {
             "profile": payload["prompt_profile"],
-            "catalog": payload["catalog_subset"],
+            "readonly": payload["readonly_params"],
+            "adjustable": payload["adjustable_params"],
             "rules": payload["rules"],
             "cases": payload["selected_cases"],
             "instructions": payload["skill_instructions"],
@@ -972,7 +972,8 @@ class TestArtifactWriter:
         assert loaded_payload["method_id"] == "test_method"
         assert loaded_payload["task"] == "recommend_initial"
         assert loaded_payload["prompt_profile"] == payload["prompt_profile"]
-        assert loaded_payload["catalog_subset"] == payload["catalog_subset"]
+        assert loaded_payload["readonly_params"] == payload["readonly_params"]
+        assert loaded_payload["adjustable_params"] == payload["adjustable_params"]
 
     def test_load_roundtrip_with_path_refs(self, sample_catalog, sample_full_profile, tmp_path):
         """Test that load roundtrip with path-based refs works (P1 fix implemented)."""
@@ -1176,7 +1177,7 @@ class TestArtifactWriter:
         if catalog_drift:
             with pytest.raises(
                 ValueError,
-                match="catalog_subset differs from the authoritative catalog snapshot",
+                match="readonly_params differs from the authoritative catalog snapshot",
             ):
                 build_prompt_payload(**retry_kwargs)
             return
@@ -1189,7 +1190,8 @@ class TestArtifactWriter:
         if retry_task == "retry_after_review_failure":
             assert retry["prompt_profile"]["assembly_review"]
         assert retry["evidence_cases"] == persisted["evidence_cases"]
-        assert retry["case_retrieval"] == persisted["case_retrieval"]
+        assert retry["case_selection"] == persisted["case_selection"]
+        assert "case_retrieval" not in retry
         assert retry["methods_evidence"] == persisted["methods_evidence"]
         assert retry["retry_evidence"]["task"] == retry_task
         assert retry["prompt_payload_hash"] == generate_payload_ref(
@@ -1552,7 +1554,7 @@ def test_production_hifiasm_prompt_consumes_ranked_real_paper_evidence(
         task="recommend_initial",
     )
 
-    retrieval = payload["case_retrieval"]
+    retrieval = payload["case_selection"]
     prompt_cases = payload["evidence_cases"]
     prompt_case_ids = [case["case_id"] for case in prompt_cases]
     assert retrieval["retrieval_backend"] == "hifiasm_numeric"
@@ -1561,7 +1563,13 @@ def test_production_hifiasm_prompt_consumes_ranked_real_paper_evidence(
     assert prompt_case_ids == retrieval["selected_case_ids"]
     assert prompt_case_ids == retrieval["evidence_case_ids"]
     assert set(prompt_case_ids) <= set(approved_papers)
-    assert payload["selected_cases"] == []
+    assert "selected_cases" not in payload
+    assert "case_retrieval" not in payload
+    assert "catalog_subset" not in payload
+    assert "_hifiasm_ranked_selection_attestation" not in payload
+    assert "_hifiasm_ranked_selection_attestation" not in retrieval
+    rendered = json.dumps(payload, sort_keys=True)
+    assert "_hifiasm_ranked_selection_attestation" not in rendered
 
     for prompt_case in prompt_cases:
         source_case = approved_papers[prompt_case["case_id"]]
@@ -1619,7 +1627,9 @@ def test_hifiasm_writes_ref_backed_methods_evidence_payload(
     assert evidence_path.name == "evidence_payload.json"
     assert evidence_path.exists()
     assert prompt_path.exists()
-    assert payload["case_retrieval"]["evidence_payload_ref"] == payload["evidence_payload_ref"]
+    assert payload["evidence_payload_ref"]
+    assert "evidence_payload_ref" not in payload["case_selection"]
+    assert "case_retrieval" not in payload
     assert payload["methods_evidence"]["response_contract"] == "case_assessments_and_recommendation"
     loaded = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert loaded["candidate_case_ids"] == ["case_a"]
@@ -1794,7 +1804,7 @@ def test_hifiasm_prompt_artifact_is_absent_if_canonical_build_is_interrupted(
             if kwargs["filename"] != "prompt_payload.json":
                 return original_publish(**kwargs)
             payload = json.loads(kwargs["serialized"])
-            assert payload["hifiasm_methods_prompt_schema_version"] == 1
+            assert payload["hifiasm_methods_prompt_schema_version"] == 2
             assert payload["prompt_payload_hash"] == generate_payload_ref(
                 {
                     key: value
@@ -2405,8 +2415,8 @@ def test_hifiasm_limits_final_methods_evidence_to_eight_cases(
         data_dir=tmp_path,
     )
 
-    assert payload["case_retrieval"]["candidate_case_ids"] == candidate_ids
-    assert payload["case_retrieval"]["evidence_case_ids"] == candidate_ids[:8]
+    assert payload["case_selection"]["candidate_case_ids"] == candidate_ids
+    assert payload["case_selection"]["evidence_case_ids"] == candidate_ids[:8]
     assert [case["case_id"] for case in payload["evidence_cases"]] == candidate_ids[:8]
     evidence_path = tmp_path / payload["evidence_payload_ref"].removeprefix("data/")
     loaded = json.loads(evidence_path.read_text(encoding="utf-8"))

@@ -75,7 +75,7 @@ def test_legacy_method_examples_use_object_shaped_parameter_evidence(method_id):
 
 def test_hifiasm_methods_example_tracks_the_complete_current_l2_surface():
     payload = _payload("hifiasm")
-    payload["case_retrieval"] = {
+    payload["case_selection"] = {
         "retrieval_backend": "hifiasm_numeric",
         "evidence_case_ids": [],
     }

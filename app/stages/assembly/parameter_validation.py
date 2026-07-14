@@ -228,12 +228,15 @@ def validate_parameter_evidence(
     """
 
     violations: list[dict[str, Any]] = []
-    case_selection = prompt_payload.get("case_selection") or {}
-    case_retrieval = prompt_payload.get("case_retrieval") or case_selection
+    case_selection = (
+        prompt_payload.get("case_selection")
+        or prompt_payload.get("case_retrieval")
+        or {}
+    )
     selected_ids = set(
-        case_retrieval.get("evidence_case_ids")
-        or case_retrieval.get("candidate_case_ids")
-        or case_retrieval.get("selected_case_ids")
+        case_selection.get("evidence_case_ids")
+        or case_selection.get("candidate_case_ids")
+        or case_selection.get("selected_case_ids")
         or []
     )
     # Cases actually present in the prompt are always citable by id.
@@ -242,7 +245,7 @@ def validate_parameter_evidence(
             if isinstance(case, dict) and case.get("case_id"):
                 selected_ids.add(str(case["case_id"]))
 
-    uses_hifiasm_evidence = case_retrieval.get("retrieval_backend") in {
+    uses_hifiasm_evidence = case_selection.get("retrieval_backend") in {
         "hifiasm_numeric",
     }
     declared_selected_ids: set[str] | None = None
