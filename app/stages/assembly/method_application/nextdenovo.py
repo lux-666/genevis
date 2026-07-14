@@ -244,7 +244,8 @@ def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
         missing.append("nextdenovo_parameters.read_type")
     elif read_type not in _READ_TYPES:
         invalid.append({"param": "nextdenovo_parameters.read_type", "value": read_type, "accepted": sorted(_READ_TYPES)})
-    genome_size = positive_int(params.get("genome_size", output.get("genome_size_prior")), "nextdenovo_parameters.genome_size", missing, invalid)
+    resolved_genome_size = dict(output.get("resolved_genome_size") or {})
+    genome_size = positive_int(resolved_genome_size.get("value_bp"), "nextdenovo_parameters.genome_size", missing, invalid)
     threads_value = params.get("threads")
     if threads_value is None:
         threads_value = 32
@@ -266,7 +267,7 @@ def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | N
     if error:
         return {}, error
     assert attempt is not None
-    return dict(attempt.recommended_params), None
+    return dict(attempt.execution_params), None
 
 
 def _merge_catalog_sources(parameter_sources: dict[str, dict[str, Any]], catalog) -> dict[str, Any]:

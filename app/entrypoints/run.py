@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import sys
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Any, get_args
@@ -24,6 +25,7 @@ from app.domains.assembly.selection import (
 )
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
+from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
 from app.schemas.run_config import (
@@ -32,6 +34,7 @@ from app.schemas.run_config import (
     RunConfig,
     infer_assembly_method,
     load_run_config,
+    validate_genome_size_execution_plan,
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
@@ -427,7 +430,10 @@ def _run_session(args: argparse.Namespace) -> int:
     if "assembly" in local_stages:
         try:
             validate_local_assembly_execution(run_config.assembly if run_config else None)
-        except ValueError as exc:
+            manifest = InputManifest.model_validate(yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {})
+            assert run_config is not None
+            validate_genome_size_execution_plan(run_config, manifest, local_stages=local_stages)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     # From this point on every runtime writer receives the session-local

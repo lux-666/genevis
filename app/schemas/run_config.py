@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.domains.assembly.selection import is_method_read_type_compatible, normalize_read_type
 from app.schemas.artifacts import FunctionDatabaseProvenance
+from app.schemas.manifest import InputManifest
 from app.schemas.shared_parameters import SharedParameters
 
 RequestableStage = Literal[
@@ -257,6 +258,57 @@ def validate_local_assembly_execution(assembly: AssemblyRunConfig | None) -> Non
         raise ValueError(
             "run_config: local assembly has parameters for multiple methods; set assembly.assembly_method"
         )
+
+
+def validate_genome_size_execution_plan(
+    run_config: "RunConfig",
+    manifest: InputManifest,
+    *,
+    local_stages: list[str] | None = None,
+) -> None:
+    """Require a provided size unless an earlier local survey can produce it."""
+
+    effective_local = list(local_stages if local_stages is not None else run_config.local_exec)
+    if "assembly" not in effective_local or run_config.assembly is None:
+        return
+
+    method = infer_assembly_method(run_config.assembly)
+    if method not in {"flye", "nextdenovo"}:
+        return
+
+    method_size = None
+    if method == "flye" and run_config.assembly.flye_parameters:
+        method_size = run_config.assembly.flye_parameters.estimated_genome_size
+    elif method == "nextdenovo" and run_config.assembly.nextdenovo_parameters:
+        method_size = run_config.assembly.nextdenovo_parameters.genome_size
+    shared_size = run_config.shared_parameters.estimated_genome_size if run_config.shared_parameters else None
+    if method_size or shared_size or manifest.genome_size_estimate:
+        return
+
+    requested = list(run_config.requested_stages or [])
+    survey_precedes_assembly = not requested or (
+        "genome_survey" in requested
+        and "assembly" in requested
+        and requested.index("genome_survey") < requested.index("assembly")
+    )
+    has_survey_reads = any(
+        asset.asset_type
+        in {"raw_short_dna_reads", "clean_short_dna_reads", "raw_long_reads", "clean_long_reads"}
+        for asset in manifest.assets
+    )
+    survey_is_executable = (
+        "genome_survey" in effective_local
+        and run_config.genome_survey is not None
+        and run_config.genome_survey.survey_parameters is not None
+    )
+    if survey_precedes_assembly and survey_is_executable and has_survey_reads:
+        return
+
+    raise ValueError(
+        f"run_config: local assembly method {method!r} requires a positive genome size; "
+        "provide it in the manifest/shared/method parameters, or schedule executable "
+        "genome_survey before assembly with short or long genomic reads"
+    )
 
 
 class ReadQCLengthFilterConfig(BaseModel):

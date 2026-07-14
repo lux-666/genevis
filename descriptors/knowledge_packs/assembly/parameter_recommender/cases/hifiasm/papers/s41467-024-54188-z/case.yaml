@@ -39,7 +39,6 @@ cases:
       tool: hifiasm
       version: 0.16.1
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: goat_t2t.hybrid_finishing
         statement: "HiFi assembly was combined with long-range and trio evidence to finish repetitive regions and phase a diploid animal genome."

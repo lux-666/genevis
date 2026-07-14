@@ -37,12 +37,7 @@ parameters:
     value_type: int
     min: 1
     source_priority:
-      - assembly.nextdenovo_parameters.genome_size
-      - assembly.genome_size_prior
-      - genome_survey.genome_size_prior
-      - genome_survey.estimates.genome_size_prior
-      - genome_survey.estimates.genome_size
-      - shared_parameters.estimated_genome_size
+      - assembly.resolved_genome_size.value_bp
     description: "Estimated genome size in bases."
   threads:
     cli: null
@@ -62,8 +57,7 @@ parameters:
     value_type: int
     min: 1
     source_priority:
-      - read_qc.read_n50
-      - read_qc.stats.read_n50
+      - read_qc.summary.n50
     description: "Readonly read N50 context."
   estimated_coverage:
     cli: null
@@ -71,10 +65,7 @@ parameters:
     source: read_qc
     value_type: float
     min: 0
-    source_priority:
-      - read_qc.estimated_coverage
-      - read_qc.effective_coverage_1kb
-    description: "Readonly sequencing coverage context."
+    description: "Readonly sequencing coverage context; omitted until a producer publishes this field."
 
   read_cutoff:
     cli: null

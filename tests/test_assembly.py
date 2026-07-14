@@ -333,6 +333,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(interrupt["stage"], "assembly")
             self.assertIn("genome_size_required", interrupt["reason"])
             rejected = result["stage_outputs"]["assembly"]["rejected_candidates"]
+            self.assertEqual(rejected["assembly.candidate.flye"], "genome_size_required")
             self.assertEqual(rejected["assembly.candidate.nextdenovo"], "genome_size_required")
 
     def test_auto_planning_without_human_decision_selects_no_more_than_primary_and_fallback(self):
@@ -355,7 +356,9 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly": {"assembly_route": "cyclone"},
                 "genome_survey": {
                     "status": "completed",
-                    "estimates": {"genome_size_prior": 2_000_000},
+                    "genome_size_prior": 2_000_000,
+                    "genome_size_source": "survey",
+                    "estimates": {"genome_size": 2_000_000},
                 }
             }
 
@@ -439,7 +442,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["primary_long_read_platform"], "pacbio_hifi")
             self.assertIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
 
-    def test_auto_planning_without_genome_size_selects_only_flye(self):
+    def test_auto_planning_without_genome_size_rejects_flye_and_nextdenovo(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
             clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -458,18 +461,16 @@ class AssemblyStageTests(unittest.TestCase):
 
             result = self._invoke_with_parameter_approvals(state)
 
-            self.assertEqual(result["current_stage"], "assembly_dedup")
+            self.assertEqual(result["current_stage"], "assembly")
+            self.assertEqual(result["supervision_state"], "blocked_human")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(assembly["fallback_method"], None)
-            self.assertEqual(assembly["selected_methods"], ["assembly.candidate.flye"])
             self.assertEqual(
                 assembly["rejected_candidates"],
                 {
+                    "assembly.candidate.flye": "genome_size_required",
                     "assembly.candidate.nextdenovo": "genome_size_required",
                 },
             )
-            self.assertNotIn("assembly.candidate.hifiasm", assembly["candidate_methods"])
 
     def test_default_planning_does_not_execute_flye(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -495,6 +496,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                 }
             }
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -719,7 +721,12 @@ class AssemblyStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "genome_survey": {"status": "completed", "estimates": {"genome_size_prior": 2_000_000}},
+                "genome_survey": {
+                    "status": "completed",
+                    "genome_size_prior": 2_000_000,
+                    "genome_size_source": "survey",
+                    "estimates": {"genome_size": 2_000_000},
+                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
@@ -959,7 +966,12 @@ class AssemblyStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "genome_survey": {"status": "completed", "estimates": {"genome_size_prior": 2_000_000}},
+                "genome_survey": {
+                    "status": "completed",
+                    "genome_size_prior": 2_000_000,
+                    "genome_size_source": "survey",
+                    "estimates": {"genome_size": 2_000_000},
+                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
@@ -1026,7 +1038,12 @@ class AssemblyStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "genome_survey": {"status": "completed", "estimates": {"genome_size_prior": 2_000_000}},
+                "genome_survey": {
+                    "status": "completed",
+                    "genome_size_prior": 2_000_000,
+                    "genome_size_source": "survey",
+                    "estimates": {"genome_size": 2_000_000},
+                },
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
@@ -1140,7 +1157,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         state["stage_outputs"] = {"assembly": assembly_out}
         return state
 
-    def test_missing_flye_params_blocks_with_blocked_param_status(self):
+    def test_missing_flye_genome_size_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = Path(tmpdir) / "flye-called"
             state = self._local_state_with_flye(tmpdir, flye_parameters=None, marker=marker)
@@ -1148,18 +1165,13 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly")
-            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertFalse(marker.exists())
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["status"], "blocked_param")
-            self.assertIn("flye_parameters.estimated_genome_size", assembly["missing_params"])
-            self.assertNotIn("flye_parameters.threads", assembly["missing_params"])
+            self.assertEqual(assembly["status"], "blocked_human")
+            self.assertEqual(assembly["rejected_candidates"]["assembly.candidate.flye"], "genome_size_required")
             self.assertEqual(assembly["read_type_prior"]["source"], "manifest_platform")
             self.assertEqual(assembly["read_type_prior"]["flye"], "nano-raw")
-            self.assertEqual(assembly["invalid_params"], [])
-            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
-            events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
-            self.assertNotIn("attempt_started", {event["event_type"] for event in events})
 
     def test_flye_omitted_threads_uses_catalog_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1270,8 +1282,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
                 },
             )
             state["stage_outputs"]["read_qc"] = {
-                "read_n50": 10000,
-                "estimated_coverage": 35.5,
+                "summary": {"n50": 10000},
             }
 
             result = self._invoke_with_parameter_approvals(state)
@@ -1284,9 +1295,8 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(argv[read_flag_index + 1], assembly["input_ref"])
             self.assertIn("--out-dir", argv[read_flag_index + 2 :])
             self.assertNotIn("10000", argv)
-            self.assertNotIn("35.5", argv)
             self.assertEqual(attempt["parameter_sources"]["l1_readonly"]["read_n50"], 10000)
-            self.assertEqual(attempt["parameter_sources"]["l1_readonly"]["estimated_coverage"], 35.5)
+            self.assertNotIn("estimated_coverage", attempt["parameter_sources"]["l1_readonly"])
 
             command_ref = attempt["command_ref"]["path_ref"].removeprefix("data/")
             command_payload = json.loads((Path(tmpdir) / command_ref).read_text(encoding="utf-8"))

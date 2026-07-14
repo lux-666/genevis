@@ -31,12 +31,14 @@ cd /path/to/gene_agent/tests/hpc
 **必需配置项 / Required:**
 ```bash
 LONG_READS="/path/to/long_reads.fq.gz"           # ONT/PacBio 长读长数据
-GENOME_SIZE_ESTIMATE=500000000                   # 基因组大小估计（bp）
 PLATFORM="ont"                                   # ont | clr | pacbio_hifi
 BUSCO_LINEAGE_PATH="/db/busco/actinopterygii_odb10"
 BUSCO_LINEAGE_NAME="actinopterygii_odb10"
 HPC_PARAMETER_APPROVAL_MODE="manual"           # manual | approve
 ```
+
+`GENOME_SIZE_ESTIMATE` 是可选正整数。只要有短读或长读，`genome_survey` 都会运行；
+填写值只覆盖 survey 的 genome-size 结果，杂合率、重复比例和原始测量值仍会保留。
 
 `manual` 会在 hifiasm/hifiasm_ont 参数推荐后停在
 `parameter_approval`；后续 stage 也可能进入各自的 human gate。`run_all.sh`

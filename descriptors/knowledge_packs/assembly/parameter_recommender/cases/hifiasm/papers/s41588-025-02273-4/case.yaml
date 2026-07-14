@@ -44,7 +44,6 @@ cases:
       tool: hifiasm
       version: 0.19.0
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: pear.initial_haplotype_assembly
         statement: "hifiasm generated the initial haplotypes for two highly heterozygous diploid pear genomes."

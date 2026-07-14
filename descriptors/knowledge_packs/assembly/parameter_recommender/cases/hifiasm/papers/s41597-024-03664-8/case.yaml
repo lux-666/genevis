@@ -44,7 +44,6 @@ cases:
       tool: hifiasm
       version: 0.19.5
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: sorghum.hifi_initial
         statement: "Default-parameter hifiasm on HiFi reads supplied high-accuracy initial contigs for a repeat-rich, low-heterozygosity plant genome."

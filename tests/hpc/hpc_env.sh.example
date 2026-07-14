@@ -30,7 +30,7 @@ HIC_R1="/path/to/hic_R1.fq.gz"
 HIC_R2="/path/to/hic_R2.fq.gz"
 
 # ---- Biological parameters ----
-GENOME_SIZE_ESTIMATE=500000000    # estimated genome size in bp
+GENOME_SIZE_ESTIMATE=""           # optional bp override; survey still runs when reads exist
 PLATFORM="ont"                    # ont | clr | pacbio_hifi | cycloneseq
 SAMPLE_ID="hpc_test_sample"
 SPECIES="Danio rerio"             # for related-species sanity check

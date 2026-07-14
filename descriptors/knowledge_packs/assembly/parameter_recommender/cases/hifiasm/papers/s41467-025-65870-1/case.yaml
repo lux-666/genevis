@@ -69,7 +69,6 @@ cases:
           value: 2
           reported: true
           evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
-      parameter_changes: {}
     rationale_claims:
       - claim_id: insect.contamination_cleanup
         statement: "Contaminant graph components and their contributing reads were removed before the final HiFi assembly."

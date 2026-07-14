@@ -39,7 +39,6 @@ cases:
     intervention:
       tool: hifiasm
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: cattle.candidate_comparison
         statement: "Multiple assemblers, ONT correction states, coverage levels, and Verkko modes were compared before selecting the most contiguous T2T candidate."

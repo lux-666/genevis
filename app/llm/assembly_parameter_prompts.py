@@ -1,9 +1,9 @@
-"""Method-specific prompt rendering for assembly parameter recommendations."""
+"""Method-specific rendering for the unified parameter-patch prompt."""
 
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from app.llm.assembly_parameter_context import build_assembly_parameter_context
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
@@ -19,274 +19,41 @@ _BUNDLE_BY_METHOD = {
 
 def render_assembly_parameter_messages(
     prompt_payload: Mapping[str, Any],
-    *,
-    prompt_contract: str,
 ) -> list[dict[str, str]]:
-    """Render a positive example followed by the allowlisted model context."""
+    """Render one instruction pair without response examples or duplicated cards."""
 
     model_context = build_assembly_parameter_context(prompt_payload)
     method_id = _normalized_method_id(model_context.get("method_id"))
     try:
         bundle_name = _BUNDLE_BY_METHOD[method_id]
-        example_builder = _EXAMPLE_BY_METHOD[method_id]
     except KeyError as exc:
-        raise ValueError(f"Unsupported assembly parameter prompt method: {method_id!r}") from exc
-
-    bundle = load_prompt_bundle(bundle_name)
-    prompt_payload_json = json.dumps(model_context, ensure_ascii=False, indent=2)
-    rendered = render_prompt_messages(
-        bundle,
+        raise ValueError(
+            f"Unsupported assembly parameter prompt method: {method_id!r}"
+        ) from exc
+    return render_prompt_messages(
+        load_prompt_bundle(bundle_name),
         {
             "method_id": method_id,
-            "prompt_payload_json": prompt_payload_json,
+            "prompt_payload_json": json.dumps(
+                model_context,
+                ensure_ascii=False,
+                indent=2,
+            ),
         },
     )
-    example = example_builder(model_context, prompt_contract)
-    return [
-        rendered[0],
-        {
-            "role": "user",
-            "content": f"Representative {method_id} response for the supplied contract:",
-        },
-        {
-            "role": "assistant",
-            "content": json.dumps(example, ensure_ascii=False, indent=2),
-        },
-        rendered[1],
-    ]
 
 
 def parameter_prompt_bundle_name(method_id: Any) -> str:
-    """Return the app/llm bundle selected for an assembly method."""
+    """Return the prompt bundle selected for an assembly method."""
 
     normalized = _normalized_method_id(method_id)
     try:
         return _BUNDLE_BY_METHOD[normalized]
     except KeyError as exc:
-        raise ValueError(f"Unsupported assembly parameter prompt method: {normalized!r}") from exc
+        raise ValueError(
+            f"Unsupported assembly parameter prompt method: {normalized!r}"
+        ) from exc
 
 
 def _normalized_method_id(method_id: Any) -> str:
-    value = str(method_id or "").strip()
-    return value.rsplit(".", 1)[-1]
-
-
-def _legacy_response(
-    prompt_payload: Mapping[str, Any],
-    *,
-    preferred_parameters: tuple[str, ...],
-) -> dict[str, Any]:
-    adjustable = prompt_payload.get("adjustable_params") or {}
-    if not isinstance(adjustable, Mapping):
-        adjustable = {}
-
-    selected: list[tuple[str, Mapping[str, Any]]] = []
-    for parameter in preferred_parameters:
-        spec = adjustable.get(parameter)
-        if isinstance(spec, Mapping):
-            selected.append((parameter, spec))
-    if not selected:
-        selected = [
-            (str(parameter), spec)
-            for parameter, spec in adjustable.items()
-            if isinstance(spec, Mapping) and spec.get("default") is not None
-        ][:2]
-
-    params: dict[str, Any] = {}
-    parameter_evidence: dict[str, dict[str, Any]] = {}
-    observation_id = _first_observation_id(prompt_payload)
-    retry_evidence = prompt_payload.get("retry_evidence") or {}
-    retry_signals = [
-        str(item)
-        for item in (retry_evidence.get("signal_ids") or retry_evidence.get("signal_paths") or [])
-        if isinstance(item, str) and item.strip()
-    ]
-    for parameter, spec in selected:
-        value = _representative_value(parameter, spec)
-        if value is None:
-            continue
-        params[parameter] = value
-        if spec.get("default") is not None and value == spec.get("default"):
-            parameter_evidence[parameter] = {
-                "bases": ["catalog_default"],
-                "case_ids": [],
-                "span_ids": [],
-                "evidence_ids": [],
-                "heuristic_labels": [],
-                "retry_signals": [],
-            }
-        elif prompt_payload.get("task") != "recommend_initial" and retry_signals:
-            parameter_evidence[parameter] = {
-                "bases": ["retry_failure"],
-                "case_ids": [],
-                "span_ids": [],
-                "evidence_ids": [],
-                "heuristic_labels": [],
-                "retry_signals": retry_signals,
-            }
-        elif observation_id:
-            parameter_evidence[parameter] = {
-                "bases": ["profile_fact"],
-                "case_ids": [],
-                "span_ids": [],
-                "evidence_ids": [observation_id],
-                "heuristic_labels": [],
-                "retry_signals": [],
-            }
-
-    return {
-        "params": params,
-        "reasoning": "Use a small, evidence-linked adjustment set for this method.",
-        "selected_case_ids": [],
-        "omitted_parameters": sorted(set(adjustable) - set(params)),
-        "uncertainty_notes": [],
-        "parameter_evidence": parameter_evidence,
-    }
-
-
-def _flye_example(prompt_payload: Mapping[str, Any], _contract: str) -> dict[str, Any]:
-    return _legacy_response(prompt_payload, preferred_parameters=("min_overlap", "asm_coverage"))
-
-
-def _nextdenovo_example(prompt_payload: Mapping[str, Any], _contract: str) -> dict[str, Any]:
-    return _legacy_response(prompt_payload, preferred_parameters=("read_cutoff", "nextgraph_a"))
-
-
-def _hifiasm_ont_example(prompt_payload: Mapping[str, Any], _contract: str) -> dict[str, Any]:
-    return _legacy_response(prompt_payload, preferred_parameters=("purge_level", "kmer_length"))
-
-
-def _hifiasm_example(prompt_payload: Mapping[str, Any], contract: str) -> dict[str, Any]:
-    if contract != "hifiasm_methods_v1":
-        return _legacy_response(prompt_payload, preferred_parameters=("purge_level", "kmer_length"))
-
-    adjustable = prompt_payload.get("adjustable_params") or {}
-    if not isinstance(adjustable, Mapping):
-        adjustable = {}
-    task = str(prompt_payload.get("task") or "recommend_initial")
-    is_retry = task != "recommend_initial"
-    previous_params = _previous_parameters(prompt_payload)
-    retry_evidence = prompt_payload.get("retry_evidence") or {}
-    retry_signals = [
-        str(item)
-        for item in (retry_evidence.get("signal_ids") or retry_evidence.get("signal_paths") or [])
-        if isinstance(item, str) and item.strip()
-    ]
-
-    decisions: dict[str, dict[str, Any]] = {}
-    for parameter, raw_spec in adjustable.items():
-        spec = raw_spec if isinstance(raw_spec, Mapping) else {}
-        if is_retry and parameter in previous_params:
-            basis = "retry_failure" if retry_signals else "catalog_default"
-            decision = {
-                "action": "keep_previous",
-                "value": previous_params[parameter],
-                "basis": basis,
-                "supporting_case_ids": [],
-                "supporting_span_ids": [],
-                "evidence_ids": [],
-                "heuristic_labels": [],
-                "retry_signals": retry_signals if basis == "retry_failure" else [],
-                "reason": "Preserve the approved value while evaluating the current retry signal.",
-            }
-        elif spec.get("default") is not None:
-            decision = {
-                "action": "keep_default",
-                "value": spec.get("default"),
-                "basis": "catalog_default",
-                "supporting_case_ids": [],
-                "supporting_span_ids": [],
-                "evidence_ids": [],
-                "heuristic_labels": [],
-                "retry_signals": [],
-                "reason": "Use the catalog default when the current evidence supports a conservative choice.",
-            }
-        else:
-            decision = {
-                "action": "omit",
-                "basis": "catalog_default",
-                "supporting_case_ids": [],
-                "supporting_span_ids": [],
-                "evidence_ids": [],
-                "heuristic_labels": [],
-                "retry_signals": [],
-                "reason": "Leave the optional setting unset when the current evidence does not justify a value.",
-            }
-        decisions[str(parameter)] = decision
-
-    recommendation: dict[str, Any] = {"adjustable_params": decisions}
-    if task == "retry_after_execution_failure":
-        recommendation["retry_disposition"] = "retry"
-    elif task == "retry_after_review_failure":
-        recommendation["retry_disposition"] = "expert_review"
-
-    return {
-        "case_assessments": [],
-        "recommendation": recommendation,
-        "selected_case_ids": [],
-        "summary": "Use catalog defaults, preserve approved retry values, and omit unsupported optional settings.",
-    }
-
-
-def _representative_value(parameter: str, spec: Mapping[str, Any]) -> Any:
-    if spec.get("default") is not None:
-        return spec.get("default")
-    if parameter == "min_overlap":
-        return 5000
-    if parameter == "asm_coverage":
-        return 40
-    allowed = spec.get("allowed_values")
-    if isinstance(allowed, list) and allowed:
-        return allowed[0]
-    if spec.get("min") is not None:
-        return spec.get("min")
-    return None
-
-
-def _first_observation_id(prompt_payload: Any) -> str | None:
-    """Return one non-retry observation ID for a representative citation."""
-
-    if not isinstance(prompt_payload, Mapping):
-        return None
-    observations = prompt_payload.get("observations")
-    if not isinstance(observations, list):
-        return None
-    for observation in observations:
-        if not isinstance(observation, Mapping):
-            continue
-        section = str(observation.get("section") or "").strip()
-        evidence_id = str(observation.get("id") or "").strip()
-        if evidence_id and section not in {"previous_attempt", "assembly_review"}:
-            return evidence_id
-    return None
-
-
-def _previous_parameters(prompt_payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Recover path-free previous parameter values from retry observations."""
-
-    previous: dict[str, Any] = {}
-    observations = prompt_payload.get("observations")
-    if not isinstance(observations, list):
-        return previous
-    for observation in observations:
-        if not isinstance(observation, Mapping):
-            continue
-        if observation.get("section") != "previous_attempt":
-            continue
-        if observation.get("group") != "params":
-            continue
-        parameter = str(observation.get("name") or "").strip()
-        if parameter and "value" in observation:
-            previous[parameter] = observation["value"]
-    return previous
-
-
-_EXAMPLE_BY_METHOD: dict[
-    str,
-    Callable[[Mapping[str, Any], str], dict[str, Any]],
-] = {
-    "flye": _flye_example,
-    "nextdenovo": _nextdenovo_example,
-    "hifiasm": _hifiasm_example,
-    "hifiasm_ont": _hifiasm_ont_example,
-}
+    return str(method_id or "").strip().rsplit(".", 1)[-1]

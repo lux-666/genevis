@@ -293,7 +293,7 @@ target_assembly_level: chromosome
 YAML
     # GenomeScope must run without an operator-provided size. Individual tests
     # can set MANIFEST_GENOME_SIZE_ESTIMATE="" deliberately.
-    local manifest_size="${MANIFEST_GENOME_SIZE_ESTIMATE-${GENOME_SIZE_ESTIMATE}}"
+    local manifest_size="${MANIFEST_GENOME_SIZE_ESTIMATE-${GENOME_SIZE_ESTIMATE:-}}"
     if [[ -n "$manifest_size" ]]; then
         echo "genome_size_estimate: ${manifest_size}" >> "$out"
     fi
@@ -314,6 +314,8 @@ stages = [$(printf '"%s",' "$@" | sed 's/,$//')]
 rc = {'local_exec': stages}
 
 # Shared parameters
+genome_size_text = '''${GENOME_SIZE_ESTIMATE:-}'''.strip()
+genome_size = int(genome_size_text) if genome_size_text else None
 platform_to_read_type = {
     'cycloneseq': 'cyclone',
     'ont': 'ont_raw',
@@ -322,8 +324,9 @@ platform_to_read_type = {
 }
 rc['shared_parameters'] = {
     'read_type': platform_to_read_type.get('${PLATFORM}', '${PLATFORM}'),
-    'estimated_genome_size': ${GENOME_SIZE_ESTIMATE},
 }
+if genome_size is not None:
+    rc['shared_parameters']['estimated_genome_size'] = genome_size
 
 # Read QC config
 if 'read_qc' in stages:
@@ -362,9 +365,10 @@ if 'assembly' in stages:
     if assembly_method == 'flye':
         rc['assembly']['flye_parameters'] = {
             'read_type': '${FLYE_READ_TYPE}',
-            'estimated_genome_size': ${GENOME_SIZE_ESTIMATE},
             'threads': ${ASSEMBLY_THREADS},
         }
+        if genome_size is not None:
+            rc['assembly']['flye_parameters']['estimated_genome_size'] = genome_size
     elif assembly_method == 'nextdenovo':
         nextdenovo_read_type = {
             'cycloneseq': 'ont',
@@ -374,9 +378,10 @@ if 'assembly' in stages:
         }.get('${PLATFORM}', '${PLATFORM}')
         rc['assembly']['nextdenovo_parameters'] = {
             'read_type': nextdenovo_read_type,
-            'genome_size': ${GENOME_SIZE_ESTIMATE},
             'threads': ${ASSEMBLY_THREADS},
         }
+        if genome_size is not None:
+            rc['assembly']['nextdenovo_parameters']['genome_size'] = genome_size
     elif assembly_method == 'hifiasm':
         rc['assembly']['hifiasm_parameters'] = {
             'read_type': 'hifi',
@@ -423,8 +428,8 @@ json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 }
 
 write_genome_survey_run_config() {
-    # Deliberately omits shared_parameters.estimated_genome_size: that value
-    # sends the stage down its explicit-prior skip route.
+    # Deliberately omits shared_parameters.estimated_genome_size so this smoke
+    # validates the measured genome-size path without an operator override.
     local out="$1"
     python3 - "$out" <<'PY'
 import json

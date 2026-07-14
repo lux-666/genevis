@@ -10,7 +10,10 @@ from typing import Any
 
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
 from app.control.ledger import Ledger
-from app.domains.assembly.methods_evidence import uses_hifiasm_methods_contract
+from app.domains.genome_size import resolve_genome_size
+from app.domains.assembly.parameter_recommendation import (
+    PARAMETER_RECOMMENDATION_CONTRACT,
+)
 from app.domains.assembly.selection import (
     AssemblySelection,
     compatible_methods,
@@ -37,20 +40,16 @@ from app.stages.assembly.constants import (
 )
 from app.stages.assembly.decision import (
     AssemblyDecisionRequest,
-    AssemblyPromptContract,
     make_assembly_decision,
 )
 from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
-    ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_LLM_RESPONSE,
     ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
-    ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
-    ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
     ASSEMBLY_PARAMETER_REVIEW_FAILURE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_VALIDATION,
@@ -71,10 +70,7 @@ from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_T
 from app.schemas.state import TopLevelState
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.assembly.parameter_profile import build_full_parameter_profile, flatten_profile_facts
-from app.stages.assembly.parameter_validation import (
-    validate_parameter_evidence,
-    validate_recommended_parameters,
-)
+from app.stages.assembly.parameter_validation import validate_recommended_parameters
 from app.stages.assembly.prompt_payload import build_prompt_payload
 
 ROUTE_DECISION_MAP = {
@@ -155,7 +151,8 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     if hifi_reads_ref and not ont_reads_ref:
         input_source = "run_config" if assembly_out.get("hifi_reads_ref") else "asset_registry"
 
-    genome_size_prior = _genome_size_prior(state)
+    resolved_genome_size = resolve_genome_size(state)
+    genome_size_prior = resolved_genome_size["value_bp"] if resolved_genome_size else None
     read_type_prior = _read_type_prior(state)
     target_level = assembly_out.get("target_level") or "draft"
     explicit_route = configured_route if configured_route in ROUTE_VALUES else None
@@ -176,6 +173,7 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
             "has_hic": bool(hic_reads_ref),
             "target_level": target_level,
             "genome_size_prior": genome_size_prior,
+            "resolved_genome_size": resolved_genome_size,
             "explicit_route": explicit_route,
             "input_ref": input_ref,
             "input_type": input_type,
@@ -488,12 +486,10 @@ def apply_parameter_approval_decision(
             raise ResumeValidationError("parameter retry initial attempt binding changed")
         if pending.get("inherited_initial_snapshot_ref") != _attempt_snapshot_ref(initial):
             raise ResumeValidationError("parameter retry initial snapshot changed")
-        if pending.get("initial_recommendation_contract") != initial.get("initial_recommendation_contract"):
+        if pending.get("recommendation_contract") != initial.get("recommendation_contract"):
             raise ResumeValidationError("parameter retry initial contract changed")
         if pending.get("catalog_snapshot") != initial.get("catalog_snapshot"):
             raise ResumeValidationError("parameter retry catalog snapshot changed")
-        if pending.get("inherited_evidence_payload_ref") != initial.get("evidence_payload_ref"):
-            raise ResumeValidationError("parameter retry inherited evidence changed")
         if pending.get("inherited_profile_ref") != initial.get("input_profile_ref"):
             raise ResumeValidationError("parameter retry inherited profile changed")
 
@@ -827,7 +823,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     session_id = state["session_id"]
 
     try:
-        prompt_contract = _parameter_prompt_contract(method_name, task, initial_snapshot)
         prompt_payload = build_prompt_payload(
             method_id=catalog.method_id,
             catalog=catalog,
@@ -846,33 +841,10 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     replay_artifacts = []
     profile_ref = prompt_payload.get("input_profile_ref")
     prompt_ref = prompt_payload.get("prompt_payload_ref")
-    retrieval_query_ref = prompt_payload.get("retrieval_query_ref")
-    retrieval_trace_ref = prompt_payload.get("retrieval_trace_ref")
-    # Backward-compatible read for pre-lean sealed payloads still carrying nested refs.
-    if not retrieval_query_ref or not retrieval_trace_ref:
-        nested = prompt_payload.get("case_selection") or prompt_payload.get("case_retrieval") or {}
-        retrieval_query_ref = retrieval_query_ref or nested.get("query_ref")
-        retrieval_trace_ref = retrieval_trace_ref or nested.get("trace_ref")
-    evidence_payload_ref = prompt_payload.get("evidence_payload_ref")
-    case_selection = (
-        prompt_payload.get("case_selection")
-        or prompt_payload.get("case_retrieval")
-        or {}
-    )
-    retrieval_query_hash = (
-        prompt_payload.get("retrieval_query_hash")
-        or case_selection.get("query_hash")
-    )
-    retrieval_trace_hash = (
-        prompt_payload.get("retrieval_trace_hash")
-        or case_selection.get("trace_hash")
-    )
+    literature_selection = prompt_payload.get("literature_selection") or {}
     artifact_specs = (
         (profile_ref, ASSEMBLY_PARAMETER_INPUT_PROFILE),
         (prompt_ref, ASSEMBLY_PARAMETER_PROMPT_PAYLOAD),
-        (retrieval_query_ref, ASSEMBLY_PARAMETER_RETRIEVAL_QUERY),
-        (retrieval_trace_ref, ASSEMBLY_PARAMETER_RETRIEVAL_TRACE),
-        (evidence_payload_ref, ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD),
     )
     resolved_paths: dict[str, Path] = {}
     for ref, artifact_type in artifact_specs:
@@ -898,7 +870,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         AssemblyDecisionRequest(
             kind="parameter_recommendation",
             session_id=session_id,
-            prompt_contract=prompt_contract,
             prompt_payload=prompt_payload,
             allow_default_on_error=bool(
                 _parameter_recommendation_config(state, assembly_out).get("allow_model_unavailable_defaults", False)
@@ -930,15 +901,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             rules=prompt_payload.get("rules") or {},
             full_profile=full_profile,
         )
-        evidence_validation = validate_parameter_evidence(
-            parameter_evidence=(decision.parsed or {}).get("parameter_evidence"),
-            recommended_params=recommended_params,
-            prompt_payload=prompt_payload,
-            declared_selected_case_ids=(decision.parsed or {}).get("selected_case_ids"),
-        )
-        validation["violations"].extend(evidence_validation["violations"])
-        validation["warnings"].extend(evidence_validation["warnings"])
-        validation["valid"] = not validation["violations"]
     else:
         validation = {
             "valid": False,
@@ -963,23 +925,14 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     )
 
     parsed = decision.parsed or {}
-    if uses_hifiasm_methods_contract(prompt_payload):
-        selected_case_ids = list(parsed.get("selected_case_ids") or [])
-    elif "selected_case_ids" in parsed:
-        selected_case_ids = list(parsed.get("selected_case_ids") or [])
-    else:
-        selected_case_ids = list(
-            prompt_payload.get("case_selection", {}).get("selected_case_ids") or []
-        )
-    previous_rendered = dict(
-        previous_attempt.get("rendered_parameters")
-        or previous_attempt.get("recommended_params")
-        or {}
-    )
+    selected_case_ids = list(parsed.get("used_literature_case_ids") or [])
+    baseline_params = dict(parsed.get("baseline_params") or {})
+    effective_params = dict(parsed.get("effective_params") or baseline_params)
+    execution_params = dict(parsed.get("execution_params") or recommended_params)
     proposed_parameter_changes = {
-        key: {"from": previous_rendered.get(key), "to": value}
+        key: {"from": baseline_params.get(key), "to": value}
         for key, value in recommended_params.items()
-        if previous_attempt and previous_rendered.get(key) != value
+        if baseline_params.get(key) != value
     }
     attempt = ParameterAttempt(
         attempt_id=attempt_id,
@@ -1001,57 +954,16 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             artifact_type="assembly.parameter.prompt_payload",
         ),
         retrieval_backend=(
-            case_selection.get("retrieval_backend")
-            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
+            literature_selection.get("retrieval_backend")
+            if literature_selection.get("retrieval_backend")
             else None
         ),
-        retrieval_query_id=(
-            case_selection.get("query_id")
-            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
-            else None
-        ),
-        retrieval_query_ref=(
-            ArtifactRef(
-                path_ref=str(retrieval_query_ref),
-                sha256=str(retrieval_query_hash),
-                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_QUERY,
-            )
-            if retrieval_query_ref and retrieval_query_hash
-            else None
-        ),
-        retrieval_trace_ref=(
-            ArtifactRef(
-                path_ref=str(retrieval_trace_ref),
-                sha256=str(retrieval_trace_hash),
-                artifact_type=ASSEMBLY_PARAMETER_RETRIEVAL_TRACE,
-            )
-            if retrieval_trace_ref and retrieval_trace_hash
-            else None
-        ),
-        evidence_payload_ref=(
-            ArtifactRef(
-                path_ref=str(evidence_payload_ref),
-                sha256=str(prompt_payload["evidence_payload_hash"]),
-                artifact_type=ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD,
-            )
-            if evidence_payload_ref
-            else None
-        ),
+        retrieval_query_id=literature_selection.get("query_id"),
         retrieval_candidate_case_ids=list(
-            case_selection.get("candidate_case_ids") or []
-            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
-            else []
+            literature_selection.get("candidate_case_ids") or []
         ),
-        retrieval_eligible_case_count=(
-            case_selection.get("eligible_case_count")
-            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
-            else None
-        ),
-        retrieval_warning=(
-            case_selection.get("warning")
-            if case_selection.get("retrieval_backend") == "hifiasm_numeric"
-            else None
-        ),
+        retrieval_eligible_case_count=literature_selection.get("eligible_case_count"),
+        retrieval_warning=literature_selection.get("warning"),
         llm_response_ref=llm_response_ref,
         validation_ref=validation_ref,
         catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",
@@ -1059,17 +971,18 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         knowledge_pack_ref="descriptors/knowledge_packs/assembly/parameter_recommender",
         selected_case_ids=selected_case_ids,
         recommended_params=recommended_params,
-        omitted_parameters=list(parsed.get("omitted_parameters") or []),
-        parameter_evidence=dict(parsed.get("parameter_evidence") or {}),
-        case_assessments=list(parsed.get("case_assessments") or []),
-        parameter_decisions=dict(parsed.get("parameter_decisions") or {}),
+        baseline_params=baseline_params,
+        effective_params=effective_params,
+        execution_params=execution_params,
+        parameter_reasoning=dict(parsed.get("parameter_reasoning") or {}),
+        sample_diagnosis=dict(parsed.get("sample_diagnosis") or {}),
         proposed_parameter_changes=proposed_parameter_changes,
         recommendation_summary=parsed.get("summary"),
         validation=validation,
         reasoning=parsed.get("reasoning"),
         previous_attempt_id=previous_attempt.get("attempt_id") if previous_attempt else None,
         failure_signature=(
-            dict((prompt_payload.get("retry_evidence") or {}))
+            dict((prompt_payload.get("retry_context") or {}))
             if task != "recommend_initial"
             else None
         ),
@@ -1080,17 +993,10 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             "assembly_execution" if task == "retry_after_execution_failure"
             else "assembly_review" if task == "retry_after_review_failure" else None
         ),
-        initial_recommendation_contract=(
-            "curated_initial_v1"
-            if prompt_contract == "hifiasm_methods_v1"
-            else "legacy_initial"
-        ) if task == "recommend_initial" else initial_attempt.get("initial_recommendation_contract"),
+        recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
         inherited_initial_attempt_id=0 if task != "recommend_initial" else None,
         inherited_initial_snapshot_ref=(
             _attempt_snapshot_ref(initial_attempt) if task != "recommend_initial" else None
-        ),
-        inherited_evidence_payload_ref=(
-            initial_attempt.get("evidence_payload_ref") if task != "recommend_initial" else None
         ),
         inherited_profile_ref=(
             initial_attempt.get("input_profile_ref") if task != "recommend_initial" else None
@@ -1099,7 +1005,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             previous_attempt.get("seal_hash") if task != "recommend_initial" else None
         ),
     )
-    retry_disposition = (parsed.get("recommendation") or {}).get("retry_disposition")
+    retry_disposition = parsed.get("retry_disposition")
     if validation.get("valid") and retry_disposition == "stop":
         status = "parameter_retry_stopped"
     elif validation.get("valid") and retry_disposition == "expert_review":
@@ -1129,10 +1035,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     elif retry_disposition == "expert_review":
         update["reason"] = parsed.get("summary") or "Parameter retry requires expert review"
     else:
-        parameter_diff = proposed_parameter_changes if previous_attempt else {
-            key: {"from": None, "to": value}
-            for key, value in recommended_params.items()
-        }
+        parameter_diff = proposed_parameter_changes
         interrupt = _parameter_approval_interrupt(
             attempt=attempt_payload,
             recommendation_ref=recommendation_ref,
@@ -1867,9 +1770,6 @@ def _parameter_approval_interrupt(
             for key in (
                 "input_profile_ref",
                 "prompt_payload_ref",
-                "retrieval_query_ref",
-                "retrieval_trace_ref",
-                "evidence_payload_ref",
                 "catalog_ref",
                 "knowledge_pack_ref",
                 "inherited_initial_snapshot_ref",
@@ -1956,9 +1856,7 @@ def _validate_parameter_attempt_chain(raw_attempts: list[Any]) -> list[dict[str,
         raise ValueError("parameter attempt chain must start at attempt 0")
     if initial.get("attempt_kind") != "initial":
         raise ValueError("parameter attempt 0 must be initial")
-    if initial.get("initial_recommendation_contract") not in {
-        "legacy_initial", "curated_initial_v1"
-    }:
+    if initial.get("recommendation_contract") != PARAMETER_RECOMMENDATION_CONTRACT:
         raise ValueError("parameter attempt 0 has no known initial contract")
     if any(
         initial.get(key) is not None
@@ -1966,7 +1864,6 @@ def _validate_parameter_attempt_chain(raw_attempts: list[Any]) -> list[dict[str,
             "retry_origin",
             "inherited_initial_attempt_id",
             "inherited_initial_snapshot_ref",
-            "inherited_evidence_payload_ref",
             "inherited_profile_ref",
             "previous_attempt_seal_hash",
         )
@@ -1990,14 +1887,12 @@ def _validate_parameter_attempt_chain(raw_attempts: list[Any]) -> list[dict[str,
             raise ValueError("parameter retry has a broken initial-attempt link")
         if attempt.get("inherited_initial_snapshot_ref") != initial_snapshot_ref:
             raise ValueError("parameter retry has a broken initial-snapshot link")
-        if attempt.get("initial_recommendation_contract") != initial.get(
-            "initial_recommendation_contract"
+        if attempt.get("recommendation_contract") != initial.get(
+            "recommendation_contract"
         ):
             raise ValueError("parameter retry initial contract drifted")
         if attempt.get("catalog_snapshot") != initial.get("catalog_snapshot"):
             raise ValueError("parameter retry catalog snapshot drifted")
-        if attempt.get("inherited_evidence_payload_ref") != initial.get("evidence_payload_ref"):
-            raise ValueError("parameter retry inherited evidence drifted")
         if attempt.get("inherited_profile_ref") != initial.get("input_profile_ref"):
             raise ValueError("parameter retry inherited profile drifted")
     return attempts
@@ -2024,8 +1919,8 @@ def build_parameter_attempt_timeline(
         if attempt.get("parameter_approval_recommendation_hash") != attempt.get("parameter_recommendation_hash"):
             raise ValueError("parameter attempt timeline approval hash mismatch")
 
-    initial_contract = attempts[0].get("initial_recommendation_contract") if attempts else None
-    if attempts and initial_contract not in {"legacy_initial", "curated_initial_v1"}:
+    recommendation_contract = attempts[0].get("recommendation_contract") if attempts else None
+    if attempts and recommendation_contract != PARAMETER_RECOMMENDATION_CONTRACT:
         raise ValueError("parameter attempt timeline has missing/unknown initial contract")
     entries = []
     for sequence, attempt in enumerate(attempts):
@@ -2076,7 +1971,7 @@ def build_parameter_attempt_timeline(
     ).hexdigest()
     return {
         "schema_version": 1,
-        "initial_recommendation_contract": initial_contract,
+        "recommendation_contract": recommendation_contract,
         "entries": entries,
         "terminal": terminal,
         "source_attempt_chain_hash": chain_hash,
@@ -2086,37 +1981,6 @@ def build_parameter_attempt_timeline(
 def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
     typed = [ParameterAttempt.model_validate(item).model_dump(mode="json") for item in attempts if isinstance(item, dict)]
     return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
-
-
-def _parameter_prompt_contract(
-    method_name: str,
-    task: str,
-    initial_snapshot: dict[str, Any] | None = None,
-) -> AssemblyPromptContract:
-    """Choose the decision contract from trusted routing and pack configuration."""
-
-    if method_name != HIFIASM_METHOD:
-        return "legacy"
-    if task != "recommend_initial":
-        contract = (initial_snapshot or {}).get("initial_recommendation_contract")
-        if contract == "curated_initial_v1":
-            return "hifiasm_methods_v1"
-        if contract == "legacy_initial":
-            return "legacy"
-        raise ValueError("retry is missing attempt 0 initial recommendation contract")
-    pack = load_knowledge_pack("parameter_recommender")
-    strategies = pack.get("strategies") or {}
-    if not isinstance(strategies, dict):
-        raise ValueError("parameter recommender strategies must be a mapping")
-    numeric = strategies.get("hifiasm_numeric")
-    if numeric is None:
-        return "legacy"
-    if not isinstance(numeric, dict):
-        raise ValueError("hifiasm_numeric strategy must be a mapping")
-    cutover_enabled = numeric.get("initial_cutover_enabled", False)
-    if not isinstance(cutover_enabled, bool):
-        raise ValueError("hifiasm_numeric.initial_cutover_enabled must be a bool")
-    return "hifiasm_methods_v1" if cutover_enabled else "legacy"
 
 
 def _failure_log_tail(execution_result: dict[str, Any]) -> str:
@@ -2246,7 +2110,6 @@ def _recommend_route_with_decision_boundary(
         AssemblyDecisionRequest(
             kind="route_selection",
             session_id=state["session_id"],
-            prompt_contract="legacy",
             prompt_payload=prompt_payload,
             system_prompt="You are an expert genome assembly route selector.\n\n" + str(ctx.get("skill_text") or ""),
             allowed_actions=list(ctx.get("allowed_actions") or []),
@@ -2334,27 +2197,8 @@ def _asset_ref_by_type(state: TopLevelState, asset_types: set[str]) -> str | Non
 
 
 def _genome_size_prior(state: TopLevelState) -> int | None:
-    assembly_out = _assembly_output(state)
-    params = dict(assembly_out.get("flye_parameters") or {})
-    if params.get("estimated_genome_size"):
-        return int(params["estimated_genome_size"])
-    decision = dict(assembly_out.get("method_decision") or {})
-    if decision.get("genome_size_prior"):
-        return int(decision["genome_size_prior"])
-    shared = _shared_parameters(state)
-    if shared.get("estimated_genome_size"):
-        return int(shared["estimated_genome_size"])
-    inventory = (state.get("stage_outputs") or {}).get("inventory") or {}
-    if inventory.get("genome_size_estimate"):
-        return int(inventory["genome_size_estimate"])
-    survey = (state.get("stage_outputs") or {}).get("genome_survey") or {}
-    if survey.get("genome_size_prior"):
-        return int(survey["genome_size_prior"])
-    estimates = dict(survey.get("estimates") or {})
-    for key in ["genome_size_prior", "genome_size"]:
-        if estimates.get(key):
-            return int(estimates[key])
-    return None
+    resolved = resolve_genome_size(state)
+    return resolved["value_bp"] if resolved else None
 
 
 def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:

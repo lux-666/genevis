@@ -28,7 +28,6 @@ cases:
       tool: hifiasm
       version: 0.16.1-r375
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: hifi_hic.no_parental_requirement
         statement: "HiFi plus Hi-C can support haplotype-resolved assembly when parental sequencing is unavailable."

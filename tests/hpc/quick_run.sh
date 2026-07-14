@@ -143,7 +143,7 @@ check_config() {
     fi
 
     if [[ -z "${GENOME_SIZE_ESTIMATE:-}" ]]; then
-        warn "GENOME_SIZE_ESTIMATE not set"
+        info "Genome size: auto (genome_survey must run before Flye/NextDenovo)"
     else
         ok "Genome size: $GENOME_SIZE_ESTIMATE bp"
     fi
@@ -229,10 +229,10 @@ setup_wizard() {
     info ""
     info "Required settings:"
     info "  - LONG_READS: path to ONT/PacBio reads (FASTQ/FASTA, gzipped ok)"
-    info "  - GENOME_SIZE_ESTIMATE: estimated genome size in bp"
     info "  - BUSCO_LINEAGE_PATH: path to BUSCO lineage database"
     info ""
     info "Optional (for full pipeline):"
+        info "  - GENOME_SIZE_ESTIMATE: optional positive bp override; survey still measures other fields"
     info "  - HIC_R1, HIC_R2: Hi-C paired reads"
     info "  - HIC_RESTRICTION_ENZYME: enzyme used for Hi-C (e.g. DpnII)"
     info "  - HIC_CHROMOSOME_COUNT: expected number of chromosomes"

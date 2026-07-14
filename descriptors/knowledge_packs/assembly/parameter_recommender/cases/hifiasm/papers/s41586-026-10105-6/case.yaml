@@ -35,7 +35,6 @@ cases:
           value: true
           reported: true
           evidence_span_ids: [command.ont, caveat.parameter_ownership]
-      parameter_changes: {}
     rationale_claims:
       - claim_id: ont_simplex.error_model
         statement: "Read phasing helps separate consistently phased heterozygous variants from recurrent ONT simplex sequencing errors."

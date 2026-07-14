@@ -181,7 +181,7 @@ assert d['mode'] == 'full', d
 assert d.get('skip_reason') is None, d
 assert 'genome_size' in d['estimates'], d
 print('full survey result produced genome-size estimates:', d['estimates']['genome_size'])
-" 2>&1 && pass "genome_survey executed instead of explicit-prior skip" || fail "genome_survey did not execute full survey"
+" 2>&1 && pass "genome_survey executed the full measured path" || fail "genome_survey did not execute full survey"
     cd "${SCRIPT_DIR}"
 else
     fail "Could not find genome_survey_result JSON to verify contract"

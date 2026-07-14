@@ -183,9 +183,7 @@ parameters:
     source: genome_survey
     value_type: string
     source_priority:
-      - genome_survey.genome_size_prior
-      - genome_survey.estimates.genome_size
-      - shared_parameters.estimated_genome_size
+      - assembly.resolved_genome_size.value_bp
     description: "Estimated haploid genome size, e.g. 100m or 3g."
   hom_cov:
     cli: "--hom-cov"
@@ -193,11 +191,7 @@ parameters:
     source: genome_survey
     value_type: int
     min: 1
-    source_priority:
-      - genome_survey.estimates.hom_cov
-      - genome_survey.estimates.kmer_peak_coverage
-      - read_qc.estimated_coverage
-    description: "Homozygous read coverage."
+    description: "Homozygous read coverage; omitted until a producer publishes this measurement."
   n_hap:
     cli: "--n-hap"
     level: 1
@@ -205,10 +199,7 @@ parameters:
     value_type: int
     allowed_values: [1, 2, 3, 4, 5, 6, 8]
     default: 2
-    source_priority:
-      - shared_parameters.ploidy
-      - manifest.ploidy
-    description: "Assumed haplotype count."
+    description: "Assumed haplotype count; omitted unless a future typed producer is added."
 
   kmer_length:
     cli: "-k"

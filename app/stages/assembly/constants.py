@@ -7,6 +7,7 @@ ASSEMBLY_AUTO_CANDIDATES = [
 ASSEMBLY_COMPATIBILITY_CANDIDATES = ["assembly.candidate.hifiasm", "assembly.candidate.hifiasm_ont"]
 ASSEMBLY_CANDIDATES = [*ASSEMBLY_AUTO_CANDIDATES, *ASSEMBLY_COMPATIBILITY_CANDIDATES]
 GENOME_SIZE_REQUIRED = {
+    "assembly.candidate.flye",
     "assembly.candidate.nextdenovo",
 }
 

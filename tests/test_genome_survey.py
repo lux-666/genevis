@@ -149,7 +149,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("asset_registry_ref", result["last_error"])
 
-    def test_full_mode_with_clean_short_reads_writes_high_confidence_plan(self):
+    def test_explicit_size_does_not_skip_survey_when_clean_short_reads_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_r1 = Path(tmpdir) / "short_R1.fq.gz"
             short_r2 = Path(tmpdir) / "short_R2.fq.gz"
@@ -190,18 +190,22 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
+            self.assertEqual(survey["survey_input_family"], "clean_short_dna_reads")
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
-            self.assertEqual(survey["genome_size_source"], "user")
-            self.assertEqual(survey["skip_reason"], None)
-            self.assertIn("genome_survey.kmer_count.jellyfish", survey["candidate_methods"])
-            self.assertIn("genome_survey.model.genomescope2", survey["candidate_methods"])
+            self.assertEqual(survey["genome_size_source"], "provided")
+            self.assertIsNone(survey["skip_reason"])
+            self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
+            self.assertIsNone(survey["measured_estimates"]["genome_size"])
+            self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
+            self.assertEqual(survey["estimate_sources"]["genome_size"], "provided")
             artifact_ref = Path(survey["result_artifact_ref"])
             self.assertTrue(artifact_ref.exists())
             payload = json.loads(artifact_ref.read_text(encoding="utf-8"))
             self.assertEqual(payload["mode"], "full")
-            self.assertEqual(payload["confidence"], "high")
+            self.assertEqual(payload["status"], "planned")
+            self.assertEqual(payload["genome_size_source"], "provided")
 
-    def test_full_mode_with_raw_short_reads_writes_high_confidence_plan(self):
+    def test_manifest_inventory_size_overrides_planned_survey_when_raw_short_reads_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_r1 = Path(tmpdir) / "short_R1.fq.gz"
             short_r2 = Path(tmpdir) / "short_R2.fq.gz"
@@ -227,7 +231,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
 
             state = self._state(tmpdir, str(registry))
-            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
+            state["stage_outputs"] = {"inventory": {"genome_size_estimate": 2_000_000}}
 
             result = build_stage().invoke(state)
 
@@ -235,15 +239,17 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["confidence"], "high")
-            self.assertEqual(survey["genome_size_prior"], 2_000_000)
-            self.assertEqual(survey["genome_size_source"], "user")
             self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["genome_size_source"], "provided")
+            self.assertEqual(survey["genome_size_source_path"], "inventory.genome_size_estimate")
+            self.assertEqual(survey["measured_estimates"]["genome_size"], None)
             self.assertEqual(
-                survey["survey_input_refs"],
-                ["s1:raw_short_dna_reads:short_R1.fq.gz", "s1:raw_short_dna_reads:short_R2.fq.gz"],
+                survey["estimate_source_paths"]["genome_size"],
+                "inventory.genome_size_estimate",
             )
             payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(payload["metadata"]["input_family"], "raw_short_dna_reads")
+            self.assertEqual(payload["genome_size_prior"], 2_000_000)
 
     def test_local_full_mode_runs_jellyfish_and_genomescope2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -413,7 +419,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("genomescope2_repeat_fraction_unparsed", survey["notes"])
             self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
 
-    def test_local_full_mode_with_unparseable_summary_uses_explicit_genome_size(self):
+    def test_explicit_size_overrides_unparseable_genome_size_after_local_survey_runs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             short_reads = Path(tmpdir) / "short.fq"
             short_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -448,13 +454,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
+            self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
-            self.assertEqual(survey["genome_size_source"], "user")
+            self.assertEqual(survey["genome_size_source"], "provided")
             self.assertEqual(
-                survey["estimates"],
+                survey["measured_estimates"],
                 {"genome_size": None, "heterozygosity": None, "repeat_fraction": None},
             )
-            self.assertIn("genomescope2_estimates_unparsed", survey["notes"])
+            self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
+            self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
+            self.assertTrue((Path(tmpdir) / "work" / "genome_survey" / "s1").exists())
 
     def test_parse_genomescope2_summary_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -795,7 +804,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertIn("survey_parameters.kmer_size", result["last_error"])
             self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
 
-    def test_explicit_genome_size_keeps_survey_running_but_prior_uses_user_size(self):
+    def test_explicit_genome_size_overrides_measurement_but_keeps_other_survey_estimates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             long_reads = Path(tmpdir) / "BGI_CycloneSEQ.fastq.gz"
             long_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -828,13 +837,25 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["mode"], "full")
             self.assertEqual(survey["status"], "completed")
-            self.assertEqual(survey["survey_input_family"], "raw_long_reads")
-            self.assertEqual(survey["estimates"]["genome_size"], 12345)
+            self.assertEqual(survey["measured_estimates"]["genome_size"], 12345)
+            self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
+            self.assertEqual(survey["estimates"]["heterozygosity"], 0.001)
+            self.assertEqual(survey["estimates"]["repeat_fraction"], 0.2)
+            self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
+            self.assertEqual(
+                survey["estimate_sources"],
+                {
+                    "genome_size": "provided",
+                    "heterozygosity": "survey",
+                    "repeat_fraction": "survey",
+                },
+            )
             self.assertEqual(survey["genome_size_prior"], 2_000_000)
-            self.assertEqual(survey["genome_size_source"], "user")
+            self.assertEqual(survey["genome_size_source"], "provided")
             payload = json.loads(Path(survey["result_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(payload["estimates"]["genome_size"], 12345)
-            self.assertEqual(payload["metadata"]["input_family"], "raw_long_reads")
+            self.assertEqual(payload["measured_estimates"]["genome_size"], 12345)
+            self.assertEqual(payload["estimates"]["genome_size"], 2_000_000)
+            self.assertEqual(payload["genome_size_source"], "provided")
 
     def test_no_usable_inputs_fails_with_stable_genome_size_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -859,6 +880,34 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["status"], "failed")
             self.assertEqual(survey["error_code"], "GENOME_SIZE_UNAVAILABLE")
             self.assertIsNone(survey["genome_size_prior"])
+
+    def test_no_usable_inputs_falls_back_to_explicit_genome_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rnaseq = Path(tmpdir) / "rna_R1.fq.gz"
+            rnaseq.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:raw_rnaseq_reads:rna_R1.fq.gz",
+                        "asset_type": "raw_rnaseq_reads",
+                        "path": str(rnaseq),
+                    }
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["shared_parameters"] = {"estimated_genome_size": 2_000_000}
+
+            result = build_stage().invoke(state)
+
+            self.assertEqual(result["current_stage"], "assembly")
+            survey = result["stage_outputs"]["genome_survey"]
+            self.assertEqual(survey["mode"], "skipped")
+            self.assertEqual(survey["status"], "skipped")
+            self.assertEqual(survey["skip_reason"], "no_usable_survey_reads")
+            self.assertEqual(survey["genome_size_prior"], 2_000_000)
+            self.assertEqual(survey["estimates"], {"genome_size": 2_000_000})
+            self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
 
 
 class GenomeSurveyEnvPreflightTests(unittest.TestCase):

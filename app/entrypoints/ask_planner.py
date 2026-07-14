@@ -1365,7 +1365,7 @@ def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
 
 
 def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
-    """Defer only when executable Survey will run before assembly with DNA reads."""
+    """Defer when executable Survey precedes assembly with short or long genomic reads."""
     order = plan.resolved_execution_order or []
     if "genome_survey" not in order or "assembly" not in order:
         return False

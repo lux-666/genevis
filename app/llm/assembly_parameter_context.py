@@ -13,19 +13,19 @@ from typing import Any
 
 
 MODEL_FACING_PROMPT_FIELDS = (
+    "recommendation_contract",
     "method_id",
     "task",
     "observations",
     "rules",
     "recommendation_policy",
-    "skill_instructions",
+    "method_guidance",
     "readonly_params",
     "adjustable_params",
-    "selected_cases",
-    "case_selection",
-    "evidence_cases",
-    "methods_evidence",
-    "retry_evidence",
+    "baseline_params",
+    "literature_selection",
+    "literature_cases",
+    "retry_context",
 )
 
 _PARAMETER_SPEC_FIELDS = (
@@ -37,13 +37,17 @@ _PARAMETER_SPEC_FIELDS = (
     "description",
     "notes",
 )
-_CASE_SELECTION_FIELDS = (
+_LITERATURE_SELECTION_FIELDS = (
+    "retrieval_backend",
+    "selected_case_ids",
+    "selected_count",
+    "eligible_case_count",
+    "total_cases",
     "warning",
     "evidence_available",
-    "case_evidence_required",
-    "evidence_required",
 )
-_EVIDENCE_CASE_FIELDS = (
+_LITERATURE_CASE_FIELDS = (
+    "schema_version",
     "case_id",
     "case_type",
     "source",
@@ -52,14 +56,16 @@ _EVIDENCE_CASE_FIELDS = (
     "intervention",
     "rationale_claims",
     "outcomes",
-    "previous_attempt",
     "source_excerpts",
+    "numeric_match",
 )
-_METHODS_EVIDENCE_FIELDS = (
-    "effect_areas",
-    "response_contract",
-    "assessment_rule",
-    "recommendation_rule",
+_METHOD_GUIDANCE_FIELDS = (
+    "guidance_id",
+    "methods",
+    "parameters",
+    "relevant_metrics",
+    "guidance",
+    "caveats",
 )
 _INTERNAL_ONLY_FIELDS = frozenset({"evidence_registry", "profile_facts"})
 _AUDIT_SCALAR_FIELDS = frozenset(
@@ -113,14 +119,14 @@ def build_assembly_parameter_context(
             projected = _project_observations(raw_value)
         elif field in {"readonly_params", "adjustable_params"}:
             projected = _project_parameter_specs(raw_value, field=field)
-        elif field == "case_selection":
-            projected = _project_mapping_fields(raw_value, _CASE_SELECTION_FIELDS)
-        elif field == "evidence_cases":
-            projected = _project_evidence_cases(raw_value)
-        elif field == "methods_evidence":
-            projected = _project_mapping_fields(raw_value, _METHODS_EVIDENCE_FIELDS)
-        elif field == "retry_evidence":
-            projected = _project_retry_evidence(raw_value)
+        elif field == "literature_selection":
+            projected = _project_mapping_fields(raw_value, _LITERATURE_SELECTION_FIELDS)
+        elif field == "literature_cases":
+            projected = _project_literature_cases(raw_value)
+        elif field == "method_guidance":
+            projected = _project_method_guidance(raw_value)
+        elif field == "retry_context":
+            projected = _project_retry_context(raw_value)
         else:
             projected = _project_safe_value(raw_value)
         if projected is _OMIT:
@@ -191,24 +197,39 @@ def _project_mapping_fields(value: Any, fields: tuple[str, ...]) -> Any:
     return projected if projected else _OMIT
 
 
-def _project_evidence_cases(value: Any) -> Any:
+def _project_literature_cases(value: Any) -> Any:
     if not isinstance(value, (list, tuple)):
         return _OMIT
     cases = []
     for raw_case in value:
-        case = _project_mapping_fields(raw_case, _EVIDENCE_CASE_FIELDS)
+        case = _project_mapping_fields(raw_case, _LITERATURE_CASE_FIELDS)
         if case is not _OMIT:
             cases.append(case)
     return cases if cases else _OMIT
 
 
-def _project_retry_evidence(value: Any) -> Any:
+def _project_method_guidance(value: Any) -> Any:
+    if not isinstance(value, (list, tuple)):
+        return _OMIT
+    cards = []
+    for raw_card in value:
+        card = _project_mapping_fields(raw_card, _METHOD_GUIDANCE_FIELDS)
+        if card is not _OMIT:
+            cards.append(card)
+    return cards if cards else _OMIT
+
+
+def _project_retry_context(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return _OMIT
     projected: dict[str, Any] = {}
     task = _project_safe_value(value.get("task"))
     if task is not _OMIT:
         projected["task"] = task
+    for field in ("previous_attempt", "assembly_review"):
+        child = _project_safe_value(value.get(field))
+        if child is not _OMIT:
+            projected[field] = child
     signal_ids = [
         signal_id
         for signal_id in (value.get("signal_ids") or [])

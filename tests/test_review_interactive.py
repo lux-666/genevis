@@ -784,11 +784,11 @@ class DecisionBriefTests(unittest.TestCase):
     def test_parameter_approval_brief_renders_diff_failure_and_top5_paper_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            evidence_path = root / "evidence_payload.json"
-            evidence_path.write_text(
+            prompt_path = root / "prompt_payload.json"
+            prompt_path.write_text(
                 json.dumps(
                     {
-                        "cases": [
+                        "literature_cases": [
                             {
                                 "case_id": f"paper-{index}",
                                 "source": {"doi": f"10.1000/{index}"},
@@ -812,7 +812,7 @@ class DecisionBriefTests(unittest.TestCase):
                             "previous_attempt_id": 0,
                             "recommended_params": {"purge_level": 2},
                             "selected_case_ids": [f"paper-{index}" for index in range(5)],
-                            "evidence_payload_ref": {"path_ref": str(evidence_path)},
+                            "prompt_payload_ref": {"path_ref": str(prompt_path)},
                         }
                     }
                 ),
@@ -835,7 +835,7 @@ class DecisionBriefTests(unittest.TestCase):
                     "parameter_diff": {"purge_level": {"from": 1, "to": 2}},
                     "rationale": "retry after OOM",
                     "failure_facts": {"signals": {"return_code": 137}},
-                    "evidence_refs": {"evidence_payload_ref": str(evidence_path)},
+                    "evidence_refs": {"prompt_payload_ref": str(prompt_path)},
                 },
                 "latest_review_request_artifact": None,
                 "next_action": {},
@@ -849,7 +849,7 @@ class DecisionBriefTests(unittest.TestCase):
         proposal = brief["parameter_proposal"]
         self.assertEqual(proposal["parameter_diff"]["purge_level"]["to"], 2)
         self.assertEqual(proposal["failure_facts"]["signals"]["return_code"], 137)
-        self.assertEqual(len(proposal["evidence_cases"]), 5)
+        self.assertEqual(len(proposal["literature_cases"]), 5)
         rendered = out.getvalue()
         self.assertIn("production paper evidence (5, top-5 maximum)", rendered)
         self.assertIn("doi=10.1000/0", rendered)

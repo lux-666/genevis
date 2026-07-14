@@ -103,6 +103,15 @@ fi
 SID="hpc-test09-e2e-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test09_manifest.yaml"
 mkdir -p "${TEST_DATA_ROOT}"
+SKIP_UPSTREAM="${TEST09_SKIP_UPSTREAM:-false}"
+
+# A full E2E deliberately supplies no genome-size hint. This proves the survey
+# produces the canonical value consumed by assembly. The assembly-only smoke
+# still requires an explicit value because it skips the producer stage.
+if [[ "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    GENOME_SIZE_ESTIMATE=""
+    MANIFEST_GENOME_SIZE_ESTIMATE=""
+fi
 
 # Conditionally add Hi-C reads to manifest
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
@@ -144,15 +153,14 @@ cd "${SCRIPT_DIR}"
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
 # TEST09_SKIP_UPSTREAM=true skips expensive read_qc + genome_survey and jumps to
-# assembly using raw long reads + GENOME_SIZE_ESTIMATE (shared_parameters).
-SKIP_UPSTREAM="${TEST09_SKIP_UPSTREAM:-false}"
+# assembly using raw long reads + an explicit GENOME_SIZE_ESTIMATE.
 
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     LOCAL_EXEC_STAGES=("t2t")
 elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
     LOCAL_EXEC_STAGES=("assembly" "assembly_review" "t2t")
     info "TEST09_SKIP_UPSTREAM=true: skipping read_qc and genome_survey"
-    info "  assembly will use raw_long_reads + GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE}"
+    info "  assembly will use raw_long_reads + GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE:-<missing>}"
 else
     LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 fi
@@ -281,7 +289,27 @@ elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
 elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
     info "genome_survey skipped because TEST09_SKIP_UPSTREAM=true"
 else
-    info "genome_survey skipped or not yet reached"
+    fail "full E2E did not produce genome_survey_result.json"
+fi
+
+if [[ -f "$SURVEY_RESULT" && "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    python3 - "$SURVEY_RESULT" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+measured = result.get("measured_estimates", {}).get("genome_size")
+assert result.get("mode") == "full", result
+assert result.get("status") == "completed", result
+assert result.get("genome_size_source") == "survey", result
+assert result.get("estimate_sources", {}).get("genome_size") == "survey", result
+assert result.get("provided_overrides") == {}, result
+assert isinstance(measured, int) and measured > 0, result
+assert result.get("estimates", {}).get("genome_size") == measured, result
+assert result.get("genome_size_prior") == measured, result
+print(f"survey canonical genome size: {measured} bp")
+PY
+    pass "genome survey supplied the canonical genome size"
 fi
 
 # ---- Check current stage and supervision state ----
@@ -327,6 +355,40 @@ fi
 
 info "  current_stage: ${CURRENT_STAGE}"
 info "  supervision_state: ${SUPERVISION_STATE}"
+
+if [[ -f "$SURVEY_RESULT" && "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    ASSEMBLY_SCRIPT=""
+    case "${ASSEMBLY_METHOD}" in
+        hifiasm) ASSEMBLY_SCRIPT=$(find "${RUN_DIR}/work/assembly" -name run_hifiasm.sh -type f | head -1 || true) ;;
+        hifiasm_ont) ASSEMBLY_SCRIPT=$(find "${RUN_DIR}/work/assembly" -name run_hifiasm_ont.sh -type f | head -1 || true) ;;
+    esac
+    if [[ "${ASSEMBLY_METHOD}" == hifiasm* ]]; then
+        assert_file_nonempty "$ASSEMBLY_SCRIPT" "hifiasm command script for genome-size handoff"
+        if [[ -n "$ASSEMBLY_SCRIPT" ]]; then
+            python3 - "$SURVEY_RESULT" "$ASSEMBLY_SCRIPT" <<'PY'
+import json
+import re
+import shlex
+import sys
+
+survey = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(survey["measured_estimates"]["genome_size"])
+command_line = next(
+    line for line in open(sys.argv[2], encoding="utf-8")
+    if line.strip().startswith("hifiasm ")
+)
+argv = shlex.split(command_line)
+rendered = argv[argv.index("--hg-size") + 1]
+match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([kmg])", rendered, re.IGNORECASE)
+assert match, rendered
+actual = round(float(match.group(1)) * {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}[match.group(2).lower()])
+assert actual == expected, {"survey_bp": expected, "hg_size": rendered, "rendered_bp": actual}
+print(f"--hg-size {rendered} matches survey measurement {expected} bp")
+PY
+            pass "assembly --hg-size matches the survey artifact"
+        fi
+    fi
+fi
 
 if (( RUN_EXITCODE != 0 )) && [[ "$SUPERVISION_STATE" != "blocked_human" ]]; then
     fail "Pipeline failed with exit code ${RUN_EXITCODE}"

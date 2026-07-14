@@ -45,7 +45,6 @@ cases:
     intervention:
       tool: hifiasm
       parameters: {}
-      parameter_changes: {}
     rationale_claims:
       - claim_id: wheat.scale_and_repeats
         statement: "Very deep HiFi and ultra-long ONT data were combined with long-range maps for an approximately 15 Gb, repeat-rich hexaploid genome."

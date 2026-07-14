@@ -226,8 +226,9 @@ def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
         missing.append("flye_parameters.read_type")
     elif read_type not in FLYE_READ_TYPE_FLAGS:
         invalid.append({"param": "flye_parameters.read_type", "value": read_type, "accepted": sorted(FLYE_READ_TYPE_FLAGS)})
+    resolved_genome_size = dict(output.get("resolved_genome_size") or {})
     genome_size = positive_int(
-        params.get("estimated_genome_size", output.get("genome_size_prior")),
+        resolved_genome_size.get("value_bp"),
         "flye_parameters.estimated_genome_size",
         missing,
         invalid,
@@ -253,7 +254,7 @@ def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | N
     if error:
         return {}, error
     assert attempt is not None
-    return dict(attempt.recommended_params), None
+    return dict(attempt.execution_params), None
 
 
 def _build_flye_argv(catalog, parameter_sources: dict[str, dict[str, Any]], *, fallback_read_type: str) -> list[str]:

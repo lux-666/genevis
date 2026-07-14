@@ -273,4 +273,4 @@ def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | N
     if error:
         return {}, error
     assert attempt is not None
-    return dict(attempt.recommended_params), None
+    return dict(attempt.execution_params), None

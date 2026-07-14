@@ -30,7 +30,6 @@ _EVIDENCE_MANIFEST_VERSION = 2
 _ALLOWED_CASE_TYPES = {"initial"}
 _ALLOWED_CURATION_STATUSES = {"draft", "approved", "rejected"}
 _ALLOWED_EXPLICITNESS = {"explicit", "inferred"}
-_ALLOWED_HIFIASM_METHODS = {"hifiasm", "hifiasm_ont"}
 _MAX_DYNAMIC_MAPPING_ITEMS = 64
 _MAX_RATIONALE_CLAIMS = 32
 _MAX_SHORT_STRING_LIST_ITEMS = 16
@@ -59,7 +58,6 @@ _PARAMETER_SCHEMA = {
     "reported": _JSON_SCALAR,
     "evidence_span_ids": ("strings", MAX_SOURCE_EXCERPTS_PER_CASE),
 }
-_PARAMETER_CHANGE_SCHEMA = {"from": _JSON_SCALAR, "to": _JSON_SCALAR}
 _RATIONALE_SCHEMA = {
     "claim_id": _TEXT,
     "statement": _TEXT,
@@ -76,7 +74,6 @@ _CASE_SCHEMA = {
         "title": _OPTIONAL_TEXT,
         "doi": _OPTIONAL_TEXT,
         "year": _JSON_SCALAR,
-        "internal_run_id": _OPTIONAL_TEXT,
         "artifact_refs": ("strings", _MAX_SHORT_STRING_LIST_ITEMS),
     },
     "applicability": {
@@ -98,11 +95,6 @@ _CASE_SCHEMA = {
         "tool": _TEXT,
         "version": _OPTIONAL_TEXT,
         "parameters": ("mapping", _PARAMETER_SCHEMA, _MAX_DYNAMIC_MAPPING_ITEMS),
-        "parameter_changes": (
-            "mapping",
-            _PARAMETER_CHANGE_SCHEMA,
-            _MAX_DYNAMIC_MAPPING_ITEMS,
-        ),
     },
     "rationale_claims": ("list", _RATIONALE_SCHEMA, _MAX_RATIONALE_CLAIMS),
     "outcomes": {
@@ -119,12 +111,6 @@ _CASE_SCHEMA = {
         "curator": _OPTIONAL_TEXT,
         "reviewed_at": _OPTIONAL_TEXT,
         "notes": _OPTIONAL_TEXT,
-    },
-    "previous_attempt": {
-        "parameters": ("mapping", _JSON_SCALAR, _MAX_DYNAMIC_MAPPING_ITEMS),
-        "failure_mode": _OPTIONAL_TEXT,
-        "execution_failure_class": _OPTIONAL_TEXT,
-        "review_metrics": ("mapping", _JSON_SCALAR, _MAX_DYNAMIC_MAPPING_ITEMS),
     },
 }
 _EVIDENCE_SPAN_SCHEMA = {
@@ -339,12 +325,10 @@ def _build_validation_boundary():
             raise EvidenceCaseValidationError(f"{case_id}: approved case requires curation.curator")
 
         source = result.get("source")
-        if not isinstance(source, dict) or source.get("kind") not in {"paper", "internal_run"}:
-            raise EvidenceCaseValidationError(f"{case_id}: source.kind must be paper or internal_run")
-        if source.get("kind") == "paper" and not any(source.get(key) for key in ("doi", "title")):
+        if not isinstance(source, dict) or source.get("kind") != "paper":
+            raise EvidenceCaseValidationError(f"{case_id}: source.kind must be paper")
+        if not any(source.get(key) for key in ("doi", "title")):
             raise EvidenceCaseValidationError(f"{case_id}: paper source requires doi or title")
-        if source.get("kind") == "internal_run" and not source.get("internal_run_id"):
-            raise EvidenceCaseValidationError(f"{case_id}: internal_run source requires internal_run_id")
         year = source.get("year")
         if year is not None and (not isinstance(year, int) or isinstance(year, bool)):
             raise EvidenceCaseValidationError(f"{case_id}: source.year must be an integer")
@@ -352,42 +336,19 @@ def _build_validation_boundary():
         applicability = result.get("applicability")
         if not isinstance(applicability, dict):
             raise EvidenceCaseValidationError(f"{case_id}: applicability must be a mapping")
-        read_type = applicability.get("read_type")
-        if read_type not in {"hifi", "ont"}:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: applicability.read_type must be one of ['hifi', 'ont']"
-            )
-        source_tool = _short_method_name(applicability.get("source_tool"))
-        if source_tool not in _ALLOWED_HIFIASM_METHODS:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: applicability.source_tool must be a known hifiasm family method"
-            )
-        target_methods = applicability.get("target_methods")
-        if not isinstance(target_methods, list) or not target_methods:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: applicability.target_methods must contain at least one known "
-                "hifiasm family method"
-            )
-        unknown_target_methods = [
-            method
-            for method in target_methods
-            if _short_method_name(method) not in _ALLOWED_HIFIASM_METHODS
-        ]
-        if unknown_target_methods:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: applicability.target_methods contains unknown hifiasm family "
-                f"methods: {unknown_target_methods}"
-            )
+        for field_name in ("read_type", "source_tool"):
+            if not isinstance(applicability.get(field_name), str):
+                raise EvidenceCaseValidationError(
+                    f"{case_id}: applicability.{field_name} is required"
+                )
 
         intervention = result.get("intervention")
         if not isinstance(intervention, dict):
             raise EvidenceCaseValidationError(f"{case_id}: intervention must be a mapping")
-        if _short_method_name(intervention.get("tool")) not in _ALLOWED_HIFIASM_METHODS:
-            raise EvidenceCaseValidationError(
-                f"{case_id}: intervention.tool must be a known hifiasm family method"
-            )
+        if not isinstance(intervention.get("tool"), str):
+            raise EvidenceCaseValidationError(f"{case_id}: intervention.tool is required")
         _validate_parameter_flags(intervention, case_id=case_id)
-        _validate_case_type_contract(result, intervention=intervention)
+        _validate_case_type_contract(result)
 
         result["source_excerpts"] = []
         result["retrieval_eligible"] = False
@@ -732,23 +693,13 @@ def _validate_parameter_flags(intervention: dict[str, Any], *, case_id: str) -> 
             )
 
 
-def _validate_case_type_contract(case: dict[str, Any], *, intervention: dict[str, Any]) -> None:
+def _validate_case_type_contract(case: dict[str, Any]) -> None:
     case_id = str(case["case_id"])
     case_type = case["case_type"]
-    previous_attempt = case.get("previous_attempt")
-    parameter_changes = intervention.get("parameter_changes")
 
     if case_type != "initial":
         raise EvidenceCaseValidationError(
             f"{case_id}: only initial EvidenceCases are supported"
-        )
-    if previous_attempt not in (None, {}):
-        raise EvidenceCaseValidationError(
-            f"{case_id}: initial case must not define previous_attempt"
-        )
-    if parameter_changes not in (None, {}):
-        raise EvidenceCaseValidationError(
-            f"{case_id}: initial case must not define intervention.parameter_changes"
         )
 
 
@@ -820,12 +771,6 @@ def _require_known_spans(
     for span_id in span_ids:
         if span_id not in span_documents:
             raise EvidenceCaseValidationError(f"{case_id}: {field_name} references unknown span_id {span_id!r}")
-
-
-def _short_method_name(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    return value.rsplit(".", 1)[-1]
 
 
 def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:

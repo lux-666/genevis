@@ -18,9 +18,6 @@ from app.domains.assembly.evidence_case import (
     project_hifiasm_prompt_safe_case,
     validate_hifiasm_evidence_cases,
 )
-from app.domains.assembly.methods_evidence import (
-    sanitize_hifiasm_methods_prompt_payload as _sanitize_hifiasm_methods_prompt_payload,
-)
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.knowledge.evidence_cases import (
     EvidenceCaseValidationError,
@@ -31,21 +28,6 @@ from app.knowledge.evidence_cases import (
     MAX_METHODS_FILE_BYTES,
 )
 from app.knowledge.packs import load_knowledge_pack
-
-
-def sanitize_hifiasm_methods_prompt_payload(prompt: dict) -> dict:
-    prompt.setdefault("readonly_params", {})
-    prompt.setdefault("adjustable_params", prompt.get("adjustable_params") or {})
-    if "case_selection" not in prompt and "case_retrieval" in prompt:
-        prompt["case_selection"] = prompt["case_retrieval"]
-    return _sanitize_hifiasm_methods_prompt_payload(
-        prompt,
-        authoritative_catalog_snapshot={
-            "readonly_params": deepcopy(prompt["readonly_params"]),
-            "adjustable_params": deepcopy(prompt.get("adjustable_params") or {}),
-        },
-    )
-
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +180,37 @@ def test_approved_case_projects_only_referenced_declared_spans(tmp_path):
     }
 
 
+def test_prompt_case_is_one_enriched_literature_card_without_rewritten_sections(tmp_path):
+    case = _approved_case(tmp_path)
+    case["evidence_spans"].append(
+        {
+            "span_id": "methods.rationale",
+            "quote": "A lower purge level was used to preserve divergent haplotypes.",
+        }
+    )
+    case["rationale_claims"] = [
+        {
+            "claim_id": "preserve_haplotypes",
+            "statement": "Lower purging was chosen to preserve divergent haplotypes.",
+            "explicitness": "explicit",
+            "effect_area": "purging",
+            "evidence_span_ids": ["methods.rationale"],
+        }
+    ]
+
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)[0]
+    card = project_hifiasm_prompt_safe_case(validated)
+
+    assert card["source"] == case["source"]
+    assert card["applicability"] == case["applicability"]
+    assert card["intervention"] == case["intervention"]
+    assert card["rationale_claims"] == case["rationale_claims"]
+    excerpts = {span["span_id"]: span for span in card["source_excerpts"]}
+    assert excerpts["methods.command"]["quote"] == "We ran hifiasm with purge level 1."
+    assert excerpts["methods.rationale"]["quote"].startswith("A lower purge level")
+    assert not ({"citation", "parameter_settings", "rationale"} & set(card))
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -296,7 +309,6 @@ def test_documented_optional_schema_survives_prompt_safe_rebuild(tmp_path):
     case["source"].update(
         {
             "year": 2025,
-            "internal_run_id": None,
             "artifact_refs": ["artifact://source-record"],
         }
     )
@@ -349,7 +361,7 @@ def test_documented_optional_schema_survives_prompt_safe_rebuild(tmp_path):
 
 @pytest.mark.parametrize(
     ("field_name", "value"),
-    [("title", True), ("doi", 1), ("internal_run_id", 2.0)],
+    [("title", True), ("doi", 1)],
 )
 def test_source_text_identifiers_reject_non_string_scalars(tmp_path, field_name, value):
     case = _approved_case(tmp_path)
@@ -507,130 +519,6 @@ def test_prompt_safe_excerpt_budget_accepts_12000_and_rejects_12001(tmp_path):
     _replace_evidence_spans(rejected, spans=rejected_spans)
     with pytest.raises(EvidenceCaseValidationError, match="per-document.*character limit"):
         validate_hifiasm_evidence_cases([rejected], pack_root=tmp_path)
-
-
-def test_full_chain_rejects_excerpt_tampering_and_omits_curation(tmp_path):
-    validated = validate_hifiasm_evidence_cases(
-        [_approved_case(tmp_path)],
-        pack_root=tmp_path,
-    )
-    selection = HifiasmNumericCaseRetriever(max_cases=1).select(
-        validated,
-        query=_retrieval_query(),
-    )
-    selected = selection.selected_cases
-    prompt = _methods_prompt(selected, selection.metadata)
-
-    canonical = sanitize_hifiasm_methods_prompt_payload(prompt)
-    assert "curation" not in canonical["evidence_cases"][0]
-    assert all(
-        audit_field not in json.dumps(canonical)
-        for audit_field in ("curator", "reviewed_at", "notes")
-    )
-    for copied in (copy(selected[0]), deepcopy(selected[0])):
-        assert sanitize_hifiasm_methods_prompt_payload(
-            _methods_prompt([copied], selection.metadata)
-        )["evidence_cases"]
-
-    selected[0]["source_excerpts"][0]["quote"] = "Forged replacement."
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        sanitize_hifiasm_methods_prompt_payload(prompt)
-
-    selection = HifiasmNumericCaseRetriever(max_cases=1).select(
-        validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path),
-        query=_retrieval_query(),
-    )
-    selected = selection.selected_cases
-    selected[0]["numeric_match"]["numeric_distance"] = 999
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        sanitize_hifiasm_methods_prompt_payload(_methods_prompt(selected, selection.metadata))
-
-    forged = dict.__new__(type(validated[0]))
-    dict.__init__(forged, deepcopy(dict(validated[0])))
-    forged["source_excerpts"][0]["quote"] = "Synchronized forged replacement."
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        HifiasmNumericCaseRetriever(max_cases=1).select(
-            [forged],
-            query=_retrieval_query(),
-        )
-
-    prompt["evidence_cases"] = [forged]
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        sanitize_hifiasm_methods_prompt_payload(prompt)
-
-
-def test_approved_task2_case_cannot_bypass_task3_and_enter_task4(tmp_path):
-    validated = validate_hifiasm_evidence_cases(
-        [_approved_case(tmp_path)],
-        pack_root=tmp_path,
-    )[0]
-
-    with pytest.raises(EvidenceCaseValidationError, match="Task 3 selection attestation"):
-        sanitize_hifiasm_methods_prompt_payload(_methods_prompt([validated]))
-
-
-@pytest.mark.parametrize("status", ["draft", "rejected"])
-def test_draft_and_rejected_cases_cannot_self_promote_into_task3_or_task4(tmp_path, status):
-    raw = _approved_case(tmp_path)
-    raw["curation"]["status"] = status
-    validated = validate_hifiasm_evidence_cases([raw], pack_root=tmp_path)[0]
-    assert validated["retrieval_eligible"] is False
-
-    result = HifiasmNumericCaseRetriever(max_cases=1).select(
-        [validated],
-        query=_retrieval_query(),
-    )
-    assert result.selected_cases == []
-    with pytest.raises(EvidenceCaseValidationError, match="not retrieval-eligible"):
-        project_hifiasm_prompt_safe_case(validated)
-    with pytest.raises(EvidenceCaseValidationError, match="Task 3 selection attestation"):
-        sanitize_hifiasm_methods_prompt_payload(_methods_prompt([validated]))
-
-    validated["curation"]["status"] = "approved"
-    validated["retrieval_eligible"] = True
-
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        HifiasmNumericCaseRetriever(max_cases=1).select(
-            [validated],
-            query=_retrieval_query(),
-        )
-    with pytest.raises(EvidenceCaseValidationError, match="Task 3 selection attestation"):
-        sanitize_hifiasm_methods_prompt_payload(_methods_prompt([validated]))
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda case: case["rationale_claims"].append(
-            {
-                "claim_id": "forged",
-                "statement": "Forged rationale.",
-                "explicitness": "inferred",
-                "effect_area": "purging",
-                "evidence_span_ids": [],
-            }
-        ),
-        lambda case: case["observed_facts"]["coverage"].update({"value": 300.0}),
-        lambda case: case["intervention"]["parameters"]["purge_level"].update({"value": 3}),
-        lambda case: case["source"].update({"title": "Forged source profile"}),
-        lambda case: case["applicability"].update({"assembly_goal": "forged_goal"}),
-        lambda case: case.update({"retrieval_eligible": False}),
-    ],
-)
-def test_approved_case_semantic_tampering_fails_before_task3_and_task4(tmp_path, mutate):
-    validated = validate_hifiasm_evidence_cases(
-        [_approved_case(tmp_path)],
-        pack_root=tmp_path,
-    )[0]
-    mutate(validated)
-
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
-        HifiasmNumericCaseRetriever(max_cases=1).select(
-            [validated],
-            query=_retrieval_query(),
-        )
-    with pytest.raises(EvidenceCaseValidationError, match="Task 3 selection attestation"):
-        sanitize_hifiasm_methods_prompt_payload(_methods_prompt([validated]))
 
 
 def test_yaml_quote_need_not_match_methods_file(tmp_path):
@@ -804,7 +692,7 @@ def test_initial_case_rejects_retry_only_context(tmp_path):
     case = _approved_case(tmp_path)
     case["previous_attempt"] = {"parameters": {}, "failure_mode": "under_purged"}
 
-    with pytest.raises(EvidenceCaseValidationError, match="must not define previous_attempt"):
+    with pytest.raises(EvidenceCaseValidationError, match="unknown field previous_attempt"):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -817,20 +705,22 @@ def test_non_initial_case_types_fail_closed(tmp_path, case_type):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
-def test_unknown_read_type_is_rejected_independently_of_method(tmp_path):
+def test_unknown_read_type_is_preserved_for_llm_applicability_assessment(tmp_path):
     case = _approved_case(tmp_path)
     case["applicability"]["read_type"] = "clr"
 
-    with pytest.raises(EvidenceCaseValidationError, match="read_type must be one of"):
-        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0]["applicability"]["read_type"] == "clr"
 
 
-def test_target_methods_must_not_be_empty(tmp_path):
+def test_target_methods_are_documentary_and_may_be_empty(tmp_path):
     case = _approved_case(tmp_path)
     case["applicability"]["target_methods"] = []
 
-    with pytest.raises(EvidenceCaseValidationError, match="must contain at least one known"):
-        validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0]["applicability"]["target_methods"] == []
 
 
 @pytest.mark.parametrize(
@@ -861,31 +751,30 @@ def test_read_type_and_method_attributes_are_validated_independently(
 
 
 @pytest.mark.parametrize(
-    ("field_path", "value", "message"),
+    ("field_path", "value"),
     [
-        (
-            "applicability.source_tool",
-            "flye",
-            "source_tool must be a known hifiasm family method",
-        ),
-        (
-            "applicability.target_methods",
-            ["hifiasm", "flye"],
-            "target_methods contains unknown hifiasm family methods",
-        ),
-        (
-            "intervention.tool",
-            "nextdenovo",
-            "intervention.tool must be a known hifiasm family method",
-        ),
+        ("applicability.source_tool", "flye"),
+        ("applicability.target_methods", ["hifiasm", "flye"]),
+        ("intervention.tool", "nextdenovo"),
     ],
 )
-def test_unknown_hifiasm_family_method_is_rejected(tmp_path, field_path, value, message):
+def test_method_metadata_is_preserved_without_compatibility_validation(
+    tmp_path, field_path, value
+):
     case = _approved_case(tmp_path)
     section, field = field_path.split(".")
     case[section][field] = value
 
-    with pytest.raises(EvidenceCaseValidationError, match=message):
+    validated = validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
+
+    assert validated[0][section][field] == value
+
+
+def test_internal_run_is_not_a_literature_case(tmp_path):
+    case = _approved_case(tmp_path)
+    case["source"] = {"kind": "internal_run", "title": "previous failed attempt"}
+
+    with pytest.raises(EvidenceCaseValidationError, match="source.kind must be paper"):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -995,16 +884,16 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     )
 
     assert "selected_cases" not in payload
-    assert payload["case_selection"]["selected_case_ids"] == ["case_001"]
-    assert [case["case_id"] for case in payload["evidence_cases"]] == ["case_001"]
-    evidence_text = str(payload["evidence_cases"][0])
+    assert payload["literature_selection"]["selected_case_ids"] == ["case_001"]
+    assert [case["case_id"] for case in payload["literature_cases"]] == ["case_001"]
+    evidence_text = str(payload["literature_cases"][0])
     assert "HiFi coverage was 30.0x" in evidence_text
     assert "Study body" not in evidence_text
-    assert "methods_path" not in payload["evidence_cases"][0]
-    assert "evidence_spans" not in payload["evidence_cases"][0]
+    assert "methods_path" not in payload["literature_cases"][0]
+    assert "evidence_spans" not in payload["literature_cases"][0]
 
 
-def test_hifiasm_retrieval_query_and_trace_are_attempt_scoped_artifacts(tmp_path):
+def test_hifiasm_selection_is_embedded_once_in_attempt_prompt_artifact(tmp_path):
     from app.stages.assembly.parameter_catalog import load_parameter_catalog
     from app.stages.assembly.prompt_payload import build_prompt_payload
 
@@ -1040,24 +929,20 @@ def test_hifiasm_retrieval_query_and_trace_are_attempt_scoped_artifacts(tmp_path
         data_dir=data_dir,
     )
 
-    retrieval = payload["case_selection"]
-    assert "case_retrieval" not in payload
+    retrieval = payload["literature_selection"]
     assert "query" not in retrieval
     assert "trace" not in retrieval
     assert "query_ref" not in retrieval
     assert "trace_ref" not in retrieval
     assert retrieval["query_id"] == "session_a:parameter_attempt_2"
-    assert payload["retrieval_query_ref"].endswith("parameter_attempt_2/retrieval_query.json")
-    assert payload["retrieval_trace_ref"].endswith("parameter_attempt_2/retrieval_trace.json")
+    assert "retrieval_query_ref" not in payload
+    assert "retrieval_trace_ref" not in payload
 
-    query_path = data_dir / payload["retrieval_query_ref"].removeprefix("data/")
-    trace_path = data_dir / payload["retrieval_trace_ref"].removeprefix("data/")
-    query_artifact = json.loads(query_path.read_text(encoding="utf-8"))
-    trace_artifact = json.loads(trace_path.read_text(encoding="utf-8"))
-    assert query_artifact["query_id"] == retrieval["query_id"]
-    assert trace_artifact["selected_case_ids"] == ["case_001"]
-    assert trace_artifact["trace"][0]["feature_distances"]["coverage"]["status"] == "compared"
-    artifact_text = query_path.read_text(encoding="utf-8") + trace_path.read_text(encoding="utf-8")
+    prompt_path = data_dir / payload["prompt_payload_ref"].removeprefix("data/")
+    prompt_artifact = json.loads(prompt_path.read_text(encoding="utf-8"))
+    assert prompt_artifact["literature_selection"]["selected_case_ids"] == ["case_001"]
+    assert [case["case_id"] for case in prompt_artifact["literature_cases"]] == ["case_001"]
+    artifact_text = prompt_path.read_text(encoding="utf-8")
     assert "methods_path" not in artifact_text
     assert "evidence_spans" not in artifact_text
     assert "Study body" not in artifact_text
@@ -1174,7 +1059,7 @@ def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_id
 
 
 @pytest.mark.parametrize("field_path", ["applicability.source_tool", "intervention.tool"])
-@pytest.mark.parametrize("identifier_state", ["typo", "wrong_type", "missing"])
+@pytest.mark.parametrize("identifier_state", ["wrong_type", "missing"])
 def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
     tmp_path, field_path, identifier_state
 ):
@@ -1187,7 +1072,7 @@ def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
     if identifier_state == "missing":
         case[section_name].pop(field_name)
     else:
-        case[section_name][field_name] = "hifiasn" if identifier_state == "typo" else 7
+        case[section_name][field_name] = 7
     _write_case_pack(
         tmp_path,
         {
@@ -1288,7 +1173,7 @@ def _write_case_pack(
     (pack_dir / "SKILL.md").write_text("Use curated evidence.\n", encoding="utf-8")
     if enable_hifiasm_numeric:
         (pack_dir / "strategies.yaml").write_text(
-            yaml.safe_dump({"hifiasm_numeric": {"initial_cutover_enabled": True}}),
+            yaml.safe_dump({"hifiasm_numeric": {}}),
             encoding="utf-8",
         )
     if shard is not None:

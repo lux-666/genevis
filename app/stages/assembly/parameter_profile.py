@@ -48,8 +48,10 @@ EXECUTION_REPAIR_FIELDS = (
     "method_id",
     "tool_version",
     "params",
+    "effective_params",
+    "execution_params",
     "command_argv",
-    "selected_cases",
+    "literature_case_ids",
     "exit_code",
     "failure_class",
     "execution_status",
@@ -63,8 +65,10 @@ QUALITY_REPLAN_PREVIOUS_FIELDS = (
     "method_id",
     "tool_version",
     "params",
+    "effective_params",
+    "execution_params",
     "command_argv",
-    "selected_cases",
+    "literature_case_ids",
 )
 QUALITY_REVIEW_FIELDS = (
     "failure_mode",
@@ -94,11 +98,15 @@ def build_full_parameter_profile(
 
     assembly_out = assembly_out or assembly_output(state)
     stage_outputs = state.get("stage_outputs") or {}
+    genome_survey = _genome_survey_profile(stage_outputs.get("genome_survey") or {})
     return {
         "sample": _sample_profile(state, assembly_out),
         "assets": _assets_profile(state, assembly_out),
-        "read_qc": _read_qc_profile(stage_outputs.get("read_qc") or {}),
-        "genome_survey": _genome_survey_profile(stage_outputs.get("genome_survey") or {}),
+        "read_qc": _read_qc_profile(
+            stage_outputs.get("read_qc") or {},
+            genome_survey=genome_survey,
+        ),
+        "genome_survey": genome_survey,
         "previous_attempt": _previous_attempt_profile(previous_attempt or assembly_out.get("previous_parameter_attempt") or {}),
         "assembly_review": _assembly_review_profile(assembly_review or stage_outputs.get("assembly_review") or {}),
     }
@@ -206,47 +214,91 @@ def _parameter_case_read_type(
     )
 
 
-def _read_qc_profile(read_qc: dict[str, Any]) -> dict[str, Any]:
-    return _drop_empty(
+def _read_qc_profile(
+    read_qc: dict[str, Any],
+    *,
+    genome_survey: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize the current seqkit summary contract for recommendation."""
+
+    summary = read_qc.get("summary") or {}
+    total_bases = summary.get("total_bases")
+    profile = _drop_empty(
         {
-            "read_count": _first_path(read_qc, "read_count", "summary.read_count", "long_read_summary.read_count"),
-            "total_bases": _first_path(read_qc, "total_bases", "summary.total_bases", "long_read_summary.total_bases"),
-            "read_n50": _first_path(read_qc, "read_n50", "n50", "summary.n50", "long_read_summary.n50"),
-            "read_n90": _first_path(read_qc, "read_n90", "n90", "summary.n90", "long_read_summary.n90"),
-            "read_mean": _first_path(read_qc, "read_mean", "mean_read_length", "summary.mean_read_length"),
-            "read_median": _first_path(read_qc, "read_median", "median_read_length", "summary.median_read_length"),
-            "longest_read": _first_path(read_qc, "longest_read", "max_read_length", "summary.max_read_length"),
-            "bases_above_1kb": _first_path(read_qc, "bases_above_1kb", "summary.bases_above_1kb"),
-            "bases_above_5kb": _first_path(read_qc, "bases_above_5kb", "summary.bases_above_5kb"),
-            "bases_above_10kb": _first_path(read_qc, "bases_above_10kb", "summary.bases_above_10kb"),
-            "bases_above_50kb": _first_path(read_qc, "bases_above_50kb", "summary.bases_above_50kb"),
-            "mean_quality": _first_path(read_qc, "mean_quality", "summary.mean_quality"),
-            "q10_fraction": _first_path(read_qc, "q10_fraction", "summary.q10_fraction"),
-            "q20_fraction": _first_path(read_qc, "q20_fraction", "summary.q20_fraction"),
-            "effective_coverage_1kb": _first_path(read_qc, "effective_coverage_1kb", "summary.effective_coverage_1kb"),
-            "effective_coverage_5kb": _first_path(read_qc, "effective_coverage_5kb", "summary.effective_coverage_5kb"),
-            "gc_content": _first_path(read_qc, "gc_content", "summary.gc_content"),
-            "adapter_fraction": _first_path(read_qc, "adapter_fraction", "summary.adapter_fraction"),
-            "contamination_hint": _first_path(read_qc, "contamination_hint", "summary.contamination_hint"),
-            "quality_available": _first_path(read_qc, "quality_available", "summary.quality_available"),
+            "read_count": summary.get("num_seqs"),
+            "total_bases": total_bases,
+            "read_n50": summary.get("n50"),
+            "read_mean": summary.get("avg_len"),
+            "longest_read": summary.get("max_len"),
+            "q20_fraction": _percent_to_fraction(summary.get("q20_percent")),
+            "mean_quality": summary.get("avg_qual"),
         }
     )
+
+    effective_genome_size = genome_survey.get("effective_genome_size")
+    if _is_positive_number(total_bases) and _is_positive_number(effective_genome_size):
+        profile["raw_coverage"] = float(total_bases) / float(effective_genome_size)
+        profile["raw_coverage_basis"] = _drop_empty(
+            {
+                "numerator_bases": total_bases,
+                "numerator_source_path": "read_qc.summary.total_bases",
+                "denominator_bases": effective_genome_size,
+                "denominator_source": genome_survey.get("genome_size_source"),
+                "denominator_source_path": genome_survey.get("genome_size_source_path"),
+            }
+        )
+
+    return profile
 
 
 def _genome_survey_profile(genome_survey: dict[str, Any]) -> dict[str, Any]:
+    """Normalize effective values and their measured/provided provenance."""
+
+    estimates = genome_survey.get("estimates") or {}
+    measured = genome_survey.get("measured_estimates") or {}
+    provided = genome_survey.get("provided_overrides") or {}
+    sources = genome_survey.get("estimate_sources") or {}
+    source_paths = genome_survey.get("estimate_source_paths") or {}
+
+    effective_genome_size = estimates.get("genome_size")
+    measured_genome_size = measured.get("genome_size")
+    provided_genome_size = provided.get("genome_size")
+    genome_size_source = sources.get("genome_size")
+    genome_size_source_path = source_paths.get("genome_size")
+    if genome_size_source == "survey" and genome_size_source_path is None:
+        genome_size_source_path = "genome_survey.measured_estimates.genome_size"
+    elif genome_size_source == "provided" and genome_size_source_path is None:
+        genome_size_source_path = "genome_survey.provided_overrides.genome_size"
+
+    delta_ratio = None
+    if _is_positive_number(measured_genome_size) and _is_positive_number(provided_genome_size):
+        delta_ratio = (float(provided_genome_size) - float(measured_genome_size)) / float(measured_genome_size)
+
     return _drop_empty(
         {
-            "estimated_genome_size": _first_path(genome_survey, "estimated_genome_size", "genome_size_prior", "estimates.genome_size"),
-            "genome_size_confidence": _first_path(genome_survey, "genome_size_confidence", "confidence"),
-            "heterozygosity": _first_path(genome_survey, "heterozygosity", "estimates.heterozygosity"),
-            "repeat_content": _first_path(genome_survey, "repeat_content", "estimates.repeat_content", "estimates.repeat_fraction"),
-            "gc_content": _first_path(genome_survey, "gc_content", "estimates.gc_content"),
-            "kmer_peak_coverage": _first_path(genome_survey, "kmer_peak_coverage", "estimates.kmer_peak_coverage", "estimates.hom_cov"),
-            "kmer_histogram_shape": _first_path(genome_survey, "kmer_histogram_shape", "estimates.kmer_histogram_shape"),
-            "estimated_error_rate": _first_path(genome_survey, "estimated_error_rate", "estimates.error_rate"),
-            "ploidy_hint": _first_path(genome_survey, "ploidy_hint", "estimates.ploidy", "estimates.ploidy_hint"),
+            "effective_genome_size": effective_genome_size,
+            "measured_genome_size": measured_genome_size,
+            "provided_genome_size": provided_genome_size,
+            "genome_size_source": genome_size_source,
+            "genome_size_source_path": genome_size_source_path,
+            "genome_size_delta_ratio": delta_ratio,
+            "heterozygosity": estimates.get("heterozygosity"),
+            "repeat_fraction": estimates.get("repeat_fraction"),
+            "confidence": genome_survey.get("confidence"),
         }
     )
+
+
+def _percent_to_fraction(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > 100:
+        return None
+    return float(value) / 100.0
+
+
+def _is_positive_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0
 
 
 def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any]:
@@ -256,8 +308,13 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             "method_id": previous_attempt.get("method_id"),
             "tool_version": previous_attempt.get("tool_version"),
             "params": _rendered_previous_params(previous_attempt),
+            "effective_params": previous_attempt.get("effective_params"),
+            "execution_params": _first_value(
+                previous_attempt.get("execution_params"),
+                previous_attempt.get("recommended_params"),
+            ),
             "command_argv": _first_value(previous_attempt.get("argv"), previous_attempt.get("command_argv")),
-            "selected_cases": _first_value(previous_attempt.get("selected_cases"), previous_attempt.get("selected_case_ids")),
+            "literature_case_ids": previous_attempt.get("selected_case_ids"),
             "exit_code": _first_path(previous_attempt, "exit_code", "execution_result.return_code", "execution_result.exit_code"),
             "failure_class": _first_path(
                 previous_attempt,

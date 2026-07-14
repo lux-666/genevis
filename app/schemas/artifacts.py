@@ -158,9 +158,6 @@ class ParameterAttempt(BaseModel):
     prompt_payload_ref: ArtifactRef
     retrieval_backend: str | None = None
     retrieval_query_id: str | None = None
-    retrieval_query_ref: ArtifactRef | None = None
-    retrieval_trace_ref: ArtifactRef | None = None
-    evidence_payload_ref: ArtifactRef | None = None
     retrieval_candidate_case_ids: list[str] = Field(default_factory=list)
     retrieval_eligible_case_count: int | None = Field(default=None, ge=0)
     retrieval_warning: str | None = None
@@ -173,10 +170,11 @@ class ParameterAttempt(BaseModel):
     knowledge_pack_ref: str | None = None
     selected_case_ids: list[str] = Field(default_factory=list)
     recommended_params: dict[str, Any] = Field(default_factory=dict)
-    omitted_parameters: list[str] = Field(default_factory=list)
-    parameter_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    case_assessments: list[dict[str, Any]] = Field(default_factory=list)
-    parameter_decisions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    baseline_params: dict[str, Any] = Field(default_factory=dict)
+    effective_params: dict[str, Any] = Field(default_factory=dict)
+    execution_params: dict[str, Any] = Field(default_factory=dict)
+    parameter_reasoning: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    sample_diagnosis: dict[str, Any] = Field(default_factory=dict)
     proposed_parameter_changes: dict[str, dict[str, Any]] = Field(default_factory=dict)
     recommendation_summary: str | None = None
     parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -194,11 +192,10 @@ class ParameterAttempt(BaseModel):
     review_failure: dict[str, Any] | None = None
     review_outcome: dict[str, Any] | None = None
     attempt_kind: Literal["initial", "retry"] = "initial"
-    initial_recommendation_contract: Literal["legacy_initial", "curated_initial_v1"] | None = None
+    recommendation_contract: Literal["literature_patch_v1"] = "literature_patch_v1"
     retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
     inherited_initial_attempt_id: int | None = Field(default=None, ge=0)
     inherited_initial_snapshot_ref: str | None = None
-    inherited_evidence_payload_ref: ArtifactRef | None = None
     inherited_profile_ref: ArtifactRef | None = None
     previous_attempt_seal_hash: str | None = None
     parameter_recommendation_ref: ArtifactRef | None = None
@@ -262,6 +259,13 @@ class GenomeSurveyResult(BaseModel):
     input_asset_refs: list[str] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)
     estimates: dict[str, Any] = Field(default_factory=dict)
+    measured_estimates: dict[str, Any] = Field(default_factory=dict)
+    provided_overrides: dict[str, Any] = Field(default_factory=dict)
+    estimate_sources: dict[str, Literal["provided", "survey"]] = Field(default_factory=dict)
+    estimate_source_paths: dict[str, str] = Field(default_factory=dict)
+    genome_size_prior: int | None = Field(default=None, gt=0)
+    genome_size_source: Literal["provided", "survey"] | None = None
+    genome_size_source_path: str | None = None
     skip_reason: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

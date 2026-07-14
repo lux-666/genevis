@@ -43,10 +43,9 @@ class ParameterApprovalGateTests(unittest.TestCase):
                 retry_origin="assembly_review",
                 inherited_initial_attempt_id=0,
                 inherited_initial_snapshot_ref=attempt0["seal_hash"],
-                inherited_evidence_payload_ref=attempt0["evidence_payload_ref"],
                 inherited_profile_ref=attempt0["input_profile_ref"],
-                initial_recommendation_contract=attempt0["initial_recommendation_contract"],
                 recommended_params={"purge_level": 2},
+                execution_params={"purge_level": 2},
             ).model_dump(mode="json")
         )
         return [attempt0, attempt1, attempt2]
@@ -69,7 +68,8 @@ class ParameterApprovalGateTests(unittest.TestCase):
                     argv=["hifiasm", "-l", "1"],
                     execution_result={"status": "failed", "return_code": 137},
                     catalog_snapshot={},
-                    initial_recommendation_contract="legacy_initial",
+                    effective_params={"purge_level": 1},
+                    execution_params={"purge_level": 1},
                     parameter_recommendation_hash="e" * 64,
                     parameter_approval_recommendation_hash="e" * 64,
                     parameter_approval_decision_ref=ArtifactRef(
@@ -93,11 +93,12 @@ class ParameterApprovalGateTests(unittest.TestCase):
             inherited_initial_attempt_id=0 if retry else None,
             inherited_initial_snapshot_ref=previous.get("seal_hash") if previous else None,
             inherited_profile_ref=previous.get("input_profile_ref") if previous else None,
-            initial_recommendation_contract="legacy_initial",
             recommended_params={"purge_level": 1},
+            effective_params={"purge_level": 1},
+            execution_params={"purge_level": 1},
             failure_signature={"return_code": 137} if retry else None,
             proposed_parameter_changes={"purge_level": {"from": 0, "to": 1}} if retry else {},
-            parameter_evidence={"purge_level": {"source": "attempt0"}} if retry else {},
+            parameter_reasoning={"purge_level": {"reason": "attempt0"}} if retry else {},
         ).model_dump(mode="json")
         payload = {"attempt": pending, "validation": {"valid": True}}
         artifact = root / "artifacts" / "assembly" / "s" / f"parameter_attempt_{attempt_id}" / "validated_recommendation.json"
@@ -197,8 +198,8 @@ class ParameterApprovalGateTests(unittest.TestCase):
             "parameter_delta": lambda pending: pending.__setitem__(
                 "proposed_parameter_changes", {"purge_level": {"from": 1, "to": 2}}
             ),
-            "parameter_evidence": lambda pending: pending.__setitem__(
-                "parameter_evidence", {"purge_level": {"source": "tampered"}}
+            "parameter_reasoning": lambda pending: pending.__setitem__(
+                "parameter_reasoning", {"purge_level": {"reason": "tampered"}}
             ),
         }
         for label, mutate in mutations.items():
@@ -411,9 +412,9 @@ class ParameterApprovalGateTests(unittest.TestCase):
                 inherited_initial_attempt_id=0,
                 inherited_initial_snapshot_ref=output["parameter_attempts"][0]["seal_hash"],
                 inherited_profile_ref=output["parameter_attempts"][0]["input_profile_ref"],
-                initial_recommendation_contract="legacy_initial",
                 catalog_snapshot={},
                 recommended_params={"purge_level": 2},
+                execution_params={"purge_level": 2},
             ).model_dump(mode="json")
             artifact.write_text(json.dumps({"attempt": pending, "validation": {}}, sort_keys=True), encoding="utf-8")
             digest = hashlib.sha256(artifact.read_bytes()).hexdigest()

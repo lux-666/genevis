@@ -51,6 +51,11 @@ class ManifestSchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             InputAssetSpec(asset_type="invalid_type", paths=["x.fq"])
 
+    def test_genome_size_estimate_must_be_positive(self):
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                InputManifest(session_id="invalid-size", genome_size_estimate=value)
+
     def test_manifest_supports_all_expected_asset_types(self):
         types = [
             "raw_long_reads",

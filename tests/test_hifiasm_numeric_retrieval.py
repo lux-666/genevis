@@ -74,11 +74,6 @@ def _isolate_numeric_algorithm_from_task2_attestation(monkeypatch):
         return projected
 
     monkeypatch.setattr(numeric_retriever_module, "_rank_hifiasm_prompt_case", _project)
-    monkeypatch.setattr(
-        numeric_retriever_module,
-        "_project_hifiasm_ranked_prompt_case",
-        deepcopy,
-    )
 
 
 def test_coverage_values_across_old_bucket_boundary_are_continuous():
@@ -106,7 +101,7 @@ def test_log_ratio_distance_is_scale_invariant_for_doubling():
     assert math.isclose(low_distance, high_distance, rel_tol=1e-9)
 
 
-def test_missing_values_reduce_coverage_and_do_not_improve_rank():
+def test_missing_values_renormalize_over_shared_dimensions():
     result = HifiasmNumericCaseRetriever().select(
         [
             _case("complete", coverage=30, genome_size_mb=1000),
@@ -118,11 +113,12 @@ def test_missing_values_reduce_coverage_and_do_not_improve_rank():
     assert result.metadata["selected_case_ids"][:2] == ["complete", "missing"]
     trace = {item["case_id"]: item for item in result.trace if item["decision"] == "candidate"}
     assert trace["complete"]["numeric_distance"] == trace["missing"]["numeric_distance"] == 0
+    assert trace["complete"]["ranking_score"] == trace["missing"]["ranking_score"] == 1
     assert trace["complete"]["evidence_coverage"] > trace["missing"]["evidence_coverage"]
     assert trace["missing"]["feature_distances"]["genome_size_mb"]["status"] == "missing_case_value"
 
 
-def test_complete_candidate_is_not_displaced_by_one_field_exact_match():
+def test_numeric_similarity_does_not_penalize_missing_case_dimensions():
     result = HifiasmNumericCaseRetriever(max_cases=1).select(
         [
             _case(
@@ -144,7 +140,7 @@ def test_complete_candidate_is_not_displaced_by_one_field_exact_match():
         ),
     )
 
-    assert result.metadata["selected_case_ids"] == ["complete"]
+    assert result.metadata["selected_case_ids"] == ["weak_exact"]
     trace = {item["case_id"]: item for item in result.trace}
     assert trace["complete"]["numeric_distance"] > trace["weak_exact"]["numeric_distance"]
     assert trace["complete"]["evidence_coverage"] > trace["weak_exact"]["evidence_coverage"]
@@ -174,7 +170,7 @@ def test_near_zero_heterozygosity_distance_is_finite():
     assert math.isfinite(result.trace[0]["numeric_distance"])
 
 
-def test_method_mismatch_is_scored_instead_of_hard_filtered():
+def test_method_mismatch_is_documentary_context_only():
     wrong_tool = _case("wrong_tool", coverage=30)
     wrong_tool["applicability"]["source_tool"] = "flye"
     wrong_tool["applicability"]["target_methods"] = ["flye"]
@@ -186,14 +182,13 @@ def test_method_mismatch_is_scored_instead_of_hard_filtered():
 
     trace = result.trace[0]
     assert trace["decision"] == "candidate"
-    assert trace["hard_filter_reasons"] == []
-    assert trace["method_match"] is False
-    assert trace["read_type_match"] is True
-    assert trace["categorical_match_score"] == 1.0
-    assert trace["ranking_score"] == pytest.approx(1.2)
+    assert trace["eligibility_reasons"] == []
+    assert trace["ranking_score"] == pytest.approx(1.0)
+    assert "method_match" not in trace
+    assert result.selected_cases[0]["applicability"]["source_tool"] == "flye"
 
 
-def test_missing_query_read_type_remains_missing_without_excluding_case():
+def test_query_read_type_is_not_a_selection_feature():
     query = _query(coverage=30)
     query["read_type"] = None
 
@@ -203,12 +198,11 @@ def test_missing_query_read_type_remains_missing_without_excluding_case():
     )
 
     assert [case["case_id"] for case in result.selected_cases] == ["case"]
-    assert result.trace[0]["hard_filter_reasons"] == []
-    assert result.trace[0]["read_type_match"] is False
-    assert result.trace[0]["categorical_match_score"] == 1.0
+    assert result.trace[0]["eligibility_reasons"] == []
+    assert "read_type_match" not in result.trace[0]
 
 
-def test_method_and_read_type_matches_rank_without_discrete_filtering():
+def test_method_and_read_type_do_not_score_or_filter_cases():
     exact = _case("exact", coverage=30)
     method_only = _case("method_only", coverage=30)
     method_only["applicability"]["read_type"] = "ont"
@@ -228,22 +222,16 @@ def test_method_and_read_type_matches_rank_without_discrete_filtering():
     assert [case["case_id"] for case in result.selected_cases] == [
         "exact",
         "method_only",
-        "read_type_only",
         "neither",
+        "read_type_only",
     ]
     trace = {item["case_id"]: item for item in result.trace}
-    assert trace["exact"]["categorical_match_score"] == 2.0
-    assert trace["method_only"]["categorical_match_score"] == 1.0
-    assert trace["read_type_only"]["categorical_match_score"] == 1.0
-    assert trace["neither"]["categorical_match_score"] == 0.0
-    assert trace["exact"]["ranking_score"] == pytest.approx(2.2)
-    assert trace["method_only"]["ranking_score"] == pytest.approx(1.2)
-    assert trace["read_type_only"]["ranking_score"] == pytest.approx(1.2)
-    assert trace["neither"]["ranking_score"] == pytest.approx(0.2)
-    assert all(item["hard_filter_reasons"] == [] for item in trace.values())
+    assert {item["ranking_score"] for item in trace.values()} == {1.0}
+    assert all(item["eligibility_reasons"] == [] for item in trace.values())
+    assert all("categorical_match_score" not in item for item in trace.values())
 
 
-def test_internal_and_external_hifiasm_ont_names_share_method_identity():
+def test_query_method_identity_does_not_change_literature_ranking():
     ont_case = _case("ont", coverage=30)
     ont_case["applicability"].update(
         {"read_type": "ont", "target_methods": ["hifiasm_ont"]}
@@ -256,12 +244,10 @@ def test_internal_and_external_hifiasm_ont_names_share_method_identity():
         [hifi_case, ont_case], query=query
     )
 
-    assert [case["case_id"] for case in result.selected_cases] == ["ont", "hifi"]
+    assert [case["case_id"] for case in result.selected_cases] == ["hifi", "ont"]
     trace = {item["case_id"]: item for item in result.trace}
-    assert trace["ont"]["method_match"] is True
-    assert trace["ont"]["read_type_match"] is True
-    assert trace["hifi"]["method_match"] is False
-    assert trace["hifi"]["read_type_match"] is False
+    assert trace["ont"]["ranking_score"] == trace["hifi"]["ranking_score"]
+    assert "method_match" not in trace["ont"]
 
 
 def test_assembly_goal_and_topology_metadata_do_not_filter_or_score_cases():
@@ -285,11 +271,11 @@ def test_assembly_goal_and_topology_metadata_do_not_filter_or_score_cases():
     assert [item["case_id"] for item in result.selected_cases] == [
         "documentary_context"
     ]
-    assert result.trace[0]["hard_filter_reasons"] == []
-    assert result.trace[0]["categorical_match_score"] == 2.0
+    assert result.trace[0]["eligibility_reasons"] == []
+    assert result.trace[0]["ranking_score"] == 1.0
 
 
-def test_clade_tie_break_cannot_override_numeric_distance():
+def test_clade_does_not_override_numeric_distance():
     numeric_match = _case("numeric_match", coverage=30)
     numeric_match["observed_facts"]["clade"] = {"value": "plant"}
     clade_match = _case("clade_match", coverage=300)
@@ -303,6 +289,47 @@ def test_clade_tie_break_cannot_override_numeric_distance():
     )
 
     assert result.metadata["selected_case_ids"][:2] == ["numeric_match", "clade_match"]
+
+
+def test_actionability_breaks_numeric_ties_without_rewriting_case_card():
+    plain = _case("a_plain", coverage=30)
+    actionable = _case("z_actionable", coverage=30)
+    actionable["intervention"]["parameters"] = {
+        "purge_level": {
+            "value": 1,
+            "reported": True,
+            "evidence_span_ids": ["methods.command"],
+        }
+    }
+    actionable["rationale_claims"] = [
+        {
+            "claim_id": "purge_reason",
+            "statement": "The paper's rationale.",
+            "explicitness": "explicit",
+            "effect_area": "purging",
+            "evidence_span_ids": ["methods.rationale"],
+        }
+    ]
+    actionable["source_excerpts"] = [
+        {"span_id": "methods.command", "document": "methods", "quote": "-l 1"},
+        {
+            "span_id": "methods.rationale",
+            "document": "methods",
+            "quote": "Purging was reduced for the heterozygous sample.",
+        },
+    ]
+
+    result = HifiasmNumericCaseRetriever(max_cases=2).select(
+        [plain, actionable],
+        query=_query(coverage=30),
+    )
+
+    assert result.metadata["selected_case_ids"] == ["z_actionable", "a_plain"]
+    card = result.selected_cases[0]
+    assert card["intervention"] == actionable["intervention"]
+    assert card["rationale_claims"] == actionable["rationale_claims"]
+    assert card["source_excerpts"] == actionable["source_excerpts"]
+    assert card["numeric_match"]["actionability_score"] == 1.0
 
 
 def test_numeric_ties_are_stable_by_case_id():
@@ -399,21 +426,20 @@ def _dispatch_initial(monkeypatch, cases, *, max_cases=None, numeric_config=None
             "read_qc": {"effective_coverage_1kb": 30},
         },
         max_cases=max_cases,
-        strategy={"hifiasm_numeric": {"initial_cutover_enabled": True, **(numeric_config or {})}},
+        strategy={"hifiasm_numeric": numeric_config or {}},
     )
 
 
-def test_hifiasm_initial_cutover_selects_stable_top_five_for_tied_shuffled_cases(monkeypatch):
+def test_hifiasm_numeric_selection_respects_budget_and_is_stable(monkeypatch):
     cases = [_case(case_id, coverage=30) for case_id in ("g", "a", "f", "c", "b", "e", "d")]
     selected, metadata = _dispatch_initial(monkeypatch, cases, max_cases=1)
 
-    assert [case["case_id"] for case in selected] == ["a", "b", "c", "d", "e"]
-    assert metadata["retrieval_backend"] == "hifiasm_numeric"
-    assert metadata["hifiasm_numeric_gate"]["decision"] == "hifiasm_numeric"
+    assert [case["case_id"] for case in selected] == ["a"]
+    assert metadata["retrieval_backend"] == "numeric_literature"
     assert metadata["eligible_case_count"] == 7
 
-    reversed_selected, _ = _dispatch_initial(monkeypatch, list(reversed(cases)))
-    assert [case["case_id"] for case in reversed_selected] == ["a", "b", "c", "d", "e"]
+    reversed_selected, _ = _dispatch_initial(monkeypatch, list(reversed(cases)), max_cases=1)
+    assert [case["case_id"] for case in reversed_selected] == ["a"]
 
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4])
@@ -437,62 +463,8 @@ def test_hifiasm_initial_cutover_has_no_score_or_coverage_threshold(monkeypatch)
 
     assert [case["case_id"] for case in selected] == ["missing_everything"]
     assert metadata["evidence_available"] is True
-    assert metadata["trace"][0]["numeric_similarity_display"] == 0.0
-    assert metadata["trace"][0]["evidence_coverage"] == 0.0
-
-
-def test_hifiasm_numeric_cutover_flag_is_fail_closed(monkeypatch):
-    legacy = {
-        "case_id": "legacy_hifiasm_seed",
-        "features": {"read_type": "hifi", "coverage": 30},
-        "params": {"tool": "hifiasm"},
-    }
-    draft_v3 = _case("draft_v3", coverage=30)
-    draft_v3["curation"]["status"] = "draft"
-    draft_v3.update(
-        {
-            "features": {"read_type": "hifi", "coverage": 30},
-            "params": {"tool": "hifiasm"},
-        }
-    )
-    rejected_v3 = _case("rejected_v3", coverage=30)
-    rejected_v3["curation"]["status"] = "rejected"
-    rejected_v3.update(
-        {
-            "features": {"read_type": "hifi", "coverage": 30},
-            "params": {"tool": "hifiasm"},
-        }
-    )
-    invalid_v3 = {
-        "schema_version": 3,
-        "case_id": "invalid_v3",
-        "features": {"read_type": "hifi", "coverage": 30},
-        "params": {"tool": "hifiasm"},
-    }
-    monkeypatch.setattr(
-        case_selector_module,
-        "validate_hifiasm_evidence_cases",
-        lambda values, pack_root: pytest.fail("disabled cutover must not validate curated cases"),
-    )
-    monkeypatch.setattr(
-        case_selector_module,
-        "is_hifiasm_evidence_case",
-        lambda case: case.get("schema_version") == 3,
-    )
-
-    selected, metadata = case_selector_module.select_evidence_cases(
-        [legacy, draft_v3, rejected_v3, invalid_v3],
-        method_id="assembly.candidate.hifiasm",
-        task="recommend_initial",
-        prompt_profile={"assets": {"read_type": "hifi"}},
-        strategy={"hifiasm_numeric": {"initial_cutover_enabled": False}},
-    )
-
-    assert [case["case_id"] for case in selected] == ["legacy_hifiasm_seed"]
-    assert metadata["total_cases"] == 1
-    assert [entry["case_id"] for entry in metadata["trace"]] == ["legacy_hifiasm_seed"]
-    assert metadata["retrieval_backend"] == "structured_default"
-    assert metadata["hifiasm_numeric_gate"]["reason"] == "initial_cutover_disabled"
+    assert selected[0]["numeric_match"]["numeric_similarity_display"] == 0.0
+    assert selected[0]["numeric_match"]["evidence_coverage"] == 0.0
 
 
 def test_hifiasm_numeric_cutover_handles_empty_corpus_without_legacy_fallback(monkeypatch):
@@ -512,17 +484,12 @@ def test_hifiasm_numeric_cutover_handles_empty_corpus_without_legacy_fallback(mo
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
         prompt_profile={"assets": {"read_type": "hifi"}},
-        strategy={"hifiasm_numeric": {"initial_cutover_enabled": True}},
+        strategy={"hifiasm_numeric": {}},
     )
 
     assert selected == []
-    assert metadata["retrieval_backend"] == "hifiasm_numeric"
+    assert metadata["retrieval_backend"] == "numeric_literature"
     assert metadata["evidence_available"] is False
-    assert metadata["hifiasm_numeric_gate"] == {
-        "initial_cutover_enabled": True,
-        "decision": "hifiasm_numeric",
-        "reason": "initial_cutover_enabled",
-    }
 
 
 @pytest.mark.parametrize(
@@ -541,13 +508,13 @@ def test_hifiasm_retry_never_enters_a_selector(monkeypatch, task):
         lambda *_args, **_kwargs: pytest.fail("retry must not construct a selector"),
     )
 
-    with pytest.raises(ValueError, match="do not use evidence-case selection"):
+    with pytest.raises(ValueError, match="inherits attempt 0"):
         case_selector_module.select_evidence_cases(
             [],
             method_id="assembly.candidate.hifiasm",
             task=task,
             prompt_profile={"assets": {"read_type": "hifi"}},
-            strategy={"hifiasm_numeric": {"initial_cutover_enabled": True}},
+            strategy={"hifiasm_numeric": {}},
         )
 
 
@@ -555,9 +522,8 @@ def test_hifiasm_retry_never_enters_a_selector(monkeypatch, task):
     ("numeric_config", "message"),
     [
         ([], "hifiasm_numeric strategy must be a mapping"),
-        ({"initial_cutover_enabled": "yes"}, "initial_cutover_enabled must be a bool"),
         (
-            {"initial_cutover_enabled": True, "candidate_budget": 5},
+            {"candidate_budget": 5},
             "unknown keys.*candidate_budget",
         ),
     ],
@@ -588,13 +554,13 @@ def test_hifiasm_dispatch_rejects_unknown_task_before_backend_selection(monkeypa
         lambda values, pack_root: pytest.fail("invalid task must fail before retrieval"),
     )
 
-    with pytest.raises(ValueError, match="unsupported hifiasm parameter task"):
+    with pytest.raises(ValueError, match="unsupported assembly parameter task"):
         case_selector_module.select_evidence_cases(
             [],
             method_id="assembly.candidate.hifiasm",
             task="not_a_parameter_task",
             prompt_profile={"assets": {"read_type": "hifi"}},
-            strategy={"hifiasm_numeric": {"initial_cutover_enabled": True}},
+            strategy={"hifiasm_numeric": {}},
         )
 
 
@@ -667,8 +633,7 @@ def test_no_approved_cases_returns_non_blocking_fallback_metadata():
 
     assert result.selected_cases == []
     assert result.metadata["evidence_available"] is False
-    assert result.metadata["case_evidence_required"] is False
-    assert "readonly L1 facts" in result.metadata["warning"]
+    assert "current sample profile" in result.metadata["warning"]
 
 
 def test_approved_case_without_validated_sources_has_distinct_filter_reason():
@@ -678,7 +643,7 @@ def test_approved_case_without_validated_sources_has_distinct_filter_reason():
     result = HifiasmNumericCaseRetriever().select([case], query=_query(coverage=30))
 
     assert result.selected_cases == []
-    assert result.trace[0]["hard_filter_reasons"] == ["source_not_validated"]
+    assert result.trace[0]["eligibility_reasons"] == ["source_not_validated"]
 
 
 def test_any_weak_selected_case_produces_an_explicit_warning():
@@ -704,7 +669,7 @@ def test_any_weak_selected_case_produces_an_explicit_warning():
     )
 
     assert result.metadata["warning"] is not None
-    assert "weak evidence coverage" in result.metadata["warning"]
+    assert "few measured biological fields" in result.metadata["warning"]
 
 
 def test_underfilled_shortlist_warns_even_with_complete_evidence():

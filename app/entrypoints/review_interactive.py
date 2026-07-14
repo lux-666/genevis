@@ -801,7 +801,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
             print("  evidence_refs:")
             for name, ref in proposal["evidence_refs"].items():
                 print(f"    {name}: {ref}")
-        cases = proposal.get("evidence_cases") or []
+        cases = proposal.get("literature_cases") or []
         if cases:
             print(f"  production paper evidence ({len(cases)}, top-5 maximum):")
             for case in cases:
@@ -888,15 +888,15 @@ def _brief_parameter_approval(
         proposal.setdefault("previous_attempt_id", attempt.get("previous_attempt_id"))
         proposal["recommended_params"] = dict(attempt.get("recommended_params") or {})
         proposal["selected_case_ids"] = list(attempt.get("selected_case_ids") or [])
-        evidence_payload = _load_ref_payload(attempt.get("evidence_payload_ref"), data_dir)
-        if isinstance(evidence_payload, dict):
-            proposal["evidence_cases"] = [
+        prompt_payload = _load_ref_payload(attempt.get("prompt_payload_ref"), data_dir)
+        if isinstance(prompt_payload, dict):
+            proposal["literature_cases"] = [
                 {
                     "case_id": case.get("case_id"),
                     "doi": (case.get("source") or {}).get("doi"),
                     "source_excerpts": list(case.get("source_excerpts") or []),
                 }
-                for case in (evidence_payload.get("cases") or [])[:5]
+                for case in (prompt_payload.get("literature_cases") or [])[:5]
                 if isinstance(case, dict)
             ]
     return proposal
