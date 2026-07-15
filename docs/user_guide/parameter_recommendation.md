@@ -12,6 +12,8 @@ Parameters use three levels:
 
 Only L2 keys can appear in a recommendation. If the recommendation includes an unknown key or tries to change L0/L1, validation fails and the command is not run.
 
+The model's output contract is deliberately minimal: `parameter_patch` maps each changed L2 parameter directly to its value, with an optional `summary` for the reviewer. Read-QC facts, survey metrics, method guidance, and literature cases are reasoning inputs only. The model does not need to copy evidence IDs back into its answer; the complete input is already retained in `prompt_payload.json`, and the proposed parameter diff is reviewed by a human before execution.
+
 ## Why Parameters May Be Unset
 
 The recommender is not trying to fill every possible CLI flag. If evidence is weak, it may omit an L2 parameter. An omitted L2 parameter means "do not explicitly set this flag"; the assembler's default behavior applies.

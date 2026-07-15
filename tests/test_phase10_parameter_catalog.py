@@ -1022,7 +1022,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
         attempt = assembly["pending_parameter_recommendation"]
         self.assertEqual(attempt["attempt_id"], 0)
         self.assertEqual(attempt["method_id"], "assembly.candidate.hifiasm_ont")
-        self.assertEqual(attempt["recommendation_contract"], "literature_patch_v1")
+        self.assertEqual(attempt["recommendation_contract"], "parameter_patch_v2")
         self.assertEqual(
             attempt["recommended_params"],
             {"purge_level": 1, "read_length_cutoff": 3000},

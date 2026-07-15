@@ -96,6 +96,8 @@ def test_prompt_is_one_system_user_pair_without_response_example(method_id: str)
     assert model_payload["baseline_params"] == {"purge_level": 2}
     assert messages[1]["content"].count("Reported parameter rationale.") == 1
     assert "Representative" not in json.dumps(messages)
+    assert "mapping each changed L2 parameter name directly to its proposed value" in messages[0]["content"]
+    assert "Do not return observation IDs" in messages[0]["content"]
 
 
 def test_retry_context_is_visible_but_internal_paths_are_removed() -> None:

@@ -133,11 +133,13 @@ def build_prompt_payload(
         "baseline_params": baseline_params,
         "baseline_overrides": baseline_overrides,
         "recommendation_policy": {
-            "output": "sparse_parameter_patch",
+            "output": "parameter_patch mapping each changed L2 parameter directly to its value",
             "literature_role": (
                 "optional analog and numeric anchor; assess applicability instead of copying"
             ),
             "guidance_role": "mechanistic relationships, not executable rules or fixed values",
+            "returned_evidence_references": "not requested; evidence remains in the prompt artifact",
+            "human_review": "every proposed parameter patch is reviewed before execution",
             "case_required": False,
             "unmentioned_parameters": (
                 "retain previous effective value on retry; otherwise use catalog/tool default"

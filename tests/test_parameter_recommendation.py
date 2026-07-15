@@ -9,9 +9,9 @@ from app.domains.assembly.parameter_recommendation import (
 )
 
 
-def _prompt(*, task: str = "recommend_initial") -> dict:
+def _prompt(*, task: str = "recommend_initial", contract: str | None = None) -> dict:
     payload = {
-        "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
+        "recommendation_contract": contract or PARAMETER_RECOMMENDATION_CONTRACT,
         "task": task,
         "observations": [
             {
@@ -27,14 +27,7 @@ def _prompt(*, task: str = "recommend_initial") -> dict:
                 "parameters": ["purge_level"],
             }
         ],
-        "literature_cases": [
-            {
-                "case_id": "paper.1",
-                "source_excerpts": [
-                    {"span_id": "quote.parameter", "quote": "Used -l1."}
-                ],
-            }
-        ],
+        "literature_cases": [{"case_id": "paper.1"}],
         "adjustable_params": {"purge_level": {"default": 2}},
         "baseline_params": {"purge_level": 2},
         "baseline_overrides": {},
@@ -44,123 +37,120 @@ def _prompt(*, task: str = "recommend_initial") -> dict:
     return payload
 
 
-def _response(**entry_overrides) -> dict:
-    entry = {
-        "value": 1,
-        "observation_ids": ["pf_het"],
-        "guidance_ids": ["hifiasm.purging.heterozygosity.v1"],
-        "literature_anchors": [
-            {"case_id": "paper.1", "quote_ids": ["quote.parameter"]}
-        ],
-        "expected_effect": "Reduce the risk of purging true haplotypes.",
-        "tradeoffs": ["May retain more alternate sequence."],
-        "confidence": "medium",
-        "reason": "High heterozygosity motivates a conservative purge setting.",
-        **entry_overrides,
-    }
-    return {
-        "sample_diagnosis": {
-            "effect_areas": ["purging"],
-            "summary": "The sample is heterozygous.",
+def test_minimal_patch_is_the_canonical_model_contract() -> None:
+    result = normalize_parameter_recommendation(
+        {
+            "parameter_patch": {"purge_level": 1},
+            "summary": "Use conservative purging.",
         },
-        "parameter_patch": {"purge_level": entry},
-        "summary": "Use a conservative purge setting.",
-    }
-
-
-def test_normalizes_sparse_patch_and_keeps_cards_by_reference() -> None:
-    result = normalize_parameter_recommendation(_response(), _prompt())
+        _prompt(),
+    )
 
     assert result["parameter_patch"] == {"purge_level": 1}
     assert result["params"] == {"purge_level": 1}
     assert result["effective_params"] == {"purge_level": 1}
     assert result["execution_params"] == {"purge_level": 1}
-    assert result["used_literature_case_ids"] == ["paper.1"]
-    assert "quote" not in result["parameter_reasoning"]["purge_level"]
+    assert result["parameter_reasoning"] == {"purge_level": {}}
+    assert result["sample_diagnosis"]["summary"] == "Use conservative purging."
 
 
-def test_mechanistic_extrapolation_does_not_require_a_paper_case() -> None:
-    response = _response(literature_anchors=[])
+def test_old_rich_response_is_accepted_but_evidence_references_are_not_a_contract() -> None:
+    result = normalize_parameter_recommendation(
+        {
+            "sample_diagnosis": {"effect_areas": ["purging"]},
+            "parameter_patch": {
+                "purge_level": {
+                    "value": 1,
+                    "observation_ids": ["pf_truncated_or_invented"],
+                    "guidance_ids": ["invented.guidance"],
+                    "literature_anchors": [{"case_id": "invented.case", "quote_ids": ["q"]}],
+                    "expected_effect": "Preserve divergent sequence.",
+                    "tradeoffs": "May retain alternate sequence.",
+                    "confidence": "medium",
+                    "reason": "Use a cautious first attempt.",
+                }
+            },
+            "summary": "Use conservative purging.",
+        },
+        _prompt(contract="literature_patch_v1"),
+    )
 
-    result = normalize_parameter_recommendation(response, _prompt())
-
+    assert result["parameter_patch"] == {"purge_level": 1}
     assert result["used_literature_case_ids"] == []
+    assert result["parameter_reasoning"]["purge_level"] == {
+        "expected_effect": "Preserve divergent sequence.",
+        "tradeoffs": ["May retain alternate sequence."],
+        "confidence": "medium",
+        "reason": "Use a cautious first attempt.",
+    }
+
+
+def test_summary_and_sample_diagnosis_are_optional() -> None:
+    result = normalize_parameter_recommendation(
+        {"parameter_patch": {"purge_level": 1}},
+        _prompt(),
+    )
+
+    assert result["summary"] == "LLM proposed 1 parameter change(s) for human review."
+    assert result["sample_diagnosis"] == {
+        "effect_areas": [],
+        "summary": result["summary"],
+    }
+
+
+@pytest.mark.parametrize("field", ["params", "parameters", "recommended_params"])
+def test_common_patch_labels_are_accepted(field: str) -> None:
+    result = normalize_parameter_recommendation({field: {"purge_level": 1}}, _prompt())
+
     assert result["parameter_patch"] == {"purge_level": 1}
 
 
-def test_guidance_can_support_an_adjacent_parameter_and_tradeoff_string_is_normalized() -> None:
-    prompt = _prompt()
-    prompt["adjustable_params"] = {"read_length_cutoff": {"default": 0}}
-    prompt["baseline_params"] = {"read_length_cutoff": 0}
-    response = _response(tradeoffs="May discard genuine short molecules.")
-    entry = response["parameter_patch"].pop("purge_level")
-    response["parameter_patch"]["read_length_cutoff"] = entry
+def test_direct_top_level_parameter_mapping_is_accepted() -> None:
+    result = normalize_parameter_recommendation(
+        {"purge_level": 1, "summary": "Use conservative purging."},
+        _prompt(),
+    )
 
-    result = normalize_parameter_recommendation(response, prompt)
-
-    assert result["parameter_patch"] == {"read_length_cutoff": 1}
-    assert result["parameter_reasoning"]["read_length_cutoff"]["guidance_ids"] == [
-        "hifiasm.purging.heterozygosity.v1"
-    ]
-    assert result["parameter_reasoning"]["read_length_cutoff"]["tradeoffs"] == [
-        "May discard genuine short molecules."
-    ]
+    assert result["parameter_patch"] == {"purge_level": 1}
 
 
-def test_missing_diagnosis_summary_uses_top_level_summary() -> None:
-    response = _response()
-    response["sample_diagnosis"] = {
-        "effect_areas": ["purging"],
-        "observation_ids": ["pf_het"],
-        "tradeoffs": ["May retain more alternate sequence."],
-    }
-
-    result = normalize_parameter_recommendation(response, _prompt())
-
-    assert result["sample_diagnosis"] == {
-        "effect_areas": ["purging"],
-        "summary": "Use a conservative purge setting.",
-    }
-
-
-def test_retry_carries_previous_explicit_overrides_and_applies_sparse_patch() -> None:
+def test_retry_carries_previous_overrides_and_defaults_disposition() -> None:
     prompt = _prompt(task="retry_after_review_failure")
     prompt["adjustable_params"]["kmer_length"] = {"default": 51}
     prompt["baseline_params"] = {"purge_level": 1, "kmer_length": 51}
-    prompt["baseline_overrides"] = {"purge_level": 1}
-    response = _response(value=2)
-    response["retry_disposition"] = "retry"
 
-    result = normalize_parameter_recommendation(response, prompt)
+    result = normalize_parameter_recommendation(
+        {"parameter_patch": {"purge_level": 2}},
+        prompt,
+    )
 
     assert result["effective_params"] == {"purge_level": 2, "kmer_length": 51}
     assert result["execution_params"] == {"purge_level": 2}
+    assert result["retry_disposition"] == "retry"
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"observation_ids": ["missing"]}, "observations absent"),
-        ({"guidance_ids": ["missing"]}, "guidance absent"),
-        (
-            {"literature_anchors": [{"case_id": "paper.1", "quote_ids": ["missing"]}]},
-            "quotes absent",
-        ),
-    ],
-)
-def test_rejects_invented_reference_ids(overrides, message) -> None:
-    with pytest.raises(ValueError, match=message):
-        normalize_parameter_recommendation(_response(**overrides), _prompt())
+def test_retry_without_patch_defaults_to_expert_review() -> None:
+    result = normalize_parameter_recommendation(
+        {"parameter_patch": {}},
+        _prompt(task="retry_after_execution_failure"),
+    )
+
+    assert result["retry_disposition"] == "expert_review"
 
 
-def test_retry_stop_requires_empty_patch() -> None:
-    response = _response()
-    response["retry_disposition"] = "stop"
-
-    with pytest.raises(ValueError, match="cannot include"):
+def test_non_adjustable_parameter_is_still_rejected() -> None:
+    with pytest.raises(ValueError, match="non-L2 parameters"):
         normalize_parameter_recommendation(
-            response,
-            _prompt(task="retry_after_execution_failure"),
+            {"parameter_patch": {"threads": 128}},
+            _prompt(),
+        )
+
+
+def test_rich_entry_without_value_is_rejected() -> None:
+    with pytest.raises(ValueError, match="containing value"):
+        normalize_parameter_recommendation(
+            {"parameter_patch": {"purge_level": {"reason": "missing value"}}},
+            _prompt(),
         )
 
 

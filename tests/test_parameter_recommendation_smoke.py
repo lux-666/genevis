@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import app.diagnostics.parameter_recommendation_smoke as smoke
+import app.stages.assembly.decision as assembly_decision
 from app.diagnostics.parameter_recommendation_smoke import (
     evaluate_parameter_prompt,
     load_replay_inputs,
@@ -15,6 +17,7 @@ from app.domains.assembly.parameter_recommendation import (
     normalize_parameter_recommendation,
 )
 from app.stages.assembly.decision import AssemblyDecisionResult
+from app.stages.assembly.decision import AssemblyDecisionRequest, make_assembly_decision
 
 
 def _payload() -> dict:
@@ -22,7 +25,14 @@ def _payload() -> dict:
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": "hifiasm_ont",
         "task": "recommend_initial",
-        "observations": [{"id": "pf_het", "name": "heterozygosity", "value": 0.01}],
+        "observations": [
+            {
+                "id": "pf_het",
+                "section": "genome_survey",
+                "name": "heterozygosity",
+                "value": 0.01,
+            }
+        ],
         "method_guidance": [],
         "literature_cases": [],
         "adjustable_params": {"purge_level": {"default": 2}},
@@ -35,19 +45,7 @@ def _payload() -> dict:
 def _model_response(payload: dict) -> dict:
     return normalize_parameter_recommendation(
         {
-            "sample_diagnosis": {"effect_areas": ["purging"]},
-            "parameter_patch": {
-                "purge_level": {
-                    "value": 1,
-                    "observation_ids": ["pf_het"],
-                    "guidance_ids": [],
-                    "literature_anchors": [],
-                    "expected_effect": "Preserve divergent sequence.",
-                    "tradeoffs": ["May retain alternate sequence."],
-                    "confidence": "medium",
-                    "reason": "Heterozygosity favors conservative purging.",
-                }
-            },
+            "parameter_patch": {"purge_level": 1},
             "summary": "Use conservative purging.",
         },
         payload,
@@ -88,6 +86,27 @@ def test_probe_preserves_model_parse_failure_for_diagnosis() -> None:
 
     assert result["passed"] is False
     assert result["validation"]["violations"][0]["reason"] == "ValueError: summary is required"
+
+
+def test_production_decision_accepts_fenced_minimal_json(monkeypatch) -> None:
+    class FakeModel:
+        def invoke(self, _messages):
+            return SimpleNamespace(
+                content='```json\n{"parameter_patch":{"purge_level":1}}\n```'
+            )
+
+    monkeypatch.setattr(assembly_decision, "build_chat_model", lambda: FakeModel())
+
+    result = make_assembly_decision(
+        AssemblyDecisionRequest(
+            kind="parameter_recommendation",
+            session_id="s1",
+            prompt_payload=_payload(),
+        )
+    )
+
+    assert result.valid is True
+    assert result.parsed["params"] == {"purge_level": 1}
 
 
 def test_replay_inputs_find_sibling_profile_and_verify_hash(tmp_path: Path) -> None:

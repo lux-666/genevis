@@ -42,7 +42,7 @@ Add evidence cases in `cases/*.yaml` and register them in `cases.yaml`. Cases sh
 
 Add hard validation rules in `rules/*.yaml` and register them in `rules.yaml`. Rules block unsafe or impossible values when their conditions match profile facts.
 
-Keep `SKILL.md` to heuristics and output discipline: use evidence, be conservative, return JSON, put only L2 keys under `params`, and omit uncertain L2 parameters.
+Keep `SKILL.md` to heuristics and output discipline: use the supplied evidence as input, be conservative, return JSON, put only L2 keys under `parameter_patch`, and omit uncertain L2 parameters. The model does not return observation, guidance, case, or quote IDs; provenance remains in the immutable prompt artifact and every proposed patch goes through human review.
 
 ## Prompt Payload Shape
 
@@ -58,6 +58,20 @@ Prompt tasks are `recommend_initial`, `retry_after_execution_failure`, and `retr
 ## Decision and Validation Boundary
 
 `recommend_assembly_parameters()` routes parameter recommendation through `make_assembly_decision()` with `kind="parameter_recommendation"`. Route selection and parameter recommendation therefore share the assembly decision/advisor boundary rather than calling a model directly from stage-local code.
+
+The canonical model response is intentionally small:
+
+```json
+{
+  "parameter_patch": {
+    "purge_level": 1,
+    "read_length_cutoff": 5000
+  },
+  "summary": "Optional explanation for the human reviewer."
+}
+```
+
+`summary` is optional. For replay compatibility the normalizer also accepts the former rich per-parameter objects and common wrapper names such as `params` or `recommended_params`, but evidence references are neither required nor validated.
 
 `validate_recommended_parameters()` accepts only a JSON object whose keys are cataloged L2 parameters. It rejects unknown keys, L0/L1 keys, bad types, out-of-range values, enum violations, and matching hard-rule violations. Invalid recommendations set `parameter_validation_failed` and stop before freeze/run.
 

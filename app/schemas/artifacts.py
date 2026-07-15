@@ -192,7 +192,7 @@ class ParameterAttempt(BaseModel):
     review_failure: dict[str, Any] | None = None
     review_outcome: dict[str, Any] | None = None
     attempt_kind: Literal["initial", "retry"] = "initial"
-    recommendation_contract: Literal["literature_patch_v1"] = "literature_patch_v1"
+    recommendation_contract: Literal["parameter_patch_v2", "literature_patch_v1"] = "parameter_patch_v2"
     retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
     inherited_initial_attempt_id: int | None = Field(default=None, ge=0)
     inherited_initial_snapshot_ref: str | None = None
