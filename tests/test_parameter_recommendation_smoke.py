@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
+import app.diagnostics.parameter_recommendation_smoke as smoke
 from app.diagnostics.parameter_recommendation_smoke import (
     evaluate_parameter_prompt,
     load_replay_inputs,
@@ -102,3 +104,50 @@ def test_replay_inputs_find_sibling_profile_and_verify_hash(tmp_path: Path) -> N
     assert loaded_payload["method_id"] == "hifiasm_ont"
     assert resolved_profile == profile.resolve()
     assert loaded_profile == {}
+
+
+def test_cli_loads_project_dotenv_before_live_probe(tmp_path: Path, monkeypatch, capsys) -> None:
+    prompt = tmp_path / "prompt_payload.json"
+    profile = tmp_path / "input_profile.json"
+    prompt.write_text(json.dumps(_payload()), encoding="utf-8")
+    profile.write_text("{}", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "GENE_AGENT_LLM_API_KEY=smoke-secret\n"
+        "GENE_AGENT_LLM_MODEL=smoke-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GENE_AGENT_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GENE_AGENT_LLM_MODEL", raising=False)
+    observed: dict[str, str | None] = {}
+
+    def fake_run_probe(**_kwargs):
+        observed["api_key"] = os.environ.get("GENE_AGENT_LLM_API_KEY")
+        return (
+            {
+                "method_id": "hifiasm_ont",
+                "attempt_count": 1,
+                "passed_count": 1,
+                "failed_count": 0,
+                "passed": True,
+                "attempts": [],
+            },
+            tmp_path / "summary.json",
+        )
+
+    monkeypatch.setattr(smoke, "run_probe", fake_run_probe)
+
+    code = smoke.main(
+        [
+            "--prompt-payload",
+            str(prompt),
+            "--input-profile",
+            str(profile),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert code == 0
+    assert observed["api_key"] == "smoke-secret"
+    assert "llm_model: smoke-model" in capsys.readouterr().out

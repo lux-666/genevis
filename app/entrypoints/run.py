@@ -24,6 +24,9 @@ from app.domains.assembly.selection import (
     resolve_read_type,
 )
 from app.control.ledger import Ledger
+from app.entrypoints.environment import (
+    load_dotenv_without_override as _load_dotenv_without_override,
+)
 from app.schemas.entry import EntryRequest
 from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
@@ -1054,25 +1057,6 @@ def _filter_review_decisions(decisions: list[dict], filters: dict[str, str]) -> 
     if not decided_by:
         return decisions
     return [decision for decision in decisions if decision.get("decided_by") == decided_by]
-
-
-def _load_dotenv_without_override() -> None:
-    for path in _candidate_dotenv_paths():
-        if not path.exists():
-            continue
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        return
-
-
-def _candidate_dotenv_paths() -> list[Path]:
-    cwd = Path(os.getcwd()).resolve()
-    repo_root = Path(__file__).resolve().parents[2]
-    return list(dict.fromkeys([cwd / ".env", repo_root / ".env"]))
 
 
 def _run_resume(args: argparse.Namespace) -> int:

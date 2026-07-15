@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from app.entrypoints.environment import load_dotenv_without_override
+from app.llm.config import load_llm_profile
 from app.stages.assembly.decision import (
     AssemblyDecisionRequest,
     AssemblyDecisionResult,
@@ -229,6 +231,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        dotenv_ref = load_dotenv_without_override()
+        llm_profile = load_llm_profile()
+        if not llm_profile.api_key:
+            raise ValueError(
+                "GENE_AGENT_LLM_API_KEY is not exported and was not found in the project .env"
+            )
         summary, summary_ref = run_probe(
             prompt_ref=args.prompt_payload,
             input_profile_ref=args.input_profile,
@@ -240,6 +248,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     print(f"method_id: {summary['method_id']}")
+    print(f"llm_model: {llm_profile.model}")
+    print(f"llm_base_url_configured: {bool(llm_profile.base_url)}")
+    print(f"dotenv_ref: {dotenv_ref or 'none (exported environment only)'}")
     print(f"attempts: {summary['attempt_count']}")
     print(f"passed: {summary['passed_count']}")
     print(f"failed: {summary['failed_count']}")
