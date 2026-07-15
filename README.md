@@ -64,7 +64,7 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 | assembly | Flye, NextDenovo | Canu, hifiasm |
 | assembly_review | QUAST, BUSCO evidence | Merqury, coverage/contamination checks |
 | assembly_dedup | purge_dups-style candidate handoff | broader purge/polish loops |
-| hic_scaffolding | Juicer + 3D-DNA, YaHS | raw Hi-C BAM generation gaps |
+| hic_scaffolding | AutoHiC (internally Juicer + 3D-DNA + DL correction) | GPU/HPC real-data validation |
 | t2t | minimap2 evidence, conservative telomere patch handoff | broader gap-closing strategies |
 | repeat_annotation | RepeatMasker with provided libraries | EDTA, RepeatModeler, TRF |
 | gene_annotation | Miniprot, AUGUSTUS, EVM merge, BUSCO signal | BRAKER3, MAKER, HISAT2/StringTie/IsoQuant, GeMoMa |
@@ -282,9 +282,11 @@ artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
   直接把主线推进到 `assembly_review`，并记录 `read_qc`、`genome_survey`、
   `assembly` 的 skip reason。
 - **Hi-C scaffolding**：`hic_scaffolding` 会读取 inventory 里的
-  `target_assembly_level`。如果没有 Hi-C reads/alignment/merged_nodups，会写
+  `target_assembly_level`。如果没有成对 Hi-C R1/R2 reads，会写
   `skipped_no_hic`；如果目标不是 `chromosome`，会写
   `skipped_not_chromosome_level`，下游 annotation 继续使用 pre-Hi-C assembly。
+  chromosome 目标会以 AutoHiC 作为唯一候选；它内部完成 Juicer mapping、
+  3D-DNA scaffolding、深度学习纠错、染色体划分和 HTML report 生成。
 - **human gates**：`assembly_review`、`hic_scaffolding`、`t2t`、`gene_annotation`
   等阶段会在需要人工判断时进入 `blocked_human`，并写 review request artifact。
 - **provenance gates**：`function_annotation` 需要明确的 database provenance；

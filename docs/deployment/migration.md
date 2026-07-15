@@ -78,13 +78,13 @@ the descriptors for tools whose stages are still candidate-only. Channels:
 | genomescope2 ≥ 2.0 | `genomescope2` | `genome_survey` |
 | flye ≥ 2.9 | `flye` | `assembly` |
 | quast ≥ 5.2 | `quast.py` | `assembly_review` |
-| yahs ≥ 1.2 | `yahs` | `hic_scaffolding` |
+| AutoHiC ≥ 1.3.3 | dedicated `autohic` conda env plus AutoHiC/Juicer/3D-DNA install roots | `hic_scaffolding` |
 | repeatmasker ≥ 4.1 | `RepeatMasker` | `repeat_annotation` |
 
 ```bash
 conda create -n env_geno_exec -y
 conda install -n env_geno_exec -c bioconda -c conda-forge -y \
-  seqkit jellyfish genomescope2 flye quast yahs repeatmasker
+  seqkit jellyfish genomescope2 flye quast repeatmasker
 ```
 
 Notes:

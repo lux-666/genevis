@@ -12,7 +12,7 @@
 #   fallback_env: env_geno_exec
 #   fallback_prefix: /opt/conda/envs/env_geno_exec
 #
-# All bioinformatics tools (seqkit, flye, quast.py, yahs, RepeatMasker, ...)
+# Most bioinformatics tools (seqkit, flye, quast.py, RepeatMasker, ...)
 # are expected to live in a single shared conda env `env_geno_exec`. The
 # `gene_agent` env is reserved for the orchestrator itself and is not a
 # candidate host for tool binaries.
@@ -22,7 +22,7 @@ default:
   fallback_env: env_geno_exec
   # fallback_prefix: /opt/conda/envs/env_geno_exec  # alternative: use abs path
 
-# External software packages (Juicer, 3D-DNA) are standalone git-clone
+# AutoHiC, Juicer, and 3D-DNA are standalone git-clone
 # installs, not conda-env PATH tools. Declare each as a top-level entry under
 # `packages:` with `install_root` (absolute repo path) and `canary_paths`
 # (files relative to install_root). Preflight validates root + canary by
@@ -35,6 +35,14 @@ default:
 #   3D-DNA: 180922 (https://github.com/aidenlab/3d-dna)
 #   juicer_tools: 1.22.01 (https://github.com/aidenlab/juicer/wiki/Download)
 packages:
+  autohic:
+    install_root: /data/work/softs/AutoHiC
+    entrypoints:
+      - autohic.py
+    canary_paths:
+      - autohic.py
+      - src/common/run.sh
+      - src/models/cfgs/error_model.py
   juicer:
     install_root: /data/work/softs/juicer        # repo root containing CPU/ and misc/
     conform_on_bootstrap: true                   # bootstrap builds scripts/ and links the jar
@@ -132,16 +140,15 @@ methods:
     conda_env: env_geno_exec
     required_tools:
       - busco
-  hic_scaffolding.candidate.yahs:
-    conda_env: env_geno_exec
+  hic_scaffolding.candidate.autohic:
+    conda_env: autohic
     required_tools:
-      - yahs
-  hic_scaffolding.candidate.juicer_3ddna_juicebox:
-    conda_env: env_geno_exec
-    required_tools:
+      - python3.9
       - bwa
       - java
+      - quast.py
     package_tools:
+      - autohic
       - juicer
       - three_d_dna
   t2t.alignment.minimap2:

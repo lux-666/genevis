@@ -27,7 +27,7 @@ The graph runs end-to-end through every documented stage. Real local
 execution is opt-in per stage and is currently wired for: `read_qc`
 (SeqKit), `genome_survey` (Jellyfish + GenomeScope2), `assembly` (Flye),
 `assembly_review` (QUAST + BUSCO when offline lineage provenance is supplied),
-`hic_scaffolding` (Juicer + 3D-DNA or YaHS), `repeat_annotation` (RepeatMasker for provided
+`hic_scaffolding` (AutoHiC, internally Juicer + 3D-DNA), `repeat_annotation` (RepeatMasker for provided
 libraries), `gene_annotation` (Miniprot + AUGUSTUS runners, EVM merge,
 BUSCO), `function_annotation` (DIAMOND blastp). Real-data smoke validation
 for the annotation runners is pending (Phase 7 task 08). All remaining
@@ -642,7 +642,7 @@ gene-agent resume --session-id <SESSION> --data-dir /absolute/path/to/data --dec
   this).
 - Requested-stage routing is not implemented; the CLI flag is
   intentionally not exposed.
-- SeqKit, Flye, QUAST, and YaHS are not installed in the local Mac
+- SeqKit, Flye, QUAST, and AutoHiC are not installed in the local Mac
   verification environment; tests use temporary fake binaries for
   success paths and cover missing/failing binary behavior.
 - `scripts/server_phase4_smoke.sh` is the only server-side smoke entry

@@ -1,0 +1,51 @@
+method_name: hic_scaffolding.candidate.autohic
+stage: hic_scaffolding
+package_ref: autohic
+goal: "Run AutoHiC end to end: Juicer mapping, 3D-DNA scaffolding, deep-learning error correction, chromosome assignment, and report generation."
+required_inputs:
+  - name: contig_assembly
+    type: draft_assembly
+    description: "Adopted contig-level FASTA produced by the assembly/review stages; AutoHiC calls this REFERENCE_GENOME."
+  - name: hic_reads
+    type: hic_reads_registered
+    description: "Materialized paired-end Hi-C R1/R2 reads."
+expected_outputs:
+  - name: chromosome_scaffolded_assembly
+    type: chromosome_scaffolded_assembly
+    description: "AutoHiC chromosome-level FASTA candidate."
+  - name: contact_map
+    type: hic_contact_map
+    description: "Final chromosome-assigned .hic contact map."
+  - name: assembly_file
+    type: hic_assembly
+    description: "Final chromosome-assigned .assembly file."
+  - name: html_report
+    type: html_report
+    description: "AutoHiC before/after correction report."
+review_rules:
+  - chromosome_fasta_hic_assembly_and_report_exist
+  - geneagent_review_gate_accepts_candidate
+human_review_triggers:
+  - autohic_contact_map_review_required
+  - chromosome_assignment_review_required
+resource_hints:
+  cpu_cores: 40
+  memory_gb: 128.0
+  gpu_required: false
+  walltime_hours: 48.0
+planner:
+  required_parameters:
+    - restriction_enzyme
+    - error_model_ref
+    - chromosome_model_ref
+  parameter_defaults:
+    threads: 10
+    number_of_edit_rounds: 2
+    translocation_adjust: true
+    inversion_adjust: true
+    debris_adjust: false
+    error_max_epoch: 5
+    error_min_len: 15000
+    error_max_len: 20000000
+    error_filter_score: 0.9
+    error_filter_iou_score: 0.8

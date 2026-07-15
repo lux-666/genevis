@@ -70,16 +70,10 @@ BUSCO_LINEAGE_NAME="actinopterygii_odb10"
 
 # ---- Hi-C scaffolding ----
 HIC_RESTRICTION_ENZYME="DpnII"
-HIC_CHROMOSOME_COUNT=25
-# Optional: Juicer installation root that contains common/chimeric_sam.awk.
-# For the upstream CPU layout, this is usually /path/to/juicer/CPU.
-# Leave empty to auto-detect from the configured conda env and juicer.sh location.
-HIC_JUICER_SCRIPTS_DIR=""
-# Path to chrom.sizes file (required for Juicer+3D-DNA execution).
-# If empty, Hi-C scaffolding will be planned but not executed.
-# You can generate one from your assembly:
-#   samtools faidx assembly.fasta && cut -f1,2 assembly.fasta.fai > chrom.sizes
-HIC_CHROM_SIZES=""
+# AutoHiC requires both pretrained models. They are passed through to
+# ERROR_PRETRAINED_MODEL and CHR_PRETRAINED_MODEL in cfg-autohic.txt.
+HIC_AUTOHIC_ERROR_MODEL="/path/to/error_detection_model.pth"
+HIC_AUTOHIC_CHROMOSOME_MODEL="/path/to/chromosome_assignment_model.pth"
 
 # ---- Test output root ----
 # All test sessions will be created under this directory.

@@ -757,52 +757,58 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertFalse(config.read_qc.length_filter.approved)
 
 
-    def test_hic_3ddna_parameters_are_accepted(self):
+    def test_autohic_parameters_are_accepted(self):
         config = RunConfig.model_validate(
             {
                 "local_exec": ["hic_scaffolding"],
                 "hic_scaffolding": {
-                    "method": "juicer_3ddna_juicebox",
-                    "input_mode": "merged_nodups",
-                    "chromosome_count": 22,
-                    "merged_nodups_ref": "/data/merged_nodups.txt",
-                    "juicer_3ddna_parameters": {"three_dna_extra_args": ["-r", "2"]},
-                },
-            }
-        )
-
-        self.assertEqual(config.hic_scaffolding.method, "juicer_3ddna_juicebox")
-        self.assertEqual(config.hic_scaffolding.chromosome_count, 22)
-
-    def test_hic_3ddna_raw_reads_allows_auto_chrom_sizes(self):
-        config = RunConfig.model_validate(
-            {
-                "local_exec": ["hic_scaffolding"],
-                "hic_scaffolding": {
-                    "method": "juicer_3ddna_juicebox",
-                    "input_mode": "raw_reads",
-                    "chromosome_count": 22,
-                    "juicer_3ddna_parameters": {
-                        "restriction_enzyme": "DpnII",
-                        "chrom_sizes_ref": "auto",
-                        "threads": 4,
+                    "method": "autohic",
+                    "autohic_parameters": {
+                        "restriction_enzyme": "MboI",
+                        "error_model_ref": "/models/error_model.pth",
+                        "chromosome_model_ref": "/models/chr_model.pth",
+                        "threads": 40,
+                        "debris_adjust": True,
                     },
                 },
             }
         )
 
-        assert config.hic_scaffolding is not None
-        assert config.hic_scaffolding.juicer_3ddna_parameters is not None
-        self.assertEqual(config.hic_scaffolding.juicer_3ddna_parameters.chrom_sizes_ref, "auto")
+        self.assertEqual(config.hic_scaffolding.method, "autohic")
+        assert config.hic_scaffolding.autohic_parameters is not None
+        self.assertEqual(config.hic_scaffolding.autohic_parameters.threads, 40)
+        self.assertTrue(config.hic_scaffolding.autohic_parameters.debris_adjust)
+
+    def test_autohic_rejects_inverted_error_length_window(self):
+        with self.assertRaises(ValidationError):
+            RunConfig.model_validate(
+                {
+                    "hic_scaffolding": {
+                        "autohic_parameters": {
+                            "restriction_enzyme": "DpnII",
+                            "error_model_ref": "/models/error_model.pth",
+                            "chromosome_model_ref": "/models/chr_model.pth",
+                            "error_min_len": 20_000,
+                            "error_max_len": 10_000,
+                        }
+                    }
+                }
+            )
 
     def test_hic_plan_candidate_allows_missing_execution_inputs(self):
         candidate = HiCScaffoldingPlanCandidate(
-            method="juicer_3ddna_juicebox",
-            input_mode="merged_nodups",
+            method="autohic",
         )
 
         self.assertEqual(candidate.status, "needs_clarification")
-        self.assertEqual(candidate.missing_fields, ["chromosome_count", "merged_nodups_ref"])
+        self.assertEqual(
+            candidate.missing_fields,
+            [
+                "autohic_parameters.restriction_enzyme",
+                "autohic_parameters.error_model_ref",
+                "autohic_parameters.chromosome_model_ref",
+            ],
+        )
 
     def test_local_hic_execution_rejects_incomplete_candidate(self):
         with self.assertRaises(ValidationError) as ctx:
@@ -810,8 +816,7 @@ class RunConfigSchemaTests(unittest.TestCase):
                 {
                     "local_exec": ["hic_scaffolding"],
                     "hic_scaffolding": {
-                        "method": "juicer_3ddna_juicebox",
-                        "input_mode": "merged_nodups",
+                        "method": "autohic",
                     },
                 }
             )

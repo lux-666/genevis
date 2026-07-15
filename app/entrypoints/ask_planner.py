@@ -10,7 +10,6 @@ import yaml
 
 from pydantic import ValidationError
 
-from app.reference.ncbi_metazoa import build_related_species_evidence_pack, species_name_from_metadata
 from app.schemas.ask_plan import (
     AskClarificationRequest,
     AskClarificationResponse,
@@ -18,7 +17,7 @@ from app.schemas.ask_plan import (
     save_ask_plan,
 )
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
+from app.schemas.run_config import AutoHiCRunParameters, HiCScaffoldingPlanCandidate, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.review.gates import planned_review_gates
@@ -122,7 +121,7 @@ def _default_methods_for_stage(stage: str) -> str | list[str] | None:
     if stage == "read_qc":
         return list(READ_QC_DEFAULT_METHODS)
     if stage == "hic_scaffolding":
-        return ["hic_scaffolding.candidate.juicer_3ddna_juicebox", "hic_scaffolding.candidate.yahs"]
+        return ["hic_scaffolding.candidate.autohic"]
     if stage == "repeat_annotation":
         return ["repeat_annotation.masking.repeatmasker"]
     if stage == "gene_annotation":
@@ -387,21 +386,9 @@ def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
         "methods": [candidate.method for candidate in ready],
         "method": ready[0].method,
     }
-    juicer = next((candidate for candidate in ready if candidate.method == "juicer_3ddna_juicebox"), None)
-    if juicer:
-        payload.update(
-            {
-                "input_mode": juicer.input_mode,
-                "chromosome_count": juicer.chromosome_count,
-                "merged_nodups_ref": juicer.merged_nodups_ref,
-                "juicer_3ddna_parameters": juicer.juicer_3ddna_parameters.model_dump(exclude_none=True)
-                if juicer.juicer_3ddna_parameters
-                else None,
-            }
-        )
-    yahs = next((candidate for candidate in ready if candidate.method == "yahs"), None)
-    if yahs:
-        payload["hic_alignment_ref"] = yahs.hic_alignment_ref
+    candidate = ready[0]
+    if candidate.autohic_parameters:
+        payload["autohic_parameters"] = candidate.autohic_parameters.model_dump(exclude_none=True)
     return {key: value for key, value in payload.items() if value is not None}
 
 
@@ -412,33 +399,12 @@ def _hic_scaffolding_plan_candidates(plan: AskPlanState) -> list[HiCScaffoldingP
     candidates: list[HiCScaffoldingPlanCandidate] = []
     for method in methods:
         params = dict((plan.method_parameters or {}).get(method) or {})
-        if method.endswith("juicer_3ddna_juicebox"):
-            tool_keys = {
-                "restriction_enzyme",
-                "chrom_sizes_ref",
-                "threads",
-                "juicer_command",
-                "juicer_extra_args",
-                "three_dna_command",
-                "three_dna_extra_args",
-            }
-            tool_params = {key: value for key, value in params.items() if key in tool_keys}
-            candidates.append(
-                HiCScaffoldingPlanCandidate(
-                    method="juicer_3ddna_juicebox",
-                    input_mode=params.get("input_mode"),
-                    chromosome_count=params.get("chromosome_count"),
-                    merged_nodups_ref=params.get("merged_nodups_ref"),
-                    juicer_3ddna_parameters=Juicer3DDNARunParameters.model_validate(tool_params),
-                )
+        candidates.append(
+            HiCScaffoldingPlanCandidate(
+                method="autohic",
+                autohic_parameters=AutoHiCRunParameters.model_validate(params),
             )
-        else:
-            candidates.append(
-                HiCScaffoldingPlanCandidate(
-                    method="yahs",
-                    hic_alignment_ref=params.get("hic_alignment_ref"),
-                )
-            )
+        )
     return candidates
 
 
@@ -751,16 +717,10 @@ def _method_parameter_default_sources(
 ) -> dict[str, dict[str, str]]:
     """Generate parameter default source labels. Pass manifest to avoid repeated disk loading."""
     sources: dict[str, dict[str, str]] = {}
-    species_name = _target_species_from_plan(plan, manifest=manifest)
     for method, values in defaults.items():
         method_sources: dict[str, str] = {}
         for key, value in values.items():
             source = "default"
-            if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
-                if key == "chromosome_count" and species_name:
-                    source = f"evidence: local NCBI related-species evidence for {species_name}"
-                elif key == "chrom_sizes_ref" and value == "auto":
-                    source = "auto: derive chrom.sizes from the pre-Hi-C FASTA"
             method_sources[key] = source
         if method_sources:
             sources[method] = method_sources
@@ -805,15 +765,6 @@ def _deferred_shared_parameter_summary(plan: AskPlanState, shared_defaults: dict
             "status": "awaiting_genome_survey",
         }
     }
-
-
-def _target_species_from_plan(plan: AskPlanState, *, manifest: InputManifest | None = None) -> str | None:
-    """Extract species name from plan's manifest. Pass manifest to avoid repeated disk loading."""
-    if manifest is None:
-        manifest = _load_manifest(plan.manifest_ref)
-    if not manifest:
-        return None
-    return species_name_from_metadata(dict(manifest.user_metadata or {}))
 
 
 def _stage_plan_details(
@@ -1227,28 +1178,6 @@ def _infer_parameter_defaults(
     """Infer parameter defaults for a method. Pass manifest to avoid repeated disk loading."""
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
-    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
-        # Infer chromosome_count from related species evidence
-        if "chromosome_count" not in inferred:
-            chromosome_count, species_name, evidence_notes = _infer_chromosome_count_from_related_species(plan, manifest=manifest)
-            if chromosome_count is not None:
-                inferred["chromosome_count"] = chromosome_count
-                warnings.append(
-                    "hic_scaffolding.candidate.juicer_3ddna_juicebox: "
-                    f"chromosome_count default {chromosome_count} inferred from local NCBI related-species evidence"
-                    f"{f' for {species_name}' if species_name else ''}; confirm before running"
-                )
-            elif species_name:
-                note = f"; notes: {', '.join(evidence_notes)}" if evidence_notes else ""
-                warnings.append(
-                    "hic_scaffolding.candidate.juicer_3ddna_juicebox: "
-                    f"chromosome_count evidence unavailable for {species_name}{note}"
-                )
-        # Set mode-dependent defaults
-        mode = str(((plan.method_parameters or {}).get(method) or {}).get("input_mode") or inferred.get("input_mode") or "raw_reads")
-        if mode != "merged_nodups":
-            inferred.setdefault("chrom_sizes_ref", "auto")
-            inferred.setdefault("threads", 8)
     if method == "assembly_review.eval.busco":
         provided = (plan.method_parameters or {}).get(method, {})
         lineage_path = provided.get("lineage_path") or inferred.get("lineage_path")
@@ -1268,27 +1197,6 @@ def _infer_parameter_defaults(
             if "lineage_source" not in inferred:
                 inferred["lineage_source"] = "local"
     return inferred, warnings
-
-
-def _infer_chromosome_count_from_related_species(
-    plan: AskPlanState,
-    *,
-    manifest: InputManifest | None = None,
-) -> tuple[int | None, str | None, list[str]]:
-    """Infer chromosome count from related species evidence. Pass manifest to avoid repeated disk loading."""
-    if manifest is None:
-        manifest = _load_manifest(plan.manifest_ref)
-    if not manifest:
-        return None, None, []
-    species_name = species_name_from_metadata(dict(manifest.user_metadata or {}))
-    if not species_name:
-        return None, None, []
-    pack = build_related_species_evidence_pack(species_name)
-    summary = pack.get("computed_summary") or {}
-    chromosome_count = summary.get("chromosome_count") or {}
-    mode = chromosome_count.get("mode") if isinstance(chromosome_count, dict) else None
-    notes = [str(note) for note in pack.get("notes") or []]
-    return (mode, species_name, notes) if isinstance(mode, int) and mode > 0 else (None, species_name, notes)
 
 
 def _extract_busco_version(lineage_name: str) -> str:

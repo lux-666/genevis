@@ -26,8 +26,7 @@ from app.stages.hic_scaffolding.method_application.lifecycle import hic_output a
 from app.stages.hic_scaffolding.method_application.lifecycle import update_hic_output as _update_hic_output
 
 HIC_CANDIDATE_METHODS = [
-    "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-    "hic_scaffolding.candidate.yahs",
+    "hic_scaffolding.candidate.autohic",
 ]
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
 
@@ -65,10 +64,6 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
             "final_assembly_for_downstream": final_assembly_ref,
             "hic_read_refs": [asset.get("asset_id", "") for asset in hic_assets if asset.get("asset_id")],
             "hic_read_paths": [str(asset.get("path")) for asset in hic_assets if asset.get("path")],
-            "hic_alignment_refs": [asset.get("asset_id", "") for asset in _hic_alignment_assets(state) if asset.get("asset_id")],
-            "hic_alignment_paths": [str(asset.get("path")) for asset in _hic_alignment_assets(state) if asset.get("path")],
-            "hic_merged_nodups_refs": [asset.get("asset_id", "") for asset in _hic_merged_nodups_assets(state) if asset.get("asset_id")],
-            "hic_merged_nodups_paths": [str(asset.get("path")) for asset in _hic_merged_nodups_assets(state) if asset.get("path")],
             "target_assembly_level": target_level,
             "assembly_source": source,  # Track provenance
         },
@@ -82,10 +77,6 @@ def select_hic_mode(state: TopLevelState) -> dict:
         return {}
     if not (
         hic_out.get("hic_read_refs")
-        or hic_out.get("hic_alignment_refs")
-        or hic_out.get("hic_merged_nodups_refs")
-        or hic_out.get("merged_nodups_ref")
-        or hic_out.get("hic_merged_nodups_ref")
     ):
         mode = "skipped_no_hic"
     elif hic_out.get("target_assembly_level") != "chromosome":
@@ -118,12 +109,13 @@ def plan_hic_scaffold(state: TopLevelState) -> dict:
         pre_hic_assembly_ref=hic_out["pre_hic_assembly_ref"],
         fallback_assembly_ref=hic_out["pre_hic_assembly_ref"],
         hic_read_refs=hic_out.get("hic_read_refs", []),
-        hic_alignment_refs=hic_out.get("hic_alignment_refs", []),
         candidate_methods=HIC_CANDIDATE_METHODS,
         expected_outputs={
             "hic_qc_report": str(work_dir / "hic_qc_report.json"),
             "chromosome_scaffolded_assembly": str(work_dir / "chromosome_scaffolded_assembly.fasta"),
-            "juicebox_review_bundle": str(work_dir / "juicebox_review_bundle"),
+            "contact_map": str(work_dir / "contact_map.hic"),
+            "assembly_file": str(work_dir / "chromosome.assembly"),
+            "html_report": str(work_dir / "result.html"),
         },
         notes=_hic_plan_notes(hic_out),
         metadata={},
@@ -488,47 +480,15 @@ def fail_hic_scaffolding(state: TopLevelState) -> dict:
 
 def _hic_plan_notes(hic_out: dict[str, Any]) -> list[str]:
     notes = [
-        "contact_map_policy_required",
+        "autohic_contact_map_review_required",
         "pre_hic_assembly_preserved_as_annotation_fallback",
     ]
     method = hic_out.get("primary_method") or hic_out.get("selected_method_name")
-    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox" and hic_out.get("execution_mode") == "local":
-        notes.append("juicer_3ddna_execution_requested")
-    elif method == "hic_scaffolding.candidate.yahs" and hic_out.get("execution_mode") == "local":
-        notes.append("yahs_execution_requested")
+    if method == "hic_scaffolding.candidate.autohic" and hic_out.get("execution_mode") == "local":
+        notes.append("autohic_execution_requested")
     else:
         notes.append("execution_deferred_to_method_specific_task")
     return notes
-
-
-def _hic_alignment_assets(state: TopLevelState) -> list[dict[str, Any]]:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return []
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return []
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    return [
-        asset
-        for asset in registry.get("assets", [])
-        if str(asset.get("asset_type", "")) in {"hic_alignment_bam", "hic_alignments_bam", "hic_alignment"}
-    ]
-
-
-def _hic_merged_nodups_assets(state: TopLevelState) -> list[dict[str, Any]]:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return []
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return []
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    return [
-        asset
-        for asset in registry.get("assets", [])
-        if str(asset.get("asset_type", "")) in {"hic_merged_nodups", "merged_nodups_txt", "juicer_merged_nodups"}
-    ]
 
 
 def _local_method_enabled(hic_out: dict[str, Any]) -> bool:

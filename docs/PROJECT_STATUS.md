@@ -62,7 +62,7 @@ Stages in pipeline order, with the methods registered under each stage's
 | `assembly` | `assembly.candidate.flye`, `assembly.candidate.hifiasm`, `assembly.candidate.nextdenovo` | Candidate assemblers; route/candidate selection may open a human gate. |
 | `assembly_dedup` | `assembly_dedup.purge_dups` | Haplotig / duplicate purging. |
 | `assembly_review` | `assembly_review.eval.quast`, `assembly_review.eval.busco` | Evaluation methods feeding a mandatory review gate. |
-| `hic_scaffolding` | `hic_scaffolding.candidate.yahs`, `hic_scaffolding.candidate.juicer_3ddna_juicebox` | Hi-C scaffolding candidates; soft-blocks when execution mode is non-local. |
+| `hic_scaffolding` | `hic_scaffolding.candidate.autohic` | End-to-end AutoHiC candidate; emits chromosome FASTA, `.hic`, `.assembly`, and HTML report, then blocks at the GeneAgent adoption gate. |
 | `t2t` | `t2t.alignment.minimap2` | Telomere-aware alignment / patch planning. |
 | `repeat_annotation` | `repeat_annotation.masking.repeatmasker` | Repeat masking. |
 | `gene_annotation` | `gene_annotation.candidate.augustus`, `gene_annotation.candidate.miniprot` | Candidate gene predictors. See internal-helper note below. |

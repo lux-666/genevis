@@ -162,15 +162,15 @@ def collect_method_artifacts(
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
                     "final_assembly_for_annotation": output.get("final_assembly_for_annotation"),
                     "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
+                    "contact_map_ref": attempt.metadata.get("contact_map"),
+                    "assembly_file_ref": attempt.metadata.get("assembly_file"),
+                    "html_report_ref": attempt.metadata.get("html_report"),
                     "stdout_path": result.get("stdout_path"),
                     "stderr_path": result.get("stderr_path"),
                     "review_required": True,
                     "execution_metadata": execution_metadata or {},
                     "attempt_metadata": attempt.metadata,
-                    "notes": [
-                        "contact_map_policy_required_before_promotion",
-                        "pre_hic_assembly_preserved_as_annotation_fallback",
-                    ],
+                    "notes": ["geneagent_review_required_before_promotion", "pre_hic_assembly_preserved_as_annotation_fallback"],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -188,7 +188,7 @@ def collect_method_artifacts(
                     "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
                     "return_code": result.get("return_code"),
                     "execution_metadata": execution_metadata or {},
-                    "notes": ["qc_thresholds_not_applied", "contact_map_policy_required_before_promotion"],
+                    "notes": ["qc_thresholds_not_applied", "geneagent_review_required_before_promotion"],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -213,11 +213,14 @@ def collect_method_artifacts(
                 ),
             ]
         )
-        notes = unique_refs([*notes, f"{lifecycle.name}_executed", "contact_map_policy_required_before_promotion"])
+        notes = unique_refs([*notes, f"{lifecycle.name}_executed", "geneagent_review_required_before_promotion"])
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {
             "status": "executed",
             "scaffold_fasta": str(attempt.metadata["scaffold_fasta"]),
+            "contact_map": attempt.metadata.get("contact_map"),
+            "assembly_file": attempt.metadata.get("assembly_file"),
+            "html_report": attempt.metadata.get("html_report"),
             "review_bundle_ref": str(review_bundle_ref),
             "qc_report_ref": str(qc_report_ref),
         }

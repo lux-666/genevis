@@ -54,9 +54,11 @@ ASSEMBLY_CANDIDATE_COMPARISON = "assembly_review.candidate_comparison"
 ASSEMBLY_CANDIDATE_COMPARISON_REPORT = "assembly_review.candidate_comparison_report"
 HIC_SCAFFOLD_PLAN = "hic_scaffolding.plan"
 HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
-HIC_SCAFFOLD_AGP = "hic_scaffolding.scaffold_agp"
 HIC_REVIEW_BUNDLE = "hic_scaffolding.review_bundle"
 HIC_QC_REPORT = "hic_scaffolding.qc_report"
+HIC_CONTACT_MAP = "hic_scaffolding.contact_map"
+HIC_ASSEMBLY_FILE = "hic_scaffolding.assembly"
+HIC_HTML_REPORT = "hic_scaffolding.html_report"
 T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
 T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
 T2T_TELOMERIC_READS = "t2t.telomeric_reads"
@@ -425,7 +427,6 @@ class HiCScaffoldPlan(BaseModel):
     pre_hic_assembly_ref: str
     fallback_assembly_ref: str
     hic_read_refs: list[str] = Field(default_factory=list)
-    hic_alignment_refs: list[str] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)
     expected_outputs: dict[str, str] = Field(default_factory=dict)
     review_required: bool = True

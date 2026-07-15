@@ -3,18 +3,18 @@
 #  Test 06 — Hi-C Scaffolding: interactive planning + execution
 # ============================================================
 #  What it tests:
-#    1. Juicer+3D-DNA method subgraph (raw_reads mode)
+#    1. AutoHiC method subgraph (internally Juicer + 3D-DNA)
 #    2. Hi-C shell script generation correctness
 #    3. RunConfig Hi-C schema validation
-#    4. choose_many method selection (was choose_one)
-#    5. Interactive parameter collection for Juicer
+#    4. AutoHiC-only method selection
+#    5. Interactive parameter collection for enzyme and pretrained models
 #    6. Hi-C artifacts published to new layout
 #    7. Fallback to pre-Hi-C assembly on failure
 #    8. Unit tests pass
 #
 #  Prerequisites:
 #    - An assembly FASTA (from Test 04 or existing)
-#    - Hi-C paired reads (HIC_R1, HIC_R2 in hpc_env.sh)
+#    - Hi-C paired reads plus AutoHiC error/chromosome models
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -33,12 +33,6 @@ if [[ -n "${REVIEW_ASSEMBLY:-}" ]] && ! grep -q '^>' "$REVIEW_ASSEMBLY" 2>/dev/n
     summary "Test 06: Hi-C Scaffolding (invalid explicit assembly)" || true
     exit 1
 fi
-if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
-    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
-    summary "Test 06: Hi-C Scaffolding (invalid explicit chrom.sizes)" || true
-    exit 1
-fi
-
 if [[ -z "${HIC_R1:-}" && -z "${HIC_R2:-}" ]]; then
     warn "Hi-C reads not configured (HIC_R1/HIC_R2 in hpc_env.sh)"
     info "Running schema + unit tests only (no real Hi-C execution)"
@@ -55,7 +49,16 @@ elif [[ ! -s "$HIC_R1" || ! -s "$HIC_R2" ]]; then
 else
     assert_file_nonempty "$HIC_R1" "Hi-C R1"
     assert_file_nonempty "$HIC_R2" "Hi-C R2"
-    HIC_AVAILABLE=true
+    if [[ -z "${HIC_AUTOHIC_ERROR_MODEL:-}" || -z "${HIC_AUTOHIC_CHROMOSOME_MODEL:-}" ]]; then
+        warn "AutoHiC pretrained models are not configured; schema/unit tests only"
+        HIC_AVAILABLE=false
+    elif [[ ! -s "$HIC_AUTOHIC_ERROR_MODEL" || ! -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]]; then
+        [[ -s "$HIC_AUTOHIC_ERROR_MODEL" ]] || fail "AutoHiC error model missing: ${HIC_AUTOHIC_ERROR_MODEL}"
+        [[ -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]] || fail "AutoHiC chromosome model missing: ${HIC_AUTOHIC_CHROMOSOME_MODEL}"
+        exit 1
+    else
+        HIC_AVAILABLE=true
+    fi
 fi
 
 # ---- Unit tests ----
@@ -87,22 +90,19 @@ import json
 rc_data = {
     'local_exec': ['hic_scaffolding'],
     'hic_scaffolding': {
-        'methods': ['juicer_3ddna_juicebox'],
-        'input_mode': 'raw_reads',
-        'chromosome_count': ${HIC_CHROMOSOME_COUNT},
-        'juicer_3ddna_parameters': {
+        'methods': ['autohic'],
+        'autohic_parameters': {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-            'chrom_sizes_ref': '/tmp/chrom.sizes',
+            'error_model_ref': '/tmp/error_model.pth',
+            'chromosome_model_ref': '/tmp/chr_model.pth',
             'threads': ${ASSEMBLY_THREADS},
         },
     },
 }
 rc = RunConfig.model_validate(rc_data)
 assert rc.hic_scaffolding is not None, 'hic_scaffolding config is None'
-assert 'juicer_3ddna_juicebox' in rc.hic_scaffolding.methods, 'method not in methods list'
+assert 'autohic' in rc.hic_scaffolding.methods, 'method not in methods list'
 print(f'HiCScaffoldingRunConfig: methods={rc.hic_scaffolding.methods}')
-print(f'  input_mode={rc.hic_scaffolding.input_mode}')
-print(f'  chromosome_count={rc.hic_scaffolding.chromosome_count}')
 print('Hi-C RunConfig validation: PASS')
 " 2>&1 && pass "HiCScaffoldingRunConfig schema validation" || fail "HiCScaffoldingRunConfig schema validation"
 
@@ -110,86 +110,58 @@ python3 -c "
 from app.schemas.run_config import HiCScaffoldingPlanCandidate
 # Test: candidate readiness derivation
 cand = HiCScaffoldingPlanCandidate(
-    method='juicer_3ddna_juicebox',
-    input_mode='raw_reads',
-    chromosome_count=${HIC_CHROMOSOME_COUNT},
+    method='autohic',
 )
 print(f'Candidate status: {cand.status}')
 print(f'Missing fields: {cand.missing_fields}')
-# Without juicer params, should show missing fields
+# Without AutoHiC params, should show missing fields
 assert cand.status == 'needs_clarification', \
     f'candidate should need clarification without params, got {cand.status}'
 assert len(cand.missing_fields) > 0, 'should have missing fields'
 print('Candidate readiness derivation: correct')
 " 2>&1 && pass "HiCScaffoldingPlanCandidate readiness derivation" || fail "HiCScaffoldingPlanCandidate readiness derivation"
 
-# Test choose_many (was choose_one)
+# AutoHiC is the only allowed method.
 python3 -c "
 from app.schemas.run_config import HiCScaffoldingRunConfig
-import json
-
-# Test: multiple methods allowed (choose_many)
-rc_data = {
-    'methods': ['juicer_3ddna_juicebox', 'yahs'],
-    'input_mode': 'raw_reads',
-    'chromosome_count': ${HIC_CHROMOSOME_COUNT},
-    # YAHS is also selected here, so give the schema an alignment reference.
-    # This is a validation-only fixture; the real execution branch supplies
-    # actual data and does not use this placeholder.
-    'hic_alignment_ref': '/tmp/hic_alignment.bam',
-    'juicer_3ddna_parameters': {
+rc = HiCScaffoldingRunConfig.model_validate({
+    'methods': ['autohic'],
+    'autohic_parameters': {
         'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-        'chrom_sizes_ref': '/tmp/chrom.sizes',
+        'error_model_ref': '/tmp/error_model.pth',
+        'chromosome_model_ref': '/tmp/chr_model.pth',
         'threads': 4,
     },
-}
-rc = HiCScaffoldingRunConfig.model_validate(rc_data)
-assert len(rc.methods) == 2, f'expected 2 methods, got {len(rc.methods)}'
-print(f'Multiple methods accepted: {rc.methods}')
-print('choose_many schema: PASS')
-" 2>&1 && pass "choose_many allows multiple Hi-C methods" || fail "choose_many schema validation"
+})
+assert rc.methods == ['autohic']
+print('AutoHiC-only schema: PASS')
+" 2>&1 && pass "AutoHiC-only method schema" || fail "AutoHiC-only method schema"
 
-# ---- Test HiCInputMode and HiCMethod Literal types ----
+# ---- Test HiCMethod Literal type ----
 python3 -c "
-from app.schemas.run_config import HiCInputMode, HiCMethod
+from app.schemas.run_config import HiCMethod
 import typing
-# These are Literal types, not enums
 method_vals = typing.get_args(HiCMethod)
-mode_vals = typing.get_args(HiCInputMode)
-print(f'HiCInputMode values: {list(mode_vals)}')
 print(f'HiCMethod values: {list(method_vals)}')
-assert 'raw_reads' in mode_vals, 'raw_reads missing'
-assert 'merged_nodups' in mode_vals, 'merged_nodups missing'
-assert 'auto' in mode_vals, 'auto missing'
-assert 'juicer_3ddna_juicebox' in method_vals, 'juicer_3ddna_juicebox missing'
-assert 'yahs' in method_vals, 'yahs missing'
+assert method_vals == ('autohic',), method_vals
 print('Hi-C Literal types: PASS')
 " 2>&1 && pass "Hi-C Literal types valid" || fail "Hi-C Literal types"
-
-# ---- Schema: hic_merged_nodups in asset types ----
-python3 -c "
-from app.schemas.manifest import InputAssetSpec
-import typing
-hints = typing.get_type_hints(InputAssetSpec)
-atype = hints.get('asset_type')
-type_str = str(atype)
-assert 'hic_merged_nodups' in type_str, f'hic_merged_nodups not in asset types: {type_str}'
-print('hic_merged_nodups in accepted asset types')
-" 2>&1 && pass "hic_merged_nodups in manifest asset types" || fail "hic_merged_nodups not in asset types"
 
 python3 -c "
 from app.schemas.run_config import HiCScaffoldingPlanCandidate
 
 candidate = HiCScaffoldingPlanCandidate(
-    method='juicer_3ddna_juicebox',
-    input_mode='merged_nodups',
-    chromosome_count=${HIC_CHROMOSOME_COUNT},
-    merged_nodups_ref='/tmp/merged_nodups.txt',
-    juicer_3ddna_parameters={'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}', 'chrom_sizes_ref': '/tmp/chrom.sizes', 'threads': 4},
+    method='autohic',
+    autohic_parameters={
+        'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
+        'error_model_ref': '/tmp/error_model.pth',
+        'chromosome_model_ref': '/tmp/chr_model.pth',
+        'threads': 4,
+    },
 )
 assert candidate.status == 'ready_to_execute', candidate
-print('merged_nodups Juicer candidate is execution-ready')
-" 2>&1 && pass "merged_nodups planning contract" || fail "merged_nodups planning contract"
+print('AutoHiC candidate is execution-ready')
+" 2>&1 && pass "AutoHiC planning contract" || fail "AutoHiC planning contract"
 
 cd "${SCRIPT_DIR}"
 
@@ -214,76 +186,12 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     fi
     info "Using assembly: ${PREV_ASM}"
 
-    # Generate chrom.sizes if not provided
-    if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-        info "Generating chrom.sizes from assembly (samtools faidx)"
-        HIC_CHROM_SIZES="${TEST_DATA_ROOT}/_test06_chrom.sizes"
-        if run_configured_method_tool \
-            "hic_scaffolding" "hic_scaffolding.candidate.juicer_3ddna_juicebox" \
-            samtools faidx "$PREV_ASM"; then
-            cut -f1,2 "${PREV_ASM}.fai" > "$HIC_CHROM_SIZES"
-            pass "chrom.sizes generated ($(wc -l < "$HIC_CHROM_SIZES") sequences)"
-            rm -f "${PREV_ASM}.fai"  # clean up
-        else
-            warn "samtools failed in the configured Hi-C method environment; cannot generate chrom.sizes"
-            warn "Hi-C execution will be skipped (schema tests still run)"
-            HIC_CHROM_SIZES=""
-        fi
-    fi
-    export HIC_CHROM_SIZES
-
-    # Skip execution if chrom_sizes is still not available
-    if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-        fail "Hi-C inputs were configured, but chrom.sizes could not be generated"
-        summary "Test 06: Hi-C Scaffolding (runtime preflight failed)" || true
-        exit 1
-    fi
-
-    if [[ -n "${HIC_JUICER_SCRIPTS_DIR:-}" ]]; then
-        export JUICER_SCRIPTS_DIR="$HIC_JUICER_SCRIPTS_DIR"
-    fi
     if run_configured_method_tool \
-        "hic_scaffolding" "hic_scaffolding.candidate.juicer_3ddna_juicebox" \
-        sh -c '
-set -eu
-juicer_path="$(command -v juicer.sh)"
-generator="$(command -v generate_site_positions.py 2>/dev/null || true)"
-if test -z "$generator"; then
-  generator="$(find "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" -type f -name generate_site_positions.py -print -quit 2>/dev/null || true)"
-fi
-test -n "$generator" || {
-  echo "generate_site_positions.py not found in configured Juicer environment" >&2
-  exit 127
-}
-command -v java >/dev/null 2>&1 || {
-  echo "java not found in configured Juicer environment" >&2
-  exit 127
-}
-for root in "${JUICER_SCRIPTS_DIR:-}" "${JUICER_DIR:-}" "${JUICE_DIR:-}" "${CONDA_PREFIX:-}" "$(dirname "$juicer_path")" "$(dirname "$(dirname "$juicer_path")")" "$(dirname "$(dirname "$(dirname "$juicer_path")")")"; do
-  test -n "$root" && test -d "$root" || continue
-  helper="$(find "$root" -type f \( -path "*/common/chimeric_blacklist.awk" -o -path "*/scripts/common/chimeric_blacklist.awk" \) -print -quit 2>/dev/null || true)"
-  test -n "$helper" || continue
-  case "$helper" in
-    */scripts/common/chimeric_blacklist.awk)
-      scripts_dir="$(dirname "$(dirname "$(dirname "$helper")")")"
-      ;;
-    */common/chimeric_blacklist.awk)
-      scripts_dir="$(dirname "$(dirname "$helper")")"
-      ;;
-    *)
-      continue
-      ;;
-  esac
-  echo "Juicer helper scripts: $scripts_dir"
-  exit 0
-done
-echo "chimeric_blacklist.awk not found. Set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_blacklist.awk, e.g. /data/work/softs/juicer/CPU." >&2
-exit 127
-'; then
-        pass "Juicer helper scripts available"
+        "hic_scaffolding" "hic_scaffolding.candidate.autohic" \
+        python3.9 -c 'import torch, typer; print("AutoHiC Python dependencies available")'; then
+        pass "AutoHiC Python environment available"
     else
-        fail "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
-        info "Use the exact prerequisite error printed above; only install or configure the item it names."
+        fail "AutoHiC Python dependencies are missing from the configured method environment"
         summary "Test 06: Hi-C Scaffolding (runtime preflight failed)" || true
         exit 1
     fi
@@ -349,21 +257,25 @@ PY
     assert_dir_exists "$HIC_ARTIFACT" "Hi-C artifact dir"
 
     # Shell script
-    JUICER_SCRIPT=$(find "$HIC_WORK" -name "*.sh" 2>/dev/null | head -1 || true)
-    if [[ -n "$JUICER_SCRIPT" ]]; then
-        pass "Hi-C shell script generated: $(basename "$JUICER_SCRIPT")"
-        assert_file_contains "$JUICER_SCRIPT" "juicer\|3d-dna\|run-asm-pipeline" "script has Juicer/3D-DNA commands"
-        assert_file_contains "$JUICER_SCRIPT" "published artifact conflicts" "Hi-C script rejects conflicting replay output"
+    AUTOHIC_SCRIPT=$(find "$HIC_WORK" -name "run_autohic.sh" 2>/dev/null | head -1 || true)
+    if [[ -n "$AUTOHIC_SCRIPT" ]]; then
+        pass "AutoHiC shell script generated: $(basename "$AUTOHIC_SCRIPT")"
+        assert_file_contains "$AUTOHIC_SCRIPT" "autohic.py.*-c.*cfg-autohic.txt" "script invokes AutoHiC with its config"
+        assert_file_contains "$AUTOHIC_SCRIPT" "published artifact conflicts" "AutoHiC script rejects conflicting replay output"
     else
         fail "Hi-C shell script not found"
     fi
 
     # Output files
-    SCAFFOLDED=$(find "$HIC_ARTIFACT" -name "*scaffolded*.fasta" -o -name "*FINAL*.fasta" 2>/dev/null | head -1 || true)
+    SCAFFOLDED=$(find "$HIC_ARTIFACT" \( -name "*scaffolded*.fasta" -o -name "*FINAL*.fasta" \) 2>/dev/null | head -1 || true)
     HIC_FILE=$(find "$HIC_ARTIFACT" -name "*.hic" 2>/dev/null | head -1 || true)
+    ASSEMBLY_FILE=$(find "$HIC_ARTIFACT" -name "*.assembly" 2>/dev/null | head -1 || true)
+    HTML_REPORT=$(find "$HIC_ARTIFACT" -name "result.html" 2>/dev/null | head -1 || true)
 
     [[ -n "$SCAFFOLDED" ]] && assert_file_nonempty "$SCAFFOLDED" "scaffolded assembly FASTA" || fail "scaffolded FASTA not found"
     [[ -n "$HIC_FILE" ]]   && assert_file_nonempty "$HIC_FILE"   "Hi-C contact map (.hic)" || fail ".hic file not found"
+    [[ -n "$ASSEMBLY_FILE" ]] && assert_file_nonempty "$ASSEMBLY_FILE" "Juicebox assembly file" || fail ".assembly file not found"
+    [[ -n "$HTML_REPORT" ]] && assert_file_nonempty "$HTML_REPORT" "AutoHiC HTML report" || fail "result.html not found"
 
     # Inspect
     cd "${PROJECT_ROOT}"
@@ -371,7 +283,7 @@ PY
         pass "inspect Hi-C session" || fail "inspect Hi-C session"
 
     if [[ -f "${RUN_DIR}/ledger/events.jsonl" ]]; then
-        assert_ledger_has_method_attempt "${RUN_DIR}/ledger/events.jsonl" "hic_scaffolding.candidate.juicer_3ddna_juicebox"
+        assert_ledger_has_method_attempt "${RUN_DIR}/ledger/events.jsonl" "hic_scaffolding.candidate.autohic"
         assert_no_duplicate_method_attempts "${RUN_DIR}/ledger/events.jsonl" "Hi-C ledger has no duplicate attempts"
     else
         fail "Hi-C ledger events.jsonl not found"
@@ -381,7 +293,7 @@ else
         summary "Test 06: Hi-C Scaffolding (contract checks failed)" || true
         exit 1
     fi
-    info "[SKIP] Real Hi-C execution is not configured (HIC_R1/HIC_R2 missing)."
+    info "[SKIP] Real AutoHiC execution requires paired Hi-C reads and both pretrained models."
     info "Schema and unit checks passed, but this step did not claim a real-data PASS."
     exit 77
 fi

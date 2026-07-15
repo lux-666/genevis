@@ -37,10 +37,8 @@ def _next_method(hic_out: dict) -> str:
     method = next((item for item in methods if item and item not in completed), None)
     if hic_out.get("execution_mode") != "local" or not method:
         return "block"
-    if method == "hic_scaffolding.candidate.juicer_3ddna_juicebox":
-        return "juicer_3ddna"
-    if method == "hic_scaffolding.candidate.yahs":
-        return "yahs"
+    if method == "hic_scaffolding.candidate.autohic":
+        return "autohic"
     return "block"
 
 

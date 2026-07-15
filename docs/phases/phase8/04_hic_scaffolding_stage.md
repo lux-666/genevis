@@ -16,8 +16,8 @@
 `hic_scaffolding` 负责：
 
 - Hi-C input validation。
-- YaHS 与 Juicer + 3D-DNA scaffolding method planning or execution。
-- contact-map/manual curation workspace refs。
+- AutoHiC end-to-end planning or execution（内部使用 Juicer、3D-DNA 和深度学习模型）。
+- chromosome FASTA、`.hic`、`.assembly`、HTML report refs。
 - human selection gate。
 - final chromosome-scaffolded candidate ref。
 
@@ -48,20 +48,18 @@ Phase 8 不新建 parallel stage。若要增强 Hi-C curation，也应该在这�
 gate 和 downstream contract；每个工具方法各自冻结命令，统一 lifecycle
 负责 run、ledger 和 artifact collection。
 
-**Implementation note**: 当前已实现方法：
-- `hic_scaffolding.candidate.juicer_3ddna_juicebox` (in `method_application/juicer_3ddna.py`)
-- `hic_scaffolding.candidate.yahs` (in `method_application/yahs.py`)
+**Implementation note**: 当前唯一方法：
+- `hic_scaffolding.candidate.autohic` (in `method_application/autohic.py`)
 - Lifecycle helpers in `method_application/lifecycle.py`
 
 执行模式：
-- `raw_reads` mode：冻结标准 `juicer.sh` 命令，生成
-  `aligned/merged_nodups.txt`，再调用 `run-asm-pipeline.sh`。
-- `merged_nodups` mode：接收 materialized `hic_merged_nodups` asset 或
-  `merged_nodups_ref`，跳过 Juicer，直接运行 3D-DNA。
-- YaHS 支持已实现，可通过 run config 选择。
+- 输入 adopted contig assembly、成对 Hi-C R1/R2、限制性内切酶、error model、chromosome model。
+- adapter 复制 assembly，避免 AutoHiC 对上游 FASTA 做原地规范化。
+- adapter 把 reads 规范为 AutoHiC 要求的 `rawdata/fastq/*_R1/_R2.fastq(.gz)`。
+- AutoHiC 内部运行 Juicer → 3D-DNA → error detection/correction → 3D-DNA rerun → chromosome assignment → report。
 
 每次执行都落盘 method-specific script 和 `FrozenAttemptSpec`，并登记
-scaffold FASTA、可选 3D-DNA assembly/contact map、stdout/stderr 与 Juicebox
+chromosome FASTA、`.hic`、`.assembly`、HTML report、stdout/stderr 与 GeneAgent
 review bundle。执行失败时仍保留 pre-Hi-C assembly 作为 annotation fallback。
 
 Planning and execution use separate contracts. The TUI may keep incomplete
@@ -73,23 +71,21 @@ tool switches stay in the method parameter block:
 {
   "local_exec": ["hic_scaffolding"],
   "hic_scaffolding": {
-    "methods": ["juicer_3ddna_juicebox"],
-    "method": "juicer_3ddna_juicebox",
-    "input_mode": "merged_nodups",
-    "merged_nodups_ref": "/path/to/merged_nodups.txt",
-    "juicer_3ddna_parameters": {
+    "methods": ["autohic"],
+    "method": "autohic",
+    "autohic_parameters": {
       "restriction_enzyme": "MboI",
-      "chrom_sizes_ref": "/path/to/chrom.sizes",
-      "threads": 8,
-      "three_dna_extra_args": ["-r", "2"]
+      "error_model_ref": "/path/to/error_model.pth",
+      "chromosome_model_ref": "/path/to/chr_model.pth",
+      "threads": 40,
+      "number_of_edit_rounds": 2
     }
   }
 }
 ```
 
-**Implementation note**: `chromosome_count` 不是 RunConfig schema 字段。3D-DNA 的 
-`-r` 参数通过 `three_dna_extra_args` 传递。Juicer + 3D-DNA 执行需要 
-`restriction_enzyme`、`chrom_sizes_ref`、`threads` 等必需参数；缺失时 candidate 
+AutoHiC 自动识别染色体边界，因此 RunConfig 不再要求 `chromosome_count`。
+`restriction_enzyme`、`error_model_ref`、`chromosome_model_ref` 缺失时 candidate
 状态为 `needs_clarification`。
 
 Expected output keys should stay under `stage_outputs.hic_scaffolding`:
@@ -100,7 +96,7 @@ Expected output keys should stay under `stage_outputs.hic_scaffolding`:
     "pre_hic_assembly_ref": "...",
     "final_assembly_for_annotation": "...",  # legacy
     "final_assembly_for_downstream": "...",  # ✅ unified contract key (2026-06-28)
-    "selected_method_name": "hic_scaffolding.candidate.yahs | ...",
+    "selected_method_name": "hic_scaffolding.candidate.autohic",
     "notes": [],
 }
 ```
@@ -139,7 +135,7 @@ Candidate provenance should preserve upstream assembly details:
     "pre_hic_assembly_ref": "...",
     "assembly_candidate_ref": "...",
     "assembly_method": "flye | hifiasm_ont | hifiasm_hifi | unknown",
-    "hic_method": "yahs | user_curated | skipped",
+    "hic_method": "autohic | user_curated | skipped",
 }
 ```
 
@@ -151,10 +147,9 @@ Candidate provenance should preserve upstream assembly details:
 - `test_hic_scaffolding_chromosome_without_hic_blocks_or_skips_by_policy`
 - `test_hic_scaffolding_does_not_write_stage_outputs_assembly_hic_curation`
 
-**Test status (HPC 2026-06-26)**:
-- 本地单元测试: 16 passed (test_hic_scaffolding.py)
-- HPC 测试: PASS (12 passed, schema validation complete)
-- 真实 Juicer execution 因缺少 Java 和 helper scripts 未在 HPC 运行，但 schema/planning/YaHS 路径已验证
+**Test status**:
+- 本地单元测试覆盖 planning、skip、fake AutoHiC success/failure、双模型与成对 reads 校验、四类输出登记和 review gate。
+- 真实 AutoHiC/Juicer/3D-DNA 的 HPC real-data smoke 尚待运行。
 
 ## Acceptance
 

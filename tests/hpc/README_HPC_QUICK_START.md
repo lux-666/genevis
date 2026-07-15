@@ -70,7 +70,8 @@ ${TEST_DATA_ROOT}/test_logs/run-all-YYYYMMDD-HHMMSS/
 HIC_R1="/path/to/hic_R1.fq.gz"                  # Hi-C 双端测序 R1
 HIC_R2="/path/to/hic_R2.fq.gz"                  # Hi-C 双端测序 R2
 HIC_RESTRICTION_ENZYME="DpnII"                   # 限制性内切酶
-HIC_CHROMOSOME_COUNT=25                          # 染色体数量
+HIC_AUTOHIC_ERROR_MODEL="/path/to/error_model.pth"
+HIC_AUTOHIC_CHROMOSOME_MODEL="/path/to/chromosome_model.pth"
 ```
 
 ## 流程说明 / Pipeline Overview
@@ -83,7 +84,7 @@ HIC_CHROMOSOME_COUNT=25                          # 染色体数量
 2. **genome_survey** - 基因组调查（k-mer 分析）
 3. **assembly** - 基因组组装（hifiasm/hifiasm_ont 为当前主目标；Flye/NextDenovo 为轻量 smoke）
 4. **assembly_review** - 组装质量评估（QUAST + BUSCO）
-5. **hic_scaffolding** - Hi-C 挂载（Juicer + 3D-DNA）⭐ 实际执行生物学软件
+5. **hic_scaffolding** - AutoHiC 染色体挂载与纠错 ⭐ 实际执行生物学软件
 6. **t2t** - 端粒修补（T2T telomere finishing）⭐ 实际执行生物学软件
 
 ### 部分流程 / Partial Pipeline
@@ -95,14 +96,15 @@ HIC_CHROMOSOME_COUNT=25                          # 染色体数量
 ## 实际执行的生物学软件 / Biological Software Executed
 
 ### Hi-C 阶段 / Hi-C Stage
-- **Juicer**: Hi-C 比对和接触矩阵生成
-- **3D-DNA**: 基于 Hi-C 的染色体挂载
-- **JuiceBox**: 可视化和人工审核（生成 .hic 文件）
+- **AutoHiC**: 阶段唯一入口；内部编排 Juicer、3D-DNA、深度学习错误检测、组装修正和染色体划分
+- **Juicer**: 由 AutoHiC 调用，完成 Hi-C 比对和接触数据生成
+- **3D-DNA**: 由 AutoHiC 调用，完成初始挂载与修正后重跑
 
 输出文件 / Outputs:
 - `*scaffolded*.fasta` - 挂载后的组装序列
 - `*.hic` - Hi-C 接触矩阵
 - `*.assembly` - 3D-DNA 组装描述文件
+- `result.html` - AutoHiC 前后对比报告
 
 ### T2T 阶段 / T2T Stage
 
@@ -129,9 +131,9 @@ HIC_CHROMOSOME_COUNT=25                          # 染色体数量
 
 ### Q2: Hi-C 执行失败怎么办？
 **A:** 检查以下配置：
-- `HIC_JUICER_SCRIPTS_DIR`: Juicer 安装路径（包含 common/chimeric_blacklist.awk）
-- Java 是否在 conda 环境中可用
-- `HIC_CHROM_SIZES`: 如果未设置，脚本会自动从组装中生成
+- `HIC_RESTRICTION_ENZYME`: 必须与 Hi-C 建库酶一致
+- `HIC_AUTOHIC_ERROR_MODEL` 与 `HIC_AUTOHIC_CHROMOSOME_MODEL`: 两个预训练模型都必须存在
+- `config/envs.yaml`: AutoHiC、Juicer、3D-DNA 的安装根目录和 AutoHiC 专用 conda 环境必须可用
 
 ### Q3: 如何查看会话状态？
 **A:** 使用 inspect 命令：
@@ -165,15 +167,17 @@ Hi-C/T2T 的 stage-specific gate。每次恢复都继续原 session，已完成 
 **推荐在 HPC 上创建 `config/envs.local.yaml`：**
 ```yaml
 methods:
-  hic_scaffolding.candidate.juicer_3ddna_juicebox:
-    conda_env: juicer_3ddna
+  hic_scaffolding.candidate.autohic:
+    conda_env: autohic
+    required_tools: [python3.9, bwa, java, quast.py]
+    package_tools: [autohic, juicer, three_d_dna]
   
   t2t.detect_telomeres:
     conda_env: t2t_toolkit
 
 stages:
   hic_scaffolding:
-    conda_env: juicer_3ddna
+    conda_env: autohic
   
   t2t:
     conda_env: t2t_toolkit

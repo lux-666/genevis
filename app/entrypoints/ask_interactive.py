@@ -202,10 +202,9 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "hic_scaffolding.candidate.yahs.hic_alignment_ref": "materialized Hi-C alignment BAM for YaHS",
-    "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count": "haploid chromosome count, e.g. 22 for 2n=44",
-    "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme": "Hi-C restriction enzyme, e.g. MboI or DpnII",
-    "hic_scaffolding.candidate.juicer_3ddna_juicebox.chrom_sizes_ref": "chrom.sizes path; use auto to derive from the pre-Hi-C FASTA",
+    "hic_scaffolding.candidate.autohic.restriction_enzyme": "Hi-C restriction enzyme, e.g. MboI or DpnII",
+    "hic_scaffolding.candidate.autohic.error_model_ref": "path to AutoHiC error_model.pth",
+    "hic_scaffolding.candidate.autohic.chromosome_model_ref": "path to AutoHiC chr_model.pth",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
     "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
@@ -1323,10 +1322,10 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
     print("  Press Enter to accept [default], or type a new value.\n")
-    hic_method = "hic_scaffolding.candidate.juicer_3ddna_juicebox"
+    hic_method = "hic_scaffolding.candidate.autohic"
     handled = set()
     if hic_method in _selected_method_names(plan):
-        params[hic_method] = _prompt_juicer_3ddna_parameters(dict(defaults.get(hic_method) or {}))
+        params[hic_method] = _prompt_autohic_parameters(dict(defaults.get(hic_method) or {}))
         handled = {field for field in req.required_fields if field.startswith(hic_method + ".")}
     for field in req.required_fields:
         if field in handled:
@@ -1376,33 +1375,24 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
     )
 
 
-def _prompt_juicer_3ddna_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
-    """Collect the mode-dependent minimum needed for a real Hi-C attempt."""
-    mode = _prompt_text_value("[hic_scaffolding / juicer_3ddna_juicebox] input_mode (raw_reads or merged_nodups)", defaults.get("input_mode", "raw_reads"))
-    result: dict[str, Any] = {
-        "input_mode": mode,
-        "chromosome_count": _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] chromosome_count  (haploid chromosome count, e.g. 22 for 2n=44)",
-            defaults.get("chromosome_count"),
-        ),
-    }
-    if mode == "merged_nodups":
-        result["merged_nodups_ref"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] merged_nodups_ref", defaults.get("merged_nodups_ref")
-        )
-    else:
-        result["restriction_enzyme"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] restriction_enzyme  (Hi-C restriction enzyme, e.g. MboI or DpnII)",
+def _prompt_autohic_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
+    """Collect AutoHiC's enzyme and two pretrained-model inputs."""
+    return {
+        **defaults,
+        "restriction_enzyme": _prompt_text_value(
+            "[hic_scaffolding / autohic] restriction_enzyme  (e.g. MboI or DpnII)",
             defaults.get("restriction_enzyme"),
-        )
-        result["chrom_sizes_ref"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] chrom_sizes_ref  (chrom.sizes path; Enter = auto from pre-Hi-C FASTA)",
-            defaults.get("chrom_sizes_ref", "auto"),
-        )
-        result["threads"] = _prompt_text_value(
-            "[hic_scaffolding / juicer_3ddna_juicebox] threads", defaults.get("threads", 8)
-        )
-    return result
+        ),
+        "error_model_ref": _prompt_text_value(
+            "[hic_scaffolding / autohic] error_model_ref  (error_model.pth)",
+            defaults.get("error_model_ref"),
+        ),
+        "chromosome_model_ref": _prompt_text_value(
+            "[hic_scaffolding / autohic] chromosome_model_ref  (chr_model.pth)",
+            defaults.get("chromosome_model_ref"),
+        ),
+        "threads": _prompt_text_value("[hic_scaffolding / autohic] threads", defaults.get("threads", 10)),
+    }
 
 
 def _selected_method_names(plan: AskPlanState) -> set[str]:
@@ -1676,12 +1666,10 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
         "platform": ("shared_parameters", "platform"),
         "read_type": ("shared_parameters", "read_type"),
         "threads": ("assembly.candidate.flye", "threads"),
-        "hic_input_mode": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "input_mode"),
-        "hic_chromosome_count": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "chromosome_count"),
-        "hic_restriction_enzyme": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "restriction_enzyme"),
-        "hic_chrom_sizes_ref": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "chrom_sizes_ref"),
-        "hic_threads": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "threads"),
-        "hic_merged_nodups_ref": ("hic_scaffolding.candidate.juicer_3ddna_juicebox", "merged_nodups_ref"),
+        "hic_restriction_enzyme": ("hic_scaffolding.candidate.autohic", "restriction_enzyme"),
+        "hic_error_model_ref": ("hic_scaffolding.candidate.autohic", "error_model_ref"),
+        "hic_chromosome_model_ref": ("hic_scaffolding.candidate.autohic", "chromosome_model_ref"),
+        "hic_threads": ("hic_scaffolding.candidate.autohic", "threads"),
     }
     existing = dict(plan.method_parameters or {})
     shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}

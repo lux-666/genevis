@@ -4,6 +4,7 @@ packages:
   diamond: diamond.yaml
   gffread: gffread.yaml
   3ddna: 3ddna.yaml
+  autohic: autohic.yaml
   flye: flye.yaml
   genomescope2: genomescope2.yaml
   hifiasm: hifiasm.yaml
@@ -18,7 +19,6 @@ packages:
   juicebox: juicebox.yaml
   repeatmasker: repeatmasker.yaml
   seqkit: seqkit.yaml
-  yahs: yahs.yaml
 methods:
   assembly.candidate.flye: assembly/flye_candidate.yaml
   assembly.candidate.hifiasm: assembly/hifiasm_candidate.yaml
@@ -32,8 +32,7 @@ methods:
   gene_annotation.candidate.augustus: gene_annotation/augustus_candidate.yaml
   gene_annotation.candidate.miniprot: gene_annotation/miniprot_candidate.yaml
   function_annotation.candidate.diamond: function_annotation/diamond_candidate.yaml
-  hic_scaffolding.candidate.juicer_3ddna_juicebox: hic_scaffolding/juicer_3ddna_juicebox_candidate.yaml
-  hic_scaffolding.candidate.yahs: hic_scaffolding/yahs_candidate.yaml
+  hic_scaffolding.candidate.autohic: hic_scaffolding/autohic_candidate.yaml
   t2t.alignment.minimap2: t2t/minimap2_telomere_alignment.yaml
   read_qc.length_filter.seqkit_seq: read_qc/seqkit_seq_length_filter.yaml
   read_qc.length_filter.skip: read_qc/length_filter_skip.yaml
@@ -61,8 +60,7 @@ by_stage:
     - assembly_review.eval.quast
     - assembly_review.eval.busco
   hic_scaffolding:
-    - hic_scaffolding.candidate.yahs
-    - hic_scaffolding.candidate.juicer_3ddna_juicebox
+    - hic_scaffolding.candidate.autohic
   t2t:
     - t2t.alignment.minimap2
   repeat_annotation:
