@@ -45,8 +45,8 @@ def normalize_parameter_recommendation(
         for item in prompt_payload.get("observations") or []
         if isinstance(item, Mapping) and item.get("id")
     }
-    guidance_by_id = {
-        str(item.get("guidance_id")): item
+    visible_guidance = {
+        str(item.get("guidance_id"))
         for item in prompt_payload.get("method_guidance") or []
         if isinstance(item, Mapping) and item.get("guidance_id")
     }
@@ -60,7 +60,7 @@ def normalize_parameter_recommendation(
             parameter,
             raw_recommendation,
             visible_observations=visible_observations,
-            guidance_by_id=guidance_by_id,
+            visible_guidance=visible_guidance,
             case_quotes=case_quotes,
         )
         parameter_patch[parameter] = deepcopy(recommendation["value"])
@@ -149,7 +149,7 @@ def _validate_patch_entry(
     value: Any,
     *,
     visible_observations: set[str],
-    guidance_by_id: dict[str, Mapping[str, Any]],
+    visible_guidance: set[str],
     case_quotes: dict[str, set[str]],
 ) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(value, dict):
@@ -166,21 +166,16 @@ def _validate_patch_entry(
         )
 
     guidance_ids = _string_list(value.get("guidance_ids") or [], f"{parameter}.guidance_ids")
-    missing_guidance = sorted(set(guidance_ids) - set(guidance_by_id))
+    missing_guidance = sorted(set(guidance_ids) - visible_guidance)
     if missing_guidance:
         raise ValueError(
             f"parameter {parameter!r} cites guidance absent from the prompt: {missing_guidance}"
         )
-    incompatible_guidance = [
-        guidance_id
-        for guidance_id in guidance_ids
-        if parameter not in set(guidance_by_id[guidance_id].get("parameters") or [])
-    ]
-    if incompatible_guidance:
-        raise ValueError(
-            f"parameter {parameter!r} cites guidance for other parameters: "
-            f"{incompatible_guidance}"
-        )
+    # A guidance card's ``parameters`` are its direct control points, not a
+    # citation allowlist.  Mechanistic guidance may legitimately motivate an
+    # adjacent parameter (for example, repeat-graph evidence can justify read
+    # filtering), so the hard boundary here is provenance: the cited card must
+    # have been visible to the model.
 
     anchors = value.get("literature_anchors") or []
     if not isinstance(anchors, list):
@@ -203,7 +198,7 @@ def _validate_patch_entry(
         if case_id not in used_case_ids:
             used_case_ids.append(case_id)
 
-    tradeoffs = _string_list(value.get("tradeoffs") or [], f"{parameter}.tradeoffs")
+    tradeoffs = _tradeoff_list(value.get("tradeoffs") or [], f"{parameter}.tradeoffs")
     confidence = value.get("confidence")
     if confidence not in _CONFIDENCE_VALUES:
         raise ValueError(f"{parameter}.confidence must be high, medium, or low")
@@ -251,6 +246,14 @@ def _string_list(value: Any, field: str) -> list[str]:
     ):
         raise ValueError(f"{field} must be a list of non-empty strings")
     return list(dict.fromkeys(value))
+
+
+def _tradeoff_list(value: Any, field: str) -> list[str]:
+    """Canonicalize the common single-tradeoff model response to a list."""
+
+    if isinstance(value, str):
+        value = [value]
+    return _string_list(value, field)
 
 
 def _nonempty_string(value: Any, *, field: str) -> str:

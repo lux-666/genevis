@@ -88,6 +88,25 @@ def test_mechanistic_extrapolation_does_not_require_a_paper_case() -> None:
     assert result["parameter_patch"] == {"purge_level": 1}
 
 
+def test_guidance_can_support_an_adjacent_parameter_and_tradeoff_string_is_normalized() -> None:
+    prompt = _prompt()
+    prompt["adjustable_params"] = {"read_length_cutoff": {"default": 0}}
+    prompt["baseline_params"] = {"read_length_cutoff": 0}
+    response = _response(tradeoffs="May discard genuine short molecules.")
+    entry = response["parameter_patch"].pop("purge_level")
+    response["parameter_patch"]["read_length_cutoff"] = entry
+
+    result = normalize_parameter_recommendation(response, prompt)
+
+    assert result["parameter_patch"] == {"read_length_cutoff": 1}
+    assert result["parameter_reasoning"]["read_length_cutoff"]["guidance_ids"] == [
+        "hifiasm.purging.heterozygosity.v1"
+    ]
+    assert result["parameter_reasoning"]["read_length_cutoff"]["tradeoffs"] == [
+        "May discard genuine short molecules."
+    ]
+
+
 def test_retry_carries_previous_explicit_overrides_and_applies_sparse_patch() -> None:
     prompt = _prompt(task="retry_after_review_failure")
     prompt["adjustable_params"]["kmer_length"] = {"default": 51}
