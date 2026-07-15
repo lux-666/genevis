@@ -412,23 +412,34 @@ class AssemblyReviewRunConfig(BaseModel):
     related_species_reference_dir: str | None = None
 
 
-class Juicer3DDNARunParameters(BaseModel):
-    """Tool-specific Juicer + 3D-DNA settings, separate from input assets."""
+class AutoHiCRunParameters(BaseModel):
+    """Execution settings for the end-to-end AutoHiC pipeline."""
 
     model_config = ConfigDict(extra="forbid")
 
     restriction_enzyme: str | None = None
-    chrom_sizes_ref: str | None = None
-    threads: int | None = Field(default=None, gt=0)
-    juicer_command: str = "juicer.sh"
-    juicer_scripts_dir: str | None = None
-    juicer_extra_args: list[str] = Field(default_factory=list)
-    three_dna_command: str = "run-asm-pipeline.sh"
-    three_dna_extra_args: list[str] = Field(default_factory=list)
+    error_model_ref: str | None = None
+    chromosome_model_ref: str | None = None
+    threads: int = Field(default=10, gt=0)
+    number_of_edit_rounds: int = Field(default=2, ge=0, le=10)
+    translocation_adjust: bool = True
+    inversion_adjust: bool = True
+    debris_adjust: bool = False
+    error_max_epoch: int = Field(default=5, ge=1, le=20)
+    error_min_len: int = Field(default=15_000, gt=0)
+    error_max_len: int = Field(default=20_000_000, gt=0)
+    error_filter_score: float = Field(default=0.9, ge=0.0, le=1.0)
+    error_filter_iou_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    python_command: str = "python3.9"
+
+    @model_validator(mode="after")
+    def _validate_error_window(self) -> "AutoHiCRunParameters":
+        if self.error_max_len < self.error_min_len:
+            raise ValueError("autohic_parameters.error_max_len must be >= error_min_len")
+        return self
 
 
-HiCMethod = Literal["juicer_3ddna_juicebox", "yahs"]
-HiCInputMode = Literal["auto", "raw_reads", "merged_nodups"]
+HiCMethod = Literal["autohic"]
 
 
 class HiCScaffoldingPlanCandidate(BaseModel):
@@ -441,34 +452,20 @@ class HiCScaffoldingPlanCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     method: HiCMethod
-    input_mode: HiCInputMode | None = None
-    chromosome_count: int | None = Field(default=None, gt=0)
-    merged_nodups_ref: str | None = None
-    hic_alignment_ref: str | None = None
-    juicer_3ddna_parameters: Juicer3DDNARunParameters | None = None
+    autohic_parameters: AutoHiCRunParameters | None = None
     status: Literal["needs_clarification", "ready_to_execute"] = "needs_clarification"
     missing_fields: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _derive_readiness(self) -> "HiCScaffoldingPlanCandidate":
         missing: list[str] = []
-        if self.method == "juicer_3ddna_juicebox":
-            if self.input_mode is None:
-                missing.append("input_mode")
-            if self.chromosome_count is None:
-                missing.append("chromosome_count")
-            if self.input_mode == "merged_nodups" and not self.merged_nodups_ref:
-                missing.append("merged_nodups_ref")
-            if self.input_mode == "raw_reads":
-                params = self.juicer_3ddna_parameters
-                if not params or not params.restriction_enzyme:
-                    missing.append("juicer_3ddna_parameters.restriction_enzyme")
-                if not params or not params.chrom_sizes_ref:
-                    missing.append("juicer_3ddna_parameters.chrom_sizes_ref")
-                if not params or params.threads is None:
-                    missing.append("juicer_3ddna_parameters.threads")
-        elif not self.hic_alignment_ref:
-            missing.append("hic_alignment_ref")
+        params = self.autohic_parameters
+        if not params or not params.restriction_enzyme:
+            missing.append("autohic_parameters.restriction_enzyme")
+        if not params or not params.error_model_ref:
+            missing.append("autohic_parameters.error_model_ref")
+        if not params or not params.chromosome_model_ref:
+            missing.append("autohic_parameters.chromosome_model_ref")
         self.missing_fields = missing
         self.status = "ready_to_execute" if not missing else "needs_clarification"
         return self
@@ -479,13 +476,9 @@ class HiCScaffoldingRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    method: HiCMethod = "juicer_3ddna_juicebox"
+    method: HiCMethod = "autohic"
     methods: list[HiCMethod] | None = None
-    input_mode: HiCInputMode | None = None
-    chromosome_count: int | None = Field(default=None, gt=0)
-    merged_nodups_ref: str | None = None
-    hic_alignment_ref: str | None = None
-    juicer_3ddna_parameters: Juicer3DDNARunParameters | None = None
+    autohic_parameters: AutoHiCRunParameters | None = None
 
     @model_validator(mode="after")
     def _require_ready_candidates(self) -> "HiCScaffoldingRunConfig":
@@ -493,11 +486,7 @@ class HiCScaffoldingRunConfig(BaseModel):
         for method in methods:
             candidate = HiCScaffoldingPlanCandidate(
                 method=method,
-                input_mode=self.input_mode if method == "juicer_3ddna_juicebox" else None,
-                chromosome_count=self.chromosome_count if method == "juicer_3ddna_juicebox" else None,
-                merged_nodups_ref=self.merged_nodups_ref if method == "juicer_3ddna_juicebox" else None,
-                hic_alignment_ref=self.hic_alignment_ref if method == "yahs" else None,
-                juicer_3ddna_parameters=self.juicer_3ddna_parameters if method == "juicer_3ddna_juicebox" else None,
+                autohic_parameters=self.autohic_parameters,
             )
             if candidate.status != "ready_to_execute":
                 raise ValueError(

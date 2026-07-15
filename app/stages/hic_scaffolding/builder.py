@@ -5,7 +5,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
-from app.stages.hic_scaffolding.method_application import build_juicer_3ddna_graph, build_yahs_graph
+from app.stages.hic_scaffolding.method_application import build_autohic_graph
 from app.stages.hic_scaffolding.nodes import (
     block_hic_scaffolding,
     commit_hic_scaffolding,
@@ -33,8 +33,7 @@ def build_stage():
     graph.add_node("resolve_hic_inputs", resolve_hic_inputs)
     graph.add_node("select_hic_mode", select_hic_mode)
     graph.add_node("plan_hic_scaffold", plan_hic_scaffold)
-    graph.add_node("juicer_3ddna", build_juicer_3ddna_graph())
-    graph.add_node("yahs", build_yahs_graph())
+    graph.add_node("autohic", build_autohic_graph())
     graph.add_node("write_hic_skip", write_hic_skip)
     graph.add_node("commit", commit_hic_scaffolding)
     graph.add_node("block", block_hic_scaffolding)
@@ -55,17 +54,12 @@ def build_stage():
     graph.add_conditional_edges(
         "plan_hic_scaffold",
         route_after_scaffold_plan,
-        {"juicer_3ddna": "juicer_3ddna", "yahs": "yahs", "block": "block", "fail": "fail"},
+        {"autohic": "autohic", "block": "block", "fail": "fail"},
     )
     graph.add_conditional_edges(
-        "juicer_3ddna",
+        "autohic",
         route_after_method_subgraph,
-        {"juicer_3ddna": "juicer_3ddna", "yahs": "yahs", "block": "block", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "yahs",
-        route_after_method_subgraph,
-        {"juicer_3ddna": "juicer_3ddna", "yahs": "yahs", "block": "block", "fail": "fail"},
+        {"autohic": "autohic", "block": "block", "fail": "fail"},
     )
     graph.add_conditional_edges(
         "write_hic_skip",

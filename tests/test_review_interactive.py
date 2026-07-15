@@ -86,7 +86,7 @@ def _hic_blocked_session(tmp: str) -> tuple[str, str]:
     payload = {
         "stage": "hic_scaffolding",
         "reason": "hic_scaffolding_human_decision_required",
-        "candidates": [{"method_name": "hic_scaffolding.candidate.yahs"}],
+        "candidates": [{"method_name": "hic_scaffolding.candidate.autohic"}],
         "decisions_allowed": ["select_method", "skip", "stop_human_review"],
         "notes": ["Hi-C reads available"],
     }
@@ -352,7 +352,7 @@ class PromptHicScaffoldingTests(unittest.TestCase):
         requirements = {
             "stage": "hic_scaffolding",
             "decisions_allowed": ["accept_candidate", "skip", "stop_human_review"],
-            "executed_candidate_methods": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"],
+            "executed_candidate_methods": ["hic_scaffolding.candidate.autohic"],
         }
         inputs = iter(["1", ""])
         out = io.StringIO()
@@ -377,7 +377,7 @@ class PromptHicScaffoldingTests(unittest.TestCase):
         requirements = {
             "stage": "hic_scaffolding",
             "decisions_allowed": ["select_method", "skip"],
-            "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+            "candidate_methods": ["hic_scaffolding.candidate.autohic"],
         }
         inputs = iter(["1", ""])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
@@ -385,13 +385,13 @@ class PromptHicScaffoldingTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["decision"], "select_method")
-        self.assertEqual(result["method_name"], "hic_scaffolding.candidate.yahs")
+        self.assertEqual(result["method_name"], "hic_scaffolding.candidate.autohic")
 
     def test_skip_decision(self):
         requirements = {
             "stage": "hic_scaffolding",
             "decisions_allowed": ["select_method", "skip"],
-            "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+            "candidate_methods": ["hic_scaffolding.candidate.autohic"],
         }
         inputs = iter(["2", "no Hi-C data available"])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
@@ -749,7 +749,7 @@ class RenderBlockedSummaryTests(unittest.TestCase):
             "decision_requirements": {
                 "stage": "hic_scaffolding",
                 "decisions_allowed": ["select_method", "skip"],
-                "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                "candidate_methods": ["hic_scaffolding.candidate.autohic"],
             },
             "latest_review_request_artifact": None,
             "next_action": {},
@@ -925,7 +925,7 @@ class DecisionBriefTests(unittest.TestCase):
             "decision_requirements": {
                 "stage": "hic_scaffolding",
                 "decisions_allowed": ["select_method", "skip"],
-                "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                "candidate_methods": ["hic_scaffolding.candidate.autohic"],
             },
             "latest_review_request_artifact": None,
             "latest_review_request": {
@@ -937,7 +937,7 @@ class DecisionBriefTests(unittest.TestCase):
 
         self.assertEqual(brief["stage"], "hic_scaffolding")
         self.assertEqual(len(brief["candidates"]), 1)
-        self.assertEqual(brief["candidates"][0]["method"], "hic_scaffolding.candidate.yahs")
+        self.assertEqual(brief["candidates"][0]["method"], "hic_scaffolding.candidate.autohic")
         self.assertEqual(brief["evidence"]["report_refs"]["pre_hic_assembly_ref"], "/tmp/pre_hic.fasta")
 
     def test_hic_brief_with_notes(self):
@@ -945,7 +945,7 @@ class DecisionBriefTests(unittest.TestCase):
             artifact_path = Path(tmp) / "hic_request.json"
             artifact_path.write_text(json.dumps({
                 "stage": "hic_scaffolding",
-                "candidates": [{"method_name": "hic_scaffolding.candidate.yahs"}],
+                "candidates": [{"method_name": "hic_scaffolding.candidate.autohic"}],
                 "notes": ["Hi-C reads available", "Contact map review required"],
             }), encoding="utf-8")
 
@@ -955,7 +955,7 @@ class DecisionBriefTests(unittest.TestCase):
                 "decision_requirements": {
                     "stage": "hic_scaffolding",
                     "decisions_allowed": ["select_method", "skip"],
-                    "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                    "candidate_methods": ["hic_scaffolding.candidate.autohic"],
                 },
                 "latest_review_request_artifact": {"file_path": str(artifact_path)},
                 "latest_review_request": {"payload": {}},

@@ -283,7 +283,7 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
-    def test_parameter_prompt_collects_dual_hic_candidate_inputs(self):
+    def test_parameter_prompt_collects_autohic_inputs(self):
         req = AskClarificationRequest(
             status="clarification_required",
             kind="parameter_values",
@@ -291,11 +291,11 @@ class InteractiveLoopTests(unittest.TestCase):
             ask_plan_ref="/tmp/plan.json",
             manifest_ref="test.yaml",
             question="Parameters",
-            choices={"defaults": {"hic_scaffolding.candidate.juicer_3ddna_juicebox": {"input_mode": "merged_nodups"}}},
+            choices={"defaults": {"hic_scaffolding.candidate.autohic": {"threads": 10, "debris_adjust": False}}},
             required_fields=[
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.input_mode",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
-                "hic_scaffolding.candidate.yahs.hic_alignment_ref",
+                "hic_scaffolding.candidate.autohic.restriction_enzyme",
+                "hic_scaffolding.candidate.autohic.error_model_ref",
+                "hic_scaffolding.candidate.autohic.chromosome_model_ref",
             ],
             response_schema={},
             next_action={},
@@ -303,29 +303,22 @@ class InteractiveLoopTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
-            selected_methods={
-                "hic_scaffolding": [
-                    "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "hic_scaffolding.candidate.yahs",
-                ]
-            },
+            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
         )
-        inputs = iter(["merged_nodups", "24", "/data/merged_nodups.txt", "/data/hic.bam"])
+        inputs = iter(["MboI", "/models/error_model.pth", "/models/chr_model.pth", ""])
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", side_effect=lambda _: next(inputs)):
             response = _prompt_parameter_values(req, plan)
 
         assert response.method_parameters is not None
-        self.assertEqual(
-            response.method_parameters["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["merged_nodups_ref"],
-            "/data/merged_nodups.txt",
-        )
-        self.assertEqual(
-            response.method_parameters["hic_scaffolding.candidate.yahs"]["hic_alignment_ref"],
-            "/data/hic.bam",
-        )
+        params = response.method_parameters["hic_scaffolding.candidate.autohic"]
+        self.assertEqual(params["restriction_enzyme"], "MboI")
+        self.assertEqual(params["error_model_ref"], "/models/error_model.pth")
+        self.assertEqual(params["chromosome_model_ref"], "/models/chr_model.pth")
+        self.assertEqual(params["threads"], 10)
+        self.assertFalse(params["debris_adjust"])
 
-    def test_parameter_prompt_recommends_auto_chrom_sizes_for_juicer_raw_reads(self):
+    def test_parameter_prompt_uses_autohic_thread_default(self):
         req = AskClarificationRequest(
             status="clarification_required",
             kind="parameter_values",
@@ -333,13 +326,11 @@ class InteractiveLoopTests(unittest.TestCase):
             ask_plan_ref="/tmp/plan.json",
             manifest_ref="test.yaml",
             question="Parameters",
-            choices={"defaults": {}},
+            choices={"defaults": {"hic_scaffolding.candidate.autohic": {"threads": 40}}},
             required_fields=[
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.input_mode",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.chrom_sizes_ref",
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.threads",
+                "hic_scaffolding.candidate.autohic.restriction_enzyme",
+                "hic_scaffolding.candidate.autohic.error_model_ref",
+                "hic_scaffolding.candidate.autohic.chromosome_model_ref",
             ],
             response_schema={},
             next_action={},
@@ -347,17 +338,16 @@ class InteractiveLoopTests(unittest.TestCase):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
-            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
+            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
         )
-        inputs = iter(["raw_reads", "24", "MboI", "", ""])
+        inputs = iter(["DpnII", "/models/error.pth", "/models/chr.pth", ""])
         with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
              patch("builtins.input", side_effect=lambda _: next(inputs)):
             response = _prompt_parameter_values(req, plan)
 
         assert response.method_parameters is not None
-        params = response.method_parameters["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
-        self.assertEqual(params["chrom_sizes_ref"], "auto")
-        self.assertEqual(params["threads"], 8)
+        params = response.method_parameters["hic_scaffolding.candidate.autohic"]
+        self.assertEqual(params["threads"], 40)
 
     def test_parameter_prompt_accepts_function_database_provenance_fields(self):
         req = AskClarificationRequest(
@@ -790,29 +780,30 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "genome_survey.kmer_count.jellyfish",
                     "genome_survey.model.genomescope2",
                 ],
-                "hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"],
+                "hic_scaffolding": ["hic_scaffolding.candidate.autohic"],
             },
             "shared_parameter_defaults": {"platform": "ont", "read_type": "ont_raw"},
             "parameter_defaults": {
                 "genome_survey.kmer_count.jellyfish": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
                 "genome_survey.model.genomescope2": {"kmer_size": 21},
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {
-                    "input_mode": "raw_reads",
-                    "chromosome_count": 25,
-                    "chrom_sizes_ref": "auto",
-                    "threads": 8,
+                "hic_scaffolding.candidate.autohic": {
+                    "threads": 10,
+                    "number_of_edit_rounds": 2,
+                    "debris_adjust": False,
                 },
             },
             "parameter_default_sources": {
                 "genome_survey.kmer_count.jellyfish": {"kmer_size": "default", "hash_size": "default", "threads": "default"},
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {
-                    "chromosome_count": "evidence: local NCBI related-species evidence for 卵鳎",
-                    "chrom_sizes_ref": "auto: derive chrom.sizes from the pre-HiC FASTA",
+                "hic_scaffolding.candidate.autohic": {
                     "threads": "default",
+                    "number_of_edit_rounds": "default",
+                    "debris_adjust": "default",
                 },
             },
             "missing_parameter_fields": [
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox.restriction_enzyme",
+                "hic_scaffolding.candidate.autohic.restriction_enzyme",
+                "hic_scaffolding.candidate.autohic.error_model_ref",
+                "hic_scaffolding.candidate.autohic.chromosome_model_ref",
             ],
             "stage_plan_details": [
                 {
@@ -832,12 +823,12 @@ class PlanPreviewRenderTests(unittest.TestCase):
                     "stage": "hic_scaffolding",
                     "role": "executable",
                     "status": "configured",
-                    "inputs": ["missing Hi-C reads/alignment/merged_nodups in manifest"],
+                    "inputs": ["missing paired Hi-C reads in manifest"],
                     "methods": [
                         {
-                            "method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                            "parameters": {"input_mode": "raw_reads", "chromosome_count": 25},
-                            "missing_parameters": ["restriction_enzyme"],
+                            "method": "hic_scaffolding.candidate.autohic",
+                            "parameters": {"threads": 10, "number_of_edit_rounds": 2},
+                            "missing_parameters": ["restriction_enzyme", "error_model_ref", "chromosome_model_ref"],
                         }
                     ],
                 },
@@ -856,13 +847,13 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn("Intent parser: local deterministic fallback", rendered)
         self.assertIn("platform: ont", rendered)
         self.assertIn("[jellyfish] kmer_size: 21  (default)", rendered)
-        self.assertIn("[juicer_3ddna_juicebox] input_mode: raw_reads  (recommended)", rendered)
-        self.assertIn("[juicer_3ddna_juicebox] chromosome_count: 25  (evidence: local NCBI related-species evidence for 卵鳎)", rendered)
-        self.assertIn("[juicer_3ddna_juicebox] chrom_sizes_ref: auto  (auto: derive chrom.sizes from the pre-HiC FASTA)", rendered)
-        self.assertIn("[juicer_3ddna_juicebox] restriction_enzyme: pending", rendered)
+        self.assertIn("[autohic] threads: 10  (default)", rendered)
+        self.assertIn("[autohic] restriction_enzyme: pending", rendered)
+        self.assertIn("[autohic] error_model_ref: pending", rendered)
+        self.assertIn("[autohic] chromosome_model_ref: pending", rendered)
         self.assertIn("Stage details:", rendered)
         self.assertIn("hic_scaffolding: [run] configured", rendered)
-        self.assertIn("input: missing Hi-C reads/alignment/merged_nodups in manifest", rendered)
+        self.assertIn("input: missing paired Hi-C reads in manifest", rendered)
         self.assertIn("t2t: [run] no registered method yet", rendered)
 
     def test_preview_renders_input_assets(self):

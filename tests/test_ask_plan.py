@@ -1391,25 +1391,16 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
         self.assertEqual(result.kind, "method_selection")
         methods = result.choices["methods_by_stage"]["hic_scaffolding"]
-        three_dna = next(m for m in methods if m["method_name"] == "hic_scaffolding.candidate.juicer_3ddna_juicebox")
-        self.assertNotIn("execution_support", three_dna)
-        self.assertEqual(
-            result.choices["defaults"]["hic_scaffolding"],
-            ["hic_scaffolding.candidate.juicer_3ddna_juicebox", "hic_scaffolding.candidate.yahs"],
-        )
+        self.assertEqual([method["method_name"] for method in methods], ["hic_scaffolding.candidate.autohic"])
+        self.assertEqual(result.choices["defaults"]["hic_scaffolding"], ["hic_scaffolding.candidate.autohic"])
 
     def test_incomplete_hic_candidates_remain_planned_not_local_execution(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
-            selected_methods={
-                "hic_scaffolding": [
-                    "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "hic_scaffolding.candidate.yahs",
-                ]
-            },
+            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
             method_parameters={
-                "hic_scaffolding.candidate.juicer_3ddna_juicebox": {"input_mode": "merged_nodups"},
+                "hic_scaffolding.candidate.autohic": {"restriction_enzyme": "MboI"},
             },
         )
 
@@ -1420,87 +1411,39 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertNotIn("hic_scaffolding", payload)
         candidates = summary["hic_scaffolding_plan_candidates"]
         self.assertEqual(candidates[0]["status"], "needs_clarification")
-        self.assertIn("chromosome_count", candidates[0]["missing_fields"])
-        self.assertEqual(candidates[1]["missing_fields"], ["hic_alignment_ref"])
-        juicer_defaults = summary["parameter_defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
-        self.assertEqual(juicer_defaults["input_mode"], "merged_nodups")
+        self.assertIn("autohic_parameters.error_model_ref", candidates[0]["missing_fields"])
+        autohic_defaults = summary["parameter_defaults"]["hic_scaffolding.candidate.autohic"]
+        self.assertEqual(autohic_defaults["threads"], 10)
         self.assertIn(
-            "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
+            "hic_scaffolding.candidate.autohic.error_model_ref",
             summary["missing_parameter_fields"],
         )
         self.assertIn(
-            "hic_scaffolding.candidate.juicer_3ddna_juicebox.merged_nodups_ref",
+            "hic_scaffolding.candidate.autohic.chromosome_model_ref",
             summary["missing_parameter_fields"],
         )
 
-    def test_hic_chromosome_count_default_uses_related_species_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\n"
-                "user_metadata:\n"
-                "  target_species: 卵鳎\n"
-                "assets: []\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                selected_stages=["hic_scaffolding"],
-                resolved_execution_order=["hic_scaffolding"],
-                selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
-            )
-            evidence_pack = {
-                "status": "available",
-                "computed_summary": {"chromosome_count": {"mode": 25}},
-            }
+    def test_complete_autohic_candidate_is_emitted_as_local_run_config(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
+            method_parameters={
+                "hic_scaffolding.candidate.autohic": {
+                    "restriction_enzyme": "DpnII",
+                    "error_model_ref": "/models/error_model.pth",
+                    "chromosome_model_ref": "/models/chr_model.pth",
+                }
+            },
+        )
 
-            with patch("app.entrypoints.ask_planner.build_related_species_evidence_pack", return_value=evidence_pack):
-                result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-                summary = build_run_plan_summary(plan)
-
-        defaults = result.choices["defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]
-        self.assertEqual(defaults["chromosome_count"], 25)
+        payload = build_run_config_payload(plan)
+        self.assertIn("hic_scaffolding", payload["local_exec"])
+        self.assertEqual(payload["hic_scaffolding"]["method"], "autohic")
         self.assertEqual(
-            summary["parameter_defaults"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["chromosome_count"],
-            25,
+            payload["hic_scaffolding"]["autohic_parameters"]["chromosome_model_ref"],
+            "/models/chr_model.pth",
         )
-        self.assertEqual(
-            summary["parameter_default_sources"]["hic_scaffolding.candidate.juicer_3ddna_juicebox"]["chromosome_count"],
-            "evidence: local NCBI related-species evidence for 卵鳎",
-        )
-        self.assertTrue(any("NCBI related-species evidence" in warning for warning in result.choices["warnings"]))
-
-    def test_hic_chromosome_count_pending_explains_unavailable_species_evidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            manifest = Path(tmp) / "manifest.yaml"
-            manifest.write_text(
-                "session_id: s1\n"
-                "user_metadata:\n"
-                "  target_species: 卵鳎\n"
-                "assets: []\n",
-                encoding="utf-8",
-            )
-            plan = _base_plan(
-                manifest_ref=str(manifest),
-                selected_stages=["hic_scaffolding"],
-                resolved_execution_order=["hic_scaffolding"],
-                selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.juicer_3ddna_juicebox"]},
-            )
-            evidence_pack = {
-                "status": "unavailable",
-                "computed_summary": {"selected_record_count": 0},
-                "notes": ["reference_version_mismatch:Metazoa.ncbi.tsv,Metazoa.ncbi.lineage"],
-            }
-
-            with patch("app.entrypoints.ask_planner.build_related_species_evidence_pack", return_value=evidence_pack):
-                result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-
-        self.assertIn(
-            "hic_scaffolding.candidate.juicer_3ddna_juicebox.chromosome_count",
-            result.required_fields,
-        )
-        self.assertTrue(any("chromosome_count evidence unavailable for 卵鳎" in warning for warning in result.choices["warnings"]))
-        self.assertTrue(any("reference_version_mismatch" in warning for warning in result.choices["warnings"]))
 
     def test_repeat_annotation_method_selection(self):
         plan = _base_plan(
@@ -1554,7 +1497,7 @@ class AskPlannerValidationWarningTests(unittest.TestCase):
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
             selected_methods={
-                "hic_scaffolding": "hic_scaffolding.candidate.yahs",
+                "hic_scaffolding": "hic_scaffolding.candidate.autohic",
             },
         )
         warnings = _plan_validation_warnings(plan)

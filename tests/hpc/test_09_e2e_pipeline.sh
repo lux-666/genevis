@@ -10,7 +10,7 @@
 #    5. Resume capability after human intervention
 #    6. Asset registry propagation across stages
 #    7. Small-file execution for quick validation
-#    8. Hi-C scaffolding with juicer+3D-DNA when Hi-C data available
+#    8. Hi-C scaffolding with AutoHiC when Hi-C data and models are available
 #    9. T2T polishing with auto_patch mode
 # ============================================================
 set -euo pipefail
@@ -61,8 +61,16 @@ if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
         info "Hi-C data detected:"
         info "  R1: ${HIC_R1}"
         info "  R2: ${HIC_R2}"
+        if [[ -z "${HIC_AUTOHIC_ERROR_MODEL:-}" || -z "${HIC_AUTOHIC_CHROMOSOME_MODEL:-}" ]]; then
+            fail "AutoHiC requires HIC_AUTOHIC_ERROR_MODEL and HIC_AUTOHIC_CHROMOSOME_MODEL"
+            exit 1
+        elif [[ ! -s "$HIC_AUTOHIC_ERROR_MODEL" || ! -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]]; then
+            [[ -s "$HIC_AUTOHIC_ERROR_MODEL" ]] || fail "AutoHiC error model missing: ${HIC_AUTOHIC_ERROR_MODEL}"
+            [[ -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]] || fail "AutoHiC chromosome model missing: ${HIC_AUTOHIC_CHROMOSOME_MODEL}"
+            exit 1
+        fi
         HIC_AVAILABLE=true
-        pass "Hi-C data available for scaffolding"
+        pass "Hi-C data and AutoHiC models available for scaffolding"
     else
         [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
         [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
@@ -71,12 +79,6 @@ if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
     fi
 else
     info "No Hi-C data provided (HIC_R1/HIC_R2 not set), Hi-C stage will be skipped"
-fi
-
-if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
-    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
-    summary "Test 09: End-to-End Pipeline (invalid explicit chrom.sizes)" || true
-    exit 1
 fi
 
 T2T_AVAILABLE=false
@@ -171,9 +173,6 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         LOCAL_EXEC_STAGES=("assembly" "assembly_review" "hic_scaffolding" "t2t")
     else
         LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
-    fi
-    if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-        info "HIC_CHROM_SIZES is empty; Juicer run-config will use chrom_sizes_ref=auto"
     fi
 fi
 

@@ -107,6 +107,22 @@ def test_guidance_can_support_an_adjacent_parameter_and_tradeoff_string_is_norma
     ]
 
 
+def test_missing_diagnosis_summary_uses_top_level_summary() -> None:
+    response = _response()
+    response["sample_diagnosis"] = {
+        "effect_areas": ["purging"],
+        "observation_ids": ["pf_het"],
+        "tradeoffs": ["May retain more alternate sequence."],
+    }
+
+    result = normalize_parameter_recommendation(response, _prompt())
+
+    assert result["sample_diagnosis"] == {
+        "effect_areas": ["purging"],
+        "summary": "Use a conservative purge setting.",
+    }
+
+
 def test_retry_carries_previous_explicit_overrides_and_applies_sparse_patch() -> None:
     prompt = _prompt(task="retry_after_review_failure")
     prompt["adjustable_params"]["kmer_length"] = {"default": 51}

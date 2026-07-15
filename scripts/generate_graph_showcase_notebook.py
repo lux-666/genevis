@@ -79,8 +79,7 @@ def build_notebook() -> nbf.NotebookNode:
             from app.stages.genome_survey.builder import build_stage as build_genome_survey_stage
             from app.stages.hic_scaffolding.builder import build_stage as build_hic_scaffolding_stage
             from app.stages.hic_scaffolding.method_application import (
-                build_juicer_3ddna_graph,
-                build_yahs_graph,
+                build_autohic_graph,
             )
             from app.stages.inventory.builder import build_stage as build_inventory_stage
             from app.stages.read_qc.builder import build_stage as build_read_qc_stage
@@ -136,8 +135,7 @@ def build_notebook() -> nbf.NotebookNode:
                 [
                     ("assembly.method.flye", build_flye_graph),
                     ("assembly.method.nextdenovo", build_nextdenovo_graph),
-                    ("hic_scaffolding.method.juicer_3ddna", build_juicer_3ddna_graph),
-                    ("hic_scaffolding.method.yahs", build_yahs_graph),
+                    ("hic_scaffolding.method.autohic", build_autohic_graph),
                 ]
             )
             """

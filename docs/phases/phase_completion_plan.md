@@ -131,7 +131,7 @@ Tasks in `docs/phases/phase7/` (subjects first; specifics deferred):
    merge/EVM-weight review → final-gene-set + BUSCO review — initially over
    candidate-only methods so the chain is exercised before execution lands.
 4. Gene annotation execution slices: real runners for the gene predictors one
-   method at a time (e.g. an ab-initio path first), mirroring the Flye/YaHS
+   method at a time (e.g. an ab-initio path first), mirroring the frozen-attempt
    runner pattern, each flipping its registry `execution_support` to executable.
 5. Candidate merge and final gene set: EVM/MAKER-style merge of candidate gene
    models, gated by the candidate-evidence and merge reviews, producing a final

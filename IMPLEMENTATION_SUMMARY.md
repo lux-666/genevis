@@ -17,15 +17,12 @@
 - ✅ package preflight 失败时返回结构化 payload（status="missing_tool"、missing_tools 列表）
 - ✅ 保留 `has_explicit_path_override` 旁路，但也对其运行 package preflight
 
-#### 1.3 Juicer/3D-DNA 方法重构 (`app/stages/hic_scaffolding/method_application/juicer_3ddna.py`)
-- ✅ 删除 `juicer_scripts_compat` shim 逻辑（lines 278-296）
-- ✅ 删除 `_resolve_juicer_scripts_dir()` 函数：不再靠 `command -v` + dirname 猜测
-- ✅ 删除 `_resolve_site_generator()` 函数：不再在 CONDA_PREFIX 里 find
-- ✅ 改为从 `packages["juicer"].install_root` 显式拼接路径：
-  - `juicer_scripts_dir = <juicer_root>/scripts`（conformance 后存在）
-  - `generate_site_positions.py = <juicer_root>/misc/generate_site_positions.py`
-  - `run-asm-pipeline.sh = <three_d_dna_root>/run-asm-pipeline.sh`
-- ✅ 脚本生成改为用绝对路径，不依赖 PATH
+#### 1.3 AutoHiC 方法 (`app/stages/hic_scaffolding/method_application/autohic.py`)
+- ✅ Hi-C stage 只保留 `hic_scaffolding.candidate.autohic`。
+- ✅ AutoHiC package root、Juicer root、3D-DNA root 都通过 `package_tools` 显式解析。
+- ✅ 输入 assembly 先复制，成对 reads 规范为 AutoHiC 目录结构。
+- ✅ 生成官方 `cfg-autohic.txt` 并登记 chromosome FASTA、`.hic`、`.assembly`、HTML report。
+- ✅ AutoHiC 完成后仍进入 GeneAgent review gate，未采纳前保留 contig fallback。
 
 #### 1.4 所有 stage 节点更新
 以下 stage 的 `resolve_method_env` 调用已更新为解包 3-tuple：
@@ -39,7 +36,7 @@
 - ✅ `app/stages/gene_annotation/nodes.py`
 - ✅ `app/stages/genome_survey/method_application/genomescope2.py`
 - ✅ `app/stages/genome_survey/method_application/jellyfish.py`
-- ✅ `app/stages/hic_scaffolding/method_application/yahs.py`
+- ✅ `app/stages/hic_scaffolding/method_application/autohic.py`
 - ✅ `app/stages/read_qc/method_application/seqkit_length_filter.py`
 - ✅ `app/stages/read_qc/method_application/seqkit_stats.py`
 - ✅ `app/stages/repeat_annotation/nodes.py`
@@ -48,14 +45,13 @@
 ### 2. 配置文件
 
 #### 2.1 config/envs.yaml
-- ✅ 新增顶层 `packages:` 段，声明 3 个外部软件包：
+- ✅ 顶层 `packages:` 段声明 AutoHiC 及其外部依赖：
+  - `autohic`: install_root、entrypoints、canary_paths
   - `juicer`: install_root、conform_on_bootstrap=true、jar_root_ref=juicer_tools
   - `three_d_dna`: install_root、entrypoints、canary_paths
   - `juicer_tools`: install_root、canary_paths
-- ✅ `methods.hic_scaffolding.candidate.juicer_3ddna_juicebox` 调整：
-  - `required_tools` 只保留 conda env 内工具（bwa、samtools、java）
-  - 移除 juicer.sh、run-asm-pipeline.sh 等（改由 package_tools 表达）
-  - 新增 `package_tools: [juicer, three_d_dna]`
+- ✅ `methods.hic_scaffolding.candidate.autohic` 使用专用 conda env，并声明
+  `package_tools: [autohic, juicer, three_d_dna]`。
 
 #### 2.2 config/envs.yaml.example（新建）
 - ✅ 模板文件，所有路径用占位符（/path/to/...、your_tool_env）
@@ -181,8 +177,8 @@ Checking configuration: config/envs.yaml
 根据原计划，以下项目未实现（非阻塞）：
 
 ### 1. HPC 测试脚本调整
-- ❌ `tests/hpc/hpc_env.sh.example`: 删 HIC_JUICER_SCRIPTS_DIR 环境变量
-- ❌ `tests/hpc/test_06_hic.sh`: 删除 manual Juicer preflight 逻辑（lines 223-271）
+- ✅ `tests/hpc/hpc_env.sh.example`: 改为 AutoHiC 双模型路径配置
+- ✅ `tests/hpc/test_06_hic.sh`: 改为 AutoHiC 入口、四类输出和 review gate 验证
 - ❌ `tests/hpc/run_all.sh`、`tests/hpc/common.sh`: 删 envs.local.yaml 引用
 
 **原因**: 这些脚本在本地开发环境不可测试（需要真实 HPC 环境），且是 tests/hpc/ 目录下的专用脚本，不影响核心功能。可在 HPC 实际部署时按需调整。
@@ -237,7 +233,7 @@ Checking configuration: config/envs.yaml
 - `app/execution/env_resolver.py` (+134 lines)
 - `app/execution/env_dispatch.py` (+146 lines)
 - `app/entrypoints/run.py` (+95 lines, bootstrap 子命令)
-- `app/stages/hic_scaffolding/method_application/juicer_3ddna.py` (-130 lines, 删 shim)
+- `app/stages/hic_scaffolding/method_application/autohic.py`
 - `config/envs.yaml` (+39 lines, packages 段)
 
 ### 修改文件（stage 节点 3-tuple 更新）
@@ -251,7 +247,7 @@ Checking configuration: config/envs.yaml
 - `app/stages/gene_annotation/nodes.py`
 - `app/stages/genome_survey/method_application/genomescope2.py`
 - `app/stages/genome_survey/method_application/jellyfish.py`
-- `app/stages/hic_scaffolding/method_application/yahs.py`
+- `app/stages/hic_scaffolding/method_application/autohic.py`
 - `app/stages/read_qc/method_application/seqkit_length_filter.py`
 - `app/stages/read_qc/method_application/seqkit_stats.py`
 - `app/stages/repeat_annotation/nodes.py`

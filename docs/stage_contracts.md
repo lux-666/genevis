@@ -280,16 +280,20 @@ Inputs:
 Outputs:
 
 - `hic_qc_report`
-- optional `chromosome_scaffolded_assembly`
-- optional `juicebox_review_bundle`
+- `chromosome_scaffolded_assembly`
+- final `.hic` contact map
+- final `.assembly` file
+- AutoHiC HTML report
 
 Planning rules:
 
 - Skip if Hi-C reads are absent.
 - Skip if the user did not request chromosome-level assembly.
 - Put Hi-C-specific QC inside this stage, not generic read QC.
-- Prefer HiC-Pro or Juicer for processing, 3D-DNA for scaffolding, and
-  Juicebox for manual review.
+- Use AutoHiC as the only stage candidate. AutoHiC internally runs Juicer,
+  3D-DNA, deep-learning error correction, chromosome assignment, and report generation.
+- Preserve the contig assembly until the GeneAgent review gate explicitly adopts
+  the chromosome-level FASTA candidate.
 
 Review triggers:
 

@@ -148,7 +148,7 @@ class ReviewReportTests(unittest.TestCase):
                         "stage": "hic_scaffolding",
                         "reason": "needs_review",
                         "decisions_allowed": ["select_method"],
-                        "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                        "candidate_methods": ["hic_scaffolding.candidate.autohic"],
                     },
                 },
             )
@@ -163,7 +163,7 @@ class ReviewReportTests(unittest.TestCase):
                         "stage": "hic_scaffolding",
                         "reason": "needs_review",
                         "decisions_allowed": ["select_method"],
-                        "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                        "candidate_methods": ["hic_scaffolding.candidate.autohic"],
                     },
                 },
             )

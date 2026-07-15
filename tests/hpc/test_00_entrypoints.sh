@@ -103,20 +103,14 @@ python3 -c "
 # Verify Hi-C schemas are self-consistent
 from app.schemas.run_config import (
     HiCScaffoldingRunConfig, HiCScaffoldingPlanCandidate,
-    Juicer3DDNARunParameters, HiCInputMode, HiCMethod,
+    AutoHiCRunParameters, HiCMethod,
 )
 from app.schemas.artifacts import HiCScaffoldDecisionArtifact
 import typing
 
-# HiCMethod should have both juicer and yahs (Literal type)
+# AutoHiC is the only stage-level Hi-C method.
 methods = typing.get_args(HiCMethod)
-assert 'juicer_3ddna_juicebox' in methods, 'juicer missing from HiCMethod'
-assert 'yahs' in methods, 'yahs missing from HiCMethod'
-
-# HiCInputMode should have raw_reads and merged_nodups (Literal type)
-modes = typing.get_args(HiCInputMode)
-assert 'raw_reads' in modes, 'raw_reads missing'
-assert 'merged_nodups' in modes, 'merged_nodups missing'
+assert methods == ('autohic',), f'unexpected HiCMethod values: {methods}'
 
 # Decision artifact should accept accept_candidate
 dec_hints = typing.get_type_hints(HiCScaffoldDecisionArtifact)
@@ -141,10 +135,10 @@ done
 python3 -c "
 from app.storage.publish import shell_publish_file, shell_publish_variable
 from app.stages.assembly.method_application import flye, nextdenovo
-from app.stages.hic_scaffolding.method_application import juicer_3ddna, yahs
+from app.stages.hic_scaffolding.method_application import autohic
 
 assert callable(shell_publish_file) and callable(shell_publish_variable)
-for module in [flye, nextdenovo, juicer_3ddna, yahs]:
+for module in [flye, nextdenovo, autohic]:
     source = open(module.__file__, encoding='utf-8').read()
     assert 'shell_publish_' in source, module.__name__
 print('all refactored assembly/Hi-C adapters use replay-safe publishing')

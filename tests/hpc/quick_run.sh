@@ -69,8 +69,8 @@ BUSCO_LINEAGE_PATH="/data/work/genevis/data_archive/archive/fish_actinopterygii_
 BUSCO_LINEAGE_NAME="fish_actinopterygii_odb10"
 
 HIC_RESTRICTION_ENZYME="DpnII"
-HIC_CHROMOSOME_COUNT=25
-HIC_CHROM_SIZES=""
+HIC_AUTOHIC_ERROR_MODEL=""
+HIC_AUTOHIC_CHROMOSOME_MODEL=""
 
 TEST_DATA_ROOT="${PROJECT_ROOT}/data_hpc_test"
 CHECKPOINTER="sqlite"
@@ -137,11 +137,6 @@ check_config() {
         info "Review assembly reuse disabled; will assemble from reads"
     fi
 
-    if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
-        error "HIC_CHROM_SIZES file missing or empty: $HIC_CHROM_SIZES"
-        ((missing++))
-    fi
-
     if [[ -z "${GENOME_SIZE_ESTIMATE:-}" ]]; then
         info "Genome size: auto (genome_survey must run before Flye/NextDenovo)"
     else
@@ -178,15 +173,17 @@ check_config() {
             else
                 ok "  Restriction enzyme: $HIC_RESTRICTION_ENZYME"
             fi
-            if [[ -z "${HIC_CHROMOSOME_COUNT:-}" ]]; then
-                warn "HIC_CHROMOSOME_COUNT not set"
+            if [[ -z "${HIC_AUTOHIC_ERROR_MODEL:-}" || ! -s "$HIC_AUTOHIC_ERROR_MODEL" ]]; then
+                error "HIC_AUTOHIC_ERROR_MODEL is missing or empty"
+                ((missing++))
             else
-                ok "  Expected chromosomes: $HIC_CHROMOSOME_COUNT"
+                ok "  Error model: $HIC_AUTOHIC_ERROR_MODEL"
             fi
-            if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-                ok "  chrom.sizes: auto-generate from assembly"
+            if [[ -z "${HIC_AUTOHIC_CHROMOSOME_MODEL:-}" || ! -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]]; then
+                error "HIC_AUTOHIC_CHROMOSOME_MODEL is missing or empty"
+                ((missing++))
             else
-                ok "  chrom.sizes: $HIC_CHROM_SIZES"
+                ok "  Chromosome model: $HIC_AUTOHIC_CHROMOSOME_MODEL"
             fi
         fi
     else
@@ -232,10 +229,11 @@ setup_wizard() {
     info "  - BUSCO_LINEAGE_PATH: path to BUSCO lineage database"
     info ""
     info "Optional (for full pipeline):"
-        info "  - GENOME_SIZE_ESTIMATE: optional positive bp override; survey still measures other fields"
+    info "  - GENOME_SIZE_ESTIMATE: optional positive bp override; survey still measures other fields"
     info "  - HIC_R1, HIC_R2: Hi-C paired reads"
     info "  - HIC_RESTRICTION_ENZYME: enzyme used for Hi-C (e.g. DpnII)"
-    info "  - HIC_CHROMOSOME_COUNT: expected number of chromosomes"
+    info "  - HIC_AUTOHIC_ERROR_MODEL: AutoHiC error-detection model"
+    info "  - HIC_AUTOHIC_CHROMOSOME_MODEL: AutoHiC chromosome model"
     info ""
     info "After editing, run:"
     info "  ./quick_run.sh --check   # Verify configuration"

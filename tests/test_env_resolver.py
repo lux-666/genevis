@@ -67,23 +67,17 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         self.assertTrue(busco_spec.conda_env or busco_spec.conda_prefix)
         self.assertEqual(busco_spec.required_tools, ["busco"])
 
-        yahs_spec = resolver.resolve(
+        autohic_spec = resolver.resolve(
             stage="hic_scaffolding",
-            method_name="hic_scaffolding.candidate.yahs",
+            method_name="hic_scaffolding.candidate.autohic",
         )
-        self.assertTrue(yahs_spec.conda_env or yahs_spec.conda_prefix)
-        self.assertEqual(yahs_spec.required_tools, ["yahs"])
-
-        juicer_spec = resolver.resolve(
-            stage="hic_scaffolding",
-            method_name="hic_scaffolding.candidate.juicer_3ddna_juicebox",
-        )
-        self.assertTrue(juicer_spec.conda_env or juicer_spec.conda_prefix)
-        self.assertIn("java", juicer_spec.required_tools)
-        self.assertEqual(juicer_spec.package_tools, ["juicer", "three_d_dna"])
-        juicer_pkg = resolver.packages_for_spec(juicer_spec)
-        self.assertEqual({pkg.name for pkg in juicer_pkg}, {"juicer", "three_d_dna"})
-        self.assertTrue(all(pkg.install_root for pkg in juicer_pkg))
+        self.assertTrue(autohic_spec.conda_env or autohic_spec.conda_prefix)
+        self.assertIn("python3.9", autohic_spec.required_tools)
+        self.assertIn("java", autohic_spec.required_tools)
+        self.assertEqual(autohic_spec.package_tools, ["autohic", "juicer", "three_d_dna"])
+        packages = resolver.packages_for_spec(autohic_spec)
+        self.assertEqual({pkg.name for pkg in packages}, {"autohic", "juicer", "three_d_dna"})
+        self.assertTrue(all(pkg.install_root for pkg in packages))
 
         repeatmasker_spec = resolver.resolve(
             stage="repeat_annotation",

@@ -373,7 +373,7 @@ class ReviewResumeTests(unittest.TestCase):
         summary = inspect_state(state)
 
         self.assertEqual(summary["decision_requirements"]["stage"], "hic_scaffolding")
-        self.assertIn("hic_scaffolding.candidate.yahs", summary["decision_requirements"]["candidate_methods"])
+        self.assertIn("hic_scaffolding.candidate.autohic", summary["decision_requirements"]["candidate_methods"])
         self.assertEqual(summary["latest_artifact_refs"]["hic_scaffolding"]["scaffold_plan_ref"], "plan.json")
         proposal = summary["decision_requirements"]["runtime_proposal"]
         self.assertEqual(proposal["kind"], "scaffolding_method_or_candidate_review")
@@ -407,7 +407,7 @@ class ReviewResumeTests(unittest.TestCase):
             session_id="s1",
             stage="hic_scaffolding",
             decision="select_method",
-            method_name="hic_scaffolding.candidate.yahs",
+            method_name="hic_scaffolding.candidate.autohic",
             notes=["contact map must be manually reviewed before promotion"],
         )
 
@@ -416,7 +416,7 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
-        self.assertEqual(hic_out["selected_method_name"], "hic_scaffolding.candidate.yahs")
+        self.assertEqual(hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic")
         self.assertEqual(hic_out["final_assembly_for_annotation"], "pre_hic.fasta")
         self.assertTrue(Path(hic_out["review_decision_artifact_ref"]).exists())
 
@@ -427,7 +427,7 @@ class ReviewResumeTests(unittest.TestCase):
             session_id="s1",
             stage="hic_scaffolding",
             decision="select_method",
-            method_name="hic_scaffolding.candidate.yahs",
+            method_name="hic_scaffolding.candidate.autohic",
             notes=["contact map policy approved"],
         )
 
@@ -440,7 +440,7 @@ class ReviewResumeTests(unittest.TestCase):
             session_id="s1",
             stage="hic_scaffolding",
             decision="select_method",
-            method_name="hic_scaffolding.candidate.yahs",
+            method_name="hic_scaffolding.candidate.autohic",
         )
 
         with self.assertRaisesRegex(ResumeValidationError, "contact-map"):
@@ -886,7 +886,7 @@ def _hic_blocked_state() -> dict:
         "active_interrupt": {
             "stage": "hic_scaffolding",
             "reason": "hic_scaffolding_human_decision_required",
-            "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+            "candidate_methods": ["hic_scaffolding.candidate.autohic"],
             "scaffold_plan_ref": "plan.json",
             "pre_hic_assembly_ref": "pre_hic.fasta",
             "final_assembly_for_annotation": "pre_hic.fasta",
@@ -898,7 +898,7 @@ def _hic_blocked_state() -> dict:
         "stage_outputs": {
             "hic_scaffolding": {
                 "status": "blocked_human",
-                "candidate_methods": ["hic_scaffolding.candidate.yahs"],
+                "candidate_methods": ["hic_scaffolding.candidate.autohic"],
                 "scaffold_plan_ref": "plan.json",
                 "pre_hic_assembly_ref": "pre_hic.fasta",
                 "final_assembly_for_annotation": "pre_hic.fasta",

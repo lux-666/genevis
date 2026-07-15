@@ -27,8 +27,11 @@ def normalize_parameter_recommendation(
     if prompt_payload.get("recommendation_contract") != PARAMETER_RECOMMENDATION_CONTRACT:
         raise ValueError("prompt does not use the literature parameter-patch contract")
 
-    diagnosis = _validate_diagnosis(response.get("sample_diagnosis"))
     summary = _nonempty_string(response.get("summary"), field="summary")
+    diagnosis = _validate_diagnosis(
+        response.get("sample_diagnosis"),
+        fallback_summary=summary,
+    )
     raw_patch = response.get("parameter_patch")
     if not isinstance(raw_patch, dict):
         raise ValueError("parameter_patch must be an object")
@@ -127,7 +130,7 @@ def default_parameter_recommendation(prompt_payload: dict[str, Any]) -> dict[str
     return normalize_parameter_recommendation(response, prompt_payload)
 
 
-def _validate_diagnosis(value: Any) -> dict[str, Any]:
+def _validate_diagnosis(value: Any, *, fallback_summary: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("sample_diagnosis must be an object")
     effect_areas = value.get("effect_areas") or []
@@ -135,10 +138,13 @@ def _validate_diagnosis(value: Any) -> dict[str, Any]:
         isinstance(item, str) and item.strip() for item in effect_areas
     ):
         raise ValueError("sample_diagnosis.effect_areas must be a list of strings")
+    diagnosis_summary = value.get("summary")
+    if diagnosis_summary is None or diagnosis_summary == "":
+        diagnosis_summary = fallback_summary
     return {
         "effect_areas": list(dict.fromkeys(effect_areas)),
         "summary": _nonempty_string(
-            value.get("summary"),
+            diagnosis_summary,
             field="sample_diagnosis.summary",
         ),
     }

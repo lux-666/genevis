@@ -3,7 +3,9 @@
 > 注意：本文记录旧版 HPC 运行历史，包含已经过期的路径、TUI 假设和
 > schema-only 结论。当前执行合同请以 `README_HPC_QUICK_START.md`、
 > `hpc_env.sh.example` 和实际 `test_*.sh` 为准；Phase 11 的 hifiasm 参数
-> 推荐现在必须经过 hash-bound `parameter_approval`。
+> 推荐现在必须经过 hash-bound `parameter_approval`。2026-07-15 起 Hi-C
+> stage 已由 AutoHiC 单一路径取代本文记录的旧候选实现；下方 Juicer/3D-DNA/
+> YaHS 内容仅保留为历史运行记录，不再描述当前代码。
 
 更新日期：2026-06-26
 

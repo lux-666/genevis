@@ -1,4 +1,4 @@
-"""Tests for Phase 3 Hi-C scaffolding realization."""
+"""Tests for the AutoHiC-only Hi-C scaffolding stage."""
 
 from __future__ import annotations
 
@@ -10,34 +10,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.graph.routing import next_stage_name
+from app.review.base import ResumeReviewRequest
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.hic_scaffolding.builder import build_stage
+from app.stages.hic_scaffolding.nodes import apply_hic_scaffolding_resume_decision
+
+
+AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 
 
 class HiCScaffoldingDescriptorTests(unittest.TestCase):
-    def test_descriptor_registry_loads_hic_scaffolding_placeholders(self):
+    def test_descriptor_registry_exposes_only_autohic_for_hic_scaffolding(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
-        expected = {
-            "hic_scaffolding.candidate.yahs": "yahs",
-            "hic_scaffolding.candidate.juicer_3ddna_juicebox": "juicer",
-        }
-        for method_name, package_name in expected.items():
-            self.assertIn(package_name, registry.packages)
-            self.assertIn(method_name, registry.methods)
-            self.assertEqual(registry.methods[method_name].stage, "hic_scaffolding")
-            self.assertEqual(registry.methods[method_name].package_ref, package_name)
-            self.assertIn(method_name, registry.by_stage["hic_scaffolding"])
+        self.assertEqual(registry.by_stage["hic_scaffolding"], [AUTOHIC_METHOD])
+        self.assertIn("autohic", registry.packages)
+        self.assertIn("juicer", registry.packages)
+        self.assertIn("3ddna", registry.packages)
+        self.assertEqual(registry.methods[AUTOHIC_METHOD].package_ref, "autohic")
+        self.assertFalse(any("yahs" in method.lower() for method in registry.methods))
 
 
 class HiCScaffoldingStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
-        path.write_text(
-            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps({"session_id": "s1", "assets": assets}, indent=2), encoding="utf-8")
         return path
 
     def _state(self, tmpdir: str, registry_ref: str | None):
@@ -50,804 +48,319 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         state["asset_registry_ref"] = registry_ref
         return state
 
-    def _fake_yahs_bin(self, tmpdir: str, *, fail: bool = False) -> Path:
-        bin_dir = Path(tmpdir) / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        script = bin_dir / "yahs"
-        script.write_text(
-            "#!/usr/bin/env python3\n"
-            "import pathlib, sys\n"
-            "if " + repr(fail) + ":\n"
-            "    print('fake yahs failed', file=sys.stderr)\n"
-            "    sys.exit(8)\n"
-            "args = sys.argv[1:]\n"
-            "prefix = args[args.index('-o') + 1]\n"
-            "p = pathlib.Path(prefix)\n"
-            "p.parent.mkdir(parents=True, exist_ok=True)\n"
-            "pathlib.Path(str(p) + '_scaffolds_final.fa').write_text('>scaffold1\\nACGT\\n', encoding='utf-8')\n"
-            "pathlib.Path(str(p) + '_scaffolds_final.agp').write_text('scaffold1\\t1\\t4\\t1\\tW\\tctg1\\t1\\t4\\t+\\n', encoding='utf-8')\n"
-            "print('fake yahs ok')\n",
-            encoding="utf-8",
-        )
-        script.chmod(0o755)
-        return bin_dir
+    def _inputs(self, tmpdir: str, *, read_count: int = 2) -> tuple[Path, list[Path], Path, Path]:
+        root = Path(tmpdir)
+        assembly = root / "adopted_contigs.fasta"
+        assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
+        reads: list[Path] = []
+        for index in range(read_count):
+            mate = "R1" if index % 2 == 0 else "R2"
+            read = root / f"lane_{index // 2 + 1}_{mate}.fastq.gz"
+            read.write_text(f"@read{index + 1}\nACGT\n+\n!!!!\n", encoding="utf-8")
+            reads.append(read)
+        error_model = root / "error_model.pth"
+        chromosome_model = root / "chr_model.pth"
+        error_model.write_text("error model\n", encoding="utf-8")
+        chromosome_model.write_text("chromosome model\n", encoding="utf-8")
+        return assembly, reads, error_model, chromosome_model
 
-    def _build_juicer_three_d_dna_roots(
+    def _registry_for_inputs(self, tmpdir: str, assembly: Path, reads: list[Path]) -> Path:
+        assets = [
+            {
+                "asset_id": "s1:assembly_fasta_registered:adopted",
+                "asset_type": "assembly_fasta_registered",
+                "path": str(assembly),
+            }
+        ]
+        assets.extend(
+            {
+                "asset_id": f"s1:hic_reads_registered:{path.name}",
+                "asset_type": "hic_reads_registered",
+                "path": str(path),
+            }
+            for path in reads
+        )
+        return self._write_registry(tmpdir, assets=assets)
+
+    def _configured_state(
         self,
         tmpdir: str,
-        *,
-        fail_3ddna: bool = False,
-        with_site_generator: bool = True,
-        with_helper_scripts: bool = True,
-        with_jar: bool = True,
-    ) -> tuple[Path, Path, Path, Path]:
-        """Build conformed Juicer + 3D-DNA install roots plus a tmp envs.yaml.
+        assembly: Path,
+        reads: list[Path],
+        error_model: Path,
+        chromosome_model: Path,
+    ) -> dict:
+        state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
+        state["execution_mode"] = "local"
+        state["stage_outputs"] = {
+            "inventory": {"target_assembly_level": "chromosome"},
+            "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+            "hic_scaffolding": {
+                "execution_mode": "local",
+                "selected_methods": [AUTOHIC_METHOD],
+                "primary_method": AUTOHIC_METHOD,
+                "autohic_parameters": {
+                    "restriction_enzyme": "MboI",
+                    "error_model_ref": str(error_model),
+                    "chromosome_model_ref": str(chromosome_model),
+                    "threads": 2,
+                    "python_command": "python",
+                },
+            },
+        }
+        return state
 
-        Returns ``(bin_dir, juicer_root, three_d_dna_root, envs_yaml)``. The
-        bin_dir holds PATH-resolved helpers (bwa, java stub) the generated
-        script shell still needs; juicer.sh and run-asm-pipeline.sh live at
-        package-relative entry points so the freeze builds absolute paths to
-        them, matching the post-`gene-agent bootstrap` conformed layout.
-        """
-        tmp = Path(tmpdir)
-        bin_dir = tmp / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-
-        juicer_root = tmp / "juicer_root"
-        (juicer_root / "CPU" / "common").mkdir(parents=True, exist_ok=True)
-        (juicer_root / "misc").mkdir(parents=True, exist_ok=True)
-
-        juicer_entry = juicer_root / "CPU" / "juicer.sh"
-        juicer_entry.write_text(
-            "#!/usr/bin/env python3\n"
+    def _fake_autohic_environment(self, tmpdir: str, *, fail: bool = False) -> Path:
+        root = Path(tmpdir)
+        autohic_root = root / "AutoHiC"
+        (autohic_root / "src" / "common").mkdir(parents=True)
+        (autohic_root / "src" / "models" / "cfgs").mkdir(parents=True)
+        (autohic_root / "src" / "common" / "run.sh").write_text("# fake pipeline\n", encoding="utf-8")
+        (autohic_root / "src" / "models" / "cfgs" / "error_model.py").write_text("# fake model cfg\n", encoding="utf-8")
+        entry = autohic_root / "autohic.py"
+        entry.write_text(
             "import pathlib, sys\n"
-            "args = sys.argv[1:]\n"
-            "top = pathlib.Path(args[args.index('-d') + 1])\n"
-            "scripts_dir = pathlib.Path(args[args.index('-D') + 1]) if '-D' in args else None\n"
-            "has_helper = scripts_dir is not None and (scripts_dir / 'scripts' / 'common' / 'chimeric_blacklist.awk').is_file()\n"
-            "if not has_helper:\n"
-            "    print('Juicer helper scripts directory must be passed with -D', file=sys.stderr)\n"
-            "    sys.exit(14)\n"
-            "fastqs = {path.name for path in (top / 'fastq').iterdir()}\n"
-            "if not {'hic_001_R1.fastq.gz', 'hic_001_R2.fastq.gz'} <= fastqs:\n"
-            "    print('Juicer-compatible R1/R2 FASTQ links are required', file=sys.stderr)\n"
-            "    sys.exit(13)\n"
-            "if (top / 'aligned').exists():\n"
-            "    print('Juicer requires a fresh aligned directory', file=sys.stderr)\n"
-            "    sys.exit(12)\n"
-            "(top / 'aligned').mkdir(parents=True, exist_ok=True)\n"
-            "(top / 'aligned' / 'merged_nodups.txt').write_text('merged\\n', encoding='utf-8')\n"
-            "print('fake juicer ok')\n",
+            "cfg_path = pathlib.Path(sys.argv[sys.argv.index('-c') + 1])\n"
+            "cfg = dict(line.strip().split('=', 1) for line in cfg_path.read_text().splitlines() if line.strip())\n"
+            "if " + repr(fail) + ":\n"
+            "    print('fake AutoHiC failed', file=sys.stderr)\n"
+            "    raise SystemExit(17)\n"
+            "assert pathlib.Path(cfg['REFERENCE_GENOME']).is_file()\n"
+            "fastqs = sorted(path.name for path in (pathlib.Path(cfg['FASTQ_DIR']) / 'fastq').iterdir())\n"
+            "assert fastqs == ['hic_001_R1.fastq.gz', 'hic_001_R2.fastq.gz']\n"
+            "assert pathlib.Path(cfg['ERROR_PRETRAINED_MODEL']).is_file()\n"
+            "assert pathlib.Path(cfg['CHR_PRETRAINED_MODEL']).is_file()\n"
+            "top = pathlib.Path(cfg['RESULT_DIR']) / cfg['JOB_NAME']\n"
+            "chromosome = top / 'autohic_results' / 'chromosome'\n"
+            "chromosome.mkdir(parents=True)\n"
+            "(top / 'contigs_autohic.fasta').write_text('>chr1\\nACGTACGT\\n')\n"
+            "(chromosome / 'contigs.final.hic').write_text('hic\\n')\n"
+            "(chromosome / 'contigs.final.assembly').write_text('assembly\\n')\n"
+            "(top / 'result.html').write_text('<html>AutoHiC report</html>\\n')\n"
+            "print('fake AutoHiC ok')\n",
             encoding="utf-8",
         )
-        juicer_entry.chmod(0o755)
-        canary = juicer_root / "CPU" / "common" / "chimeric_blacklist.awk"
-        canary.write_text("# fake Juicer helper\n", encoding="utf-8")
 
-        if with_helper_scripts:
-            # Conformed: scripts/ is a symlink to CPU/ (what `gene-agent
-            # bootstrap --apply` deploys). juicer.sh reads helpers via
-            # ${juiceDir}/scripts/common, and the jar sits at
-            # scripts/common/juicer_tools.jar (-> CPU/common/juicer_tools.jar).
-            scripts_link = juicer_root / "scripts"
-            if not scripts_link.exists():
-                scripts_link.symlink_to(juicer_root / "CPU")
-        # when with_helper_scripts is False, leave no scripts/ tree so package
-        # preflight reports the scripts/common/* canaries missing.
+        juicer_root = root / "juicer"
+        (juicer_root / "CPU" / "common").mkdir(parents=True)
+        (juicer_root / "misc").mkdir(parents=True)
+        (juicer_root / "scripts" / "common").mkdir(parents=True)
+        for relative in [
+            "CPU/juicer.sh",
+            "CPU/common/chimeric_blacklist.awk",
+            "misc/generate_site_positions.py",
+            "scripts/common/juicer_tools.jar",
+        ]:
+            (juicer_root / relative).write_text("stub\n", encoding="utf-8")
 
-        if with_site_generator:
-            (juicer_root / "misc" / "generate_site_positions.py").write_text(
-                "#!/usr/bin/env python3\n"
-                "import pathlib, sys\n"
-                "enzyme, genome, reference = sys.argv[1:]\n"
-                "pathlib.Path(genome + '_' + enzyme + '.txt').write_text('ctg1 1 4\\n', encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            (juicer_root / "misc" / "generate_site_positions.py").chmod(0o755)
+        three_d_dna_root = root / "3d-dna"
+        (three_d_dna_root / "edit").mkdir(parents=True)
+        (three_d_dna_root / "visualize").mkdir(parents=True)
+        for relative in [
+            "run-asm-pipeline.sh",
+            "run-asm-pipeline-post-review.sh",
+            "edit/apply-edits-prep-for-next-round.sh",
+            "visualize/run-assembly-visualizer.sh",
+        ]:
+            (three_d_dna_root / relative).write_text("stub\n", encoding="utf-8")
 
-        if with_jar and with_helper_scripts:
-            (juicer_root / "scripts" / "common" / "juicer_tools.jar").write_text(
-                "fake jar\n", encoding="utf-8"
-            )
-
-        three_d_dna_root = tmp / "three_d_dna_root"
-        three_d_dna_root.mkdir(parents=True, exist_ok=True)
-        (three_d_dna_root / "edit").mkdir(exist_ok=True)
-        (three_d_dna_root / "visualize").mkdir(exist_ok=True)
-        three_d_entry = three_d_dna_root / "run-asm-pipeline.sh"
-        three_d_entry.write_text(
-            "#!/usr/bin/env python3\n"
-            "import pathlib, sys\n"
-            "if " + repr(fail_3ddna) + ":\n"
-            "    print('fake 3ddna failed', file=sys.stderr)\n"
-            "    sys.exit(9)\n"
-            "pathlib.Path('input_assembly.FINAL.fasta').write_text('>scaffold1\\nACGT\\n', encoding='utf-8')\n"
-            "pathlib.Path('input_assembly.FINAL.assembly').write_text('assembly\\n', encoding='utf-8')\n"
-            "pathlib.Path('review.hic').write_text('hic\\n', encoding='utf-8')\n"
-            "print('fake 3ddna ok')\n",
-            encoding="utf-8",
-        )
-        three_d_entry.chmod(0o755)
-        (three_d_dna_root / "run-asm-pipeline-post-review.sh").write_text(
-            "#!/usr/bin/env python3\nprint('post-review stub')\n", encoding="utf-8"
-        )
-        (three_d_dna_root / "edit" / "apply-edits-prep-for-next-round.sh").write_text("# canary\n", encoding="utf-8")
-        (three_d_dna_root / "visualize" / "run-assembly-visualizer.sh").write_text("# canary\n", encoding="utf-8")
-
-        bwa = bin_dir / "bwa"
-        bwa.write_text(
-            "#!/usr/bin/env python3\n"
-            "import pathlib, sys\n"
-            "if sys.argv[1:] and sys.argv[1] == 'index':\n"
-            "    pathlib.Path(sys.argv[2] + '.bwt').write_text('index\\n', encoding='utf-8')\n",
-            encoding="utf-8",
-        )
-        bwa.chmod(0o755)
-
-        envs_yaml = tmp / "envs.yaml"
+        envs_yaml = root / "envs.yaml"
         envs_yaml.write_text(
             "default:\n"
             "  conda_bin: conda\n"
             "  fallback_env: base\n"
             "packages:\n"
+            "  autohic:\n"
+            f"    install_root: {autohic_root}\n"
+            "    canary_paths: [autohic.py, src/common/run.sh, src/models/cfgs/error_model.py]\n"
             "  juicer:\n"
             f"    install_root: {juicer_root}\n"
-            "    entrypoints:\n"
-            "      - CPU/juicer.sh\n"
-            "    canary_paths:\n"
-            "      - CPU/juicer.sh\n"
-            "      - CPU/common/chimeric_blacklist.awk\n"
-            "      - misc/generate_site_positions.py\n"
-            "      - scripts/common/juicer_tools.jar\n"
+            "    canary_paths: [CPU/juicer.sh, CPU/common/chimeric_blacklist.awk, misc/generate_site_positions.py, scripts/common/juicer_tools.jar]\n"
             "  three_d_dna:\n"
             f"    install_root: {three_d_dna_root}\n"
-            "    entrypoints:\n"
-            "      - run-asm-pipeline.sh\n"
-            "      - run-asm-pipeline-post-review.sh\n"
-            "    canary_paths:\n"
-            "      - run-asm-pipeline.sh\n"
-            "      - run-asm-pipeline-post-review.sh\n"
-            "      - edit/apply-edits-prep-for-next-round.sh\n"
-            "      - visualize/run-assembly-visualizer.sh\n"
+            "    canary_paths: [run-asm-pipeline.sh, run-asm-pipeline-post-review.sh, edit/apply-edits-prep-for-next-round.sh, visualize/run-assembly-visualizer.sh]\n"
             "methods:\n"
-            "  hic_scaffolding.candidate.juicer_3ddna_juicebox:\n"
+            f"  {AUTOHIC_METHOD}:\n"
             "    conda_env: base\n"
-            "    package_tools:\n"
-            "      - juicer\n"
-            "      - three_d_dna\n",
+            "    package_tools: [autohic, juicer, three_d_dna]\n",
             encoding="utf-8",
         )
-        return bin_dir, juicer_root, three_d_dna_root, envs_yaml
+        return envs_yaml
+
+    def test_graph_contains_only_autohic_method_node(self):
+        nodes = set(build_stage().get_graph().nodes)
+        self.assertIn("autohic", nodes)
+        self.assertNotIn("yahs", nodes)
+        self.assertNotIn("juicer_3ddna", nodes)
 
     def test_missing_final_assembly_ref_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             result = build_stage().invoke(self._state(tmpdir, str(registry)))
-
-            self.assertEqual(result["current_stage"], "hic_scaffolding")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("final_assembly_ref", result["last_error"])
 
     def test_registered_assembly_is_used_when_review_output_is_absent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            hic_reads = Path(tmpdir) / "hic_R1.fq.gz"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            hic_reads.write_text("reads\n", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {"asset_id": "s1:assembly_fasta_registered:final", "asset_type": "assembly_fasta_registered", "path": str(assembly)},
-                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(hic_reads)},
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
             state["stage_outputs"] = {"inventory": {"target_assembly_level": "chromosome"}}
-
             result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["pre_hic_assembly_ref"], str(assembly))
+            self.assertEqual(result["stage_outputs"]["hic_scaffolding"]["pre_hic_assembly_ref"], str(assembly))
 
     def test_no_hic_reads_skips_and_continues_with_contig_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            registry = self._write_registry(tmpdir, assets=[])
+            assembly, _, _, _ = self._inputs(tmpdir, read_count=0)
+            registry = self._registry_for_inputs(tmpdir, assembly, [])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {
-                    "status": "completed",
-                    "final_assembly_ref": str(assembly),
-                },
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
             }
-
             result = build_stage().invoke(state)
-
-            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "skipped")
+            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
             self.assertEqual(hic["mode"], "skipped_no_hic")
-            self.assertEqual(hic["skip_reason"], "no_hic_reads")
             self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertEqual(hic["pre_hic_assembly_ref"], str(assembly))
-            self.assertEqual(result["skip_reasons"]["hic_scaffolding"], "no_hic_reads")
-            skip_ref = Path(hic["skip_record_ref"])
-            self.assertTrue(skip_ref.exists())
-            payload = json.loads(skip_ref.read_text(encoding="utf-8"))
-            self.assertEqual(payload["final_assembly_for_annotation"], str(assembly))
 
     def test_hic_present_but_not_chromosome_level_skips(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            hic_reads = Path(tmpdir) / "sample.hic"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            hic_reads.write_text("hic", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_reads_registered:sample.hic",
-                        "asset_type": "hic_reads_registered",
-                        "path": str(hic_reads),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
             state["stage_outputs"] = {
                 "inventory": {"target_assembly_level": "contig"},
-                "assembly_review": {
-                    "status": "completed",
-                    "final_assembly_ref": str(assembly),
-                },
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
             }
-
             result = build_stage().invoke(state)
+            self.assertEqual(result["stage_outputs"]["hic_scaffolding"]["mode"], "skipped_not_chromosome_level")
 
-            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "skipped")
-            self.assertEqual(hic["mode"], "skipped_not_chromosome_level")
-            self.assertEqual(hic["skip_reason"], "not_chromosome_level_requested")
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-
-    def test_hic_present_and_chromosome_requested_plans_candidates_and_blocks_human(self):
+    def test_chromosome_request_plans_only_autohic_and_blocks_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            hic_r1 = Path(tmpdir) / "hic_R1.fq.gz"
-            hic_r2 = Path(tmpdir) / "hic_R2.fq.gz"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            hic_r1.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-            hic_r2.write_text("@r2\nTGCA\n+\n!!!!\n", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_reads_registered:hic_R1.fq.gz",
-                        "asset_type": "hic_reads_registered",
-                        "path": str(hic_r1),
-                    },
-                    {
-                        "asset_id": "s1:hic_reads_registered:hic_R2.fq.gz",
-                        "asset_type": "hic_reads_registered",
-                        "path": str(hic_r2),
-                    },
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
             state["stage_outputs"] = {
                 "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {
-                    "status": "completed",
-                    "final_assembly_ref": str(assembly),
-                },
+                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
             }
-
             result = build_stage().invoke(state)
-
-            self.assertEqual(result["current_stage"], "hic_scaffolding")
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(result["active_interrupt"]["stage"], "hic_scaffolding")
-            self.assertIn("blocked_at", result["active_interrupt"])
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "blocked_human")
-            self.assertEqual(hic["mode"], "scaffold")
-            self.assertEqual(hic["pre_hic_assembly_ref"], str(assembly))
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertIn("hic_scaffolding.candidate.yahs", hic["candidate_methods"])
-            self.assertIn("hic_scaffolding.candidate.juicer_3ddna_juicebox", hic["candidate_methods"])
-            self.assertTrue(Path(hic["scaffold_plan_ref"]).exists())
+            self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(hic["candidate_methods"], [AUTOHIC_METHOD])
             plan = json.loads(Path(hic["scaffold_plan_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(plan["status"], "planned")
-            self.assertEqual(plan["pre_hic_assembly_ref"], str(assembly))
-            self.assertEqual(plan["fallback_assembly_ref"], str(assembly))
-            self.assertEqual(plan["hic_read_refs"], ["s1:hic_reads_registered:hic_R1.fq.gz", "s1:hic_reads_registered:hic_R2.fq.gz"])
-            self.assertEqual(plan["hic_alignment_refs"], [])
-            self.assertNotIn("yahs_frozen_attempt", hic)
-
-    def test_hic_alignment_plan_keeps_alignment_refs_separate_from_read_refs(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            alignment = Path(tmpdir) / "hic.bam"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            alignment.write_text("bam", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_alignment_bam:hic.bam",
-                        "asset_type": "hic_alignment_bam",
-                        "path": str(alignment),
-                    }
-                ],
+            self.assertEqual(plan["candidate_methods"], [AUTOHIC_METHOD])
+            self.assertEqual(
+                set(plan["expected_outputs"]),
+                {"hic_qc_report", "chromosome_scaffolded_assembly", "contact_map", "assembly_file", "html_report"},
             )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-            }
 
-            result = build_stage().invoke(state)
-
-            plan = json.loads(Path(result["stage_outputs"]["hic_scaffolding"]["scaffold_plan_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(plan["hic_read_refs"], [])
-            self.assertEqual(plan["hic_alignment_refs"], ["s1:hic_alignment_bam:hic.bam"])
-
-    def test_local_yahs_success_registers_candidate_artifacts_and_blocks_human(self):
+    def test_local_autohic_registers_four_outputs_then_blocks_geneagent_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            alignment = Path(tmpdir) / "hic.bam"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            alignment.write_text("bam", encoding="utf-8")
-            bin_dir = self._fake_yahs_bin(tmpdir)
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_alignment_bam:hic.bam",
-                        "asset_type": "hic_alignment_bam",
-                        "path": str(alignment),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.yahs",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                },
-            }
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
 
-            result = build_stage().invoke(state)
-
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            candidate = hic["method_candidates"][AUTOHIC_METHOD]
             self.assertEqual(result["current_stage"], "hic_scaffolding")
             self.assertEqual(result["supervision_state"], "blocked_human")
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "blocked_human")
-            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.yahs")
+            self.assertEqual(candidate["status"], "executed")
+            for key in ["scaffold_fasta", "contact_map", "assembly_file", "html_report"]:
+                self.assertTrue(Path(candidate[key]).is_file(), key)
+            self.assertEqual(Path(candidate["scaffold_fasta"]).read_text(), ">chr1\nACGTACGT\n")
+            self.assertIn("AutoHiC report", Path(candidate["html_report"]).read_text())
             self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertTrue(Path(hic["chromosome_scaffolded_assembly_candidate_ref"]).exists())
-            self.assertTrue(Path(hic["hic_review_bundle_ref"]).exists())
-            self.assertTrue(Path(hic["hic_qc_report_ref"]).exists())
-            self.assertIn("yahs_executed", hic["notes"])
-            self.assertIn("hic_review_bundle_ref", result["active_interrupt"])
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
-            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+
+            config = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "autohic" / "cfg-autohic.txt"
+            config_text = config.read_text(encoding="utf-8")
+            self.assertIn("REFERENCE_GENOME=", config_text)
+            self.assertIn("ENZYME=MboI", config_text)
+            self.assertIn(f"ERROR_PRETRAINED_MODEL={error_model.resolve()}", config_text)
+            self.assertIn(f"CHR_PRETRAINED_MODEL={chromosome_model.resolve()}", config_text)
+            self.assertNotIn(f"REFERENCE_GENOME={assembly}", config_text)
+
+            artifact_types = {
+                json.loads(line)["artifact_type"]
+                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
+            }
             self.assertIn("hic_scaffolding.chromosome_scaffolded_assembly", artifact_types)
-            self.assertIn("hic_scaffolding.scaffold_agp", artifact_types)
-            self.assertIn("hic_scaffolding.review_bundle", artifact_types)
-            self.assertIn("hic_scaffolding.qc_report", artifact_types)
-            self.assertIn("command.stdout", artifact_types)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertIn("attempt_started", [event["event_type"] for event in events])
-            self.assertIn("attempt_succeeded", [event["event_type"] for event in events])
+            self.assertIn("hic_scaffolding.contact_map", artifact_types)
+            self.assertIn("hic_scaffolding.assembly", artifact_types)
+            self.assertIn("hic_scaffolding.html_report", artifact_types)
+
+            adopted = apply_hic_scaffolding_resume_decision(
+                result,
+                ResumeReviewRequest(
+                    session_id="s1",
+                    stage="hic_scaffolding",
+                    decision="accept_candidate",
+                    method_name=AUTOHIC_METHOD,
+                    notes=["GeneAgent review accepted AutoHiC chromosome assembly"],
+                ),
+            )
+            adopted_hic = adopted["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(adopted["current_stage"], next_stage_name("hic_scaffolding"))
+            self.assertEqual(adopted_hic["final_assembly_for_downstream"], candidate["scaffold_fasta"])
+
+    def test_local_autohic_requires_both_pretrained_models(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            chromosome_model.unlink()
+            envs_yaml = self._fake_autohic_environment(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertIn("autohic_parameters.chromosome_model_ref", hic["missing_params"])
+            self.assertIsNone(hic.get("autohic_frozen_attempt"))
+
+    def test_local_autohic_requires_paired_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir, read_count=1)
+            envs_yaml = self._fake_autohic_environment(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
+            self.assertIn("paired hic_read_paths (R1/R2)", result["stage_outputs"]["hic_scaffolding"]["missing_params"])
+
+    def test_local_autohic_rejects_invalid_error_threshold_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            state["stage_outputs"]["hic_scaffolding"]["autohic_parameters"]["error_filter_score"] = "invalid"
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
+            invalid = result["stage_outputs"]["hic_scaffolding"]["invalid_params"]
+            self.assertEqual(invalid[0]["param"], "autohic_parameters.error_filter_score")
+
+    def test_local_autohic_failure_preserves_contig_fallback_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(tmpdir, fail=True)
+            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(state)
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["method_candidates"][AUTOHIC_METHOD]["status"], "failed")
+            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
+            self.assertIn("autohic_execution_failed", hic["notes"])
+            self.assertTrue(hic["autohic_error"])
 
     def test_local_mode_without_explicit_method_remains_planning_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            alignment = Path(tmpdir) / "hic.bam"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            alignment.write_text("bam", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_alignment_bam:hic.bam",
-                        "asset_type": "hic_alignment_bam",
-                        "path": str(alignment),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
+            state["execution_mode"] = "local"
             state["stage_outputs"] = {
                 "inventory": {"target_assembly_level": "chromosome"},
                 "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {"execution_mode": "local"},
             }
-
             result = build_stage().invoke(state)
-
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertIn("execution_deferred_to_method_specific_task", hic["notes"])
-            self.assertNotIn("selected_method_name", hic)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(events[-1]["event_type"], "review_requested")
-            self.assertFalse(events[-1]["auto_decidable"])
-
-    def test_local_yahs_without_alignment_blocks_without_attempt(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            hic_r1 = Path(tmpdir) / "hic_R1.fq.gz"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            hic_r1.write_text("reads", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_reads_registered:hic_R1.fq.gz",
-                        "asset_type": "hic_reads_registered",
-                        "path": str(hic_r1),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.yahs",
-                },
-            }
-
-            result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertIn("alignment_required_before_yahs", hic["notes"])
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(events[-1]["event_type"], "review_requested")
-            self.assertFalse(events[-1]["auto_decidable"])
-
-    def test_local_yahs_failure_registers_logs_and_preserves_fallback(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            alignment = Path(tmpdir) / "hic.bam"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            alignment.write_text("bam", encoding="utf-8")
-            bin_dir = self._fake_yahs_bin(tmpdir, fail=True)
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_alignment_bam:hic.bam",
-                        "asset_type": "hic_alignment_bam",
-                        "path": str(alignment),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.yahs",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                },
-            }
-
-            result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertIn("yahs_execution_failed", hic["notes"])
-            self.assertNotIn("chromosome_scaffolded_assembly_candidate_ref", hic)
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
-            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
-            self.assertIn("command.stdout", artifact_types)
-            self.assertIn("command.stderr", artifact_types)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertIn("attempt_failed", [event["event_type"] for event in events])
-
-    def test_local_mode_with_juicer_selection_remains_planning_only(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            alignment = Path(tmpdir) / "hic.bam"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            alignment.write_text("bam", encoding="utf-8")
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_alignment_bam:hic.bam",
-                        "asset_type": "hic_alignment_bam",
-                        "path": str(alignment),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                },
-            }
-
-            result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(hic["status"], "blocked_human")
-            self.assertNotIn("selected_method_name", hic)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(events[-1]["event_type"], "review_requested")
-            self.assertFalse(events[-1]["auto_decidable"])
-
-    def test_local_3ddna_uses_precomputed_merged_nodups_and_registers_artifacts(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            merged_nodups = Path(tmpdir) / "merged_nodups.txt"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            merged_nodups.write_text("merged\n", encoding="utf-8")
-            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {
-                        "asset_id": "s1:hic_merged_nodups:merged_nodups.txt",
-                        "asset_type": "hic_merged_nodups",
-                        "path": str(merged_nodups),
-                    }
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                    "juicer_3ddna_parameters": {"chromosome_count": 22},
-                },
-            }
-
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
-            self.assertTrue(Path(hic["chromosome_scaffolded_assembly_candidate_ref"]).exists())
-            self.assertIn("juicer_3ddna_executed", hic["notes"])
-            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
-            script_text = script.read_text(encoding="utf-8")
-            self.assertIn(str(merged_nodups), script_text)
-            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
-            self.assertNotIn("juicer.sh -d", script_text)
-            artifact_types = {
-                json.loads(line)["artifact_type"]
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
-            }
-            self.assertIn("hic_scaffolding.contact_map", artifact_types)
-            self.assertIn("hic_scaffolding.3ddna_assembly", artifact_types)
-
-    def test_local_3ddna_raw_reads_runs_juicer_before_3ddna(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            read1 = Path(tmpdir) / "hic_R1.fq.gz"
-            read2 = Path(tmpdir) / "hic_R2.fq.gz"
-            chrom_sizes = Path(tmpdir) / "chrom.sizes"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            read1.write_text("r1\n", encoding="utf-8")
-            read2.write_text("r2\n", encoding="utf-8")
-            chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
-                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                    "juicer_3ddna_parameters": {
-                        "input_mode": "raw_reads",
-                        "chromosome_count": 22,
-                        "restriction_enzyme": "MboI",
-                        "chrom_sizes_ref": str(chrom_sizes),
-                        "threads": 2,
-                    },
-                },
-            }
-
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
-            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
-            script_text = script.read_text(encoding="utf-8")
-            # juicer.sh and generate_site_positions.py are invoked by absolute
-            # path resolved from the declared juicer package root (post
-            # bootstrap conformance). No compat shim, no PATH-based discovery.
-            self.assertIn(f"{juicer_root}/CPU/juicer.sh -d", script_text)
-            self.assertIn("-s MboI", script_text)
-            self.assertIn(f"{juicer_root}/misc/generate_site_positions.py", script_text)
-            self.assertIn("MboI reference", script_text)
-            self.assertIn("reference.fasta", script_text)
-            self.assertIn("reference_MboI.txt", script_text)
-            self.assertIn("-y \"$site_file\"", script_text)
-            self.assertNotIn("juicer_scripts_compat", script_text)
-            self.assertNotIn('java_path="$(command -v java)"', script_text)
-            self.assertIn(f"juicer_scripts_dir={juicer_root}", script_text)
-            self.assertIn("-D \"$juicer_scripts_dir\"", script_text)
-            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/chimeric_blacklist.awk\"", script_text)
-            self.assertIn("test -f \"$juicer_scripts_dir/scripts/common/juicer_tools.jar\"", script_text)
-            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
-            self.assertIn("hic_001_R1.fastq.gz", script_text)
-            self.assertIn("hic_001_R2.fastq.gz", script_text)
-            self.assertNotIn("/aidenlab/restriction_sites", script_text)
-            self.assertIn("bwa index", script_text)
-            self.assertIn("juicer/reference.fasta", script_text)
-            self.assertIn(f"{three_d_dna_root}/run-asm-pipeline.sh", script_text)
-            self.assertTrue((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "juicer" / "aligned" / "merged_nodups.txt").exists())
-
-    def test_local_3ddna_raw_reads_auto_generates_chrom_sizes_from_assembly(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            read1 = Path(tmpdir) / "hic_R1.fq.gz"
-            read2 = Path(tmpdir) / "hic_R2.fq.gz"
-            assembly.write_text(">ctg1 description\nACGT\nAC\n>ctg2\nNNNN\n", encoding="utf-8")
-            read1.write_text("r1\n", encoding="utf-8")
-            read2.write_text("r2\n", encoding="utf-8")
-            bin_dir, juicer_root, _three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(tmpdir)
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
-                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                    "juicer_3ddna_parameters": {
-                        "input_mode": "raw_reads",
-                        "chromosome_count": 22,
-                        "restriction_enzyme": "MboI",
-                        "chrom_sizes_ref": "auto",
-                        "threads": 2,
-                    },
-                },
-            }
-
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["selected_method_name"], "hic_scaffolding.candidate.juicer_3ddna_juicebox")
-            chrom_sizes = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "chrom.sizes"
-            self.assertEqual(chrom_sizes.read_text(encoding="utf-8"), "ctg1\t6\nctg2\t4\n")
-            script = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh"
-            script_text = script.read_text(encoding="utf-8")
-            self.assertIn(f"-p {chrom_sizes.resolve()}", script_text)
-            self.assertIn(f"juicer_scripts_dir={juicer_root}", script_text)
-
-    def test_local_3ddna_raw_reads_blocks_before_execution_without_site_generator(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            read1 = Path(tmpdir) / "hic_R1.fq.gz"
-            read2 = Path(tmpdir) / "hic_R2.fq.gz"
-            chrom_sizes = Path(tmpdir) / "chrom.sizes"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            read1.write_text("r1\n", encoding="utf-8")
-            read2.write_text("r2\n", encoding="utf-8")
-            chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(
-                tmpdir, with_site_generator=False
-            )
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
-                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                    "juicer_3ddna_parameters": {
-                        "input_mode": "raw_reads",
-                        "chromosome_count": 22,
-                        "restriction_enzyme": "DpnII",
-                        "chrom_sizes_ref": str(chrom_sizes),
-                        "threads": 2,
-                    },
-                },
-            }
-
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "missing_tool")
-            self.assertIn("misc/generate_site_positions.py", hic["missing_tools"])
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
-
-    def test_local_3ddna_raw_reads_blocks_before_execution_without_juicer_helper_scripts(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly = Path(tmpdir) / "final.fa"
-            read1 = Path(tmpdir) / "hic_R1.fq.gz"
-            read2 = Path(tmpdir) / "hic_R2.fq.gz"
-            chrom_sizes = Path(tmpdir) / "chrom.sizes"
-            assembly.write_text(">ctg1\nACGT\n", encoding="utf-8")
-            read1.write_text("r1\n", encoding="utf-8")
-            read2.write_text("r2\n", encoding="utf-8")
-            chrom_sizes.write_text("ctg1\t4\n", encoding="utf-8")
-            bin_dir, juicer_root, three_d_dna_root, envs_yaml = self._build_juicer_three_d_dna_roots(
-                tmpdir, with_helper_scripts=False
-            )
-            registry = self._write_registry(
-                tmpdir,
-                assets=[
-                    {"asset_id": "s1:hic_reads_registered:r1", "asset_type": "hic_reads_registered", "path": str(read1)},
-                    {"asset_id": "s1:hic_reads_registered:r2", "asset_type": "hic_reads_registered", "path": str(read2)},
-                ],
-            )
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-                "hic_scaffolding": {
-                    "execution_mode": "local",
-                    "primary_method": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-                    "juicer_3ddna_parameters": {
-                        "input_mode": "raw_reads",
-                        "chromosome_count": 22,
-                        "restriction_enzyme": "DpnII",
-                        "chrom_sizes_ref": str(chrom_sizes),
-                        "threads": 2,
-                    },
-                },
-            }
-
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["status"], "missing_tool")
-            self.assertIn("scripts/common/juicer_tools.jar", hic["missing_tools"])
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertFalse((Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "juicer_3ddna" / "run_juicer_3ddna.sh").exists())
+            self.assertIsNone(hic.get("autohic_frozen_attempt"))
 
 
 if __name__ == "__main__":

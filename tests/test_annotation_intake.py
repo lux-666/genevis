@@ -183,7 +183,7 @@ class AnnotationIntakeTests(unittest.TestCase):
                     "selected_stages": ["hic_scaffolding", "repeat_annotation"],
                     "resolved_execution_order": ["hic_scaffolding", "repeat_annotation"],
                     "selected_methods": {
-                        "hic_scaffolding": "hic_scaffolding.candidate.yahs",
+                        "hic_scaffolding": "hic_scaffolding.candidate.autohic",
                         "repeat_annotation": ["repeat_annotation.masking.repeatmasker"],
                     },
                     "confirmed": True,
@@ -205,7 +205,7 @@ class AnnotationIntakeTests(unittest.TestCase):
             )
             self.assertEqual(
                 result.update["stage_outputs"]["hic_scaffolding"]["primary_method"],
-                "hic_scaffolding.candidate.yahs",
+                "hic_scaffolding.candidate.autohic",
             )
             self.assertEqual(
                 result.update["stage_outputs"]["repeat_annotation"]["primary_method"],
@@ -269,7 +269,7 @@ class AnnotationIntakeTests(unittest.TestCase):
                 update={
                     "selected_stages": ["hic_scaffolding"],
                     "resolved_execution_order": ["hic_scaffolding"],
-                    "selected_methods": {"hic_scaffolding": "hic_scaffolding.candidate.yahs"},
+                    "selected_methods": {"hic_scaffolding": "hic_scaffolding.candidate.autohic"},
                     "confirmed": True,
                 }
             )

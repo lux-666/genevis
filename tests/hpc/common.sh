@@ -409,19 +409,14 @@ if 'assembly_review' in stages:
 # Hi-C config
 if 'hic_scaffolding' in stages:
     rc['hic_scaffolding'] = {
-        'methods': ['juicer_3ddna_juicebox'],
-        'input_mode': 'raw_reads',
-        'chromosome_count': ${HIC_CHROMOSOME_COUNT},
-        'juicer_3ddna_parameters': {
+        'methods': ['autohic'],
+        'autohic_parameters': {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
+            'error_model_ref': '${HIC_AUTOHIC_ERROR_MODEL:-}',
+            'chromosome_model_ref': '${HIC_AUTOHIC_CHROMOSOME_MODEL:-}',
             'threads': ${ASSEMBLY_THREADS},
         },
     }
-    juicer_scripts_dir = '${HIC_JUICER_SCRIPTS_DIR:-}'
-    if juicer_scripts_dir:
-        rc['hic_scaffolding']['juicer_3ddna_parameters']['juicer_scripts_dir'] = juicer_scripts_dir
-    chrom_sizes = '${HIC_CHROM_SIZES:-}'
-    rc['hic_scaffolding']['juicer_3ddna_parameters']['chrom_sizes_ref'] = chrom_sizes or 'auto'
 
 json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 " "$out"
