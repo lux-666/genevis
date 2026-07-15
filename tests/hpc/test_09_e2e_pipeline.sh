@@ -23,8 +23,10 @@ section "Test 09: End-to-End Pipeline"
 info "Checking input data"
 USE_EXISTING_ASSEMBLY=false
 PREV_ASM="${REVIEW_ASSEMBLY:-}"
-if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
-    fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
+if [[ -n "$PREV_ASM" && ! -s "$PREV_ASM" ]]; then
+    fail "REVIEW_ASSEMBLY is missing or empty: ${PREV_ASM}"
+    summary "Test 09: End-to-End Pipeline (invalid explicit assembly)" || true
+    exit 1
 fi
 if [[ -z "$PREV_ASM" && "${TEST09_REUSE_ASSEMBLY:-true}" == "true" ]]; then
     PREV_ASM=$(latest_hpc_assembly || true)
@@ -39,40 +41,90 @@ if [[ -n "$PREV_ASM" ]]; then
         fail "REVIEW_ASSEMBLY is not a FASTA file: ${PREV_ASM}"
     fi
 else
-    for f in $LONG_READS; do
+    for f in ${LONG_READS:-}; do
         assert_file_nonempty "$f" "input long reads: $(basename "$f")"
     done
+fi
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline (invalid explicit inputs)" || true
+    exit 1
 fi
 
 # ---- Check Hi-C data availability ----
 HIC_AVAILABLE=false
-if [[ -n "${HIC_R1:-}" ]] && [[ -n "${HIC_R2:-}" ]]; then
-    if [[ -f "$HIC_R1" ]] && [[ -f "$HIC_R2" ]]; then
+if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
+    if [[ -z "${HIC_R1:-}" || -z "${HIC_R2:-}" ]]; then
+        fail "HIC_R1 and HIC_R2 must be configured together"
+        summary "Test 09: End-to-End Pipeline (incomplete explicit Hi-C inputs)" || true
+        exit 1
+    elif [[ -s "$HIC_R1" ]] && [[ -s "$HIC_R2" ]]; then
         info "Hi-C data detected:"
         info "  R1: ${HIC_R1}"
         info "  R2: ${HIC_R2}"
         HIC_AVAILABLE=true
         pass "Hi-C data available for scaffolding"
     else
-        warn "HIC_R1/HIC_R2 set but files not found, skipping Hi-C"
+        [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
+        [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
+        summary "Test 09: End-to-End Pipeline (invalid explicit Hi-C inputs)" || true
+        exit 1
     fi
 else
     info "No Hi-C data provided (HIC_R1/HIC_R2 not set), Hi-C stage will be skipped"
+fi
+
+if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
+    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
+    summary "Test 09: End-to-End Pipeline (invalid explicit chrom.sizes)" || true
+    exit 1
+fi
+
+T2T_AVAILABLE=false
+if [[ "${PLATFORM:-}" == "ont" || "${PLATFORM:-}" == "cycloneseq" ]]; then
+    read -r -a _test09_long_reads <<< "${LONG_READS:-}"
+    if (( ${#_test09_long_reads[@]} > 0 )); then
+        T2T_AVAILABLE=true
+        for read_path in "${_test09_long_reads[@]}"; do
+            if [[ ! -s "$read_path" ]]; then
+                T2T_AVAILABLE=false
+                break
+            fi
+        done
+    fi
+fi
+
+if [[ "$HIC_AVAILABLE" != true || "$T2T_AVAILABLE" != true ]]; then
+    info "[SKIP] Full E2E requires configured Hi-C reads and ONT/CycloneSeq reads for T2T."
+    info "Use Test 06 or Test 07 for an independently configured stage smoke."
+    exit 77
 fi
 
 # ---- Session setup ----
 SID="hpc-test09-e2e-$(date +%Y%m%d-%H%M%S)"
 MANIFEST="${TEST_DATA_ROOT}/_test09_manifest.yaml"
 mkdir -p "${TEST_DATA_ROOT}"
+SKIP_UPSTREAM="${TEST09_SKIP_UPSTREAM:-false}"
+
+# A full E2E deliberately supplies no genome-size hint. This proves the survey
+# produces the canonical value consumed by assembly. The assembly-only smoke
+# still requires an explicit value because it skips the producer stage.
+if [[ "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    GENOME_SIZE_ESTIMATE=""
+    MANIFEST_GENOME_SIZE_ESTIMATE=""
+fi
 
 # Conditionally add Hi-C reads to manifest
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
+    LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
     if [[ "$HIC_AVAILABLE" == true ]]; then
         write_manifest "$MANIFEST" "$SID" \
             "assembly_fasta_registered:${PREV_ASM}:unknown:unknown" \
+            "raw_long_reads:${LR_PATHS}:${PLATFORM}:single" \
             "hic_reads_registered:${HIC_R1},${HIC_R2}:illumina:paired"
     else
-        write_manifest "$MANIFEST" "$SID" "assembly_fasta_registered:${PREV_ASM}:unknown:unknown"
+        write_manifest "$MANIFEST" "$SID" \
+            "assembly_fasta_registered:${PREV_ASM}:unknown:unknown" \
+            "raw_long_reads:${LR_PATHS}:${PLATFORM}:single"
     fi
 else
     LR_PATHS=$(echo "$LONG_READS" | tr ' ' ',')
@@ -100,14 +152,23 @@ cd "${SCRIPT_DIR}"
 # ---- Write run-config with all stages, auto policy for assembly routing ----
 RC="${TEST_DATA_ROOT}/_test09_rc.json"
 
+# TEST09_SKIP_UPSTREAM=true skips expensive read_qc + genome_survey and jumps to
+# assembly using raw long reads + an explicit GENOME_SIZE_ESTIMATE.
+
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     LOCAL_EXEC_STAGES=("t2t")
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    LOCAL_EXEC_STAGES=("assembly" "assembly_review" "t2t")
+    info "TEST09_SKIP_UPSTREAM=true: skipping read_qc and genome_survey"
+    info "  assembly will use raw_long_reads + GENOME_SIZE_ESTIMATE=${GENOME_SIZE_ESTIMATE:-<missing>}"
 else
     LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "t2t")
 fi
 if [[ "$HIC_AVAILABLE" == true ]]; then
     if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
         LOCAL_EXEC_STAGES=("hic_scaffolding" "t2t")
+    elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+        LOCAL_EXEC_STAGES=("assembly" "assembly_review" "hic_scaffolding" "t2t")
     else
         LOCAL_EXEC_STAGES=("read_qc" "genome_survey" "assembly" "assembly_review" "hic_scaffolding" "t2t")
     fi
@@ -116,22 +177,37 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
     fi
 fi
 
-READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
-READ_QC_LENGTH_FILTER_APPROVED="True"
+if [[ "$SKIP_UPSTREAM" != "true" && "$USE_EXISTING_ASSEMBLY" != true ]]; then
+    READ_QC_LENGTH_FILTER_METHOD="read_qc.length_filter.seqkit_seq"
+    READ_QC_LENGTH_FILTER_APPROVED="True"
+fi
 write_run_config_stages "$RC" "${LOCAL_EXEC_STAGES[@]}"
 unset READ_QC_LENGTH_FILTER_METHOD READ_QC_LENGTH_FILTER_APPROVED
 
-python3 - "$RC" "$HIC_AVAILABLE" "$USE_EXISTING_ASSEMBLY" <<'PY'
+python3 - "$RC" "$HIC_AVAILABLE" "$USE_EXISTING_ASSEMBLY" "$SKIP_UPSTREAM" <<'PY'
 import json
 import sys
 
-path, hic_available, use_existing = sys.argv[1], sys.argv[2] == "true", sys.argv[3] == "true"
+path = sys.argv[1]
+hic_available = sys.argv[2] == "true"
+use_existing = sys.argv[3] == "true"
+skip_upstream = sys.argv[4] == "true"
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 
-requested = ["t2t"] if use_existing else ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
+if use_existing:
+    requested = ["t2t"]
+elif skip_upstream:
+    requested = ["assembly", "assembly_review", "t2t"]
+else:
+    requested = ["read_qc", "genome_survey", "assembly", "assembly_review", "t2t"]
 if hic_available:
-    insert_at = 0 if use_existing else 4
+    if use_existing:
+        insert_at = 0
+    elif skip_upstream:
+        insert_at = 2
+    else:
+        insert_at = 4
     requested.insert(insert_at, "hic_scaffolding")
 config["requested_stages"] = requested
 config["review_policy"] = {"mode": "auto"}
@@ -174,6 +250,16 @@ else
     warn "Pipeline invocation returned exit code ${RUN_EXITCODE}; inspecting durable state"
 fi
 
+PARAMETER_RESUME_STATUS=0
+resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+if (( PARAMETER_RESUME_STATUS == 3 )); then
+    info "[SKIP] E2E session is intentionally paused at parameter_approval."
+    info "Resume the printed session in the TUI; the same session will continue to later gates."
+    exit 77
+elif (( PARAMETER_RESUME_STATUS != 0 )); then
+    fail "E2E parameter-approval handling failed"
+fi
+
 # ---- Verify read_qc artifacts ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
 ARTIFACT_DIR="${RUN_DIR}/artifacts"
@@ -188,18 +274,42 @@ if [[ -f "$READQC_SUMMARY" ]]; then
     assert_file_contains "$READQC_SUMMARY" "method_name" "summary has method_name"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "read_qc skipped because assembly_fasta_registered was provided"
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    info "read_qc skipped because TEST09_SKIP_UPSTREAM=true"
 else
     warn "read_qc_summary.json not found (may have stopped earlier)"
 fi
 
 # ---- Verify genome_survey artifacts ----
-SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/survey_result.json"
+SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/genome_survey_result.json"
 if [[ -f "$SURVEY_RESULT" ]]; then
-    pass "survey_result.json produced"
+    pass "genome_survey_result.json produced"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "genome_survey skipped because assembly_fasta_registered was provided"
+elif [[ "$SKIP_UPSTREAM" == "true" ]]; then
+    info "genome_survey skipped because TEST09_SKIP_UPSTREAM=true"
 else
-    info "genome_survey skipped or not yet reached"
+    fail "full E2E did not produce genome_survey_result.json"
+fi
+
+if [[ -f "$SURVEY_RESULT" && "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    python3 - "$SURVEY_RESULT" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+measured = result.get("measured_estimates", {}).get("genome_size")
+assert result.get("mode") == "full", result
+assert result.get("status") == "completed", result
+assert result.get("genome_size_source") == "survey", result
+assert result.get("estimate_sources", {}).get("genome_size") == "survey", result
+assert result.get("provided_overrides") == {}, result
+assert isinstance(measured, int) and measured > 0, result
+assert result.get("estimates", {}).get("genome_size") == measured, result
+assert result.get("genome_size_prior") == measured, result
+print(f"survey canonical genome size: {measured} bp")
+PY
+    pass "genome survey supplied the canonical genome size"
 fi
 
 # ---- Check current stage and supervision state ----
@@ -245,6 +355,40 @@ fi
 
 info "  current_stage: ${CURRENT_STAGE}"
 info "  supervision_state: ${SUPERVISION_STATE}"
+
+if [[ -f "$SURVEY_RESULT" && "$USE_EXISTING_ASSEMBLY" != true && "$SKIP_UPSTREAM" != "true" ]]; then
+    ASSEMBLY_SCRIPT=""
+    case "${ASSEMBLY_METHOD}" in
+        hifiasm) ASSEMBLY_SCRIPT=$(find "${RUN_DIR}/work/assembly" -name run_hifiasm.sh -type f | head -1 || true) ;;
+        hifiasm_ont) ASSEMBLY_SCRIPT=$(find "${RUN_DIR}/work/assembly" -name run_hifiasm_ont.sh -type f | head -1 || true) ;;
+    esac
+    if [[ "${ASSEMBLY_METHOD}" == hifiasm* ]]; then
+        assert_file_nonempty "$ASSEMBLY_SCRIPT" "hifiasm command script for genome-size handoff"
+        if [[ -n "$ASSEMBLY_SCRIPT" ]]; then
+            python3 - "$SURVEY_RESULT" "$ASSEMBLY_SCRIPT" <<'PY'
+import json
+import re
+import shlex
+import sys
+
+survey = json.load(open(sys.argv[1], encoding="utf-8"))
+expected = int(survey["measured_estimates"]["genome_size"])
+command_line = next(
+    line for line in open(sys.argv[2], encoding="utf-8")
+    if line.strip().startswith("hifiasm ")
+)
+argv = shlex.split(command_line)
+rendered = argv[argv.index("--hg-size") + 1]
+match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([kmg])", rendered, re.IGNORECASE)
+assert match, rendered
+actual = round(float(match.group(1)) * {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}[match.group(2).lower()])
+assert actual == expected, {"survey_bp": expected, "hg_size": rendered, "rendered_bp": actual}
+print(f"--hg-size {rendered} matches survey measurement {expected} bp")
+PY
+            pass "assembly --hg-size matches the survey artifact"
+        fi
+    fi
+fi
 
 if (( RUN_EXITCODE != 0 )) && [[ "$SUPERVISION_STATE" != "blocked_human" ]]; then
     fail "Pipeline failed with exit code ${RUN_EXITCODE}"
@@ -345,7 +489,7 @@ section "Phase 3: Stage Transition Validation"
 if [[ -f "$INSPECT_JSON" ]]; then
     info "Analyzing route trace"
     cd "${PROJECT_ROOT}"
-    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" "$HIC_AVAILABLE" <<'PY'
+    python3 - "$INSPECT_JSON" "$USE_EXISTING_ASSEMBLY" "$HIC_AVAILABLE" "$SKIP_UPSTREAM" <<'PY'
 import json
 import sys
 
@@ -354,11 +498,14 @@ trace = summary.get("route_trace") or []
 stages = [str(item).removesuffix("_stage") for item in trace]
 use_existing = sys.argv[2] == "true"
 hic_available = sys.argv[3] == "true"
+skip_upstream = sys.argv[4] == "true"
 
 print(f"Stage sequence: {' → '.join(stages)}")
 
 if use_existing:
     expected_start = ['inventory', 'hic_scaffolding'] if hic_available else ['inventory', 't2t']
+elif skip_upstream:
+    expected_start = ['inventory', 'assembly']
 else:
     expected_start = ['inventory', 'read_qc', 'genome_survey', 'assembly']
 actual_start = stages[:len(expected_start)]
@@ -431,7 +578,7 @@ fi
 section "Phase 5: TUI Interaction Points Summary"
 
 info "TUI blocking points in the pipeline:"
-info "  1. Assembly route selection (if confidence < threshold)"
+info "  1. Assembly route selection (when platform/coverage evidence is insufficient)"
 info "  2. Assembly candidate selection (if multiple candidates)"
 info "  3. Assembly review human gate (always blocks unless auto policy)"
 info "  4. Hi-C scaffolding (blocks if execution_mode != local)"
@@ -562,26 +709,12 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         fi
     fi
 
-    # Verify Hi-C assets in registry
+    # The asset registry records declared inputs. Derived outputs are verified
+    # through the stage artifact directory and ledger above.
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
         info "Hi-C asset registry check deferred until after assembly_review accept"
-    elif [[ -f "$REGISTRY" ]]; then
-        cd "${PROJECT_ROOT}"
-        python3 <<EOPYTHON
-import json
-from pathlib import Path
-
-reg = json.loads(Path("${REGISTRY}").read_text())
-assets = reg.get('assets', [])
-
-hic_assets = [a for a in assets if a.get('stage') == 'hic_scaffolding']
-if hic_assets:
-    print(f"✓ Hi-C assets registered: {len(hic_assets)} entries")
-    for asset in hic_assets:
-        print(f"  - {asset.get('asset_type')}: {asset.get('path')}")
-else:
-    print("No Hi-C assets registered yet")
-EOPYTHON
+    else
+        info "Derived Hi-C outputs are tracked in artifact records, not the input asset registry"
     fi
 else
     info "Hi-C data not available, Phase 8 skipped"
@@ -641,34 +774,44 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         fi
     fi
 
-    # Verify T2T assets in registry
+    # The asset registry records declared inputs. Derived outputs are verified
+    # through the stage artifact directory and ledger above.
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
         info "T2T asset registry check deferred until after assembly_review accept"
-    elif [[ -f "$REGISTRY" ]]; then
-        cd "${PROJECT_ROOT}"
-        python3 <<EOPYTHON
-import json
-from pathlib import Path
-
-reg = json.loads(Path("${REGISTRY}").read_text())
-assets = reg.get('assets', [])
-
-t2t_assets = [a for a in assets if a.get('stage') == 't2t']
-if t2t_assets:
-    print(f"✓ T2T assets registered: {len(t2t_assets)} entries")
-    for asset in t2t_assets:
-        print(f"  - {asset.get('asset_type')}: {asset.get('path')}")
-else:
-    print("No T2T assets registered yet")
-EOPYTHON
+    else
+        info "Derived T2T outputs are tracked in artifact records, not the input asset registry"
     fi
 else
     info "Hi-C data not available, Phase 9 (T2T) skipped"
 fi
 
 # ============================================================
-# Summary
+# Completion gate: a full E2E must finish every requested stage. Human gates
+# and missing downstream artifacts are explicit SKIP/FAIL outcomes, never PASS.
 # ============================================================
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline" || true
+    exit 1
+fi
+if [[ "$SUPERVISION_STATE" == "blocked_human" ]]; then
+    info "[SKIP] E2E session is durably waiting at ${CURRENT_STAGE}; it has not completed."
+    info "Resume the same session with an explicit review decision, then rerun the completion assertions."
+    exit 77
+fi
+if [[ "$SUPERVISION_STATE" != "completed" ]]; then
+    fail "E2E session did not reach completed state (got ${SUPERVISION_STATE})"
+fi
+if [[ "$HIC_RAN" != true ]]; then
+    fail "Full E2E completed without verifiable Hi-C work or artifacts"
+fi
+if [[ "$T2T_RAN" != true ]]; then
+    fail "Full E2E completed without verifiable T2T work or artifacts"
+fi
+if (( _FAIL > 0 )); then
+    summary "Test 09: End-to-End Pipeline" || true
+    exit 1
+fi
+
 summary "Test 09: End-to-End Pipeline"
 
 info ""
@@ -681,7 +824,11 @@ if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     fi
     info "  - Existing assembly shortcut: read_qc/genome_survey/assembly/assembly_review skipped"
 else
-    info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+    if [[ "$SKIP_UPSTREAM" == "true" ]]; then
+        info "  - Pipeline stages flow: inventory → assembly → ... (TEST09_SKIP_UPSTREAM)"
+    else
+        info "  - Pipeline stages flow: inventory → read_qc → genome_survey → assembly → ..."
+    fi
 fi
 if [[ "$HIC_AVAILABLE" == true && "$USE_EXISTING_ASSEMBLY" != true ]]; then
         info "    → assembly_review → hic_scaffolding → t2t"

@@ -1,0 +1,26 @@
+rules:
+  - rule_id: haploid_purge_ceiling
+    condition:
+      sample.ploidy: 1
+    constraints:
+      purge_level:
+        max: 1
+    reason: "Haploid samples must not use aggressive duplicate purging."
+
+  - rule_id: low_coverage_read_length_ceiling
+    condition:
+      read_qc.effective_coverage_1kb:
+        max: 30
+    constraints:
+      read_length_cutoff:
+        max: 3000
+    reason: "Low effective coverage must not discard a large fraction of long reads."
+
+  - rule_id: low_coverage_max_kmer
+    condition:
+      read_qc.effective_coverage_1kb:
+        max: 25
+    constraints:
+      kmer_length:
+        max: 51
+    reason: "Very low coverage must not use unusually large k-mer lengths."

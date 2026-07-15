@@ -17,11 +17,11 @@ from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
-    _STAGE_METHODS,
     _STAGES_NEEDING_METHOD_SELECTION,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
+    _executable_methods_for_stage,
     _fill_draft_default_methods,
     build_initial_plan_draft,
     build_run_plan_summary,
@@ -236,7 +236,7 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
 
 
 def _render_confirm(req: AskClarificationRequest) -> None:
-    _render_plan_summary(req.summary or {}, title="Run Plan")
+    _render_plan_summary(req.summary or {}, title="Execution Plan")
 
 
 def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
@@ -287,7 +287,9 @@ def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
     print("  - This draft becomes the working plan.")
     print("  - Execution will NOT start yet.")
     print("  - Missing fields shown below must be fixed here first.")
-    print("  - A final run plan will be shown before execution.")
+    print("  - An execution-route plan will be shown before execution.")
+    print("  - Runtime-derived proposals are deferred until their prerequisite results exist.")
+    print("  - Each deferred proposal will return here as a human gate before the action runs.")
     print("  - You can edit a stage here first, then return to this plan.")
 
     attention_items = _draft_attention_items(plan, summary)
@@ -363,9 +365,26 @@ def _render_draft_stage_summary(
             print(f"     {line}")
     parameter_lines = _draft_stage_parameter_lines(stage, plan, summary)
     if parameter_lines:
-        print("   parameters:")
+        heading = "planning/static parameters:" if _runtime_points_for_stage(summary, stage) else "parameters:"
+        print(f"   {heading}")
         for line in parameter_lines:
             print(f"     {line}")
+    decision_points = _runtime_points_for_stage(summary, stage)
+    runtime_parameter_contracts = _runtime_parameter_contracts_for_stage(summary, stage)
+    for contract in runtime_parameter_contracts:
+        names = list(contract.get("parameter_names") or [])
+        preview_names = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
+        print(f"   runtime-derived parameters [{contract.get('method', '').rsplit('.', 1)[-1]}]: deferred")
+        if preview_names:
+            print(f"     catalog L2: {preview_names}")
+        constraints = contract.get("user_constraints") or {}
+        if constraints:
+            print(f"     user constraints (not frozen values): {constraints}")
+    if decision_points:
+        print("   runtime decisions:")
+        for point in decision_points:
+            print(f"     {point.get('label')}: deferred")
+            print(f"       trigger: {point.get('trigger')}")
     if attention:
         print("   attention:")
         for item in attention:
@@ -423,7 +442,10 @@ def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[s
         values.update(params.get(method) or {})
         method_sources = sources.get(method) or {}
         short = method.rsplit(".", 1)[-1]
+        deferred_names = _deferred_parameter_names(summary, method)
         for key, value in values.items():
+            if key in deferred_names:
+                continue
             field = f"{method}.{key}"
             seen.add(field)
             note = _source_note(method_sources.get(key), fallback="recommended") if key in (defaults.get(method) or {}) else ""
@@ -471,6 +493,29 @@ def _draft_stage_attention(
         if warning_stage == stage:
             attention.append(str(warning))
     return attention
+
+
+def _runtime_points_for_stage(summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
+    return [
+        point
+        for point in summary.get("runtime_decision_points") or []
+        if point.get("stage") == stage
+    ]
+
+
+def _runtime_parameter_contracts_for_stage(summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
+    return [
+        contract
+        for contract in summary.get("runtime_parameter_contracts") or []
+        if contract.get("stage") == stage
+    ]
+
+
+def _deferred_parameter_names(summary: dict[str, Any], method: str) -> set[str]:
+    for contract in summary.get("runtime_parameter_contracts") or []:
+        if contract.get("method") == method:
+            return set(contract.get("parameter_names") or [])
+    return set()
 
 
 def _draft_attention_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
@@ -594,7 +639,7 @@ def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
 
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
-    methods = _STAGE_METHODS.get(stage, [])
+    methods = _executable_methods_for_stage(stage)
     if not methods:
         print(f"\nNo method choices are registered for {stage}.")
         return plan
@@ -868,6 +913,33 @@ def _render_plan_summary(
     if preview and summary.get("stage_plan_details"):
         _render_stage_plan_details(summary["stage_plan_details"])
 
+    runtime_parameter_contracts = summary.get("runtime_parameter_contracts") or []
+    if runtime_parameter_contracts:
+        print("\nRuntime-derived parameters:")
+        for contract in runtime_parameter_contracts:
+            print(f"  [{contract.get('stage')}] {contract.get('method')}: deferred")
+            print(
+                "    values are recommended after prerequisite results exist and "
+                f"confirmed at {contract.get('trigger_gate', {}).get('gate_id')}"
+            )
+            constraints = contract.get("user_constraints") or {}
+            if constraints:
+                print(f"    user constraints (not frozen values): {constraints}")
+
+    decision_points = summary.get("runtime_decision_points") or []
+    if decision_points:
+        print("\nRuntime human gates (proposals are not available yet):")
+        for point in decision_points:
+            print(
+                f"  [{point.get('stage')}] {point.get('label')}: "
+                f"{point.get('status', 'deferred')}"
+            )
+            print(f"    trigger: {point.get('trigger')}")
+            recommendation_status = point.get("parameter_recommendation_status")
+            if recommendation_status and recommendation_status != "not_applicable":
+                print(f"    parameter recommendation: {recommendation_status}")
+        print("  The TUI pauses at each reached gate, shows its runtime evidence/proposal, and asks for a decision.")
+
     warnings = summary.get("warnings", [])
     for w in warnings:
         print(f"\n  warning: {w}")
@@ -912,7 +984,10 @@ def _render_preview_parameters(
         default_values = defaults.get(method, {}) or {}
         default_sources = sources.get(method, {}) or {}
         explicit_values = params.get(method, {}) or {}
+        deferred_names = _deferred_parameter_names(summary, method)
         for key, value in values.items():
+            if key in deferred_names:
+                continue
             note = ""
             if key in explicit_values and not recommended_params:
                 note = ""
@@ -1505,7 +1580,7 @@ def _normalize_shared_platform(value: Any) -> Any:
         index = int(raw)
         if 1 <= index <= len(_SHARED_PLATFORM_VALUES):
             return _SHARED_PLATFORM_VALUES[index - 1]
-    if raw in {"nanopore", "nano", "ont_raw", "ont_hq"}:
+    if raw in {"nanopore", "nano", "ont_hq"}:
         return "ont"
     if raw in {"pacbio_hifi", "pacbio_hifi_reads", "hifi", "ccs"}:
         return "pacbio_hifi"

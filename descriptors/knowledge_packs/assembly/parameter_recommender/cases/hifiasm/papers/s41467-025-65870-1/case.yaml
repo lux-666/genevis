@@ -1,0 +1,98 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41467-025-65870-1
+    case_type: initial
+    source:
+      kind: paper
+      title: "Telomere-to-telomere genome assembly of the Dipteran Bactrocera dorsalis from a single individual"
+      doi: 10.1038/s41467-025-65870-1
+      year: 2025
+    methods_path: cases/hifiasm/papers/s41467-025-65870-1/methods.md
+    evidence_spans:
+      - span_id: scenario.single_insect
+        quote: "A single male Bactrocera dorsalis supplied low-input HiFi data in a setting complicated by small body size, microbial contamination, high heterozygosity, and poorly conserved telomere or centromere structures."
+      - span_id: preprocessing.contamination
+        quote: "Contaminant contigs were identified from hifiasm or HiCanu graph structure and microbial databases, then the reads composing those contigs were removed before assembly."
+      - span_id: preprocessing.ont_80kb
+        quote: "ONT reads were cropped by 50 bases at both ends and only reads longer than 80 kb were retained to validate and extend repetitive telomere and centromere regions."
+      - span_id: command.hifiasm_r603
+        quote: "The reported hifiasm r603 command used --hg-size 540m, --primary, -r 5, -D 6, -m 1000000, --b-cov 2, -l 1, and -O 2 on cleaned HiFi reads."
+      - span_id: downstream.scaffolding
+        quote: "After the primary assembly, Purge_Dups 1.2.6, Juicer 1.6, 3D-DNA 2.20, and manual Juicebox adjustment were used for purging and chromosome scaffolding."
+      - span_id: caveat.parameter_ownership
+        quote: "Genome size is read-only sample context and --primary is route-owned; only the six explicitly reported cataloged L2 switches are represented as hifiasm parameter evidence."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: r603
+      target_methods: [hifiasm]
+      assembly_goal: single-individual insect T2T assembly under contamination and high heterozygosity
+    observed_facts:
+      organism:
+        value: Bactrocera dorsalis
+        evidence_span_ids: [scenario.single_insect]
+      clade:
+        value: insect
+        evidence_span_ids: [scenario.single_insect]
+      genome_size_mb:
+        value: 540
+        unit: Mb
+        evidence_span_ids: [command.hifiasm_r603]
+      ploidy:
+        value: 2
+        evidence_span_ids: [scenario.single_insect]
+    intervention:
+      tool: hifiasm
+      version: r603
+      parameters:
+        correction_rounds:
+          value: 5
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+        high_freq_kmer_drop:
+          value: 6.0
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+        contig_bubble_pop_distance:
+          value: 1000000
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+        break_low_coverage:
+          value: 2
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+        purge_level:
+          value: 1
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+        duplicate_overlap_min_reads:
+          value: 2
+          reported: true
+          evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+    rationale_claims:
+      - claim_id: insect.contamination_cleanup
+        statement: "Contaminant graph components and their contributing reads were removed before the final HiFi assembly."
+        explicitness: explicit
+        effect_area: read_preprocessing
+        evidence_span_ids: [scenario.single_insect, preprocessing.contamination]
+      - claim_id: insect.ul_ont_support
+        statement: "Cropped ONT reads longer than 80 kb were reserved for validation and extension of telomeric and centromeric repeats."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [preprocessing.ont_80kb]
+      - claim_id: insect.reported_hifiasm_parameters
+        statement: "The cleaned-HiFi run explicitly reports six adjustable hifiasm values, alongside read-only genome size and route-owned primary output mode."
+        explicitness: explicit
+        effect_area: assembly_cleaning
+        evidence_span_ids: [command.hifiasm_r603, caveat.parameter_ownership]
+      - claim_id: insect.downstream_context
+        statement: "Purge_Dups, Juicer, 3D-DNA, and Juicebox are downstream finishing context rather than hifiasm parameter evidence."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [downstream.scaffolding]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "The exact r603 L2 switches are preserved; --hg-size, --primary, upstream ONT filtering, and downstream tools remain in their proper ownership layers."

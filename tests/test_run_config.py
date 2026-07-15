@@ -163,6 +163,56 @@ class RunConfigSchemaTests(unittest.TestCase):
         self.assertEqual(config.assembly.target_level, "near_t2t")
         self.assertEqual(config.assembly.assembly_route, "hifi")
 
+    def test_route_consistency_allows_compatible_inferred_method(self):
+        config = RunConfig.model_validate(
+            {
+                "assembly": {
+                    "assembly_route": "hifi",
+                    "flye_parameters": {"threads": 4},
+                }
+            }
+        )
+
+        assert config.assembly is not None
+        self.assertEqual(config.assembly.assembly_route, "hifi")
+
+    def test_cyclone_route_allows_same_explicit_method_overrides_as_ont(self):
+        """run_config route compatibility is an explicit override allow-list."""
+        for route in ["ont", "cyclone"]:
+            for method, parameters_key in [
+                ("flye", "flye_parameters"),
+                ("nextdenovo", "nextdenovo_parameters"),
+                ("hifiasm_ont", "hifiasm_ont_parameters"),
+            ]:
+                with self.subTest(route=route, method=method):
+                    config = RunConfig.model_validate(
+                        {
+                            "assembly": {
+                                "assembly_route": route,
+                                "assembly_method": method,
+                                parameters_key: {"threads": 4},
+                            }
+                        }
+                    )
+
+                    assert config.assembly is not None
+                    self.assertEqual(config.assembly.assembly_route, route)
+                    self.assertEqual(config.assembly.assembly_method, method)
+
+    def test_cyclone_route_read_type_rejects_incompatible_hifiasm(self):
+        with self.assertRaises(ValidationError) as ctx:
+            RunConfig.model_validate(
+                {
+                    "assembly": {
+                        "assembly_route": "cyclone",
+                        "assembly_method": "hifiasm",
+                        "hifiasm_parameters": {"threads": 4},
+                    }
+                }
+            )
+
+        self.assertIn("implies read_type 'cyclone' and is incompatible with assembly_method 'hifiasm'", str(ctx.exception))
+
     def test_local_assembly_accepts_shared_parameters_with_flye_threads_only(self):
         config = RunConfig.model_validate(
             {

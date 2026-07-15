@@ -26,3 +26,6 @@ resource_hints:
   memory_gb: 64.0
   gpu_required: false
   walltime_hours: 12.0
+planner:
+  required_parameters:
+    - hic_alignment_ref

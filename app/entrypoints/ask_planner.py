@@ -20,8 +20,15 @@ from app.schemas.ask_plan import (
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import HiCScaffoldingPlanCandidate, Juicer3DDNARunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
-from app.schemas.warnings import PlanWarning
+from app.schemas.warnings import PlanWarning as PlanWarning
+from app.review.gates import planned_review_gates
 from app.stages import STAGE_ORDER
+from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
+
+from .planner_catalog import (
+    build_planner_method_catalog as build_planner_method_catalog,
+    load_planner_method_catalog,
+)
 
 FUNCTION_DATABASE_PROVENANCE_FIELD = "function_annotation.database_provenance"
 FUNCTION_ANNOTATION_DIAMOND_METHOD = "function_annotation.candidate.diamond"
@@ -37,13 +44,9 @@ _ASSEMBLY_METHODS_NEED_SHARED_READ_TYPE = {
     "assembly.candidate.hifiasm",
     "assembly.candidate.hifiasm_ont",
 }
-_GENOME_SURVEY_EXECUTABLE_METHODS = {
-    "genome_survey.kmer_count.jellyfish",
-    "genome_survey.model.genomescope2",
-}
 
 # ---------------------------------------------------------------------------
-# Unified method registry — all stages and their methods
+# Planner stage-selection policy. Method metadata comes from descriptors.
 # ---------------------------------------------------------------------------
 
 _STAGE_SELECTION_MODE: dict[str, str] = {
@@ -68,173 +71,16 @@ READ_QC_FILTER_METHODS = [
 ]
 READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
 
-_STAGE_METHODS: dict[str, list[dict[str, Any]]] = {
-    "read_qc": [
-        {
-            "method_name": READ_QC_STATS_METHOD,
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "always",
-        },
-        {
-            "method_name": READ_QC_FILTER_SKIP,
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "length_filter",
-            "display_name": "skip filtering, use raw reads",
-        },
-        {
-            "method_name": READ_QC_FILTER_SEQKIT,
-            "required_parameters": ["min_len"],
-            "parameter_defaults": {},
-            "selection_role": "length_filter",
-        },
-        {
-            "method_name": READ_QC_HANDOFF_METHOD,
-            "required_parameters": [],
-            "parameter_defaults": {},
-            "selection_role": "always",
-        },
-    ],
-    "genome_survey": [
-        {
-            "method_name": "genome_survey.kmer_count.jellyfish",
-            "required_parameters": ["kmer_size", "hash_size", "threads"],
-            "parameter_defaults": {"kmer_size": 21, "hash_size": "1G", "threads": 4},
-        },
-        {
-            "method_name": "genome_survey.model.genomescope2",
-            "required_parameters": ["kmer_size"],
-            "parameter_defaults": {"kmer_size": 21},
-        },
-    ],
-    "assembly": [
-        {
-            "method_name": "assembly.candidate.flye",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 4},
-        },
-        {
-            "method_name": "assembly.candidate.nextdenovo",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 4},
-        },
-        {
-            "method_name": "assembly.candidate.hifiasm",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 4},
-        },
-        {
-            "method_name": "assembly.candidate.hifiasm_ont",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 4},
-        },
-    ],
-    "assembly_review": [
-        {
-            "method_name": "assembly_review.eval.quast",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 4},
-        },
-        {
-            "method_name": "assembly_review.eval.busco",
-            "required_parameters": ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"],
-            "parameter_defaults": {"threads": 8},
-        },
-    ],
-    "hic_scaffolding": [
-        {
-            "method_name": "hic_scaffolding.candidate.juicer_3ddna_juicebox",
-            "required_parameters": ["input_mode", "chromosome_count"],
-            "conditional_required_parameters": [
-                {
-                    "condition": {"input_mode": "merged_nodups"},
-                    "required": ["merged_nodups_ref"],
-                },
-                {
-                    "condition": {"input_mode": "raw_reads"},
-                    "required": ["restriction_enzyme", "chrom_sizes_ref"],
-                },
-            ],
-            "parameter_defaults": {"input_mode": "raw_reads"},
-        },
-        {
-            "method_name": "hic_scaffolding.candidate.yahs",
-            "required_parameters": ["hic_alignment_ref"],
-            "parameter_defaults": {},
-        },
-    ],
-    "t2t": [
-        {
-            "method_name": "t2t.alignment.minimap2",
-            "required_parameters": [
-                "mode",
-                "telomere_motif",
-                "threshold_min_motif_copies",
-                "threshold_terminal_window_bp",
-                "threshold_min_mapq",
-                "threshold_max_target_terminal_distance_bp",
-                "threshold_min_overlap_bp",
-                "threshold_min_supporting_reads",
-            ],
-            "parameter_defaults": {
-                "mode": "auto_patch",
-                "telomere_motif": "TTAGGG",
-                "threshold_min_motif_copies": 4,
-                "threshold_terminal_window_bp": 10_000,
-                "threshold_min_mapq": 20,
-                "threshold_max_target_terminal_distance_bp": 1_000,
-                "threshold_min_overlap_bp": 500,
-                "threshold_min_supporting_reads": 1,
-            },
-        },
-    ],
-    "repeat_annotation": [
-        {
-            "method_name": "repeat_annotation.masking.repeatmasker",
-            "required_parameters": ["threads"],
-            "parameter_defaults": {"threads": 8},
-        },
-    ],
-    "gene_annotation": [
-        {
-            "method_name": "gene_annotation.candidate.augustus",
-            "category": "ab_initio",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-        {
-            "method_name": "gene_annotation.candidate.miniprot",
-            "category": "homology",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-    ],
-    "function_annotation": [
-        {
-            "method_name": "function_annotation.candidate.diamond",
-            "required_parameters": [],
-            "parameter_defaults": {},
-        },
-    ],
-}
-
-_AR_RUN_CONFIG_METHODS: dict[str, tuple[str, list[str], dict[str, Any]]] = {
-    "assembly_review.eval.quast": ("quast", ["threads"], {"threads": 4}),
-    "assembly_review.eval.busco": (
-        "busco",
-        ["lineage_path", "lineage_name", "lineage_version", "lineage_source", "threads"],
-        {"threads": 8},
-    ),
-}
-
-
 def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
     ar_config: dict[str, Any] = {}
-    for method_name, (config_key, required, defaults) in _AR_RUN_CONFIG_METHODS.items():
+    for descriptor in _executable_methods_for_stage("assembly_review"):
+        method_name = descriptor["method_name"]
         params = (plan.method_parameters or {}).get(method_name)
         if not params:
             continue
+        config_key = method_name.rsplit(".", 1)[-1]
+        required = descriptor.get("required_parameters") or []
+        defaults = descriptor.get("parameter_defaults") or {}
         block: dict[str, Any] = {}
         for field in required:
             value = params.get(field, defaults.get(field))
@@ -250,19 +96,15 @@ _STAGES_NEEDING_METHOD_SELECTION = {
 }
 
 def _get_method_descriptor(method_name: str) -> dict[str, Any] | None:
-    for methods in _STAGE_METHODS.values():
-        for m in methods:
-            if m["method_name"] == method_name:
-                return m
-    return None
+    return load_planner_method_catalog().descriptor_for_method(method_name)
 
 
 def _all_known_methods() -> set[str]:
-    return {m["method_name"] for methods in _STAGE_METHODS.values() for m in methods}
+    return set(load_planner_method_catalog().by_method)
 
 
 def _executable_methods_for_stage(stage: str) -> list[dict[str, Any]]:
-    return _STAGE_METHODS.get(stage, [])
+    return load_planner_method_catalog().methods_for_stage(stage)
 
 
 def _auto_fill_pipeline_methods(execution_order: list[str]) -> dict[str, str | list[str]]:
@@ -659,7 +501,7 @@ def _method_selection_request(plan: AskPlanState, ask_plan_ref: str) -> AskClari
     for stage in plan.resolved_execution_order or []:
         if stage not in _STAGES_NEEDING_METHOD_SELECTION:
             continue
-        stage_methods = _STAGE_METHODS.get(stage, [])
+        stage_methods = _executable_methods_for_stage(stage)
         if stage_methods:
             methods_by_stage[stage] = [
                 {
@@ -781,6 +623,12 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["method_parameters"] = plan.method_parameters
     if plan.stage_parameters:
         summary["stage_parameters"] = plan.stage_parameters
+    runtime_parameter_contracts = _runtime_parameter_contracts(plan)
+    if runtime_parameter_contracts:
+        summary["runtime_parameter_contracts"] = runtime_parameter_contracts
+    decision_points = _runtime_decision_points(plan.resolved_execution_order or [])
+    if decision_points:
+        summary["runtime_decision_points"] = decision_points
     # Load manifest once and pass it through to all parameter inference functions
     manifest = _load_manifest(plan.manifest_ref)
     missing_fields, parameter_defaults, shared_parameter_defaults, stage_parameter_defaults, param_warnings = (
@@ -819,6 +667,73 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
         summary["run_config_preview"] = None
         summary["run_config_preview_error"] = str(exc)
     return summary
+
+
+def _runtime_decision_points(stages: list[str]) -> list[dict[str, Any]]:
+    """Describe future human interactions without fabricating their payloads.
+
+    The review-gate registry is the single source of truth.  A plan only says
+    that a proposal will be created later; the runtime interrupt and its
+    artifacts remain authoritative for the actual values and choices.
+    """
+
+    points: list[dict[str, Any]] = []
+    for gate in planned_review_gates(stages):
+        point: dict[str, Any] = {
+            "stage": gate.stage,
+            "gate_id": gate.gate_id,
+            "proposal_kind": gate.proposal_kind,
+            "label": gate.proposal_label or gate.gate_id.replace("_", " ").title(),
+            "status": "deferred",
+            "trigger": (
+                f"when {gate.stage} reaches the {gate.gate_id} gate and "
+                "its prerequisite results/evidence are available"
+            ),
+            "decisions_allowed": list(gate.decisions_allowed),
+            "parameter_recommendation_status": gate.parameter_recommendation_status,
+        }
+        related_parameter_gate = getattr(gate, "related_parameter_gate", None)
+        if related_parameter_gate:
+            point["related_parameter_gate"] = {
+                "stage": related_parameter_gate[0],
+                "gate_id": related_parameter_gate[1],
+            }
+        recommendation_notes = list(getattr(gate, "parameter_recommendation_notes", ()) or ())
+        if recommendation_notes:
+            point["parameter_recommendation_notes"] = recommendation_notes
+        points.append(point)
+    return points
+
+
+def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
+    """Expose catalog L2 fields as deferred, never as planning-time decisions."""
+
+    from app.stages.assembly.parameter_catalog import load_parameter_catalog
+
+    contracts: list[dict[str, Any]] = []
+    for stage, method in _iter_selected_methods(plan):
+        if stage != "assembly":
+            continue
+        try:
+            catalog = load_parameter_catalog(method)
+        except (FileNotFoundError, ValueError):
+            continue
+        dynamic_names = [name for name, spec in catalog.parameters.items() if spec.level == 2]
+        if not dynamic_names:
+            continue
+        supplied = dict((plan.method_parameters or {}).get(method) or {})
+        constraints = {name: supplied[name] for name in dynamic_names if name in supplied}
+        contract: dict[str, Any] = {
+            "stage": stage,
+            "method": method,
+            "status": "deferred",
+            "trigger_gate": {"stage": "assembly", "gate_id": "parameter_approval"},
+            "parameter_names": dynamic_names,
+        }
+        if constraints:
+            contract["user_constraints"] = constraints
+        contracts.append(contract)
+    return contracts
 
 
 def _next_action(ask_plan_ref: str) -> dict[str, Any]:
@@ -952,7 +867,7 @@ def _stage_plan_details(
 def _stage_without_method_status(stage: str) -> str:
     if stage in _STAGES_NEEDING_METHOD_SELECTION:
         return "method pending"
-    if stage in _STAGE_METHODS:
+    if stage in load_planner_method_catalog().by_stage:
         return "pipeline/internal"
     return "no registered method yet"
 
@@ -1076,7 +991,7 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
     known = _all_known_methods()
     for stage, value in methods.items():
         method_list = value if isinstance(value, list) else [value]
-        stage_methods = {m["method_name"] for m in _STAGE_METHODS.get(stage, [])}
+        stage_methods = {m["method_name"] for m in _executable_methods_for_stage(stage)}
         for method in method_list:
             if not method or not method.strip():
                 raise ValueError(f"empty method name for stage {stage!r}")
@@ -1096,7 +1011,7 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
                 raise ValueError(f"read_qc method selection requires {READ_QC_HANDOFF_METHOD}")
         if stage == "genome_survey":
             executable = set(method_list)
-            if executable and executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
+            if executable and executable != GENOME_SURVEY_EXECUTABLE_METHODS:
                 raise ValueError(
                     "genome_survey executable selection requires both "
                     "genome_survey.kmer_count.jellyfish and genome_survey.model.genomescope2"
@@ -1450,7 +1365,7 @@ def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
 
 
 def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
-    """Defer only when executable Survey will run before assembly with DNA reads."""
+    """Defer when executable Survey precedes assembly with short or long genomic reads."""
     order = plan.resolved_execution_order or []
     if "genome_survey" not in order or "assembly" not in order:
         return False
@@ -1459,7 +1374,7 @@ def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
     selected = (plan.selected_methods or {}).get("genome_survey")
     method_list = selected if isinstance(selected, list) else [selected] if selected else []
     executable = set(method_list)
-    if executable != _GENOME_SURVEY_EXECUTABLE_METHODS:
+    if executable != GENOME_SURVEY_EXECUTABLE_METHODS:
         return False
     manifest = _load_manifest(plan.manifest_ref)
     return bool(

@@ -12,6 +12,7 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
+    apply_review_gate_timeout,
     apply_review_gate_decision,
     find_review_gate,
     get_review_gate,
@@ -103,11 +104,18 @@ def inspect_session(
     )
     latest_operator_report_payload = _read_json_artifact(latest_operator_report)
 
+    report_supervision_state = (
+        latest_operator_report_payload.get("supervision_state")
+        if isinstance(latest_operator_report_payload, dict)
+        else None
+    )
     supervision_state = "unknown"
     if latest_unresolved_review_request:
         supervision_state = "blocked_human"
     elif latest_final_report or latest_function_bundle:
         supervision_state = "completed"
+    elif report_supervision_state in {"blocked_human", "failed_terminal"}:
+        supervision_state = str(report_supervision_state)
     elif latest_failed_report:
         supervision_state = "failed_terminal"
     elif latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_decision":
@@ -119,12 +127,38 @@ def inspect_session(
     durable_available = db_path.exists()
     checkpoint_persistence = "sqlite" if durable_available else "memory_only"
 
-    decision_requirements = _decision_requirements_from_artifact(latest_request_artifact) if latest_unresolved_review_request else None
+    decision_requirements = (
+        _decision_requirements_from_artifact(latest_request_artifact)
+        if latest_unresolved_review_request
+        else None
+    )
+    report_interrupt = (
+        latest_operator_report_payload.get("active_interrupt")
+        if isinstance(latest_operator_report_payload, dict)
+        else None
+    )
+    if (
+        decision_requirements is None
+        and supervision_state == "blocked_human"
+        and isinstance(report_interrupt, dict)
+    ):
+        decision_requirements = _decision_requirements(report_interrupt)
 
     summary: dict[str, Any] = {
         "session_id": session_id,
         "session": session,
+        "current_stage": (
+            latest_operator_report_payload.get("current_stage")
+            if isinstance(latest_operator_report_payload, dict)
+            else None
+        ),
         "supervision_state": supervision_state,
+        "active_interrupt": report_interrupt,
+        "route_trace": (
+            list(latest_operator_report_payload.get("route_trace_tail") or [])
+            if isinstance(latest_operator_report_payload, dict)
+            else []
+        ),
         "checkpoint_persistence": checkpoint_persistence,
         "durable_resume_available": durable_available,
         "ledger_event_count": len(events),
@@ -169,10 +203,16 @@ def resume_review_state(
 ) -> dict[str, Any]:
     """Apply a validated human review decision to an in-memory blocked state."""
 
-    _validate_common_resume_state(state, request)
-    active_interrupt = state.get("active_interrupt") or {}
+    active_interrupt = _validate_resume_identity(state, request)
+    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+    blocked_timeout_seconds, timeout_source = _resolve_blocked_timeout_seconds(
+        active_interrupt,
+        blocked_timeout_seconds,
+    )
+
     timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
     if timeout and timeout.get("expired"):
+        timeout = _with_timeout_source(timeout, timeout_source)
         return _timeout_failed_update(state, request, timeout)
 
     try:
@@ -189,6 +229,11 @@ def reject_unsupported_lifecycle_operation(operation: str) -> None:
 
 
 def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewRequest) -> None:
+    active_interrupt = _validate_resume_identity(state, request)
+    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+
+
+def _validate_resume_identity(state: TopLevelState, request: ResumeReviewRequest) -> dict[str, Any]:
     if state.get("session_id") != request.session_id:
         raise ResumeValidationError("resume session_id does not match blocked state")
     if state.get("supervision_state") != "blocked_human":
@@ -199,9 +244,13 @@ def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewReq
     if active_interrupt.get("stage") != request.stage:
         raise ResumeValidationError("resume stage does not match active_interrupt.stage")
     active_gate_id = active_interrupt.get("gate_id")
+    if active_gate_id == "parameter_approval" and request.gate_id != "parameter_approval":
+        raise ResumeValidationError(
+            "parameter approval resume requires explicit gate_id=parameter_approval"
+        )
     if request.gate_id and active_gate_id and request.gate_id != active_gate_id:
         raise ResumeValidationError("resume gate_id does not match active_interrupt.gate_id")
-    _ensure_decision_allowed_by_interrupt(active_interrupt, request)
+    return active_interrupt
 
 
 def _ensure_decision_allowed_by_interrupt(active_interrupt: dict[str, Any], request: ResumeReviewRequest) -> None:
@@ -214,7 +263,56 @@ def _ensure_decision_allowed_by_interrupt(active_interrupt: dict[str, Any], requ
         raise ResumeValidationError(f"decision {request.decision!r} is not allowed by active_interrupt")
 
 
+def _resolve_blocked_timeout_seconds(
+    active_interrupt: dict[str, Any],
+    blocked_timeout_seconds: float | None,
+) -> tuple[float | None, dict[str, Any]]:
+    policy_timeout = _review_policy_outcome_timeout_seconds(active_interrupt)
+    if blocked_timeout_seconds is None:
+        return (
+            policy_timeout,
+            {"source": "active_interrupt.review_policy_outcome.max_blocked_seconds"}
+            if policy_timeout is not None
+            else {},
+        )
+
+    source = {"source": "blocked_timeout_seconds"}
+    if policy_timeout is not None and policy_timeout != blocked_timeout_seconds:
+        source.update(
+            {
+                "warning": "blocked_timeout_seconds overrides active_interrupt.review_policy_outcome.max_blocked_seconds",
+                "review_policy_outcome_max_blocked_seconds": policy_timeout,
+            }
+        )
+    return blocked_timeout_seconds, source
+
+
+def _review_policy_outcome_timeout_seconds(active_interrupt: dict[str, Any]) -> float | None:
+    review_policy_outcome = active_interrupt.get("review_policy_outcome") or {}
+    if not isinstance(review_policy_outcome, dict):
+        return None
+    timeout = review_policy_outcome.get("max_blocked_seconds")
+    if timeout is None:
+        return None
+    return timeout
+
+
+def _with_timeout_source(timeout: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    if not source:
+        return timeout
+    return {**timeout, **source}
+
+
 def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    """Handle timeout through the review-gate registry, then fall back to stop."""
+    try:
+        timeout_update = apply_review_gate_timeout(state, request, timeout)
+    except KeyError as exc:
+        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
+    if timeout_update is not None:
+        return timeout_update
+
+    # Fall back to stop_human_review for other gates or when no recommendation
     timeout_request = request.model_copy(
         update={
             "decision": "stop_human_review",
@@ -227,6 +325,33 @@ def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, t
     except KeyError as exc:
         raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
     return {**update, "last_error": f"{request.stage} blocked timeout expired"}
+
+
+def terminal_failure_update(
+    state: TopLevelState,
+    stage: str,
+    error: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    update = {
+        "current_stage": stage,
+        "supervision_state": "failed_terminal",
+        "active_interrupt": None,
+        "last_error": error,
+        "stage_outputs": state.get("stage_outputs") or {},
+    }
+    if metadata:
+        update.update(metadata)
+    return update
+
+
+def timeout_terminal_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+    return terminal_failure_update(
+        state,
+        request.stage,
+        f"{request.stage} blocked timeout expired",
+        metadata={"blocked_timeout": timeout},
+    )
 
 
 def _stage_statuses(state: dict[str, Any]) -> dict[str, str]:
@@ -363,8 +488,62 @@ def _candidate_methods(payload: dict[str, Any]) -> list[str]:
     ]
 
 
+_PARAMETER_APPROVAL_BINDING_FIELDS = (
+    "attempt_id",
+    "task",
+    "previous_attempt_id",
+    "recommendation_hash",
+)
+
+_PARAMETER_APPROVAL_CONTEXT_FIELDS = (
+    "recommendation_ref",
+    "parameter_diff",
+    "rationale",
+    "failure_facts",
+    "evidence_refs",
+)
+
+
+def _parameter_approval_resume_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("gate_id") != "parameter_approval":
+        return {}
+    return {
+        key: payload.get(key)
+        for key in _PARAMETER_APPROVAL_BINDING_FIELDS
+        if key in payload
+    }
+
+
+def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
+    """Describe what this existing gate proposes without implying a recommender exists."""
+
+    proposal = {
+        "kind": gate.proposal_kind,
+        "label": gate.proposal_label or gate.gate_id.replace("_", " "),
+        "parameter_recommendation_status": gate.parameter_recommendation_status,
+        "human_confirmation_required": True,
+    }
+    if gate.related_parameter_gate is not None:
+        proposal["related_parameter_gate"] = {
+            "stage": gate.related_parameter_gate[0],
+            "gate_id": gate.related_parameter_gate[1],
+        }
+    if gate.parameter_recommendation_notes:
+        proposal["parameter_recommendation_notes"] = list(gate.parameter_recommendation_notes)
+    return proposal
+
+
 def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(requirements)
+    gate = find_review_gate(active_interrupt.get("stage"), active_interrupt.get("gate_id"))
+    if gate is not None:
+        enriched["runtime_proposal"] = _runtime_proposal_requirements(gate)
+    resume_metadata = _parameter_approval_resume_metadata(active_interrupt)
+    if resume_metadata:
+        enriched["resume_metadata"] = resume_metadata
+        for key in _PARAMETER_APPROVAL_CONTEXT_FIELDS:
+            if key in active_interrupt:
+                enriched[key] = active_interrupt.get(key)
     for key in ("auto_decidable", "pending_human_confirmation", "review_request_artifact_ref"):
         if key in active_interrupt:
             enriched[key] = active_interrupt.get(key)
@@ -576,6 +755,8 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "decisions_allowed": decisions_allowed,
         "review_request_artifact_ref": requirements.get("review_request_artifact_ref"),
     }
+    if requirements.get("runtime_proposal"):
+        guidance["runtime_proposal"] = dict(requirements["runtime_proposal"])
     if requirements.get("report_refs"):
         guidance["report_refs"] = dict(requirements.get("report_refs") or {})
     if requirements.get("candidate_comparison_context"):
@@ -586,7 +767,10 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
         "gate_id": gate.gate_id,
         "decision": decision,
         "notes": ["replace this note with the operator rationale"],
-        "metadata": {"template_guidance": guidance},
+        "metadata": {
+            **dict(requirements.get("resume_metadata") or {}),
+            "template_guidance": guidance,
+        },
         "decided_by": "human",
         "rationale_artifact_ref": None,
     }
@@ -913,6 +1097,14 @@ def _decision_requirements_from_artifact(
         "decisions_allowed": decisions_allowed,
         "requires_structured_resume": True,
     }
+    if gate is not None:
+        requirements["runtime_proposal"] = _runtime_proposal_requirements(gate)
+    resume_metadata = _parameter_approval_resume_metadata(payload)
+    if resume_metadata:
+        requirements["resume_metadata"] = resume_metadata
+        for key in _PARAMETER_APPROVAL_CONTEXT_FIELDS:
+            if key in payload:
+                requirements[key] = payload.get(key)
     candidates = payload.get("candidates")
     if isinstance(candidates, list):
         requirements["candidate_ids"] = [

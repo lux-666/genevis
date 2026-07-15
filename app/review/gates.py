@@ -9,6 +9,7 @@ from typing import Any, Callable
 from app.schemas.state import TopLevelState
 
 DecisionApplier = Callable[[TopLevelState, Any], dict[str, Any]]
+TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,13 @@ class ReviewGateDeclaration:
     prompt_adapter: str = "generic"
     template_preferred_decision: str | None = None
     required_resume_fields: tuple[str, ...] = field(default_factory=tuple)
+    timeout_applier: str | None = None
+    proposal_kind: str = "human_review"
+    proposal_label: str | None = None
+    parameter_recommendation_status: str = "not_applicable"
+    related_parameter_gate: tuple[str, str] | None = None
+    parameter_recommendation_notes: tuple[str, ...] = field(default_factory=tuple)
+    plan_order: int = 100
 
     @property
     def key(self) -> tuple[str, str]:
@@ -38,6 +46,16 @@ class ReviewGateDeclaration:
         applier = getattr(module, function_name)
         if not callable(applier):
             raise TypeError(f"review gate applier is not callable: {self.decision_applier}")
+        return applier
+
+    def load_timeout_applier(self) -> TimeoutApplier | None:
+        if not self.timeout_applier:
+            return None
+        module_name, function_name = self.timeout_applier.rsplit(":", 1)
+        module = import_module(module_name)
+        applier = getattr(module, function_name)
+        if not callable(applier):
+            raise TypeError(f"review gate timeout applier is not callable: {self.timeout_applier}")
         return applier
 
 
@@ -82,6 +100,24 @@ def registered_review_stages() -> tuple[str, ...]:
     return tuple(dict.fromkeys(stage for stage, _ in _DECLARATIONS))
 
 
+def planned_review_gates(stages: list[str] | tuple[str, ...]) -> list[ReviewGateDeclaration]:
+    """Return registered runtime gates in workflow and declaration order."""
+
+    stage_order = {stage: index for index, stage in enumerate(stages)}
+    indexed = [
+        (index, gate)
+        for index, gate in enumerate(_DECLARATIONS.values())
+        if gate.stage in stage_order
+    ]
+    return [
+        gate
+        for _, gate in sorted(
+            indexed,
+            key=lambda item: (stage_order[item[1].stage], item[1].plan_order, item[0]),
+        )
+    ]
+
+
 def registered_review_stage_label() -> str:
     stages = registered_review_stages()
     return ", ".join(stages) if stages else "<none>"
@@ -94,11 +130,40 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt") or {}
-    if isinstance(active_interrupt, dict):
+    if isinstance(active_interrupt, dict) and active_interrupt.get("gate_id") == "parameter_approval":
+        if gate_id != "parameter_approval":
+            raise ValueError("parameter approval resume requires explicit gate_id=parameter_approval")
+    elif isinstance(active_interrupt, dict):
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
     return gate.load_decision_applier()(state, request)
 
+
+def apply_review_gate_timeout(state: TopLevelState, request: Any, timeout: dict[str, Any]) -> dict[str, Any] | None:
+    gate_id = getattr(request, "gate_id", None)
+    active_interrupt = state.get("active_interrupt") or {}
+    if isinstance(active_interrupt, dict):
+        gate_id = active_interrupt.get("gate_id") or gate_id
+    gate = get_review_gate(request.stage, gate_id)
+    applier = gate.load_timeout_applier()
+    if applier is None:
+        return None
+    return applier(state, request, timeout)
+
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="assembly",
+        gate_id="parameter_approval",
+        decisions_allowed=("approve_parameters", "reject_parameters"),
+        decision_applier="app.stages.assembly.nodes:apply_parameter_approval_decision",
+        prompt_adapter="generic",
+        proposal_kind="parameter_recommendation",
+        proposal_label="Assembly parameter proposal",
+        parameter_recommendation_status="implemented",
+        plan_order=20,
+    )
+)
 
 register_review_gate(
     ReviewGateDeclaration(
@@ -128,6 +193,14 @@ register_review_gate(
         prompt_adapter="assembly_review",
         template_preferred_decision="accept",
         required_resume_fields=("candidate_id", "final_assembly_ref"),
+        proposal_kind="assembly_candidate_review",
+        proposal_label="Assembly result and evidence review",
+        parameter_recommendation_status="mixed",
+        related_parameter_gate=("assembly", "parameter_approval"),
+        parameter_recommendation_notes=(
+            "Phase 11 quality-gate failures route to assembly parameter recommendation and approval.",
+            "A human-selected rerun still uses the legacy manual Flye parameter path.",
+        ),
     )
 )
 
@@ -137,9 +210,11 @@ register_review_gate(
         gate_id="route_selection",
         decisions_allowed=("select_cyclone", "select_ont", "select_hifi", "stop_human_review"),
         decision_applier="app.stages.assembly.nodes:apply_route_decision",
+        timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
         prompt_bundle="assembly.route_selector",
         prompt_adapter="generic",
         template_preferred_decision="select_ont",
+        plan_order=10,
     )
 )
 
@@ -152,6 +227,9 @@ register_review_gate(
         prompt_adapter="hic_scaffolding",
         template_preferred_decision="select_method",
         required_resume_fields=("method_name",),
+        proposal_kind="scaffolding_method_or_candidate_review",
+        proposal_label="Hi-C scaffolding method or result review",
+        parameter_recommendation_status="not_implemented",
     )
 )
 
@@ -164,6 +242,9 @@ register_review_gate(
         prompt_adapter="t2t",
         template_preferred_decision="accept_selected_candidates",
         required_resume_fields=("candidate_ids",),
+        proposal_kind="finishing_candidate_review",
+        proposal_label="T2T finishing candidate review",
+        parameter_recommendation_status="not_implemented",
     )
 )
 

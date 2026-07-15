@@ -1,10 +1,10 @@
 # Task 4: Create parameter_recommender Knowledge Pack
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented; main-flow integration covered by Task 8
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -24,16 +24,37 @@ The prompt must receive the complete L2 surface from the selected method catalog
 
 ```text
 descriptors/knowledge_packs/assembly/parameter_recommender/
-├── cases.yaml
-├── rules.yaml
-└── SKILL.md
+├── SKILL.md
+├── cases.yaml              # manifest only
+├── cases/
+│   ├── initial_hifi.yaml
+│   ├── initial_ont.yaml
+│   └── retry_failures.yaml
+├── rules.yaml              # manifest only
+└── rules/
+    ├── catalog_safety.yaml
+    └── profile_boundaries.yaml
 ```
+
+Current implementation also includes `strategies.yaml` for case-selection
+weights. Keep that file as selector configuration only; do not put hard
+validation boundaries or prompt examples there.
 
 ## File Responsibilities
 
-### cases.yaml: Evidence Only
+### cases.yaml + cases/*.yaml: Evidence Only
 
-Cases are facts from papers or prior verified runs. They must not contain generic rules.
+`cases.yaml` is a manifest. Cases are facts from papers or prior verified runs. They must not contain generic rules or expected LLM answers.
+
+```yaml
+version: 1
+case_files:
+  - cases/initial_hifi.yaml
+  - cases/initial_ont.yaml
+  - cases/retry_failures.yaml
+```
+
+Case shards contain observations:
 
 ```yaml
 - case_id: grouper_hifi_2021
@@ -51,8 +72,9 @@ Cases are facts from papers or prior verified runs. They must not contain generi
     read_n50_kb: 18
   params:
     tool: hifiasm
-    purge_level: 1
-    purge_similarity: default
+    values:
+      purge_level: 1
+      purge_similarity: default
   quality:
     busco_complete: 0.968
     busco_duplicate: 0.018
@@ -62,9 +84,18 @@ Cases are facts from papers or prior verified runs. They must not contain generi
   evidence_note: "Reported hifiasm assembly with moderate heterozygosity and conservative purge settings."
 ```
 
-### rules.yaml: Boundaries Only
+### rules.yaml + rules/*.yaml: Boundaries Only
 
-Rules encode hard validation boundaries. They should reject impossible, unsafe, or explicitly disallowed values. They should not explain how to optimize.
+`rules.yaml` is a manifest. Rule shards encode hard validation boundaries. They should reject impossible, unsafe, or explicitly disallowed values. They should not explain how to optimize.
+
+```yaml
+version: 1
+rule_files:
+  - rules/catalog_safety.yaml
+  - rules/profile_boundaries.yaml
+```
+
+Soft statements such as "large genomes benefit from X" or "high heterozygosity should use Y" belong in `SKILL.md` unless they are true execution-blocking boundaries.
 
 ```yaml
 rules:
@@ -92,9 +123,9 @@ global_constraints:
     allowed: [8, 10, 12, 15]
 ```
 
-### SKILL.md: Explainable Heuristics Only
+### SKILL.md: Metadata + Explainable Heuristics
 
-Skill text explains how to reason when choosing L2 parameters. It may describe patterns and failure diagnosis, but it must not replace `rules.yaml`.
+Skill text identifies the pack and explains how to reason when choosing L2 parameters. It may describe patterns and failure diagnosis, but it must not replace `rules.yaml`.
 
 Required guidance:
 
@@ -119,7 +150,7 @@ Before prompting the LLM, code should select a small set of cases:
    - clade if available,
    - read N50 / quality when available.
 3. Pass the top 3-8 cases to the prompt.
-4. If too few cases match, include a `case_selection_warning` in the prompt.
+4. If too few cases match, include `case_selection.warning` in the prompt.
 
 The LLM should not receive the full case database by default.
 
@@ -144,6 +175,11 @@ modifiable_parameters:
     cli: "--rl-cut"
     allowed_values: [1000, 3000, 5000, 10000, 15000]
 selected_cases: []
+case_selection:
+  selected_case_ids: []
+  selected_count: 0
+  total_cases: 0
+  warning: null
 rules: {}
 previous_attempt: null
 execution_failure_log_tail: null
@@ -182,10 +218,17 @@ Validation must reject:
 
 ## Acceptance Criteria
 
-- [ ] Pack directory exists.
-- [ ] `cases.yaml` has valid evidence-case structure.
-- [ ] `rules.yaml` has at least five hard boundary rules.
-- [ ] `SKILL.md` explains initial recommendation and both retry modes.
-- [ ] Loader returns rules, cases, and skill text.
-- [ ] Prompt builder uses selected cases, not the entire case database.
-- [ ] Prompt builder includes every L2 parameter from the selected method catalog, with no hidden L2 allowlist.
+- [x] Pack directory exists.
+- [x] `cases.yaml` manifests valid evidence-case shards.
+- [x] `rules.yaml` manifests at least five hard boundary rules across shards.
+- [x] `SKILL.md` explains initial recommendation and both retry modes.
+- [x] Loader returns rules, cases, and skill text.
+- [x] Prompt builder uses selected cases, not the entire case database.
+- [x] Prompt builder includes every L2 parameter from the selected method catalog, with no hidden L2 allowlist.
+
+## Remaining Work
+
+No more standalone pack-construction work belongs in this task. Wiring the pack
+into the running assembly graph belongs to Task 8. If future edits discover a
+missing case or rule, update the shard directly; do not introduce a second
+knowledge-pack location or an alternate prompt-only case database.

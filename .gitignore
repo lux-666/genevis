@@ -37,3 +37,4 @@ build/
 # HPC integration tests
 tests/hpc/hpc_env.sh
 data_hpc_test/
+.claude/

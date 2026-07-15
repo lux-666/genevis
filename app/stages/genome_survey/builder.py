@@ -30,7 +30,7 @@ from app.stages.genome_survey.routing import (
 
 
 def build_stage():
-    """Build the genome survey subgraph for full-survey or explicit-prior skip."""
+    """Build full survey with a no-readable-input fallback to an explicit prior."""
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_genome_survey)

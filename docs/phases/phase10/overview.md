@@ -1,9 +1,9 @@
 # Phase 10: Evidence-Guided Parameter Recommendation Closed Loop
 
 **Phase**: 10
-**Status**: Planning
+**Status**: Complete for the current executable assembly typed-attempt scope
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-10
 
 ## Goal
 
@@ -29,15 +29,60 @@ Already useful:
 - `read_qc` can provide read summary facts such as total bases, N50, and quality fields.
 - `genome_survey` can provide `genome_size_prior`, heterozygosity, and repeat fraction.
 - `assembly_review` already evaluates candidates through QUAST/BUSCO-style signals and has rerun infrastructure.
-- `descriptors/knowledge_packs/assembly/*` already uses the three-file knowledge-pack pattern: `cases.yaml`, `rules.yaml`, `SKILL.md`.
+- `descriptors/knowledge_packs/assembly/*` already uses knowledge-pack files. Phase10 refines the parameter recommender pack into `SKILL.md` plus manifest-driven case/rule shards so evidence and hard boundaries do not become single-file dumps.
 
-Missing:
+Implemented in the current slice:
 
-- A simple parameter catalog with only three LLM permission levels.
-- A recommender prompt contract that uses selected cases, rules, skill text, read_qc, and genome_survey.
-- A replayable `parameter_attempts` ledger entry.
-- Command construction from accepted parameter sources.
-- Retry routing for command failure and assembly_review failure.
+- Three-level parameter catalog schema and loader.
+- hifiasm and hifiasm_ont method catalogs.
+- Method descriptor `parameter_catalog` wiring.
+- Catalog-driven L0/L1 source derivation and deterministic command building.
+- Validator core for L2-only recommendations, catalog bounds/enums, and profile-backed hard rules.
+- Full/prompt profile helper functions.
+- Parameter recommender node writes attempt-scoped input profile, prompt
+  payload, LLM response, and validation artifacts.
+- Typed `parameter_attempts` ledger entries record profile/prompt/response/
+  validation refs, selected cases, validation status, recommended parameters,
+  `parameter_sources`, `argv`, frozen metadata, execution data, and retry
+  context.
+- hifiasm and hifiasm_ont freeze paths use attempt-scoped work and artifact
+  directories.
+- hifiasm and hifiasm_ont freeze paths write attempt-scoped `command.json`
+  artifacts and store `command_ref`.
+- Command-failure and assembly-review quality gates can re-enter parameter
+  recommendation with incremented attempt ids.
+- Review-quality failures write attempt-scoped `review_failure.json` artifacts
+  and store `review_failure_ref`.
+- Assembly LLM decisions are routed through the shared decision boundary instead
+  of stage-local model invocation.
+- Planner method metadata is derived from descriptors/catalogs through
+  `app/entrypoints/planner_catalog.py`; the old `_STAGE_METHODS` registry was
+  removed from `ask_planner.py`.
+- Runtime hifiasm help verification is available as a skip-safe test and was
+  completed against local hifiasm `0.25.0-r726`.
+- ONT review-failure retry is covered by a regression proving L2 changes to
+  purge level, `--rl-cut`, and `--sc-cut` can flow into deterministic argv.
+- Flye and NextDenovo now declare L0/L1/L2 parameter catalogs, enter the shared
+  recommendation path before freeze/run, write attempt-scoped command
+  artifacts, and update the same typed parameter-attempt lifecycle as hifiasm.
+- Execution failures from every executable assembly method route through the
+  shared parameter retry gate.
+
+Post-Phase10 follow-up:
+
+- Broader closed-loop tests that exercise recommendation, freeze, run failure,
+  retry, review failure, and retry caps in one scenario.
+- Method-specific evidence cases and hard-rule shards can be added for Flye and
+  NextDenovo if their L2 recommender surfaces grow beyond the initial safe
+  knobs.
+
+Documentation package:
+
+- `docs/methodology/parameter_recommendation_closed_loop.md`
+- `docs/implementation/parameter_recommendation_loop.md`
+- `docs/user_guide/parameter_recommendation.md`
+- `docs/phases/phase10/replay_contract.md`
+- `docs/phases/phase10/no_compat_cleanup_note.md`
 
 ## Existing/New Architecture
 
@@ -62,14 +107,14 @@ genome_survey (EXISTS) ─────────┘        |
                                       parameter_catalog_loader (NEW) <── method_param_catalog params.yaml (NEW)
                                           |                              describes L0 / L1 / L2 for hifiasm, hifiasm_ont
                                           v
-                                      case_selector (NEW) <───────────── cases.yaml (NEW)
+                                      case_selector (NEW) <───────────── cases.yaml manifest + cases/*.yaml (NEW)
                                           |  selects 3-8 similar cases
                                           v
                                       parameter_recommender (NEW) <───── SKILL.md (NEW)
                                           |  prompt = L1 readonly facts + L2 modifiable params + selected cases, SKILL
                                           |  retry prompt also includes previous attempt plus failure context
                                           v
-                                      rule_validator (NEW) <──────────── rules.yaml (NEW; hard boundaries only)
+                                      rule_validator (NEW) <──────────── rules.yaml manifest + rules/*.yaml (NEW; hard boundaries only)
                                           |  validates JSON, catalog bounds, L2-only output, and biological boundaries
                                           v
                                       command_builder (REFACTOR)
@@ -89,7 +134,7 @@ genome_survey (EXISTS) ─────────┘        |
                                           |        └──────────────> parameter_recommender retry (NEW)
                                           v
                                       attempt_ledger / parameter_attempts (NEW)
-                                          append-only replay record for every recommend/freeze/run/review attempt
+                                          typed replay record completed across recommend/freeze/run/review
 ```
 
 ## Three-Level Parameter Permission Model
@@ -106,32 +151,33 @@ Operational rule: enumerate the full supported hifiasm CLI surface in the method
 
 ## Knowledge Pack Boundary
 
-`descriptors/knowledge_packs/assembly/parameter_recommender/` must follow strict separation:
+`descriptors/knowledge_packs/assembly/parameter_recommender/` must follow strict separation. Root YAML files are manifests; domain content lives in smaller shards:
 
-- `cases.yaml`: evidence only. Each case records sample facts, method, parameters used, quality outcome, source, and a short note. It does not encode rules.
-- `rules.yaml`: hard boundaries only. It constrains valid values or combinations. It does not contain soft recommendation heuristics.
-- `SKILL.md`: explainable heuristics only. It explains how to reason from evidence, how to interpret failure modes, and how to be conservative under uncertainty. It does not invent hard constraints.
+- `cases.yaml`: indexes `cases/*.yaml`. Case shards contain evidence only: sample facts, method, parameters used, quality outcome, source, and a short note. They do not encode rules or recommended-answer examples.
+- `rules.yaml`: indexes `rules/*.yaml`. Rule shards contain hard boundaries only: impossible, unsafe, or explicitly disallowed values/combinations. They do not contain soft recommendation heuristics.
+- `SKILL.md`: pack metadata plus explainable heuristics. It explains how to reason from evidence, how to interpret failure modes, and how to be conservative under uncertainty. It does not invent hard constraints.
 
 ## MVP LangGraph Shape
 
-The architecture diagram above is the canonical Phase10 graph. In implementation terms, insert `recommend_parameters` and `rule_validator` after primary method selection and before method attempt freezing. Add one retry gate after method execution failure and one quality gate after assembly_review metrics. Both retry paths re-enter `parameter_recommender` with `attempt_id + 1` and append a new replay record.
+The architecture diagram above is the canonical Phase10 graph. In implementation terms, insert `recommend_parameters` and `rule_validator` after primary method selection and before method attempt freezing. Add one retry gate after method execution failure and one quality gate after assembly_review metrics. Both retry paths re-enter `parameter_recommender` with `attempt_id + 1` and append a new recommendation attempt.
 
 ## Attempt Replay Contract
 
-Every recommendation/run/review attempt appends a compact immutable entry:
+Every parameter attempt starts as a compact typed recommendation entry and is
+completed as freeze/run/review facts become available:
 
 ```yaml
 attempt_id: 0
 method_id: assembly.candidate.hifiasm_ont
 status: recommended | validation_failed | frozen | execution_failed | executed | review_failed | passed
-input_profile_ref: data/artifacts/assembly/<session>/input_profile.json
+input_profile_ref: data/artifacts/assembly/<session>/parameter_attempt_0/input_profile.json
 read_qc_refs: []
 genome_survey_ref: data/artifacts/genome_survey/<session>/result.json
 catalog_ref: descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml
 knowledge_pack_ref: descriptors/knowledge_packs/assembly/parameter_recommender
 selected_case_ids: []
-prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0_prompt.json
-llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0_response.json
+prompt_payload_ref: data/artifacts/assembly/<session>/parameter_attempt_0/prompt_payload.json
+llm_response_ref: data/artifacts/assembly/<session>/parameter_attempt_0/llm_response.json
 parameter_sources:
   l0_fixed: {}
   l1_readonly: {}
@@ -150,7 +196,31 @@ quality_gate:
   failure_mode: under_purged
 ```
 
-Replay rule: a retry never mutates a previous entry. It reads previous attempt refs and writes `attempt_id + 1`.
+Replay rule: a retry does not overwrite earlier recommendation artifacts,
+command artifacts, or attempt directories. The retry gate may complete the
+reviewed/executed attempt entry with execution or review facts, then writes
+`attempt_id + 1` for the next recommendation.
+
+## Full Profile vs Prompt Profile
+
+Phase10 target contract maintains two related artifacts:
+
+- `input_profile_ref`: a complete replay/audit artifact with `sample`, `assets`, `read_qc`, `genome_survey`, `previous_attempt`, and `assembly_review` sections.
+- prompt profile: a task-scoped slice of the full profile. The LLM does not receive every field by default.
+
+Current implementation checkpoint: the main recommender node writes the complete
+profile and task-scoped prompt payload as attempt-scoped artifacts before
+calling the shared decision boundary. The prompt profile remains a scoped slice
+of the full profile, while the validator can still use the full profile for hard
+rules.
+
+Prompt slicing:
+
+- Initial recommendation receives sample context plus read_qc, genome_survey, and selected cases.
+- Execution repair receives previous command/params, exit code, failure class, and log tails.
+- Quality replan receives previous params/command/cases plus BUSCO/QUAST and assembly size ratio signals.
+
+The rule validator may use the complete full profile for hard constraints, including fields not shown to the LLM.
 
 ## First Executable Surface
 
@@ -166,22 +236,32 @@ The first closed loop should cover:
 ## Task Order
 
 1. Define the three-level parameter catalog schema.
-2. Create full hifiasm and hifiasm_ont catalogs using only `level`, `cli`, `value_type`, defaults, allowed/bounds, and source hints.
-3. Create the `parameter_recommender` knowledge pack.
-4. Add seed evidence cases.
-5. Implement rule validation.
-6. Refactor command building around L0/L1/L2 sources.
-7. Implement initial/retry parameter recommender node.
-8. Implement execution failure and assembly_review failure retry gates.
-9. Add integration tests for a replayable pass/fail/retry loop.
-10. Document the methodology.
+2. Create the hifiasm parameter catalog.
+3. Create the hifiasm_ont parameter catalog.
+4. Create the `parameter_recommender` knowledge pack.
+5. Add seed evidence cases.
+6. Implement rule validation.
+7. Refactor command building around L0/L1/L2 sources.
+8. Implement initial/retry parameter recommender node.
+9. Implement execution failure and assembly_review failure retry gates.
+10. Add integration tests for a replayable pass/fail/retry loop.
+11. Document the methodology.
+12. Use session/attempt-scoped artifact refs as the only runtime ref scheme.
+13. Remove old compatibility paths and enforce single-source architecture.
+14. Extend the typed parameter-attempt contract to Flye and NextDenovo.
 
 ## Acceptance Criteria
 
 - No Phase10 document uses any permission model beyond L0/L1/L2.
 - The MVP docs consistently require a full supported hifiasm/hifiasm_ont parameter catalog, not a small L2 subset.
 - The graph can produce a full attempt entry before running a command.
+- The graph records a complete profile artifact while prompt payloads remain task-scoped.
 - The executor does not run when recommendation JSON is invalid or rules fail.
 - A command failure can be retried with previous inputs plus last 100 log lines.
 - A review failure can be retried with metrics and failure mode.
 - Every attempt is replayable from recorded refs and argv.
+- Planner method metadata comes from descriptors/catalogs, not a second Python registry.
+- Assembly LLM decisions go through a shared decision/advisor boundary.
+- Parameter-loop state is typed, compact, and ref-heavy.
+- The running graph uses session/attempt refs with hashes as integrity fields;
+  hash-only refs are not a supported runtime path.

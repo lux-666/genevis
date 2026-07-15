@@ -257,6 +257,30 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Aborted during request entry.", stdout.getvalue())
 
+    def test_tui_resume_session_uses_durable_interactive_review(self):
+        with patch(
+            "app.entrypoints.review_interactive.run_interactive_review",
+            return_value=0,
+        ) as review:
+            code = run_tui("/tmp/gene-agent-data", resume_session="blocked-session")
+
+        self.assertEqual(code, 0)
+        review.assert_called_once_with("blocked-session", "/tmp/gene-agent-data")
+
+    def test_tui_parser_accepts_blocked_session_attachment(self):
+        args = _parse_args(
+            [
+                "tui",
+                "--data-dir",
+                "out",
+                "--resume-session",
+                "blocked-session",
+            ]
+        )
+
+        self.assertEqual(args.command, "tui")
+        self.assertEqual(args.resume_session, "blocked-session")
+
     def test_ask_args_parse_minimal_defaults(self):
         args = _parse_args(["ask", "use inputs/manifest.yaml to start s1", "--session-id", "s1", "--data-dir", "out"])
 
@@ -1209,8 +1233,42 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
             self.assertEqual(assembly_out["execution_mode"], "local")
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+
+    def test_run_config_explicit_assembly_method_without_read_type_fails_before_graph(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            config_path = root / "run_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "local_exec": ["assembly"],
+                        "assembly": {
+                            "assembly_method": "hifiasm_ont",
+                            "hifiasm_ont_parameters": {"threads": 4},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("app.entrypoints.run.build_graph") as build_graph:
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("assembly.assembly_method is set but no read_type could be inferred", stderr)
+            build_graph.assert_not_called()
 
     def test_run_config_inferrs_hifiasm_ont_method_from_single_parameter_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1252,7 +1310,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
 
     def test_run_config_inferrs_hifiasm_method_from_single_parameter_block(self):
@@ -1295,7 +1353,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm"})
+            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm", "source": "run_config_explicit"})
             self.assertEqual(assembly_out["hifiasm_parameters"], {"read_type": "hifi", "threads": 4})
 
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
@@ -1338,6 +1396,56 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 self.assertTrue(directory.exists(), directory)
             self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
             self.assertEqual(paths.run_config_path.read_text(encoding="utf-8"), config_path.read_text(encoding="utf-8"))
+
+    def test_run_session_invoke_exception_writes_durable_failed_terminal_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            data_dir = root / "data"
+
+            class _ExplodingGraph:
+                def invoke(self, state, config):
+                    raise RuntimeError("parameter artifact validation exploded")
+
+                def get_state(self, config):
+                    return SimpleNamespace(
+                        values={
+                            "current_stage": "assembly",
+                            "route_trace": ["inventory_stage", "assembly_stage"],
+                        }
+                    )
+
+            with patch("app.entrypoints.run.build_graph", return_value=_ExplodingGraph()):
+                code, stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(data_dir),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("workflow invoke failed: RuntimeError", stderr)
+            self.assertNotIn("Traceback", stderr)
+
+            session_dir = SessionPaths(data_dir, "s1").run_dir
+            report_path = (
+                session_dir
+                / "artifacts"
+                / "operator_report"
+                / "s1"
+                / "failed_terminal_report.json"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["supervision_state"], "failed_terminal")
+            self.assertEqual(report["current_stage"], "assembly")
+            self.assertIn("parameter artifact validation exploded", report["last_error"])
+            self.assertEqual(report["next_action"]["kind"], "failed_terminal")
+
+            events = Ledger(session_dir).read_events("s1")
+            self.assertTrue(any(event["event_type"] == "run_failed" for event in events))
 
     def test_run_config_seeds_nextdenovo_method_and_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1383,7 +1491,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(assembly_out["execution_mode"], "local")
             self.assertEqual(
                 assembly_out["method_decision"],
-                {"primary": "assembly.candidate.nextdenovo"},
+                {"primary": "assembly.candidate.nextdenovo", "source": "run_config_explicit"},
             )
             self.assertEqual(
                 assembly_out["nextdenovo_parameters"],
@@ -2052,10 +2160,12 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
         gene_models = root / "gene_models.gff3"
         proteins = root / "predicted_proteins.fasta"
         transcripts = root / "transcripts.fa"
+        database_fasta = root / "uniprot.fasta"
         assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         gene_models.write_text("##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n", encoding="utf-8")
         proteins.write_text(">prot1\nMACGT\n", encoding="utf-8")
         transcripts.write_text(">tx1\nACGTACGT\n", encoding="utf-8")
+        database_fasta.write_text(">sp|P12345\nMACGT\n", encoding="utf-8")
         manifest = root / "manifest.yaml"
         manifest.write_text(
             "\n".join(
@@ -2086,7 +2196,7 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                         "database_name": "UniProt",
                         "database_version": "2026_02",
                         "snapshot_date": "2026-05-25",
-                        "database_source_ref": "/db/uniprot/2026_02.dmnd",
+                        "database_source_ref": str(database_fasta),
                         "descriptor_version": "diamond.yaml",
                         "input_proteins_ref": str(proteins),
                     }
@@ -2213,16 +2323,37 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             )
 
             decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
-            resume_code, resume_stdout, resume_stderr = _capture_cli(
-                _run_resume,
-                argparse.Namespace(
-                    session_id=session_id,
-                    decision_file=str(decision),
-                    data_dir=str(data_dir),
-                    checkpointer="sqlite",
-                    max_blocked_seconds=None,
-                ),
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_diamond = fake_bin / "diamond"
+            fake_diamond.write_text(
+                "#!/bin/sh\n"
+                "out=''\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  if [ \"$1\" = '--out' ]; then out=\"$2\"; shift 2; continue; fi\n"
+                "  shift\n"
+                "done\n"
+                "if [ -n \"$out\" ]; then\n"
+                "  printf 'prot1\\tsp|P12345\\t100.0\\t5\\t0\\t0\\t1\\t5\\t1\\t5\\t0.0\\t10\\n' > \"$out\"\n"
+                "fi\n",
+                encoding="utf-8",
             )
+            fake_diamond.chmod(0o755)
+            fake_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            with patch(
+                "app.stages.function_annotation.nodes.resolve_method_env",
+                return_value=(None, [], None),
+            ), patch.dict(os.environ, {"PATH": fake_path}):
+                resume_code, resume_stdout, resume_stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id=session_id,
+                        decision_file=str(decision),
+                        data_dir=str(data_dir),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
 
             self.assertEqual(resume_code, 0, resume_stderr)
             self.assertIn("current_stage: done", resume_stdout)
@@ -2238,7 +2369,10 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
             self.assertEqual(bundle["proteins_fasta_ref"], str(proteins_file))
             self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
-            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/uniprot/2026_02.dmnd")
+            self.assertEqual(
+                bundle["database_provenance"][0]["database_source_ref"],
+                str(root / "uniprot.fasta"),
+            )
 
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("function_annotation.plan", artifact_types)
@@ -2405,6 +2539,49 @@ class ResumeCLITests(unittest.TestCase):
         self.assertFalse(data_dir.exists())
         self.assertFalse((data_dir / "checkpoints").exists())
         self.assertFalse((data_dir / "ledger").exists())
+
+    def test_resume_started_records_resolved_session_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_root = root / "data"
+            session_id = "s1"
+            run_dir = SessionPaths(data_root, session_id).run_dir
+            (run_dir / "checkpoints").mkdir(parents=True)
+            (run_dir / "checkpoints" / "checkpoints.sqlite").write_text("", encoding="utf-8")
+            Ledger(run_dir).create_session(session_id, "manifest.json")
+            decision = self._write_decision(root / "decision.json")
+            state = {
+                "session_id": session_id,
+                "data_dir": str(run_dir),
+                "supervision_state": "blocked_human",
+                "current_stage": "assembly_review",
+                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+            }
+            graph = _FakeResumeGraph(state)
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), \
+                    patch(
+                        "app.control.lifecycle.resume_review_state",
+                        return_value={"current_stage": "done", "supervision_state": "completed"},
+                    ), \
+                    patch("app.review.annotation_intake.maybe_collect_annotation_intake", return_value=None):
+                code, _stdout, stderr = _capture_cli(
+                    _run_resume,
+                    argparse.Namespace(
+                        session_id=session_id,
+                        decision_file=str(decision),
+                        data_dir=str(data_root),
+                        checkpointer="sqlite",
+                        max_blocked_seconds=None,
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            events = Ledger(run_dir).read_events(session_id)
+            started = [event for event in events if event["event_type"] == "resume_started"]
+            self.assertEqual(started[0]["data_dir"], str(run_dir))
 
     def test_resume_decision_file_records_recommended_intake_without_prompting(self):
         # A continue-downstream (assembly_review accept) decision-file resume is

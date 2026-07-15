@@ -13,7 +13,6 @@ from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SEQKIT,
     READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
-    _STAGE_METHODS,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _extract_busco_version,
@@ -21,6 +20,7 @@ from app.entrypoints.ask_planner import (
     _plan_validation_warnings,
     _recommended_stages_from_manifest,
     build_initial_plan_draft,
+    build_planner_method_catalog,
     build_run_plan_summary,
     build_run_config_payload,
     merge_clarification_response,
@@ -345,15 +345,21 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
 class AskPlannerMethodSelectionTests(unittest.TestCase):
     def test_stage_methods_match_descriptor_registry(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-        for stage, methods in _STAGE_METHODS.items():
+        catalog = build_planner_method_catalog(registry)
+        for stage, methods in catalog.by_stage.items():
             with self.subTest(stage=stage):
-                planner_methods = {
-                    m["method_name"]
-                    for m in methods
-                    if not str(m["method_name"]).endswith(".skip")
-                }
+                planner_methods = {m["method_name"] for m in methods}
                 registered_methods = set(registry.by_stage.get(stage, []))
                 self.assertEqual(planner_methods, registered_methods)
+
+    def test_ask_planner_has_no_hardcoded_stage_method_registry(self):
+        source = Path("app/entrypoints/ask_planner.py").read_text(encoding="utf-8")
+        self.assertNotIn("_STAGE_METHODS", source)
+        self.assertNotIn("_GENOME_SURVEY_EXECUTABLE_METHODS", source)
+
+    def test_interactive_planner_uses_descriptor_derived_methods(self):
+        source = Path("app/entrypoints/ask_interactive.py").read_text(encoding="utf-8")
+        self.assertNotIn("_STAGE_METHODS", source)
 
     def test_method_selection_includes_non_pipeline_stages(self):
         plan = _base_plan(
@@ -625,7 +631,7 @@ class AskPlannerParameterTests(unittest.TestCase):
         self.assertIn("shared_parameters.platform", result.required_fields)
         self.assertNotIn("shared_parameters.read_type", result.required_fields)
         self.assertEqual(shared_defaults.get("platform"), "cycloneseq")
-        self.assertEqual(shared_defaults.get("read_type"), "ont_raw")
+        self.assertEqual(shared_defaults.get("read_type"), "cyclone")
         self.assertEqual(shared_defaults.get("estimated_genome_size"), 2_000_000)
         self.assertEqual(flye_defaults.get("threads"), 4)
 
@@ -690,7 +696,7 @@ class AskPlannerParameterTests(unittest.TestCase):
 
         self.assertIsNotNone(updated.shared_parameters)
         self.assertEqual(updated.shared_parameters.platform, "cycloneseq")
-        self.assertEqual(updated.shared_parameters.read_type, "ont_raw")
+        self.assertEqual(updated.shared_parameters.read_type, "cyclone")
 
     def test_genome_survey_jellyfish_does_not_request_read_length(self):
         plan = _base_plan(

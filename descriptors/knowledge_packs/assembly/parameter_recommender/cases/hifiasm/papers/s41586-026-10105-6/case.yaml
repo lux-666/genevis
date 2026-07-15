@@ -1,0 +1,54 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41586-026-10105-6
+    case_type: initial
+    source:
+      kind: paper
+      title: null
+      doi: 10.1038/s41586-026-10105-6
+      year: 2026
+    methods_path: cases/hifiasm/papers/s41586-026-10105-6/methods.md
+    evidence_spans:
+      - span_id: scenario.ont_simplex
+        quote: "The workflow uses standard ONT R10.4.1 simplex reads without HiFi or dedicated ultra-long sequencing to produce partially phased near-T2T assemblies."
+      - span_id: rationale.read_phasing
+        quote: "Read phasing distinguishes heterozygous variants that maintain a consistent local phase from recurrent ONT errors that lack stable phase relationships."
+      - span_id: command.ont
+        quote: "Supplementary methods report hifiasm 0.25.0-r726 with --ont, --dual-scaf, and the human telomere motif --telo-m CCCTAA."
+      - span_id: caveat.parameter_ownership
+        quote: "The --ont switch is route-owned L0; dual_scaffold is an adjustable catalog L2 parameter; CCCTAA is human-specific and is not transferable telomere-motif recommendation evidence for other taxa."
+    applicability:
+      read_type: ont
+      source_tool: hifiasm_ont
+      source_tool_version: 0.25.0-r726
+      target_methods: [hifiasm_ont]
+      assembly_goal: partially phased near telomere-to-telomere assembly from ONT simplex reads
+    observed_facts:
+      organism:
+        value: Homo sapiens
+        evidence_span_ids: [caveat.parameter_ownership]
+    intervention:
+      tool: hifiasm_ont
+      version: 0.25.0-r726
+      parameters:
+        dual_scaffold:
+          value: true
+          reported: true
+          evidence_span_ids: [command.ont, caveat.parameter_ownership]
+    rationale_claims:
+      - claim_id: ont_simplex.error_model
+        statement: "Read phasing helps separate consistently phased heterozygous variants from recurrent ONT simplex sequencing errors."
+        explicitness: explicit
+        effect_area: read_correction
+        evidence_span_ids: [scenario.ont_simplex, rationale.read_phasing]
+      - claim_id: ont_simplex.parameter_scope
+        statement: "The reported run enables dual scaffolding, while ONT mode is route-owned and the human CCCTAA motif is retained only as taxon-specific command context."
+        explicitness: explicit
+        effect_area: parameter_transfer
+        evidence_span_ids: [command.ont, caveat.parameter_ownership]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "Only dual_scaffold is represented as transferable catalog L2 evidence; --ont and the human telomere motif are not parameter recommendations."

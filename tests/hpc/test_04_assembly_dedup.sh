@@ -26,10 +26,10 @@ section "Test 04: Assembly + Assembly Dedup"
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_assembly.py"
-    python3 -m pytest tests/test_assembly.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_assembly.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly.py" || fail "unit tests: test_assembly.py"
     info "Running unit tests: test_assembly_dedup.py"
-    python3 -m pytest tests/test_assembly_dedup.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_assembly_dedup.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly_dedup.py" || fail "unit tests: test_assembly_dedup.py"
     cd "${SCRIPT_DIR}"
 fi
@@ -60,9 +60,22 @@ print(f'DomainStage includes assembly_dedup')
 # completed draft is not useful to this integration test unless purge_dups can
 # also run, so missing tools are a fast, explicit test failure.
 case "${ASSEMBLY_METHOD}" in
-    flye|nextdenovo) ;;
+    flye|nextdenovo|hifiasm|hifiasm_ont) ;;
     *)
-        fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected flye or nextdenovo)"
+        fail "unsupported ASSEMBLY_METHOD: ${ASSEMBLY_METHOD} (expected hifiasm, hifiasm_ont, flye, or nextdenovo)"
+        summary "Test 04: Assembly + Assembly Dedup"
+        exit 1
+        ;;
+esac
+case "${ASSEMBLY_METHOD}:${PLATFORM}" in
+    hifiasm:pacbio_hifi|hifiasm_ont:ont|hifiasm_ont:cycloneseq|flye:*|nextdenovo:*) ;;
+    hifiasm:*)
+        fail "ASSEMBLY_METHOD=hifiasm expects PLATFORM=pacbio_hifi for this HPC test"
+        summary "Test 04: Assembly + Assembly Dedup"
+        exit 1
+        ;;
+    hifiasm_ont:*)
+        fail "ASSEMBLY_METHOD=hifiasm_ont expects PLATFORM=ont or PLATFORM=cycloneseq for this HPC test"
         summary "Test 04: Assembly + Assembly Dedup"
         exit 1
         ;;
@@ -105,6 +118,7 @@ cd "${PROJECT_ROOT}"
 info "Running assembly + dedup session: ${SID}"
 info "  Method: ${ASSEMBLY_METHOD}"
 info "  This may take a while for real assembly..."
+RUN_EXITCODE=0
 if GA run \
     --manifest "$MANIFEST" \
     --session-id "$SID" \
@@ -114,7 +128,37 @@ if GA run \
     2>&1; then
     pass "assembly + dedup session completed without CLI error"
 else
-    fail "assembly + dedup session returned a CLI error"
+    RUN_EXITCODE=$?
+    warn "initial assembly invocation returned ${RUN_EXITCODE}; inspecting durable gate state"
+fi
+
+PARAMETER_RESUME_STATUS=0
+resume_configured_parameter_gates "$SID" || PARAMETER_RESUME_STATUS=$?
+if (( PARAMETER_RESUME_STATUS == 3 )); then
+    info "[SKIP] Test 04 paused at an intentional parameter approval gate."
+    info "Resume the printed session, then rerun Test 04 assertions or continue with Test 05."
+    exit 77
+elif (( PARAMETER_RESUME_STATUS != 0 )); then
+    fail "parameter-approval handling failed"
+elif (( RUN_EXITCODE != 0 )); then
+    if (( ${HPC_PARAMETER_APPROVALS_RESUMED:-0} > 0 )); then
+        info "continuing after ${HPC_PARAMETER_APPROVALS_RESUMED} successful durable parameter approval(s)"
+    else
+        fail "assembly invocation failed with exit code ${RUN_EXITCODE} and no parameter gate was resumed"
+        summary "Test 04: Assembly + Assembly Dedup (run failed)" || true
+        exit 1
+    fi
+fi
+
+GATE_STATUS=0
+report_session_gate "$SID" || GATE_STATUS=$?
+if (( GATE_STATUS == 3 )); then
+    info "[SKIP] Test 04 is durably paused at a human gate."
+    exit 77
+elif (( GATE_STATUS != 0 )); then
+    fail "could not determine the post-resume session state"
+    summary "Test 04: Assembly + Assembly Dedup (durable state failed)" || true
+    exit 1
 fi
 
 # ---- Verify assembly outputs ----
@@ -150,7 +194,15 @@ fi
 ASM_SCRIPT=$(find "${RUN_DIR}/work/assembly/${SID}" -name "*.sh" -type f 2>/dev/null | head -1 || true)
 if [[ -n "$ASM_SCRIPT" ]]; then
     pass "assembly method script generated: $(basename "$ASM_SCRIPT")"
-    assert_file_contains "$ASM_SCRIPT" "published artifact conflicts" "assembly script rejects conflicting replay output"
+    case "${ASSEMBLY_METHOD}" in
+        flye|nextdenovo)
+            assert_file_contains "$ASM_SCRIPT" "published artifact conflicts" "assembly script rejects conflicting replay output"
+            ;;
+        hifiasm|hifiasm_ont)
+            assert_file_contains "$ASM_SCRIPT" "hifiasm" "hifiasm script invokes assembler"
+            assert_file_contains "$ASM_SCRIPT" "awk '/^S/" "hifiasm script converts GFA segments to FASTA"
+            ;;
+    esac
 else
     fail "assembly method script not found"
 fi
@@ -176,6 +228,156 @@ print(f'  draft_assembly_fasta: {fasta}')
 else
     warn "assembly candidate bundle not found (may be at different path)"
 fi
+
+# ---- Parameter recommendation closed-loop artifacts ----
+info "Checking assembly parameter recommendation artifacts"
+cd "${PROJECT_ROOT}"
+python3 - "${RUN_DIR}" "${SID}" "${ASSEMBLY_METHOD}" <<'PY' 2>&1 && \
+    pass "assembly parameter closed-loop artifacts valid" || fail "assembly parameter closed-loop artifacts invalid"
+import json
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+session_id = sys.argv[2]
+method_slug = sys.argv[3]
+method_id = f"assembly.candidate.{method_slug}"
+assembly_dir = run_dir / "artifacts" / "assembly" / session_id
+
+matching_commands = []
+for command_path in sorted(assembly_dir.glob("parameter_attempt_*/command.json")):
+    command = json.loads(command_path.read_text(encoding="utf-8"))
+    if command.get("method_id") == method_id:
+        matching_commands.append((command_path, command))
+assert matching_commands, f"no command.json for {method_id} under {assembly_dir}/parameter_attempt_*"
+command_path, command = matching_commands[-1]
+attempt_dir = command_path.parent
+method_artifact_dir = attempt_dir / method_slug
+assert method_artifact_dir.is_dir(), f"missing method artifact directory: {method_artifact_dir}"
+sources = command.get("parameter_sources")
+assert isinstance(sources, dict), "command.json missing parameter_sources"
+for group in ("l0_fixed", "l1_readonly", "l2_recommended"):
+    assert group in sources and isinstance(sources[group], dict), f"missing parameter source group: {group}"
+
+argv = command.get("argv")
+assert isinstance(argv, list) and argv, "command.json missing argv"
+assert command.get("command"), "command.json missing rendered command string"
+
+validated_path = attempt_dir / "validated_recommendation.json"
+assert validated_path.is_file(), f"missing validated recommendation: {validated_path}"
+validated = json.loads(validated_path.read_text(encoding="utf-8"))
+validated_attempt = validated.get("attempt") or {}
+assert validated_attempt.get("validation", {}).get("valid") is True, validated_attempt.get("validation")
+
+if method_slug in {"hifiasm", "hifiasm_ont"}:
+    assert argv[0] == "hifiasm", argv
+    assert "-t" in argv, f"hifiasm argv missing -t threads flag: {argv}"
+    assert "-o" in argv, f"hifiasm argv missing output prefix: {argv}"
+    if method_slug == "hifiasm_ont":
+        assert "--ont" in argv, f"hifiasm_ont argv missing --ont: {argv}"
+    else:
+        assert "--ont" not in argv, f"hifiasm HiFi argv should not contain --ont: {argv}"
+
+    prompt_path = attempt_dir / "prompt_payload.json"
+    evidence_path = attempt_dir / "evidence_payload.json"
+    approval_path = attempt_dir / "parameter_approval_decision.json"
+    for required_path in (prompt_path, evidence_path, approval_path):
+        assert required_path.is_file(), f"missing Phase 11 artifact: {required_path}"
+    prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    retrieval = prompt.get("case_retrieval") or {}
+    prompt_cases = prompt.get("evidence_cases") or []
+    prompt_ids = [case.get("case_id") for case in prompt_cases]
+    assert retrieval.get("retrieval_backend") == "hifiasm_numeric", retrieval
+    assert len(prompt_ids) == 5, f"production top-five expected, got {prompt_ids}"
+    assert prompt.get("selected_cases") == [], "legacy selected_cases must stay empty for hifiasm"
+    for field in ("candidate_case_ids", "selected_case_ids", "evidence_case_ids"):
+        assert retrieval.get(field) == prompt_ids, f"{field} does not match prompt evidence"
+    for case in prompt_cases:
+        source = case.get("source") or {}
+        excerpts = case.get("source_excerpts") or []
+        assert source.get("kind") == "paper", source
+        assert source.get("doi"), source
+        assert excerpts, case.get("case_id")
+        assert all(item.get("span_id") and item.get("quote") for item in excerpts), excerpts
+    assert evidence.get("cases") == prompt_cases, "evidence payload differs from canonical prompt cases"
+    recommendation_case_ids = validated_attempt.get("selected_case_ids") or []
+    assert recommendation_case_ids, "validated hifiasm recommendation cited no paper case"
+    assert set(recommendation_case_ids) <= set(prompt_ids), recommendation_case_ids
+    assert validated_attempt.get("retrieval_backend") == "hifiasm_numeric"
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    assert approval.get("decision") == "approve_parameters", approval
+elif method_slug == "nextdenovo":
+    rendered = command.get("rendered_parameters")
+    assert isinstance(rendered, dict) and rendered, "NextDenovo command.json missing rendered_parameters"
+    run_cfg = command.get("run_cfg")
+    assert run_cfg and Path(run_cfg).is_file(), f"NextDenovo run.cfg missing: {run_cfg}"
+else:
+    assert argv[0] == "flye", argv
+
+candidate_paths = sorted(assembly_dir.glob(f"**/*candidate*.json"))
+matching_candidates = []
+for path in candidate_paths:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if data.get("method_name") == method_id:
+        matching_candidates.append((path, data))
+assert matching_candidates, f"no candidate bundle for {method_id}"
+candidate_path, candidate = matching_candidates[-1]
+assert candidate.get("status") == "executed", f"{candidate_path} status is {candidate.get('status')!r}"
+
+events_path = run_dir / "ledger" / "events.jsonl"
+assert events_path.is_file(), f"missing ledger events: {events_path}"
+events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+succeeded = [
+    event for event in events
+    if event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
+]
+assert succeeded, f"ledger has no attempt_succeeded for {method_id}"
+
+checkpoint_path = run_dir / "checkpoints" / "checkpoints.sqlite"
+if checkpoint_path.exists():
+    from app.graph.builder import build_graph
+
+    graph = build_graph(backend="sqlite", data_dir=str(run_dir))
+    try:
+        snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
+        state = dict(snapshot.values or {})
+    finally:
+        checkpointer = getattr(graph, "checkpointer", None)
+        conn = getattr(checkpointer, "conn", None)
+        if conn is not None:
+            conn.close()
+
+    assembly_out = dict((state.get("stage_outputs") or {}).get("assembly") or {})
+    current_id = int(assembly_out.get("current_parameter_attempt_id") or command.get("attempt_id") or 0)
+    attempts = [
+        item for item in assembly_out.get("parameter_attempts") or []
+        if isinstance(item, dict)
+        and item.get("method_id") == method_id
+        and int(item.get("attempt_id", -1)) == current_id
+    ]
+    assert attempts, f"checkpoint state has no current parameter_attempt for {method_id}"
+    assert attempts[-1].get("status") == "executed", attempts[-1]
+    if method_slug in {"hifiasm", "hifiasm_ont"}:
+        assert attempts[-1].get("parameter_approval_decision_ref"), attempts[-1]
+        assert attempts[-1].get("parameter_approval_recommendation_hash") == attempts[-1].get("parameter_recommendation_hash")
+    compact_attempt_status = attempts[-1].get("status")
+else:
+    compact_attempt_status = "skipped_no_sqlite_checkpoint"
+
+print(f"  command_json: {command_path}")
+print(f"  method_id: {method_id}")
+print(f"  compact_parameter_attempt_status: {compact_attempt_status}")
+print(f"  parameter_source_groups: {', '.join(sorted(sources))}")
+print(f"  argv_preview: {' '.join(argv[:12])}")
+if method_slug == "nextdenovo":
+    print(f"  rendered_parameters: {sorted(command['rendered_parameters'])}")
+print(f"  candidate_bundle: {candidate_path}")
+PY
+cd "${SCRIPT_DIR}"
 
 # ---- Assembly dedup outputs ----
 info "Checking assembly_dedup outputs"

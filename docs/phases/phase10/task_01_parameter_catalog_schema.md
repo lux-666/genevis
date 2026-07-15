@@ -1,9 +1,9 @@
 # Task 1: Three-Level Parameter Catalog Schema
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Completed
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## Goal
 
@@ -75,7 +75,7 @@ parameters:
 | `min` / `max` | optional | Numeric bounds. |
 | `default` | optional | Default if the parameter is not emitted. |
 | `fixed_value` | optional | Fixed value for L0 route flags such as `--ont`. |
-| `source_priority` | optional | Ordered state paths for L1 derivation. |
+| `source_priority` | optional | Ordered source paths for deriving L0/L1 values from `execution`, `assembly`, `shared_parameters`, or stage outputs. |
 | `description` | optional | Human-readable meaning. |
 | `notes` | optional | Additional caveats. |
 
@@ -127,14 +127,25 @@ class MethodParameterCatalog(BaseModel):
 from pathlib import Path
 import yaml
 
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
 
 CATALOG_ROOT = Path("descriptors/knowledge_packs/assembly/methods")
+REGISTRY_PATH = Path("descriptors/registry.yaml")
+
+
+def catalog_id_for_method(method_id: str) -> str:
+    if "." not in method_id:
+        return method_id
+    descriptor = DescriptorRegistry.load(REGISTRY_PATH).methods[method_id]
+    if not descriptor.parameter_catalog:
+        raise ValueError(f"Method descriptor {method_id!r} does not declare parameter_catalog")
+    return descriptor.parameter_catalog
 
 
 def load_parameter_catalog(method_id: str) -> MethodParameterCatalog:
-    path = CATALOG_ROOT / method_id / "params.yaml"
+    path = CATALOG_ROOT / catalog_id_for_method(method_id) / "params.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Parameter catalog not found: {path}")
     return MethodParameterCatalog.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
@@ -145,13 +156,16 @@ def load_parameter_catalog(method_id: str) -> MethodParameterCatalog:
 - L0 parameters must never enter the LLM prompt.
 - L1 parameters may enter the prompt as read-only facts and must not appear in LLM output.
 - L2 parameters are the only accepted keys in LLM output.
+- Registry methods should declare `parameter_catalog` in their method descriptor instead of relying on loader aliases.
+- L0/L1 source derivation should be driven by catalog `source_priority`; method adapters may provide an `execution` context, but the builder must not hard-code method-specific magic keys.
 - L2 output must satisfy catalog `allowed_values`, `min`, `max`, and `rules.yaml`.
 - Unknown LLM output keys are validation failures, not warnings.
 
 ## Acceptance Criteria
 
-- [ ] Catalog schema implemented in `app/schemas/parameter_catalog.py`.
-- [ ] Loader implemented in `app/stages/assembly/parameter_catalog.py`.
-- [ ] Invalid levels are rejected.
-- [ ] Unknown schema fields are rejected.
-- [ ] Unit tests cover missing catalog, invalid level, and L1/L2 permission checks.
+- [x] Catalog schema implemented in `app/schemas/parameter_catalog.py`.
+- [x] Loader implemented in `app/stages/assembly/parameter_catalog.py`.
+- [x] Method descriptors declare their `parameter_catalog` id.
+- [x] Invalid levels are rejected.
+- [x] Unknown schema fields are rejected.
+- [x] Unit tests cover missing catalog, invalid level, and L1/L2 permission checks.

@@ -1,10 +1,10 @@
 # Task 3: Create hifiasm_ont Parameter Catalog
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented; runtime binary help and ONT retry proof verified
 **Depends on**: Task 1
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -66,6 +66,8 @@ parameters:
     level: 0
     source: executor
     value_type: path
+    source_priority:
+      - execution.output_prefix
     description: "Output file prefix"
 
   threads:
@@ -75,6 +77,8 @@ parameters:
     value_type: int
     default: 32
     min: 1
+    source_priority:
+      - assembly.hifiasm_ont_parameters.threads
     description: "Number of CPU threads"
 
   input_reads:
@@ -82,6 +86,8 @@ parameters:
     level: 0
     source: executor
     value_type: path_list
+    source_priority:
+      - execution.input_reads
     description: "Input ONT read files; must be FASTQ for ONT mode"
 
   ont_mode:
@@ -223,12 +229,15 @@ parameters:
 
 ## Prompt Behavior
 
+- The current implementation catalog exists at `descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml` and loads through the shared schema. Before release, verify the ONT-valid surface against the project-pinned hifiasm binary/help output in the execution environment.
+- Runtime help verification was completed on 2026-07-07 against `/opt/homebrew/Caskroom/miniconda/base/envs/env_geno_exec/bin/hifiasm`, which reports `0.25.0-r726` and satisfies the project-supported `>=0.21.0` constraint in `descriptors/packages/hifiasm.yaml`. The committed verification record is `docs/phases/phase10/hifiasm_runtime_verification_2026-07-07.md`. The test remains skip-safe for normal developer runs, but `PHASE10_REQUIRE_HIFIASM_RUNTIME=1` turns missing `HIFIASM_BIN`/PATH hifiasm into a failure for release verification.
 - L0 fields are excluded from prompt payload.
 - L1 fields enter `readonly_facts`.
 - L2 fields enter `modifiable_parameters`.
 - LLM output may contain only L2 keys.
 - If the LLM omits an L2 key, the command builder should omit that CLI flag unless a default is explicitly required by the run contract.
 - There is no separate prompt allowlist. If an ONT-valid behavior-changing parameter is in the catalog as L2, it is part of the MVP recommender surface.
+- L0/L1 values are derived through catalog `source_priority`; method adapters may provide `execution` context values, but generic command building should not hard-code parameter names.
 
 ## Tests
 
@@ -241,9 +250,11 @@ parameters:
 
 ## Acceptance Criteria
 
-- [ ] `params.yaml` exists for hifiasm_ont.
-- [ ] The catalog validates through the three-level schema.
-- [ ] The catalog covers the supported ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
-- [ ] The recommender prompt can include all L2 entries.
-- [ ] The command builder emits `--ont` mechanically from L0 and never from LLM output.
-- [ ] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.
+- [x] `params.yaml` exists for hifiasm_ont.
+- [x] The catalog validates through the three-level schema.
+- [x] The catalog covers the currently documented ONT-valid hifiasm CLI surface, with every behavior-changing non-fact parameter assigned to L2.
+- [x] The project-pinned hifiasm binary/help output has been verified against the catalog in the execution environment.
+- [x] The prompt payload builder can include all L2 entries.
+- [x] The integrated recommender node consumes that prompt payload in the main graph.
+- [x] The command builder emits `--ont` mechanically from L0 and never from LLM output.
+- [x] ONT failure retry can adjust L2 values such as `--rl-cut`, `--sc-cut`, and purge parameters.

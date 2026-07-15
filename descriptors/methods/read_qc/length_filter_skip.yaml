@@ -1,0 +1,24 @@
+method_name: read_qc.length_filter.skip
+stage: read_qc
+package_ref: python
+goal: "Planner-only choice to skip length filtering and use raw long reads."
+required_inputs:
+  - name: raw_long_reads
+    type: raw_long_reads
+    description: "Registered raw long-read input that will pass through unchanged."
+expected_outputs:
+  - name: raw_long_reads
+    type: raw_long_reads
+    description: "Original reads selected as the read_qc handoff input."
+review_rules:
+  - no_filtering_requested
+human_review_triggers: []
+resource_hints:
+  cpu_cores: 1
+  memory_gb: 0.1
+  gpu_required: false
+  walltime_hours: 0.1
+planner:
+  selection_role: length_filter
+  display_name: "skip filtering, use raw reads"
+  execution_kind: planner_only

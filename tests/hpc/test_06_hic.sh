@@ -23,10 +23,35 @@ source common.sh
 section "Test 06: Hi-C Scaffolding"
 
 # ---- Verify input data ----
-if [[ -z "${HIC_R1}" || ! -f "${HIC_R1}" || -z "${HIC_R2}" || ! -f "${HIC_R2}" ]]; then
-    warn "Hi-C reads not configured or missing (HIC_R1/HIC_R2 in hpc_env.sh)"
+if [[ -n "${REVIEW_ASSEMBLY:-}" && ! -s "$REVIEW_ASSEMBLY" ]]; then
+    fail "REVIEW_ASSEMBLY is missing or empty: ${REVIEW_ASSEMBLY}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit assembly)" || true
+    exit 1
+fi
+if [[ -n "${REVIEW_ASSEMBLY:-}" ]] && ! grep -q '^>' "$REVIEW_ASSEMBLY" 2>/dev/null; then
+    fail "REVIEW_ASSEMBLY is not a FASTA file: ${REVIEW_ASSEMBLY}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit assembly)" || true
+    exit 1
+fi
+if [[ -n "${HIC_CHROM_SIZES:-}" && ! -s "$HIC_CHROM_SIZES" ]]; then
+    fail "HIC_CHROM_SIZES is missing or empty: ${HIC_CHROM_SIZES}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit chrom.sizes)" || true
+    exit 1
+fi
+
+if [[ -z "${HIC_R1:-}" && -z "${HIC_R2:-}" ]]; then
+    warn "Hi-C reads not configured (HIC_R1/HIC_R2 in hpc_env.sh)"
     info "Running schema + unit tests only (no real Hi-C execution)"
     HIC_AVAILABLE=false
+elif [[ -z "${HIC_R1:-}" || -z "${HIC_R2:-}" ]]; then
+    fail "HIC_R1 and HIC_R2 must be configured together"
+    summary "Test 06: Hi-C Scaffolding (incomplete explicit inputs)" || true
+    exit 1
+elif [[ ! -s "$HIC_R1" || ! -s "$HIC_R2" ]]; then
+    [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
+    [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
+    summary "Test 06: Hi-C Scaffolding (invalid explicit inputs)" || true
+    exit 1
 else
     assert_file_nonempty "$HIC_R1" "Hi-C R1"
     assert_file_nonempty "$HIC_R2" "Hi-C R2"
@@ -37,15 +62,15 @@ fi
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_hic_scaffolding.py"
-    python3 -m pytest tests/test_hic_scaffolding.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_hic_scaffolding.py -v --tb=short 2>&1 && \
         pass "unit tests: test_hic_scaffolding.py" || fail "unit tests: test_hic_scaffolding.py"
 
     info "Running unit tests: test_run_config.py (Hi-C schema)"
-    python3 -m pytest tests/test_run_config.py -v --tb=short -k "hic or HiC or hic_scaffolding" 2>&1 && \
+    run_pytest tests/test_run_config.py -v --tb=short -k "hic or HiC or hic_scaffolding" 2>&1 && \
         pass "unit tests: test_run_config.py (Hi-C)" || fail "unit tests: test_run_config.py (Hi-C)"
 
     info "Running unit tests: test_ask_interactive.py"
-    python3 -m pytest tests/test_ask_interactive.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_ask_interactive.py -v --tb=short 2>&1 && \
         pass "unit tests: test_ask_interactive.py" || fail "unit tests: test_ask_interactive.py"
     cd "${SCRIPT_DIR}"
 fi
@@ -176,21 +201,16 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
     # artifact from the newest Test 04 session, then any existing assembly
     # artifact.
     PREV_ASM="${REVIEW_ASSEMBLY:-}"
-    if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
-        fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
-        summary "Test 06: Hi-C Scaffolding"
-        exit 0
-    fi
     if [[ -z "$PREV_ASM" ]]; then
         PREV_ASM=$(latest_test04_assembly || true)
     fi
     if [[ -z "$PREV_ASM" ]]; then
-        PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
+        PREV_ASM=$(latest_hpc_assembly || true)
     fi
     if [[ -z "$PREV_ASM" ]]; then
-        fail "No assembly FASTA found. Run test_04 first."
-        summary "Test 06: Hi-C Scaffolding"
-        exit 0
+        info "[SKIP] No assembly FASTA is available for Hi-C scaffolding."
+        info "Resume the upstream assembly/review session first, or set REVIEW_ASSEMBLY."
+        exit 77
     fi
     info "Using assembly: ${PREV_ASM}"
 
@@ -214,10 +234,9 @@ if [[ "$HIC_AVAILABLE" == "true" ]]; then
 
     # Skip execution if chrom_sizes is still not available
     if [[ -z "${HIC_CHROM_SIZES:-}" ]]; then
-        warn "Cannot run Hi-C execution without chrom.sizes"
-        info "Schema and unit tests above still validate the Hi-C code paths"
-        summary "Test 06: Hi-C Scaffolding (schema-only)"
-        exit 0
+        fail "Hi-C inputs were configured, but chrom.sizes could not be generated"
+        summary "Test 06: Hi-C Scaffolding (runtime preflight failed)" || true
+        exit 1
     fi
 
     if [[ -n "${HIC_JUICER_SCRIPTS_DIR:-}" ]]; then
@@ -263,11 +282,10 @@ exit 127
 '; then
         pass "Juicer helper scripts available"
     else
-        warn "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
-        warn "Install/expose Java in the configured Juicer environment and set HIC_JUICER_SCRIPTS_DIR to the Juicer root that contains common/chimeric_blacklist.awk (for example /data/work/softs/juicer/CPU)"
-        info "Schema and unit tests above still validate the Hi-C code paths"
-        summary "Test 06: Hi-C Scaffolding (schema-only)"
-        exit 0
+        fail "Juicer runtime prerequisites are missing from the configured Hi-C method environment"
+        info "Use the exact prerequisite error printed above; only install or configure the item it names."
+        summary "Test 06: Hi-C Scaffolding (runtime preflight failed)" || true
+        exit 1
     fi
 
     SID="hpc-test06-$(date +%Y%m%d-%H%M%S)"
@@ -298,13 +316,30 @@ PY
     # Run
     cd "${PROJECT_ROOT}"
     info "Running Hi-C scaffolding session: ${SID}"
-    GA run \
+    RUN_EXITCODE=0
+    if GA run \
         --manifest "$MANIFEST" \
         --session-id "$SID" \
         --data-dir "$TEST_DATA_ROOT" \
         --run-config "$RC" \
         --checkpointer "$CHECKPOINTER" \
-        2>&1 || true
+        2>&1; then
+        pass "Hi-C session invocation exited cleanly"
+    else
+        RUN_EXITCODE=$?
+        warn "Hi-C invocation returned ${RUN_EXITCODE}; inspecting durable state"
+    fi
+
+    GATE_STATUS=0
+    report_session_gate "$SID" || GATE_STATUS=$?
+    if (( GATE_STATUS == 3 )); then
+        info "[SKIP] Hi-C session is waiting for its stage-specific human decision."
+        exit 77
+    elif (( GATE_STATUS != 0 )); then
+        fail "could not determine the Hi-C durable session state"
+    elif (( RUN_EXITCODE != 0 )); then
+        fail "Hi-C session invocation returned a CLI error outside a human gate"
+    fi
 
     # Verify outputs
     RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
@@ -327,8 +362,8 @@ PY
     SCAFFOLDED=$(find "$HIC_ARTIFACT" -name "*scaffolded*.fasta" -o -name "*FINAL*.fasta" 2>/dev/null | head -1 || true)
     HIC_FILE=$(find "$HIC_ARTIFACT" -name "*.hic" 2>/dev/null | head -1 || true)
 
-    [[ -n "$SCAFFOLDED" ]] && assert_file_nonempty "$SCAFFOLDED" "scaffolded assembly FASTA" || warn "scaffolded FASTA not found"
-    [[ -n "$HIC_FILE" ]]   && assert_file_nonempty "$HIC_FILE"   "Hi-C contact map (.hic)" || warn ".hic file not found"
+    [[ -n "$SCAFFOLDED" ]] && assert_file_nonempty "$SCAFFOLDED" "scaffolded assembly FASTA" || fail "scaffolded FASTA not found"
+    [[ -n "$HIC_FILE" ]]   && assert_file_nonempty "$HIC_FILE"   "Hi-C contact map (.hic)" || fail ".hic file not found"
 
     # Inspect
     cd "${PROJECT_ROOT}"
@@ -342,8 +377,13 @@ PY
         fail "Hi-C ledger events.jsonl not found"
     fi
 else
-    info "Skipping real Hi-C execution (no Hi-C data configured)"
-    info "Schema and unit tests still validate the Hi-C code paths"
+    if (( _FAIL > 0 )); then
+        summary "Test 06: Hi-C Scaffolding (contract checks failed)" || true
+        exit 1
+    fi
+    info "[SKIP] Real Hi-C execution is not configured (HIC_R1/HIC_R2 missing)."
+    info "Schema and unit checks passed, but this step did not claim a real-data PASS."
+    exit 77
 fi
 
 summary "Test 06: Hi-C Scaffolding"

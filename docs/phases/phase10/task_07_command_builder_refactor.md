@@ -1,10 +1,10 @@
 # Task 7: Refactor Command Builder Around L0/L1/L2
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Completed
 **Depends on**: Tasks 1-3 and 6
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -107,16 +107,19 @@ def build_parameter_sources(
     assembly_out: dict[str, Any],
     attempt_id: int,
     recommended_params: dict[str, Any],
+    execution_context: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     ...
 ```
 
 Responsibilities:
 
-- derive L0 from execution context: prefix, threads, input reads, attempt-specific work dirs, fixed route flags;
-- derive L1 from read_qc, genome_survey, manifest, and run_config;
+- derive L0 from catalog `fixed_value` and `source_priority` paths such as `execution.output_prefix`, `assembly.hifiasm_ont_parameters.threads`, and `execution.input_reads`;
+- derive L1 from catalog `source_priority` paths into read_qc, genome_survey, manifest, shared parameters, or run_config;
 - insert only validated L2 recommendations;
 - return the exact object stored in the attempt ledger.
+
+Do not hard-code special parameter names such as `output_prefix`, `threads`, or `input_reads` inside the generic builder. Method adapters may pass an `execution_context`, but the catalog decides which parameters read from it.
 
 ## hifiasm_ont Freeze Integration
 
@@ -161,10 +164,44 @@ Replaying an attempt should not require the LLM.
 - Omit `"default"` values.
 - Append input reads last.
 - Ensure attempt 0 and attempt 1 produce different directories.
+- Derive L0 fields through catalog `source_priority`, not hard-coded parameter names.
+- Missing catalog or malformed recommended-parameter state returns structured failure from method freeze nodes.
 
 ## Acceptance Criteria
 
-- [ ] Command builder implemented.
-- [ ] hifiasm_ont freeze uses command builder.
-- [ ] Attempt metadata records `parameter_sources` and `argv`.
-- [ ] Retry attempts do not overwrite prior attempt directories.
+- [x] Command builder implemented.
+- [x] hifiasm_ont freeze uses command builder.
+- [x] Attempt metadata records `parameter_sources` and `argv`.
+- [x] Retry attempts do not overwrite prior attempt directories.
+- [x] Generic source derivation is catalog-driven.
+- [x] Catalog-loading and malformed-state errors fail gracefully.
+
+## Implementation Notes
+
+**Implemented slice**: 2026-07-03
+
+### Key Implementation Points
+
+1. **Command builder**: `app/stages/assembly/command_builder.py`
+   - `build_command()` merges L0/L1/L2 source groups into deterministic argv
+   - `build_parameter_sources()` derives L0/L1 from state via catalog source_priority
+   - Validates parameter levels match their source groups
+   - Emits boolean flags only when truthy, omits "default" values
+
+2. **Integration**: Both hifiasm.py and hifiasm_ont.py freeze functions now:
+   - Load parameter catalog via `load_parameter_catalog()`
+   - Build parameter sources with execution_context for L0 derivation
+   - Call `build_command()` to generate argv
+   - Store `parameter_sources` and `argv` in attempt metadata for replay
+
+3. **Error handling**: Catalog loading and parameter command errors return structured failures via `fail_update()`
+
+### Completion Notes
+
+- hifiasm and hifiasm_ont freeze paths now use
+  `parameter_attempt_<attempt_id>/` scoped work and artifact directories.
+- Freeze functions update the current typed `parameter_attempts` entry with
+  `parameter_sources`, `argv`, script paths, frozen metadata, and expected
+  outputs.
+- `input_profile_ref` and `prompt_payload_ref` are written by the recommender
+  node and stored on the same typed attempt entry.

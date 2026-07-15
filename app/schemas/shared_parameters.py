@@ -8,11 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.manifest import Platform
 
-NormalizedReadType = Literal["ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
+NormalizedReadType = Literal["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
 
 PLATFORM_TO_SHARED_READ_TYPE = {
-    "cyclone": "ont_raw",
-    "cycloneseq": "ont_raw",
+    "cyclone": "cyclone",
+    "cycloneseq": "cyclone",
     "ont": "ont_raw",
     "clr": "pacbio_clr",
     "pacbio_hifi": "pacbio_hifi",
@@ -26,6 +26,11 @@ FLYE_TO_SHARED_READ_TYPE = {
 }
 
 SHARED_TO_METHOD_READ_TYPE = {
+    "cyclone": {
+        "flye": "nano-raw",
+        "nextdenovo": "ont",
+        "hifiasm_ont": "ont",
+    },
     "ont_raw": {
         "flye": "nano-raw",
         "nextdenovo": "ont",

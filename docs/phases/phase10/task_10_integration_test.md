@@ -1,10 +1,10 @@
 # Task 10: Integration Tests for Parameter Closed Loop
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Focused tests implemented; planner-registry architecture guard implemented
 **Depends on**: Tasks 1-9
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-07
 
 ## Goal
 
@@ -15,6 +15,13 @@ profile -> select cases -> recommend L2 params -> validate -> build argv -> free
 ```
 
 The tests should prove the system is executable, replayable, can fail safely, can retry deterministically, and exposes the full cataloged L2 parameter surface rather than a hand-picked prompt subset.
+
+The tests should also prove that the complete parameter profile is saved for replay while prompt payloads contain only the task-scoped profile slice.
+
+The suite should include architecture-regression tests for the cleanup in this
+phase: descriptor-derived planner metadata, no assembly-local model invocation,
+typed compact stage outputs for the parameter loop, and no hash-only refs in the
+running graph.
 
 ## Test 1: Catalog and Prompt Permissions
 
@@ -61,6 +68,31 @@ def test_llm_cannot_modify_l0_or_l1():
 
     assert not result["valid"]
     assert {v["param"] for v in result["violations"]} >= {"threads", "hg_size"}
+```
+
+## Test 2b: Full Profile and Prompt Profile Split
+
+```python
+def test_full_profile_is_replayable_but_prompt_profile_is_task_scoped():
+    full_profile = build_full_parameter_profile(state, previous_attempt=attempt)
+    prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
+
+    assert "previous_attempt" in full_profile
+    assert "assembly_review" in full_profile
+    assert "previous_attempt" not in prompt_profile
+    assert "input_files" not in prompt_profile["assets"]
+
+
+def test_validator_can_use_full_profile_paths():
+    result = validate_recommended_parameters(
+        method_id="hifiasm_ont",
+        catalog=catalog,
+        recommended_params={"purge_level": 3},
+        readonly_facts={},
+        full_profile={"genome_survey": {"heterozygosity": "high"}},
+        rules={"rules": [{"condition": {"genome_survey.heterozygosity": "high"}, "constraints": {"purge_level": [0, 1]}}]},
+    )
+    assert not result["valid"]
 ```
 
 ## Test 3: Happy Path Builds Replayable Attempt
@@ -166,6 +198,34 @@ def test_max_review_retries_stop():
     assert result["stage_outputs"]["assembly"]["status"] in {"parameter_retries_exhausted", "blocked_human"}
 ```
 
+## Test 8: Architecture Cleanup Invariants
+
+```python
+def test_planner_methods_are_descriptor_derived():
+    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    catalog = build_planner_method_catalog(registry)
+
+    assert set(catalog.by_stage["assembly"]) == set(registry.by_stage["assembly"])
+    assert "_STAGE_METHODS" not in Path("app/entrypoints/ask_planner.py").read_text()
+
+
+def test_assembly_stage_does_not_invoke_llm_directly():
+    source = Path("app/stages/assembly/nodes.py").read_text()
+    assert "build_chat_model().invoke" not in source
+    assert "_recommend_route_with_llm" not in source
+
+
+def test_running_graph_uses_session_attempt_refs():
+    result = recommend_assembly_parameters(state)
+    attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
+
+    assert attempt["input_profile_ref"].startswith("data/artifacts/assembly/")
+    assert "parameter_attempt_0/input_profile.json" in attempt["input_profile_ref"]
+    assert "parameter_attempt_0/prompt_payload.json" in attempt["prompt_payload_ref"]
+    assert len(attempt["input_profile_hash"]) == 64
+    assert len(attempt["prompt_payload_hash"]) == 64
+```
+
 ## Fixtures Needed
 
 - Mock LLM returning valid L2 params.
@@ -178,10 +238,16 @@ def test_max_review_retries_stop():
 
 ## Acceptance Criteria
 
-- [ ] Tests cover initial pass path.
-- [ ] Tests prove the prompt includes the full cataloged L2 surface, not a hand-picked subset.
-- [ ] Tests cover validation failure before execution.
-- [ ] Tests cover command failure retry with log tail.
-- [ ] Tests cover review failure retry.
-- [ ] Tests prove attempt entries are append-only and replayable.
-- [ ] Tests confirm only the L0/L1/L2 permission model remains.
+- [x] Tests cover initial pass path.
+- [x] Tests prove the prompt includes the full cataloged L2 surface, not a hand-picked subset.
+- [x] Tests prove full profile is replayable while prompt profile is task-scoped.
+- [x] Tests prove validator can use complete profile fields through dotted paths.
+- [x] Tests cover validation failure before execution.
+- [x] Tests cover command failure retry with log tail.
+- [x] Tests cover review failure retry.
+- [x] Tests prove new recommendation attempts are append-only and replayable,
+  while current attempts can be completed with lifecycle refs/results.
+- [x] Tests confirm only the L0/L1/L2 permission model remains.
+- [x] Tests fail if planner method metadata is maintained as a second hardcoded registry.
+- [x] Tests fail if assembly stage nodes invoke the LLM directly.
+- [x] Tests fail if main-flow prompt/profile refs are hash-only instead of session/attempt paths.

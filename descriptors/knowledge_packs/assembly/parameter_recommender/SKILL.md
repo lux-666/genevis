@@ -1,0 +1,39 @@
+# Assembly Parameter Recommendation
+
+## Contract
+
+Design a sparse L2 parameter patch for Flye, NextDenovo, hifiasm, or hifiasm-ont. L0 execution mechanics and L1 measured/provided facts are readonly. Deterministic validation remains authoritative for parameter keys, types, ranges, and hard biological rules.
+
+The model receives four distinct inputs:
+
+1. Current-sample observations from read QC, genome survey, and run configuration.
+2. The L2 catalog and its deterministic baseline.
+3. Optional paper case cards containing original parameters, excerpts, rationale, citation, applicability, outcomes, and numeric similarity.
+4. Method-guidance cards describing biological mechanisms without fixed trigger values.
+
+Paper cards are analogs, not recipes. Method, read type, route, assembly goal, and clade are not retrieval gates or score terms. The model judges transferability from each complete card. A novel organism does not need a matching paper case: mechanistic extrapolation from its biological observations is a normal recommendation mode.
+
+## Selection, Augmentation, Generation, Validation
+
+- Selection ranks paper cards by missing-aware numeric similarity across genome size, coverage, read N50, heterozygosity, and ploidy. Actionability only breaks ties. Missing dimensions are excluded and weights are renormalized.
+- Augmentation presents each selected card exactly once and adds applicable method-guidance cards. It never synthesizes a second copy of parameters, quotes, rationale, or citation.
+- Generation is one LLM call. The model diagnoses relevant effect areas, judges case applicability implicitly, and emits only parameters it chose to change. It references observations, guidance IDs, and optional paper/quote IDs instead of rewriting their contents.
+- Validation checks the sparse patch against the catalog and hard rules, and verifies every cited ID exists on the visible prompt surface.
+
+## Biological Reasoning
+
+Coverage and read length affect graph connectivity. Low coverage or short reads may favor retaining connectivity; deep coverage and long reads can support stricter overlap or graph-cleaning choices when their tradeoffs are acceptable.
+
+Heterozygosity and ploidy affect purging. Aggressive purging can erase genuine haplotypic divergence. On retry, inflated assembly size and duplicated BUSCO can support stronger duplicate handling, while missing BUSCO, low size ratio, or collapsed haplotypes can support less aggressive handling.
+
+Repeat fraction and genome size affect graph complexity and resource pressure. Treat these as interacting biological and computational signals rather than independent numeric triggers.
+
+## Retry
+
+Retry context is same-run evidence, never a literature case. The baseline is the previous attempt's effective parameter set, and execution retains previous explicit overrides unless the new sparse patch changes them.
+
+For missing input, binary, permission, environment, or invalid-wrapper failures, prefer `expert_review` or `stop` instead of inventing a biological parameter change. For memory, timeout, parsing, or review-quality failures, make a small targeted patch and state the expected effect and tradeoffs.
+
+## Response
+
+Return `sample_diagnosis`, sparse `parameter_patch`, and `summary`. Each patch entry includes a value, visible observation/guidance/literature references, expected effect, tradeoffs, confidence, and concise reasoning. On retry also return `retry_disposition` (`retry`, `stop`, or `expert_review`). Do not restate paper cards or emit unchanged baseline values.

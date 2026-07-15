@@ -1,0 +1,73 @@
+cases:
+  - schema_version: 3
+    case_id: hifiasm.paper.s41597-024-03664-8
+    case_type: initial
+    source:
+      kind: paper
+      title: "Telomere-to-telomere genome assembly of sorghum"
+      doi: 10.1038/s41597-024-03664-8
+      year: 2024
+    methods_path: cases/hifiasm/papers/s41597-024-03664-8/methods.md
+    evidence_spans:
+      - span_id: scenario.sorghum_profile
+        quote: "The approximately 725 Mb sorghum genome has about 0.10% heterozygosity and 67.74% repetitive sequence, representing a relatively homozygous but repeat-rich plant assembly."
+      - span_id: workflow.hifiasm_default
+        quote: "hifiasm 0.19.5 was run with default parameters on PacBio HiFi reads to generate the initial high-accuracy contigs."
+      - span_id: workflow.gap_close
+        quote: "Hi-C supported chromosome scaffolding; NECAT-corrected ONT reads and LR_Gapcloser filled gaps; HiFi alignments with Winnowmap2 and Racon provided base-level polishing."
+      - span_id: preprocessing.ccs_hic
+        quote: "CCS reads were generated with minimum three passes, predicted accuracy 0.99, and minimum length 500, while SOAPnuke supplied the reported Hi-C quality-control settings."
+      - span_id: caveat.defaults
+        quote: "A report of default hifiasm parameters does not establish paper-specific nondefault L2 values, and downstream-tool settings must not be projected as hifiasm evidence."
+    applicability:
+      read_type: hifi
+      source_tool: hifiasm
+      source_tool_version: 0.19.5
+      target_methods: [hifiasm]
+      assembly_goal: gap-free assembly of a low-heterozygosity repeat-rich plant genome
+    observed_facts:
+      organism:
+        value: Sorghum bicolor
+        evidence_span_ids: [scenario.sorghum_profile]
+      clade:
+        value: flowering_plant
+        evidence_span_ids: [scenario.sorghum_profile]
+      genome_size_mb:
+        value: 725
+        unit: Mb
+        evidence_span_ids: [scenario.sorghum_profile]
+      heterozygosity:
+        value: 0.001
+        unit: fraction
+        evidence_span_ids: [scenario.sorghum_profile]
+    intervention:
+      tool: hifiasm
+      version: 0.19.5
+      parameters: {}
+    rationale_claims:
+      - claim_id: sorghum.hifi_initial
+        statement: "Default-parameter hifiasm on HiFi reads supplied high-accuracy initial contigs for a repeat-rich, low-heterozygosity plant genome."
+        explicitness: explicit
+        effect_area: assembly_scope
+        evidence_span_ids: [scenario.sorghum_profile, workflow.hifiasm_default]
+      - claim_id: sorghum.hybrid_finishing
+        statement: "Hi-C scaffolding, corrected ONT gap closing, and HiFi-based polishing converted the initial contigs into a gap-free chromosome assembly."
+        explicitness: explicit
+        effect_area: repeat_resolution
+        evidence_span_ids: [workflow.gap_close]
+      - claim_id: sorghum.preprocessing_context
+        statement: "CCS and Hi-C quality-control thresholds belong to upstream preprocessing rather than adjustable hifiasm parameters."
+        explicitness: explicit
+        effect_area: read_preprocessing
+        evidence_span_ids: [preprocessing.ccs_hic]
+      - claim_id: sorghum.no_nondefault_values
+        statement: "The default-parameter statement and downstream settings do not justify reconstructing paper-specific hifiasm L2 values."
+        explicitness: explicit
+        effect_area: evidence_scope
+        evidence_span_ids: [caveat.defaults]
+    outcomes: {}
+    curation:
+      status: approved
+      curator: BGI knowledge curation
+      reviewed_at: "2026-07-12"
+      notes: "Numeric sample attributes are retained for retrieval; default hifiasm and downstream workflow details do not manufacture L2 overrides."

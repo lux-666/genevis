@@ -1,0 +1,1 @@
+"""Assembly domain logic."""

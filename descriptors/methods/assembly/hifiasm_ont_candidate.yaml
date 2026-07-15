@@ -1,6 +1,7 @@
 method_name: assembly.candidate.hifiasm_ont
 stage: assembly
 package_ref: hifiasm
+parameter_catalog: hifiasm_ont
 goal: "Plan and optionally execute a hifiasm ONT assembly candidate for ONT and CycloneSEQ long reads (FASTQ only)."
 required_inputs:
   - name: long_reads
@@ -21,3 +22,8 @@ resource_hints:
   memory_gb: 128.0
   gpu_required: false
   walltime_hours: 48.0
+planner:
+  required_parameters:
+    - threads
+  parameter_defaults:
+    threads: 4

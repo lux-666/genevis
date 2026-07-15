@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.schemas.shared_parameters import SharedParameters
-from app.schemas.warnings import PlanWarning
+from app.schemas.warnings import PlanWarning as PlanWarning
 
 AskClarificationKind = Literal[
     "stage_selection",

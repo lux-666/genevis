@@ -8,9 +8,11 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
-from app.storage.publish import shell_publish_file
+from app.schemas.artifacts import ASSEMBLY_PARAMETER_COMMAND
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.storage.publish import shell_publish_file
+from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
 from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
@@ -19,9 +21,13 @@ from app.stages.assembly.method_application.lifecycle import (
     build_method_graph,
     collect_method_artifacts,
     fail_update,
+    current_parameter_attempt,
     positive_int,
+    update_current_parameter_attempt,
     update_assembly_output,
+    write_parameter_attempt_json_artifact,
 )
+from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
 
 
@@ -70,27 +76,67 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     if env_blocked is not None:
         return update_assembly_output(state, env_blocked)
 
-    working_dir = data_dir / "work" / "assembly" / session_id / "flye"
+    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
+    working_dir = data_dir / "work" / "assembly" / session_id / attempt_scope / "flye"
     output_dir = working_dir / "flye_out"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "flye"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "flye"
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
     script = working_dir / "run_flye.sh"
-    reads = " ".join(shlex.quote(str(path)) for path in read_paths)
+    catalog, catalog_error = _load_catalog()
+    if catalog_error:
+        return fail_update(state, catalog_error)
+    recommended_params, recommended_error = _recommended_params(output)
+    if recommended_error:
+        return fail_update(state, recommended_error)
+
+    try:
+        parameter_sources = build_parameter_sources(
+            method_id=FLYE_METHOD,
+            catalog=catalog,
+            state=state,
+            assembly_out=output,
+            attempt_id=parameter_attempt_id,
+            recommended_params=recommended_params,
+            execution_context={
+                "output_dir": str(output_dir),
+                "input_reads": [str(path) for path in read_paths],
+            },
+        )
+        argv = _build_flye_argv(catalog, parameter_sources, fallback_read_type=params["read_type"])
+    except (KeyError, ParameterCommandError) as exc:
+        return fail_update(state, f"Flye parameter sources are invalid: {exc}")
+    command = " ".join(shlex.quote(arg) for arg in argv)
     script.write_text(
         "set -e\n"
-        f"flye {FLYE_READ_TYPE_FLAGS[params['read_type']]} {reads}"
-        f" --out-dir {shlex.quote(str(output_dir))}"
-        f" --genome-size {shlex.quote(str(params['estimated_genome_size']))}"
-        f" --threads {params['threads']}\n"
+        f"{command}\n"
         f"test -f {shlex.quote(str(output_dir / 'assembly.fasta'))}\n"
         f"{shell_publish_file(output_dir / 'assembly.fasta', draft)}\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
+    command_ref = write_parameter_attempt_json_artifact(
+        state,
+        parameter_attempt_id,
+        "command.json",
+        {
+            "attempt_id": parameter_attempt_id,
+            "method_id": FLYE_METHOD,
+            "argv": argv,
+            "command": command,
+            "script_path": str(script),
+            "working_dir": str(working_dir),
+            "output_dir": str(output_dir),
+            "draft_assembly_path": str(draft),
+            "parameter_sources": parameter_sources,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_COMMAND,
+        method_name=FLYE_METHOD,
+    )
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:flye",
+        attempt_id=f"{session_id}:assembly:flye:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
         stage="assembly",
         method_name=FLYE_METHOD,
@@ -106,10 +152,24 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "read_profile": params["read_type"],
             "estimated_genome_size": params["estimated_genome_size"],
             "threads": params["threads"],
+            "parameter_sources": parameter_sources,
+            "argv": argv,
             "flye_output_dir": str(output_dir),
             "draft_assembly_path": str(draft),
+            "parameter_attempt_id": parameter_attempt_id,
         },
     )
+    parameter_attempts, attempt_error = update_current_parameter_attempt(
+        output,
+        method_id=FLYE_METHOD,
+        label="Flye",
+        status="frozen",
+        parameter_sources=parameter_sources,
+        argv=argv,
+        command_ref=command_ref.model_dump(mode="json"),
+    )
+    if attempt_error:
+        return fail_update(state, attempt_error)
     return update_assembly_output(
         state,
         {
@@ -117,6 +177,7 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             LIFECYCLE.frozen_attempt_key: attempt.model_dump(mode="json"),
             "flye_output_dir": str(output_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
+            "parameter_attempts": parameter_attempts,
         },
     )
 
@@ -165,13 +226,50 @@ def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
         missing.append("flye_parameters.read_type")
     elif read_type not in FLYE_READ_TYPE_FLAGS:
         invalid.append({"param": "flye_parameters.read_type", "value": read_type, "accepted": sorted(FLYE_READ_TYPE_FLAGS)})
+    resolved_genome_size = dict(output.get("resolved_genome_size") or {})
     genome_size = positive_int(
-        params.get("estimated_genome_size", output.get("genome_size_prior")),
+        resolved_genome_size.get("value_bp"),
         "flye_parameters.estimated_genome_size",
         missing,
         invalid,
     )
-    threads = positive_int(params.get("threads"), "flye_parameters.threads", missing, invalid)
+    threads_value = params.get("threads")
+    if threads_value is None:
+        threads_value = 32
+    threads = positive_int(threads_value, "flye_parameters.threads", missing, invalid)
     if missing or invalid:
         return {}, blocked_parameters("flye_parameters", FLYE_METHOD, missing, invalid)
     return {"read_type": read_type, "estimated_genome_size": genome_size, "threads": threads}, None
+
+
+def _load_catalog():
+    try:
+        return load_parameter_catalog(FLYE_METHOD), None
+    except (FileNotFoundError, ValueError) as exc:
+        return None, f"Flye parameter catalog is not usable: {exc}"
+
+
+def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    attempt, error = current_parameter_attempt(output, method_id=FLYE_METHOD, label="Flye")
+    if error:
+        return {}, error
+    assert attempt is not None
+    return dict(attempt.execution_params), None
+
+
+def _build_flye_argv(catalog, parameter_sources: dict[str, dict[str, Any]], *, fallback_read_type: str) -> list[str]:
+    """Build Flye argv with reads immediately following the read-type flag."""
+
+    l0 = dict(parameter_sources.get("l0_fixed") or {})
+    read_type = str(l0.pop("read_type", fallback_read_type))
+    input_reads = l0.pop("input_reads", None)
+    if not isinstance(input_reads, list) or not input_reads:
+        raise ParameterCommandError("Flye input_reads must be a non-empty list")
+
+    argv_sources = {
+        "l0_fixed": l0,
+        "l1_readonly": {},
+        "l2_recommended": dict(parameter_sources.get("l2_recommended") or {}),
+    }
+    emitted_flags = build_command(method_id=FLYE_METHOD, catalog=catalog, parameter_sources=argv_sources)
+    return [catalog.tool, FLYE_READ_TYPE_FLAGS[read_type], *[str(path) for path in input_reads], *emitted_flags[1:]]

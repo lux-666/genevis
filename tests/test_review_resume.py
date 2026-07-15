@@ -20,6 +20,7 @@ from app.control.lifecycle import (
     resume_review_state,
 )
 from app.review.base import ResumeReviewRequest, load_resume_review_request
+from app.reports.review_report import write_operator_report
 from app.schemas.artifacts import ArtifactMeta
 
 
@@ -374,6 +375,23 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(summary["decision_requirements"]["stage"], "hic_scaffolding")
         self.assertIn("hic_scaffolding.candidate.yahs", summary["decision_requirements"]["candidate_methods"])
         self.assertEqual(summary["latest_artifact_refs"]["hic_scaffolding"]["scaffold_plan_ref"], "plan.json")
+        proposal = summary["decision_requirements"]["runtime_proposal"]
+        self.assertEqual(proposal["kind"], "scaffolding_method_or_candidate_review")
+        self.assertEqual(proposal["parameter_recommendation_status"], "not_implemented")
+
+    def test_assembly_review_runtime_proposal_points_rerun_to_parameter_gate(self):
+        summary = inspect_state(_assembly_blocked_state())
+
+        proposal = summary["decision_requirements"]["runtime_proposal"]
+        self.assertEqual(proposal["kind"], "assembly_candidate_review")
+        self.assertEqual(proposal["parameter_recommendation_status"], "mixed")
+        self.assertEqual(
+            proposal["related_parameter_gate"],
+            {"stage": "assembly", "gate_id": "parameter_approval"},
+        )
+        self.assertTrue(any("legacy manual Flye" in note for note in proposal["parameter_recommendation_notes"]))
+        template = build_resume_decision_template(summary)
+        self.assertEqual(template["metadata"]["template_guidance"]["runtime_proposal"], proposal)
 
     def test_inspect_hic_uses_interrupt_decisions_allowed(self):
         state = _hic_blocked_state()
@@ -523,6 +541,77 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(guidance["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
         self.assertEqual(sorted(guidance["candidate_ids"]), ["canu", "flye"])
 
+    def test_parameter_approval_template_copies_exact_resume_bindings(self):
+        bindings = {
+            "attempt_id": 2,
+            "task": "retry_after_review_failure",
+            "previous_attempt_id": 1,
+            "recommendation_hash": "a" * 64,
+        }
+        summary = {
+            "session_id": "s1",
+            "decision_requirements": {
+                "stage": "assembly",
+                "gate_id": "parameter_approval",
+                "decisions_allowed": ["approve_parameters", "reject_parameters"],
+                "resume_metadata": bindings,
+            },
+        }
+
+        template = build_resume_decision_template(summary)
+
+        self.assertEqual(template["decision"], "approve_parameters")
+        self.assertEqual(
+            {key: template["metadata"][key] for key in bindings},
+            bindings,
+        )
+
+    def test_parameter_approval_inspect_exposes_exact_resume_bindings(self):
+        bindings = {
+            "attempt_id": 1,
+            "task": "retry_after_execution_failure",
+            "previous_attempt_id": 0,
+            "recommendation_hash": "c" * 64,
+        }
+        interrupt = {
+            "stage": "assembly",
+            "gate_id": "parameter_approval",
+            "decisions_allowed": ["approve_parameters", "reject_parameters"],
+            "parameter_diff": {"purge_level": {"from": 1, "to": 2}},
+            "rationale": "review evidence supports stronger purging",
+            "failure_facts": {"review_failure": {"status": "failed"}},
+            "evidence_refs": {"evidence_payload_ref": "data/evidence.json"},
+            **bindings,
+        }
+        state = {
+            "session_id": "s1",
+            "current_stage": "assembly",
+            "supervision_state": "blocked_human",
+            "active_interrupt": interrupt,
+            "stage_outputs": {"assembly": {"status": "blocked_human"}},
+        }
+
+        summary = inspect_state(state)
+
+        self.assertEqual(
+            summary["decision_requirements"]["resume_metadata"],
+            bindings,
+        )
+        self.assertEqual(
+            summary["decision_requirements"]["runtime_proposal"],
+            {
+                "kind": "parameter_recommendation",
+                "label": "Assembly parameter proposal",
+                "parameter_recommendation_status": "implemented",
+                "human_confirmation_required": True,
+            },
+        )
+        self.assertEqual(
+            summary["decision_requirements"]["parameter_diff"],
+            interrupt["parameter_diff"],
+        )
+        self.assertEqual(summary["decision_requirements"]["evidence_refs"], interrupt["evidence_refs"])
+
     def test_decision_requirements_uses_artifact_meta_file_path_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "assembly_review_request.json"
@@ -583,6 +672,35 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertEqual(summary["supervision_state"], "blocked_human")
         self.assertEqual(summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding")
+
+    def test_inspect_session_recovers_blocked_state_from_operator_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            session_id = "operator-report-only"
+            interrupt = {
+                "stage": "assembly",
+                "gate_id": "route_selection",
+                "decisions_allowed": ["select_ont", "stop_human_review"],
+                "reason": "assembly_route_insufficient_data",
+            }
+            write_operator_report(
+                data_dir,
+                session_id,
+                {
+                    "current_stage": "assembly",
+                    "supervision_state": "blocked_human",
+                    "active_interrupt": interrupt,
+                    "route_trace": ["inventory_stage", "read_qc_stage"],
+                },
+            )
+
+            summary = inspect_session(session_id, data_dir)
+
+            self.assertEqual(summary["supervision_state"], "blocked_human")
+            self.assertEqual(summary["current_stage"], "assembly")
+            self.assertEqual(summary["route_trace"], ["inventory_stage", "read_qc_stage"])
+            self.assertEqual(summary["decision_requirements"]["stage"], "assembly")
+            self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
 
     def test_inspect_session_reports_durable_timeout_status(self):
         state = _assembly_blocked_state()

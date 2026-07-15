@@ -9,8 +9,10 @@ from typing import Any
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
 from app.storage.publish import shell_publish_file
+from app.schemas.artifacts import ASSEMBLY_PARAMETER_COMMAND
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
+from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
 from app.stages.assembly.constants import NEXTDENOVO_METHOD
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
@@ -18,10 +20,14 @@ from app.stages.assembly.method_application.lifecycle import (
     blocked_parameters,
     build_method_graph,
     collect_method_artifacts,
+    current_parameter_attempt,
     fail_update,
     positive_int,
+    update_current_parameter_attempt,
     update_assembly_output,
+    write_parameter_attempt_json_artifact,
 )
+from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
 
 
@@ -70,15 +76,39 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     if env_blocked is not None:
         return update_assembly_output(state, env_blocked)
 
-    working_dir = data_dir / "work" / "assembly" / session_id / "nextdenovo"
+    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
+    working_dir = data_dir / "work" / "assembly" / session_id / attempt_scope / "nextdenovo"
     nextdenovo_work_dir = working_dir / "nextdenovo_work"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / "nextdenovo"
+    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "nextdenovo"
     working_dir.mkdir(parents=True, exist_ok=True)
     nextdenovo_work_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
     run_cfg = working_dir / "run.cfg"
     script = working_dir / "run_nextdenovo.sh"
+    catalog, catalog_error = _load_catalog()
+    if catalog_error:
+        return fail_update(state, catalog_error)
+    recommended_params, recommended_error = _recommended_params(output)
+    if recommended_error:
+        return fail_update(state, recommended_error)
+    try:
+        parameter_sources = build_parameter_sources(
+            method_id=NEXTDENOVO_METHOD,
+            catalog=catalog,
+            state=state,
+            assembly_out=output,
+            attempt_id=parameter_attempt_id,
+            recommended_params=recommended_params,
+            execution_context={
+                "input_fofn": str(fofn),
+                "work_dir": str(nextdenovo_work_dir),
+            },
+        )
+        params = _merge_catalog_sources(parameter_sources, catalog)
+    except ParameterCommandError as exc:
+        return fail_update(state, f"NextDenovo parameter sources are invalid: {exc}")
     run_cfg.write_text(_run_cfg(nextdenovo_work_dir, fofn, **params), encoding="utf-8")
     candidates = [
         nextdenovo_work_dir / "03.ctg_graph" / "nd.asm.fasta",
@@ -98,8 +128,29 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script.chmod(0o755)
+    argv = ["nextDenovo", str(run_cfg)]
+    command_ref = write_parameter_attempt_json_artifact(
+        state,
+        parameter_attempt_id,
+        "command.json",
+        {
+            "attempt_id": parameter_attempt_id,
+            "method_id": NEXTDENOVO_METHOD,
+            "argv": argv,
+            "command": " ".join(shlex.quote(arg) for arg in argv),
+            "script_path": str(script),
+            "working_dir": str(working_dir),
+            "run_cfg": str(run_cfg),
+            "nextdenovo_work_dir": str(nextdenovo_work_dir),
+            "draft_assembly_path": str(draft),
+            "parameter_sources": parameter_sources,
+            "rendered_parameters": params,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_COMMAND,
+        method_name=NEXTDENOVO_METHOD,
+    )
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:nextdenovo",
+        attempt_id=f"{session_id}:assembly:nextdenovo:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
         stage="assembly",
         method_name=NEXTDENOVO_METHOD,
@@ -115,11 +166,27 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
             "read_paths": [str(path) for path in read_paths],
             "read_profile": params["read_type"],
             **params,
+            "parameter_sources": parameter_sources,
+            "rendered_parameters": params,
+            "argv": argv,
             "run_cfg": str(run_cfg),
             "nextdenovo_work_dir": str(nextdenovo_work_dir),
             "draft_assembly_path": str(draft),
+            "parameter_attempt_id": parameter_attempt_id,
         },
     )
+    parameter_attempts, attempt_error = update_current_parameter_attempt(
+        output,
+        method_id=NEXTDENOVO_METHOD,
+        label="NextDenovo",
+        status="frozen",
+        parameter_sources=parameter_sources,
+        rendered_parameters=params,
+        argv=argv,
+        command_ref=command_ref.model_dump(mode="json"),
+    )
+    if attempt_error:
+        return fail_update(state, attempt_error)
     return update_assembly_output(
         state,
         {
@@ -128,6 +195,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
             "nextdenovo_run_cfg_path": str(run_cfg),
             "nextdenovo_work_dir": str(nextdenovo_work_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
+            "parameter_attempts": parameter_attempts,
         },
     )
 
@@ -176,20 +244,85 @@ def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
         missing.append("nextdenovo_parameters.read_type")
     elif read_type not in _READ_TYPES:
         invalid.append({"param": "nextdenovo_parameters.read_type", "value": read_type, "accepted": sorted(_READ_TYPES)})
-    genome_size = positive_int(params.get("genome_size", output.get("genome_size_prior")), "nextdenovo_parameters.genome_size", missing, invalid)
-    threads = positive_int(params.get("threads"), "nextdenovo_parameters.threads", missing, invalid)
-    read_cutoff = positive_int(params.get("read_cutoff", 1000), "nextdenovo_parameters.read_cutoff", missing, invalid)
+    resolved_genome_size = dict(output.get("resolved_genome_size") or {})
+    genome_size = positive_int(resolved_genome_size.get("value_bp"), "nextdenovo_parameters.genome_size", missing, invalid)
+    threads_value = params.get("threads")
+    if threads_value is None:
+        threads_value = 32
+    threads = positive_int(threads_value, "nextdenovo_parameters.threads", missing, invalid)
     if missing or invalid:
         return {}, blocked_parameters("nextdenovo_parameters", NEXTDENOVO_METHOD, missing, invalid)
-    return {"read_type": str(read_type), "genome_size": genome_size, "threads": threads, "read_cutoff": read_cutoff}, None
+    return {"read_type": str(read_type), "genome_size": genome_size, "threads": threads}, None
 
 
-def _run_cfg(work_dir: Path, input_fofn: Path, *, read_type: str, genome_size: int, threads: int, read_cutoff: int) -> str:
+def _load_catalog():
+    try:
+        return load_parameter_catalog(NEXTDENOVO_METHOD), None
+    except (FileNotFoundError, ValueError) as exc:
+        return None, f"NextDenovo parameter catalog is not usable: {exc}"
+
+
+def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    attempt, error = current_parameter_attempt(output, method_id=NEXTDENOVO_METHOD, label="NextDenovo")
+    if error:
+        return {}, error
+    assert attempt is not None
+    return dict(attempt.execution_params), None
+
+
+def _merge_catalog_sources(parameter_sources: dict[str, dict[str, Any]], catalog) -> dict[str, Any]:
+    validate_parameter_sources(catalog, parameter_sources)
+    merged: dict[str, Any] = {}
+    for group_name in ("l0_fixed", "l1_readonly", "l2_recommended"):
+        merged.update(parameter_sources.get(group_name) or {})
+    for key, spec in catalog.parameters.items():
+        if spec.level == 2 and key not in merged and spec.default is not None:
+            merged[key] = spec.default
+    return {
+        "read_type": _required_string(merged, "read_type"),
+        "genome_size": _required_int(merged, "genome_size"),
+        "threads": _required_int(merged, "threads"),
+        "read_cutoff": _required_int(merged, "read_cutoff"),
+        "nextgraph_a": _required_int(merged, "nextgraph_a"),
+    }
+
+
+def _required_string(merged: dict[str, Any], key: str) -> str:
+    try:
+        value = merged[key]
+    except KeyError as exc:
+        raise ParameterCommandError(f"Missing rendered parameter: {key}") from exc
+    if not isinstance(value, str) or not value:
+        raise ParameterCommandError(f"{key} must be a non-empty string, got {value!r}")
+    return value
+
+
+def _required_int(merged: dict[str, Any], key: str) -> int:
+    try:
+        value = merged[key]
+    except KeyError as exc:
+        raise ParameterCommandError(f"Missing rendered parameter: {key}") from exc
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ParameterCommandError(f"{key} must be an integer, got {value!r}") from exc
+
+
+def _run_cfg(
+    work_dir: Path,
+    input_fofn: Path,
+    *,
+    read_type: str,
+    genome_size: int,
+    threads: int,
+    read_cutoff: int,
+    nextgraph_a: int,
+) -> str:
     return (
         "[General]\njob_type = local\njob_prefix = nextdenovo\ntask = all\nrewrite = yes\ndeltmp = yes\n"
         f"parallel_jobs = {threads}\ninput_type = raw\nread_type = {read_type}\ninput_fofn = {input_fofn}\nworkdir = {work_dir}\n\n"
         "[correct_option]\n"
         f"read_cutoff = {read_cutoff}\ngenome_size = {genome_size}\nsort_options = -m 1g -t {threads}\n"
         f"minimap2_options_raw = -t {threads}\npa_correction = 3\ncorrection_options = -p {threads}\n\n"
-        f"[assemble_option]\nminimap2_options_cns = -t {threads}\nnextgraph_options = -a 1\n"
+        f"[assemble_option]\nminimap2_options_cns = -t {threads}\nnextgraph_options = -a {nextgraph_a}\n"
     )

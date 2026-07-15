@@ -19,3 +19,5 @@ resource_hints:
   memory_gb: 1.0
   gpu_required: false
   walltime_hours: 1.0
+planner:
+  selection_role: always

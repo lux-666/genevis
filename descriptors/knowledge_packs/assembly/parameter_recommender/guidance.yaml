@@ -1,0 +1,94 @@
+guidance:
+  - guidance_id: hifiasm.connectivity.low_coverage.v1
+    methods: [hifiasm, hifiasm_ont]
+    parameters:
+      - max_overlaps_per_read
+      - high_freq_kmer_drop
+      - min_overlap_drop_ratio
+      - max_overlap_drop_ratio
+    relevant_metrics:
+      - read_qc.raw_coverage
+      - read_qc.read_n50
+    guidance: >-
+      Low effective read coverage leaves fewer supported overlaps and can make
+      the assembly graph fragile. Consider overlap retention, high-frequency
+      seed filtering, and graph cleaning together so that filtering does not
+      remove the limited connectivity still supported by the reads.
+    caveats:
+      - Low coverage cannot always be repaired by parameter tuning; additional data may be needed.
+      - Read length and quality determine whether nominal coverage contributes useful overlaps.
+
+  - guidance_id: hifiasm.purging.heterozygosity.v1
+    methods: [hifiasm, hifiasm_ont]
+    parameters:
+      - purge_level
+      - purge_similarity
+      - purge_max
+    relevant_metrics:
+      - genome_survey.heterozygosity
+      - genome_survey.repeat_fraction
+    guidance: >-
+      Heterozygous sequence and duplicated sequence can produce similar graph
+      signals. Consider purging settings as a group, balancing removal of true
+      duplicate haplotigs against preservation of genuine haplotype divergence.
+    caveats:
+      - Genome-survey estimates are population-level summaries and may not describe every locus.
+      - Initial recommendations should remain conservative when no assembly review is available.
+
+  - guidance_id: hifiasm.repeats.graph_handling.v1
+    methods: [hifiasm, hifiasm_ont]
+    parameters:
+      - kmer_length
+      - high_freq_kmer_drop
+      - max_overlaps_per_read
+      - assembly_cleaning_rounds
+    relevant_metrics:
+      - genome_survey.repeat_fraction
+      - read_qc.raw_coverage
+      - read_qc.read_n50
+    guidance: >-
+      Repeat-rich samples can create high-frequency seeds, ambiguous overlaps,
+      and complex graph structures. Interpret seed frequency controls, overlap
+      retention, and graph cleaning jointly rather than treating any one knob
+      as a complete repeat-resolution strategy.
+    caveats:
+      - A global repeat fraction does not identify the lengths or identities of the repeats.
+      - Aggressive filtering or cleaning can also remove valid low-support sequence.
+
+  - guidance_id: hifiasm.retry.over_purging.v1
+    methods: [hifiasm, hifiasm_ont]
+    parameters:
+      - purge_level
+      - purge_similarity
+      - purge_max
+    relevant_metrics:
+      - assembly_review.assembly_size_ratio
+      - assembly_review.busco_missing
+      - previous_attempt.params.purge_level
+      - previous_attempt.params.purge_similarity
+    guidance: >-
+      When review indicates that the previous assembly may have removed genuine
+      sequence, reconsider the aggressiveness of the previous purging settings
+      and change only the smallest coherent group of related parameters.
+    caveats:
+      - Small assembly size or missing genes can also result from low coverage, contamination filtering, or fragmentation.
+      - Diagnose the failure mode before attributing it to purging.
+
+  - guidance_id: hifiasm.retry.under_purging.v1
+    methods: [hifiasm, hifiasm_ont]
+    parameters:
+      - purge_level
+      - purge_similarity
+      - purge_max
+    relevant_metrics:
+      - assembly_review.assembly_size_ratio
+      - assembly_review.busco_duplicate
+      - previous_attempt.params.purge_level
+      - previous_attempt.params.purge_similarity
+    guidance: >-
+      When review indicates retained haplotig duplication, reconsider the
+      previous purging settings as a connected group and use the observed
+      quality signals to justify a focused retry patch.
+    caveats:
+      - Biological duplication and polyploidy can resemble under-purging.
+      - Increased assembly size or duplicated BUSCO alone is not a sufficient diagnosis.

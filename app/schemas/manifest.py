@@ -7,7 +7,6 @@ assets without transforming the files.
 
 from __future__ import annotations
 
-import gzip
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -68,7 +67,7 @@ class InputManifest(BaseModel):
     assets: list[InputAssetSpec] = Field(default_factory=list)
     user_metadata: dict[str, Any] = Field(default_factory=dict)
     target_assembly_level: Literal["contig", "scaffold", "chromosome"] = "contig"
-    genome_size_estimate: int | None = None
+    genome_size_estimate: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _detect_ambiguous_long_reads(self):

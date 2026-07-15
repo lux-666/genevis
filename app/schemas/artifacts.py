@@ -5,9 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
@@ -19,6 +27,17 @@ GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
+ASSEMBLY_PARAMETER_INPUT_PROFILE = "assembly.parameter.input_profile"
+ASSEMBLY_PARAMETER_PROMPT_PAYLOAD = "assembly.parameter.prompt_payload"
+ASSEMBLY_PARAMETER_RETRIEVAL_QUERY = "assembly.parameter.retrieval_query"
+ASSEMBLY_PARAMETER_RETRIEVAL_TRACE = "assembly.parameter.retrieval_trace"
+ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
+ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
+ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
+ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
+ASSEMBLY_PARAMETER_REVIEW_FAILURE = "assembly.parameter.review_failure"
+ASSEMBLY_PARAMETER_RECOMMENDATION = "assembly.parameter.recommendation"
+ASSEMBLY_PARAMETER_APPROVAL_DECISION = "assembly.parameter_approval.decision"
 ASSEMBLY_REVIEW_EVAL_BUNDLE = "assembly_review.eval_bundle"
 ASSEMBLY_REVIEW_QUAST_REPORT_TSV = "assembly_review.quast_report_tsv"
 ASSEMBLY_REVIEW_QUAST_REPORT_TXT = "assembly_review.quast_report_txt"
@@ -98,6 +117,138 @@ class ArtifactMeta(BaseModel):
         )
 
 
+class ArtifactRef(BaseModel):
+    """Path ref plus integrity hash for a runtime artifact."""
+
+    path_ref: str
+    sha256: str
+    artifact_type: str
+
+
+ParameterAttemptStatus = Literal[
+    "recommended",
+    "validation_failed",
+    "parameters_recommended",
+    "frozen",
+    "execution_failed",
+    "executed",
+]
+ParameterAttemptTask = Literal[
+    "recommend_initial",
+    "retry_after_execution_failure",
+    "retry_after_review_failure",
+]
+ParameterFailureClass = Annotated[str, Field(min_length=1)]
+
+
+class ParameterAttempt(BaseModel):
+    """Compact replay record for one assembly parameter recommendation attempt."""
+
+    # Attempt artifacts are durable and can outlive the code that produced them.
+    # Preserve fields added by newer producers instead of silently dropping them
+    # during validation and sealing on an older runtime.
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: Literal[1] | None = None
+    attempt_id: int = Field(ge=0)
+    method_id: str = Field(min_length=1)
+    status: ParameterAttemptStatus
+    task: ParameterAttemptTask | None = None
+    input_profile_ref: ArtifactRef
+    prompt_payload_ref: ArtifactRef
+    retrieval_backend: str | None = None
+    retrieval_query_id: str | None = None
+    retrieval_candidate_case_ids: list[str] = Field(default_factory=list)
+    retrieval_eligible_case_count: int | None = Field(default=None, ge=0)
+    retrieval_warning: str | None = None
+    llm_response_ref: ArtifactRef | None = None
+    validation_ref: ArtifactRef | None = None
+    command_ref: ArtifactRef | None = None
+    review_failure_ref: ArtifactRef | None = None
+    catalog_ref: str | None = None
+    catalog_snapshot: dict[str, Any] | None = None
+    knowledge_pack_ref: str | None = None
+    selected_case_ids: list[str] = Field(default_factory=list)
+    recommended_params: dict[str, Any] = Field(default_factory=dict)
+    baseline_params: dict[str, Any] = Field(default_factory=dict)
+    effective_params: dict[str, Any] = Field(default_factory=dict)
+    execution_params: dict[str, Any] = Field(default_factory=dict)
+    parameter_reasoning: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    sample_diagnosis: dict[str, Any] = Field(default_factory=dict)
+    proposed_parameter_changes: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    recommendation_summary: str | None = None
+    parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    rendered_parameters: dict[str, Any] = Field(default_factory=dict)
+    argv: list[str] = Field(default_factory=list)
+    validation: dict[str, Any] = Field(default_factory=dict)
+    reasoning: str | None = None
+    previous_attempt_id: int | None = Field(default=None, ge=0)
+    failure_signature: dict[str, Any] | None = None
+    execution_result: dict[str, Any] | None = None
+    failure_class: ParameterFailureClass | None = None
+    failure_log_tail: str | None = None
+    stderr_tail: str | None = None
+    stdout_tail: str | None = None
+    review_failure: dict[str, Any] | None = None
+    review_outcome: dict[str, Any] | None = None
+    attempt_kind: Literal["initial", "retry"] = "initial"
+    recommendation_contract: Literal["parameter_patch_v2", "literature_patch_v1"] = "parameter_patch_v2"
+    retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
+    inherited_initial_attempt_id: int | None = Field(default=None, ge=0)
+    inherited_initial_snapshot_ref: str | None = None
+    inherited_profile_ref: ArtifactRef | None = None
+    previous_attempt_seal_hash: str | None = None
+    parameter_recommendation_ref: ArtifactRef | None = None
+    parameter_recommendation_hash: str | None = None
+    parameter_approval_decision_ref: ArtifactRef | None = None
+    parameter_approval_recommendation_hash: str | None = None
+    sealed_at: str | None = None
+    seal_hash: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_parameter_attempt(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Keep unversioned legacy records unversioned during round trips."""
+
+        data: dict[str, Any] = handler(self)
+        if self.schema_version is None:
+            data.pop("schema_version", None)
+        return data
+
+    @model_validator(mode="after")
+    def validate_attempt_kind_for_task(self) -> "ParameterAttempt":
+        """Reject explicit task/lifecycle contradictions without breaking legacy records."""
+
+        if self.task is None:
+            return self
+
+        expected_kind = "initial" if self.task == "recommend_initial" else "retry"
+        if "attempt_kind" in self.model_fields_set and self.attempt_kind != expected_kind:
+            raise ValueError(
+                f"task {self.task!r} requires attempt_kind {expected_kind!r}"
+            )
+
+        expected_origin = {
+            "retry_after_execution_failure": "assembly_execution",
+            "retry_after_review_failure": "assembly_review",
+        }.get(self.task)
+        if "retry_origin" in self.model_fields_set and self.retry_origin != expected_origin:
+            raise ValueError(
+                f"task {self.task!r} requires retry_origin {expected_origin!r}"
+            )
+        return self
+
+
+class AssemblyParameterLoopState(BaseModel):
+    """Typed compact state for Phase10 parameter-loop control."""
+
+    current_parameter_attempt_id: int = 0
+    parameter_attempts: list[ParameterAttempt] = Field(default_factory=list)
+    retry_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class GenomeSurveyResult(BaseModel):
     """Compact genome survey contract written by the genome_survey stage."""
 
@@ -108,6 +259,13 @@ class GenomeSurveyResult(BaseModel):
     input_asset_refs: list[str] = Field(default_factory=list)
     candidate_methods: list[str] = Field(default_factory=list)
     estimates: dict[str, Any] = Field(default_factory=dict)
+    measured_estimates: dict[str, Any] = Field(default_factory=dict)
+    provided_overrides: dict[str, Any] = Field(default_factory=dict)
+    estimate_sources: dict[str, Literal["provided", "survey"]] = Field(default_factory=dict)
+    estimate_source_paths: dict[str, str] = Field(default_factory=dict)
+    genome_size_prior: int | None = Field(default=None, gt=0)
+    genome_size_source: Literal["provided", "survey"] | None = None
+    genome_size_source_path: str | None = None
     skip_reason: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

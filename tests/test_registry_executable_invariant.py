@@ -5,13 +5,13 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.stages.assembly.constants import ASSEMBLY_CANDIDATES
 from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
 from app.stages.function_annotation.nodes import FUNCTION_EXECUTABLE_METHODS
-from app.entrypoints.ask_planner import _GENOME_SURVEY_EXECUTABLE_METHODS
+from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
 
 WIRED_RUNNERS = set().union(
     set(GENE_EXECUTABLE_METHODS),
     set(FUNCTION_EXECUTABLE_METHODS),
     set(ASSEMBLY_CANDIDATES),
-    set(_GENOME_SURVEY_EXECUTABLE_METHODS),
+    set(GENOME_SURVEY_EXECUTABLE_METHODS),
     {
         "assembly_dedup.purge_dups",
         "assembly_review.eval.quast",
@@ -29,6 +29,11 @@ WIRED_RUNNERS = set().union(
 
 class RegistryExecutableInvariantTests(unittest.TestCase):
     def test_every_registered_method_has_a_wired_runner(self):
-        registry = set(DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods)
+        descriptor_registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+        registry = {
+            method_name
+            for method_name, descriptor in descriptor_registry.methods.items()
+            if descriptor.planner.execution_kind == "local"
+        }
         self.assertEqual(registry - WIRED_RUNNERS, set(), "registry methods with no wired runner")
         self.assertEqual(WIRED_RUNNERS - registry, set(), "wired runners with no registry descriptor")

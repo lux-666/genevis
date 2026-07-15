@@ -22,6 +22,12 @@ source common.sh
 
 section "Test 05: Assembly Review"
 
+# ---- Lightweight TUI/HPC smoke ----
+cd "${PROJECT_ROOT}"
+python3 -m app.entrypoints.run tui --help 2>&1 && \
+    pass "tui entrypoint help" || fail "tui entrypoint help"
+cd "${SCRIPT_DIR}"
+
 # ---- Check for NCBI Metazoa reference data ----
 info "Checking NCBI Metazoa reference data"
 REF_DIR="${PROJECT_ROOT}/data/reference/ncbi_metazoa"
@@ -32,6 +38,10 @@ if [[ -f "${REF_DIR}/Metazoa.ncbi.tsv" && -f "${REF_DIR}/Metazoa.ncbi.lineage" \
     assert_file_exists "${REF_DIR}/reference_manifest.json" "reference_manifest.json"
     pass "NCBI Metazoa reference data is installed"
     REFERENCE_READY=true
+elif [[ -n "${NCBI_REFERENCE_SOURCE_DIR:-}" && ! -d "${NCBI_REFERENCE_SOURCE_DIR}" ]]; then
+    fail "NCBI_REFERENCE_SOURCE_DIR does not exist: ${NCBI_REFERENCE_SOURCE_DIR}"
+    summary "Test 05: Assembly Review (invalid reference source)" || true
+    exit 1
 elif [[ -n "${NCBI_REFERENCE_SOURCE_DIR:-}" ]]; then
     info "Installing NCBI Metazoa reference from: ${NCBI_REFERENCE_SOURCE_DIR}"
     cd "${PROJECT_ROOT}"
@@ -50,19 +60,19 @@ fi
 if [[ "${RUN_UNIT_TESTS:-true}" == "true" ]]; then
     cd "${PROJECT_ROOT}"
     info "Running unit tests: test_assembly_review.py"
-    python3 -m pytest tests/test_assembly_review.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_assembly_review.py -v --tb=short 2>&1 && \
         pass "unit tests: test_assembly_review.py" || fail "unit tests: test_assembly_review.py"
 
     if [[ "${REFERENCE_READY}" == "true" ]]; then
         info "Running unit tests: test_related_species_evidence.py"
-        python3 -m pytest tests/test_related_species_evidence.py -v --tb=short 2>&1 && \
+        run_pytest tests/test_related_species_evidence.py -v --tb=short 2>&1 && \
             pass "unit tests: test_related_species_evidence.py" || fail "unit tests: test_related_species_evidence.py"
     else
         warn "Skipping test_related_species_evidence.py because the pinned NCBI snapshot is unavailable"
     fi
 
     info "Running unit tests: test_review_recommender.py"
-    python3 -m pytest tests/test_review_recommender.py -v --tb=short 2>&1 && \
+    run_pytest tests/test_review_recommender.py -v --tb=short 2>&1 && \
         pass "unit tests: test_review_recommender.py" || fail "unit tests: test_review_recommender.py"
     cd "${SCRIPT_DIR}"
 fi
@@ -71,23 +81,28 @@ fi
 # Prefer an explicitly configured review assembly; otherwise use the preferred
 # artifact from the newest Test 04 session, then any existing assembly artifact.
 PREV_ASM="${REVIEW_ASSEMBLY:-}"
-if [[ -n "$PREV_ASM" && ! -f "$PREV_ASM" ]]; then
-    fail "REVIEW_ASSEMBLY does not exist: ${PREV_ASM}"
-    summary "Test 05: Assembly Review (SKIPPED - invalid REVIEW_ASSEMBLY)"
-    exit 0
+if [[ -n "$PREV_ASM" && ! -s "$PREV_ASM" ]]; then
+    fail "REVIEW_ASSEMBLY is missing or empty: ${PREV_ASM}"
+    summary "Test 05: Assembly Review (invalid REVIEW_ASSEMBLY)" || true
+    exit 1
+fi
+if [[ -n "$PREV_ASM" ]] && ! grep -q '^>' "$PREV_ASM" 2>/dev/null; then
+    fail "REVIEW_ASSEMBLY is not a FASTA file: ${PREV_ASM}"
+    summary "Test 05: Assembly Review (invalid REVIEW_ASSEMBLY)" || true
+    exit 1
 fi
 if [[ -z "$PREV_ASM" ]]; then
     PREV_ASM=$(latest_test04_assembly || true)
 fi
-# Also check any *.fasta in assembly dirs
+# Fall back to another validated smoke/E2E assembly.
 if [[ -z "$PREV_ASM" ]]; then
-    PREV_ASM=$(find "${TEST_DATA_ROOT}/runs" -path "*/assembly*/*.fasta" 2>/dev/null | head -1 || true)
+    PREV_ASM=$(latest_hpc_assembly || true)
 fi
 
-if [[ -z "$PREV_ASM" || ! -f "$PREV_ASM" ]]; then
-    fail "No assembly FASTA found from Test 04. Run test_04 first or provide your own."
-    summary "Test 05: Assembly Review (SKIPPED - no assembly)"
-    exit 0
+if [[ -z "$PREV_ASM" || ! -s "$PREV_ASM" ]] || ! grep -q '^>' "$PREV_ASM" 2>/dev/null; then
+    info "[SKIP] No assembly FASTA is available yet."
+    info "Test 04 may be waiting at a human gate; resume that session first, or set REVIEW_ASSEMBLY."
+    exit 77
 fi
 info "Using assembly: ${PREV_ASM}"
 SEQ_COUNT=$(count_fasta_seqs "$PREV_ASM")
@@ -264,11 +279,17 @@ fi
 # ---- Test gene-agent review --dry-run ----
 info "Testing review dry-run"
 cd "${PROJECT_ROOT}"
-GA review \
+if printf '1\n\n' | python3 -m app.entrypoints.run review \
     --session-id "$SID" \
     --data-dir "$TEST_DATA_ROOT" \
     --dry-run \
-    2>&1 && pass "review --dry-run succeeded" || warn "review --dry-run returned non-zero (may need different state)"
+    2>&1; then
+    pass "review --dry-run accepted a deterministic test decision"
+else
+    fail "review --dry-run failed for the blocked assembly_review gate"
+fi
+
+info "Manual TUI smoke step: run 'gene-agent tui --resume-session ${SID} --data-dir ${TEST_DATA_ROOT}', drive the blocked review gate, and record the operator decision."
 
 # ---- Inspect with trace ----
 cd "${PROJECT_ROOT}"

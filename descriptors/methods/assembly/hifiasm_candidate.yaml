@@ -1,6 +1,7 @@
 method_name: assembly.candidate.hifiasm
 stage: assembly
 package_ref: hifiasm
+parameter_catalog: hifiasm
 goal: "Plan and optionally execute a hifiasm assembly candidate for HiFi assembly routes."
 required_inputs:
   - name: long_reads
@@ -20,3 +21,8 @@ resource_hints:
   memory_gb: 128.0
   gpu_required: false
   walltime_hours: 48.0
+planner:
+  required_parameters:
+    - threads
+  parameter_defaults:
+    threads: 4

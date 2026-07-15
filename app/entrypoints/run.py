@@ -12,18 +12,29 @@ import os
 import re
 import shutil
 import sys
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Any, get_args
 
+from app.domains.assembly.selection import (
+    AssemblySelection,
+    default_primary_method,
+    read_type_from_method_parameters,
+    resolve_read_type,
+)
 from app.control.ledger import Ledger
 from app.schemas.entry import EntryRequest
+from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
 from app.schemas.run_config import (
+    AssemblyRunConfig,
     LocalExecStage,
     RunConfig,
+    infer_assembly_method,
     load_run_config,
+    validate_genome_size_execution_plan,
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
@@ -37,6 +48,80 @@ _ASSEMBLY_METHOD_NAMES = {
     "hifiasm": "assembly.candidate.hifiasm",
     "hifiasm_ont": "assembly.candidate.hifiasm_ont",
 }
+_ASSEMBLY_PARAMETER_ATTRS = {
+    "flye": "flye_parameters",
+    "nextdenovo": "nextdenovo_parameters",
+    "hifiasm": "hifiasm_parameters",
+    "hifiasm_ont": "hifiasm_ont_parameters",
+}
+
+
+def _assembly_parameter_dump(
+    assembly: AssemblyRunConfig,
+    method: str,
+) -> dict[str, Any] | None:
+    parameters = getattr(assembly, _ASSEMBLY_PARAMETER_ATTRS[method])
+    return parameters.model_dump(exclude_none=True) if parameters else None
+
+
+def _configured_assembly_parameter_items(assembly: AssemblyRunConfig):
+    for method in _ASSEMBLY_PARAMETER_ATTRS:
+        params = _assembly_parameter_dump(assembly, method)
+        if params:
+            yield method, params
+
+
+def _build_assembly_selection(
+    *,
+    assembly: AssemblyRunConfig,
+    shared_parameters: dict[str, Any] | None,
+    shared_platform: Any = None,
+) -> AssemblySelection | None:
+    assembly_method = infer_assembly_method(assembly)
+    if assembly_method:
+        read_type = resolve_read_type(
+            (
+                f"assembly.{assembly_method}_parameters.read_type",
+                read_type_from_method_parameters(assembly_method, _assembly_parameter_dump(assembly, assembly_method)),
+            ),
+            ("assembly.assembly_route", assembly.assembly_route),
+            ("shared_parameters.read_type", (shared_parameters or {}).get("read_type")),
+            ("shared_parameters.platform", None, shared_platform),
+            context="entrypoints.run.assembly_selection",
+        )
+        if read_type is None:
+            if assembly.assembly_method is not None:
+                raise ValueError(
+                    "run_config: assembly.assembly_method is set but no read_type could be inferred; "
+                    "set assembly.<method>_parameters.read_type, assembly.assembly_route, "
+                    "shared_parameters.read_type, or shared_parameters.platform"
+                )
+            return None
+        return AssemblySelection(
+            read_type=read_type,
+            primary_method=_ASSEMBLY_METHOD_NAMES[assembly_method],
+            source="run_config",
+            rationale="run_config explicitly selected assembly method",
+            parameter_overrides={
+                _ASSEMBLY_METHOD_NAMES[name]: params
+                for name, params in _configured_assembly_parameter_items(assembly)
+            },
+            metadata={"assembly_route": assembly.assembly_route},
+        )
+
+    if assembly.assembly_route == "auto":
+        return None
+
+    read_type = resolve_read_type(("assembly.assembly_route", assembly.assembly_route), context="entrypoints.run.assembly_route")
+    if read_type is None:
+        return None
+    return AssemblySelection(
+        read_type=read_type,
+        primary_method=default_primary_method(read_type),
+        source="run_config",
+        rationale="run_config provided legacy assembly_route read-type hint",
+        metadata={"assembly_route": assembly.assembly_route},
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -197,9 +282,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     tui_parser = subparsers.add_parser(
         "tui",
-        help="Interactive workflow launcher with automatic human-gate handling",
+        help="Launch a workflow or interactively review a blocked session",
     )
     tui_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    tui_parser.add_argument(
+        "--resume-session",
+        default=None,
+        metavar="SESSION_ID",
+        help="Attach to one blocked durable workflow session and review its active gate",
+    )
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
@@ -339,7 +430,10 @@ def _run_session(args: argparse.Namespace) -> int:
     if "assembly" in local_stages:
         try:
             validate_local_assembly_execution(run_config.assembly if run_config else None)
-        except ValueError as exc:
+            manifest = InputManifest.model_validate(yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {})
+            assert run_config is not None
+            validate_genome_size_execution_plan(run_config, manifest, local_stages=local_stages)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     # From this point on every runtime writer receives the session-local
@@ -387,33 +481,29 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["repeat_annotation"] = repeat_out
     if run_config and run_config.assembly:
         assembly_out = dict(stage_outputs.get("assembly") or {})
-        assembly_method = run_config.assembly.assembly_method
-        if assembly_method is None:
-            provided_methods = [
-                method
-                for method, params in [
-                    ("flye", run_config.assembly.flye_parameters),
-                    ("nextdenovo", run_config.assembly.nextdenovo_parameters),
-                    ("hifiasm", run_config.assembly.hifiasm_parameters),
-                    ("hifiasm_ont", run_config.assembly.hifiasm_ont_parameters),
-                ]
-                if params is not None
-            ]
-            if len(provided_methods) == 1:
-                assembly_method = provided_methods[0]
-        if assembly_method:
+        try:
+            selection = _build_assembly_selection(
+                assembly=run_config.assembly,
+                shared_parameters=state.get("shared_parameters"),
+                shared_platform=(run_config.shared_parameters.platform if run_config.shared_parameters else None),
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if selection:
+            assembly_out["assembly_selection"] = selection.model_dump(mode="json")
             assembly_out["method_decision"] = {
-                **dict(assembly_out.get("method_decision") or {}),
-                "primary": _ASSEMBLY_METHOD_NAMES[assembly_method],
+                "primary": selection.primary_method,
+                "source": "run_config_explicit",
             }
         if run_config.assembly.flye_parameters:
-            assembly_out["flye_parameters"] = run_config.assembly.flye_parameters.model_dump(exclude_none=True)
+            assembly_out["flye_parameters"] = _assembly_parameter_dump(run_config.assembly, "flye")
         if run_config.assembly.nextdenovo_parameters:
-            assembly_out["nextdenovo_parameters"] = run_config.assembly.nextdenovo_parameters.model_dump(exclude_none=True)
+            assembly_out["nextdenovo_parameters"] = _assembly_parameter_dump(run_config.assembly, "nextdenovo")
         if run_config.assembly.hifiasm_parameters:
-            assembly_out["hifiasm_parameters"] = run_config.assembly.hifiasm_parameters.model_dump(exclude_none=True)
+            assembly_out["hifiasm_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm")
         if run_config.assembly.hifiasm_ont_parameters:
-            assembly_out["hifiasm_ont_parameters"] = run_config.assembly.hifiasm_ont_parameters.model_dump(exclude_none=True)
+            assembly_out["hifiasm_ont_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm_ont")
         for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
             value = getattr(run_config.assembly, key)
             if value is not None:
@@ -473,7 +563,45 @@ def _run_session(args: argparse.Namespace) -> int:
 
     graph = build_graph(backend=backend, data_dir=request.data_dir)
     config = {"configurable": {"thread_id": request.session_id}}
-    result = graph.invoke(state, config=config)
+    try:
+        result = graph.invoke(state, config=config)
+    except Exception as exc:
+        # A stage bug must still leave an operator-readable durable terminal
+        # record.  Prefer the latest checkpoint values because the in-memory
+        # initial state may be several stages behind the node that raised.
+        latest_state = dict(state)
+        try:
+            snapshot = graph.get_state(config)
+            snapshot_values = getattr(snapshot, "values", None)
+            if isinstance(snapshot_values, dict):
+                latest_state.update(snapshot_values)
+        except Exception:
+            # Failure reporting must not hide the original graph exception when
+            # a backend cannot expose a checkpoint snapshot.
+            pass
+        error = f"{type(exc).__name__}: {exc}"
+        failure_result = {
+            **latest_state,
+            "session_id": request.session_id,
+            "data_dir": request.data_dir,
+            "input_manifest_ref": str(manifest_path),
+            "supervision_state": "failed_terminal",
+            "last_error": error,
+            "checkpoint_persistence": backend,
+        }
+        Ledger(request.data_dir).record_event(
+            request.session_id,
+            "run_failed",
+            {
+                "current_stage": failure_result.get("current_stage"),
+                "error": error,
+            },
+        )
+        from app.reports.review_report import write_operator_report
+
+        write_operator_report(request.data_dir, request.session_id, failure_result)
+        print(f"error: workflow invoke failed: {error}", file=sys.stderr)
+        return 1
 
     interactive_gate = getattr(args, "_interactive_gate", None)
     if interactive_gate is None:
@@ -1152,7 +1280,7 @@ def _run_tui(args: argparse.Namespace) -> int:
     from app.entrypoints.tui import run_tui
 
     data_dir = _resolve_data_dir(args.data_dir)
-    return run_tui(data_dir)
+    return run_tui(data_dir, resume_session=getattr(args, "resume_session", None))
 
 
 def _run_bootstrap(args: argparse.Namespace) -> int:

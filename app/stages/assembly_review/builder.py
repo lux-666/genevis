@@ -18,11 +18,13 @@ from app.stages.assembly_review.nodes import (
     fail_assembly_review,
     generate_candidate_comparison,
     human_review_gate,
+    parameter_quality_gate,
     plan_review_metrics,
     resolve_candidates,
 )
 from app.stages.assembly_review.routing import (
     route_after_comparison,
+    route_after_parameter_quality_gate,
     route_after_plan_metrics,
     route_after_busco,
     route_after_quast,
@@ -40,6 +42,7 @@ def build_stage():
     graph.add_node("quast", build_quast_graph())
     graph.add_node("busco", build_busco_graph())
     graph.add_node("evaluate_rules", evaluate_review_rules)
+    graph.add_node("parameter_quality_gate", parameter_quality_gate)
     graph.add_node("related_species_sanity_check", build_related_species_evidence_pack)
     graph.add_node("related_species_statistics", build_related_species_statistics_and_notebook)
     graph.add_node("generate_comparison", generate_candidate_comparison)
@@ -68,7 +71,24 @@ def build_stage():
         route_after_busco,
         {"evaluate_rules": "evaluate_rules", "fail": "fail"},
     )
-    graph.add_edge("evaluate_rules", "related_species_sanity_check")
+    graph.add_conditional_edges(
+        "evaluate_rules",
+        route_after_parameter_quality_gate,
+        {
+            "parameter_quality_gate": "parameter_quality_gate",
+            "related_species_sanity_check": "related_species_sanity_check",
+            "fail": "fail",
+        },
+    )
+    graph.add_conditional_edges(
+        "parameter_quality_gate",
+        route_after_parameter_quality_gate,
+        {
+            "replan": END,
+            "related_species_sanity_check": "related_species_sanity_check",
+            "fail": "fail",
+        },
+    )
     graph.add_edge("related_species_sanity_check", "related_species_statistics")
     graph.add_conditional_edges(
         "related_species_statistics",

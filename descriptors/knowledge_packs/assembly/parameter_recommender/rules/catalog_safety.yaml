@@ -1,0 +1,21 @@
+rules:
+  - rule_id: kmer_length_hifiasm_upper_bound
+    condition: {}
+    constraints:
+      kmer_length:
+        max: 63
+    reason: "hifiasm k-mer length must remain below 64."
+
+  - rule_id: nonzero_overlap_cap
+    condition: {}
+    constraints:
+      max_overlaps_per_read:
+        min: 1
+    reason: "An overlap cap below 1 is invalid for hifiasm overlap selection."
+
+  - rule_id: adapter_trim_nonnegative
+    condition: {}
+    constraints:
+      adapter_trim_length:
+        min: 0
+    reason: "Adapter trim length cannot be negative."

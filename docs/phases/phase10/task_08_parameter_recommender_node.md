@@ -1,10 +1,10 @@
 # Task 8: Implement Parameter Recommender Node
 
 **Phase**: 10
-**Status**: Pending
+**Status**: Implemented for hifiasm/hifiasm_ont main assembly flow
 **Depends on**: Tasks 1-7
 **Created**: 2026-07-02
-**Updated**: 2026-07-03
+**Updated**: 2026-07-06
 
 ## Goal
 
@@ -25,6 +25,14 @@ The node must support three modes:
 
 For the MVP, the node must expose the full L2 surface from the selected method catalog. It may let the LLM omit parameters in its response, but it must not pre-filter L2 parameters down to a hand-picked subset.
 
+This task is also the cleanup point for scattered LLM decision calls in the
+assembly stage. Do not add another stage-local `build_chat_model().invoke(...)`
+helper. Create a shared decision/advisor boundary for assembly decisions and
+move the existing route-selection LLM call behind it while adding parameter
+recommendation. The stage graph should receive typed decision artifacts, not
+own prompt rendering, model invocation, JSON parsing, validation, and artifact
+writing in one node.
+
 ## Node API
 
 ```python
@@ -32,12 +40,26 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     """Recommend L2 parameters and append a replayable parameter attempt."""
 ```
 
+The node may delegate to a shared decision service, but the public graph node
+must remain deterministic around state transitions:
+
+```python
+def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecisionResult:
+    """Render prompt, call model, validate structured output, and write artifacts."""
+```
+
+Use one request/result schema family for route selection and parameter
+recommendation. Delete the older assembly-local route selector invocation after
+the shared path is wired; do not leave compatibility wrappers that preserve both
+decision paths.
+
 ## Inputs From State
 
 Assembly output should provide:
 
 - selected route / primary method,
-- input profile ref,
+- full parameter profile ref,
+- prompt profile for the current recommendation task,
 - read_qc summary refs or embedded summaries,
 - genome_survey result ref or embedded estimates,
 - current attempt id,
@@ -60,14 +82,29 @@ Use selected primary method when available. Route fallback:
 ## Prompt Construction
 
 1. Load method catalog.
-2. Split parameters by level:
+2. Build and save the full parameter profile artifact:
+   - `sample`
+   - `assets`
+   - `read_qc`
+   - `genome_survey`
+   - `previous_attempt`
+   - `assembly_review`
+3. Build a task-scoped prompt profile from the full profile:
+   - initial recommendation: sample + assets + read_qc + genome_survey,
+   - execution repair: sample + assets + previous command/params + exit code + failure class + log tails,
+   - quality replan: sample + previous params/command/cases + assembly_review metrics.
+4. Split parameters by level:
    - L0 excluded,
    - L1 copied into `readonly_facts`,
    - all L2 entries copied into `modifiable_parameters`.
-3. Load `parameter_recommender` pack.
-4. Select 3-8 cases.
-5. Build prompt payload.
-6. Save prompt payload as an artifact before invoking the LLM.
+5. Load `parameter_recommender` pack.
+6. Select 3-8 cases.
+7. Build prompt payload.
+8. Save prompt payload as an artifact before invoking the LLM.
+
+Artifact refs in the main graph must be session/attempt-scoped paths. Hashes
+may be recorded as integrity fields, but hash-only refs and `write_artifacts=False`
+fallback behavior must not be used by the running graph.
 
 Prompt payload:
 
@@ -80,6 +117,20 @@ readonly_facts:
   coverage: 42
   read_n50_kb: 30
   heterozygosity: medium
+prompt_profile:
+  sample:
+    sample_id: s1
+    target_level: draft
+  assets:
+    read_type: ont
+    has_hifi: false
+    has_ont: true
+  read_qc:
+    read_n50: 30000
+    effective_coverage_5kb: 42
+  genome_survey:
+    estimated_genome_size: 1000000000
+    heterozygosity: medium
 modifiable_parameters:
   purge_level: {cli: "-l", allowed_values: [0, 1, 2, 3], default: 1}
   read_length_cutoff: {cli: "--rl-cut", allowed_values: [1000, 3000, 5000, 10000, 15000]}
@@ -151,8 +202,9 @@ attempt_id: 0
 method_id: hifiasm_ont
 status: recommended
 prompt_payload_ref: ...
+input_profile_ref: ...
 llm_response_ref: ...
-readonly_facts: {}
+prompt_profile: {}
 selected_case_ids: []
 recommended_params: {}
 validation: {}
@@ -177,9 +229,23 @@ Routing:
 - `parameter_validation_failed` -> fail fast.
 - no catalog or no L2 parameters -> fail fast for Phase10 MVP, because the loop cannot be tested.
 
+## Cleanup Requirements
+
+- Remove direct LLM invocation helpers from `app/stages/assembly/nodes.py` once
+  route selection and parameter recommendation share the decision boundary.
+- Keep prompt bundle, model response, parsed decision, validation result, and
+  final state transition as separate concepts and artifacts.
+- Do not support both old `recommended_params` injection and new
+  `parameter_attempts` as equal first-class paths. The closed loop writes and
+  consumes `parameter_attempts`; method freeze nodes read the current attempt.
+- Main-flow prompt/profile artifacts must use session/attempt paths under
+  `data/artifacts/assembly/<session>/`.
+- Validation failure must append an attempt entry and stop before freeze/run.
+
 ## Tests
 
 - Initial recommendation writes prompt and response refs.
+- Full parameter profile is saved for replay and prompt profile contains only task-relevant fields.
 - LLM output with L2 params passes.
 - LLM output with L1/L0 keys fails.
 - Invalid JSON fails before command execution.
@@ -189,9 +255,13 @@ Routing:
 
 ## Acceptance Criteria
 
-- [ ] Node implemented.
-- [ ] Prompt payload has L1 facts and L2 modifiable parameters only.
-- [ ] Prompt payload includes every L2 parameter in the selected method catalog.
-- [ ] Attempt entry is replayable.
-- [ ] Failure branches stop before execution.
-- [ ] Retry modes reuse previous attempt context.
+- [x] Node implemented.
+- [x] Prompt payload has L1 facts and L2 modifiable parameters only.
+- [x] Prompt payload uses a task-scoped profile and does not expose the full profile by default.
+- [x] Prompt payload includes every L2 parameter in the selected method catalog.
+- [x] Attempt entry records the full profile ref.
+- [x] Attempt entry is replayable.
+- [x] Failure branches stop before execution.
+- [x] Retry modes reuse previous attempt context.
+- [x] Existing route-selection LLM behavior is moved behind the shared decision boundary.
+- [x] No stage-local model invocation remains in assembly stage nodes.
