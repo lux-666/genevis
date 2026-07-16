@@ -75,7 +75,7 @@ flowchart TD
     resolve -- "missing inputs / env / models" --> requirements
     resolve -- "failure" --> fail
     recommend -- "recommendation persisted" --> block
-    recommend -- "LLM / validation failure" --> fail
+    recommend -- "LLM / response-shape failure" --> fail
     block --> ending
     requirements --> ending
     fail --> ending
@@ -140,7 +140,7 @@ The first version exposes no other LLM-recommended parameters:
 | assembly, R1/R2, species name, and output paths | resolved or derived run inputs |
 
 This keeps the recommendation surface small while preserving the same approval,
-resume, validation, and artifact contracts already used by assembly. It does
+resume, response-parsing, and artifact contracts already used by assembly. It does
 not introduce a Hi-C-specific persistence contract or change
 [`data-v2.md`](data-v2.md).
 
@@ -162,7 +162,7 @@ mode and does not reintroduce method selection.
    the method-selection review path.
 2. Route directly from resolved Hi-C inputs to
    `recommend_autohic_parameters`.
-3. Reuse the assembly recommender, validation, approval, resume, and frozen
+3. Reuse the shared recommendation persistence, response parsing, approval, resume, and frozen
    attempt contracts for the AutoHiC restriction-enzyme proposal.
 4. Keep missing-requirement blocking separate from AutoHiC execution failure.
 5. Update tests to cover parent bypass, missing requirements, mandatory

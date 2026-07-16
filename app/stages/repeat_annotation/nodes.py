@@ -19,7 +19,14 @@ from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
     REPEAT_ANNOTATION_GFF3,
@@ -131,8 +138,6 @@ def plan_repeat_library(state: TopLevelState) -> dict:
     if missing:
         return _fail_update(state, f"repeat_annotation descriptors missing: {missing}")
 
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
     library_ref = stage_work_dir(state, "repeat_annotation", "repeat_library.fa")
     return _update_repeat_output(
         state,
@@ -477,7 +482,7 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
         "bundle_artifact_ref": str(bundle_ref),
         "artifact_refs": [*repeat_out.get("artifact_refs", []), str(artifact.file_path)],
     }
-    trace = [*state.get("route_trace", []), "repeat_annotation_stage"]
+    trace = append_route_trace(state, "repeat_annotation_stage")
     return {
         "stage_outputs": outputs,
         "current_stage": next_stage_name("repeat_annotation"),
@@ -653,12 +658,15 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
     }
-    original_trace = list(state.get("route_trace") or [])
     return {
         **commit_result,
         "active_interrupt": None,
         "stage_outputs": stage_outputs,
-        "route_trace": [*original_trace, "mask_review", "repeat_annotation_stage"],
+        "route_trace": append_route_trace(
+            state,
+            "mask_review",
+            "repeat_annotation_stage",
+        ),
     }
 
 

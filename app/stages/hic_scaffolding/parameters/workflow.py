@@ -6,11 +6,19 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.llm.autohic_parameter_prompts import (
+from app.llm.parameters.hic.recommender import (
     PROMPT_BUNDLE,
     autohic_parameter_prompt_hash,
-    recommend_autohic_parameter_patch,
     render_autohic_parameter_messages,
+    restore_autohic_parameter_decision,
+)
+from app.llm.parameters.hic.recommender import (
+    recommend_autohic_parameters as invoke_autohic_parameter_model,
+)
+from app.llm.parameters.hic.request import (
+    AUTOHIC_METHOD,
+    PARAMETER_RECOMMENDATION_CONTRACT,
+    build_autohic_parameter_request,
 )
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
@@ -22,13 +30,12 @@ from app.review.persistence import (
 from app.schemas.artifacts import (
     HIC_PARAMETER_APPROVAL_DECISION,
     HIC_PARAMETER_BASIS,
-    HIC_PARAMETER_FROZEN_PARAMETERS,
     HIC_PARAMETER_INPUT_PROFILE,
     HIC_PARAMETER_MODEL_REQUEST,
     HIC_PARAMETER_MODEL_RESPONSE,
     HIC_PARAMETER_RECOMMENDATION,
     HIC_PARAMETER_RECOMMENDATION_MANIFEST,
-    HIC_PARAMETER_VALIDATION,
+    HIC_PARAMETER_RESPONSE_PARSE,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
@@ -41,18 +48,16 @@ from app.stages.hic_scaffolding.method_application.lifecycle import (
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     update_hic_output as _update_hic_output,
 )
-from app.stages.hic_scaffolding.parameter_catalog import (
+from app.stages.hic_scaffolding.parameters.catalog import (
     load_autohic_parameter_catalog,
 )
-from app.stages.hic_scaffolding.parameter_persistence import (
+from app.stages.hic_scaffolding.parameters.storage import (
     AutoHiCParameterPersistenceError,
     read_autohic_parameter_artifact,
+    recover_autohic_parameter_artifact,
     write_autohic_parameter_artifact,
 )
 
-
-AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
-PARAMETER_RECOMMENDATION_CONTRACT = "parameter_patch_v2"
 _RECOMMENDER_METHOD = "hic_scaffolding.parameter_recommender"
 _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
 
@@ -74,30 +79,14 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
         )
 
     recommendation_id = 0
-    input_profile = _input_profile(state, hic_out)
+    input_profile = _input_profile(hic_out)
     catalog_snapshot = catalog.model_dump(mode="json")
-    prompt_payload = {
-        "schema_version": 2,
-        "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
-        "task": "recommend_initial",
-        "stage": "hic_scaffolding",
-        "method_id": AUTOHIC_METHOD,
-        "input_profile": input_profile,
-        "adjustable_params": {
-            "restriction_enzyme": catalog_snapshot["parameters"]["restriction_enzyme"]
-        },
-        "baseline_params": {
-            "restriction_enzyme": (
-                (hic_out.get("autohic_parameters") or {}).get("restriction_enzyme")
-            )
-        },
-        "rules": {
-            "allowed_parameter_names": ["restriction_enzyme"],
-            "human_approval_required": True,
-        },
-    }
 
     try:
+        model_request = build_autohic_parameter_request(
+            input_profile=input_profile,
+            catalog=catalog,
+        ).model_dump(mode="json")
         input_profile_ref = write_autohic_parameter_artifact(
             state,
             recommendation_id,
@@ -118,17 +107,13 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             artifact_type=HIC_PARAMETER_BASIS,
             method_name=_RECOMMENDER_METHOD,
         )
-        messages = render_autohic_parameter_messages(prompt_payload)
+        messages = render_autohic_parameter_messages(model_request)
         model_request_ref = write_autohic_parameter_artifact(
             state,
             recommendation_id,
             "model_request.json",
             {
                 "schema_version": 2,
-                "request_id": (
-                    f"{state['session_id']}:hic_scaffolding:"
-                    f"parameter_recommendation:{recommendation_id}"
-                ),
                 "prompt_bundle_id": PROMPT_BUNDLE,
                 "prompt_template_sha256": autohic_parameter_prompt_hash(),
                 "messages": messages,
@@ -143,44 +128,48 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             failure_kind="parameter_recommendation",
         )
 
-    decision = recommend_autohic_parameter_patch(prompt_payload, messages=messages)
-    recommendation = decision.recommendation or {}
-    validation = (
-        {
-            "valid": True,
-            "method_id": AUTOHIC_METHOD,
-            "violations": [],
-            "warnings": [],
-        }
-        if decision.valid
-        else {
-            "valid": False,
-            "method_id": AUTOHIC_METHOD,
-            "violations": [
-                {
-                    "param": "restriction_enzyme",
-                    "reason": decision.error or "AutoHiC parameter recommendation failed",
-                    "severity": "critical",
-                }
-            ],
-            "warnings": [],
-        }
-    )
+    model_response_ref: ArtifactRef | None = None
     try:
-        model_response_ref = write_autohic_parameter_artifact(
+        recovered_response = recover_autohic_parameter_artifact(
             state,
             recommendation_id,
             "model_response.json",
-            {
-                "schema_version": 2,
-                "raw_response": decision.raw_response,
-                "validity": "parsed" if decision.valid else "invalid",
-                "error": decision.error,
-                "model_id": decision.model_id,
-            },
-            artifact_type=HIC_PARAMETER_MODEL_RESPONSE,
+            expected_type=HIC_PARAMETER_MODEL_RESPONSE,
             method_name=_RECOMMENDER_METHOD,
         )
+        if recovered_response is None:
+            decision = invoke_autohic_parameter_model(model_request, messages=messages)
+        else:
+            model_response_ref, response_record = recovered_response
+            decision = restore_autohic_parameter_decision(response_record)
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC parameter response recovery failed: {exc}",
+            failure_kind="parameter_recommendation",
+        )
+    recommendation = decision.recommendation or {}
+    response_parse = {
+        "schema_version": 1,
+        "parsed": bool(decision.valid),
+        "error": decision.error,
+    }
+    try:
+        if model_response_ref is None:
+            model_response_ref = write_autohic_parameter_artifact(
+                state,
+                recommendation_id,
+                "model_response.json",
+                {
+                    "schema_version": 2,
+                    "raw_response": decision.raw_response,
+                    "validity": "parsed" if decision.valid else "invalid",
+                    "error": decision.error,
+                    "model_id": decision.model_id,
+                },
+                artifact_type=HIC_PARAMETER_MODEL_RESPONSE,
+                method_name=_RECOMMENDER_METHOD,
+            )
         recommendation_ref = write_autohic_parameter_artifact(
             state,
             recommendation_id,
@@ -194,13 +183,13 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             artifact_type=HIC_PARAMETER_RECOMMENDATION,
             method_name=_RECOMMENDER_METHOD,
         )
-        validation_ref = write_autohic_parameter_artifact(
+        response_parse_ref = write_autohic_parameter_artifact(
             state,
             recommendation_id,
-            "validation.json",
-            validation,
-            artifact_type=HIC_PARAMETER_VALIDATION,
-            method_name="hic_scaffolding.parameter_validator",
+            "response_parse.json",
+            response_parse,
+            artifact_type=HIC_PARAMETER_RESPONSE_PARSE,
+            method_name="hic_scaffolding.parameter_response_parser",
         )
         manifest_ref = write_autohic_parameter_artifact(
             state,
@@ -213,7 +202,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
                 "method_id": AUTOHIC_METHOD,
                 "task": "recommend_initial",
                 "recommendation_id": recommendation_id,
-                "status": "pending_approval" if decision.valid else "validation_failed",
+                "status": "pending_approval" if decision.valid else "response_invalid",
                 "previous_attempt_id": None,
                 "previous_attempt_manifest_ref": None,
                 "previous_attempt_seal_hash": None,
@@ -223,12 +212,10 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
                     "model_request_ref": model_request_ref.model_dump(mode="json"),
                     "model_response_ref": model_response_ref.model_dump(mode="json"),
                     "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-                    "validation_ref": validation_ref.model_dump(mode="json"),
+                    "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 },
                 "summary": {
-                    "validation_valid": bool(validation["valid"]),
-                    "violation_count": len(validation["violations"]),
-                    "warning_count": 0,
+                    "response_parsed": bool(decision.valid),
                 },
             },
             artifact_type=HIC_PARAMETER_RECOMMENDATION_MANIFEST,
@@ -245,7 +232,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
         recommendation_id=recommendation_id,
         method_id=AUTOHIC_METHOD,
         task="recommend_initial",
-        status="pending_approval" if decision.valid else "validation_failed",
+        status="pending_approval" if decision.valid else "response_invalid",
         previous_attempt_id=None,
         manifest_ref=manifest_ref,
         recommendation_hash=manifest_ref.sha256,
@@ -253,13 +240,12 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
     if not decision.valid:
         return _fail_update(
             state,
-            "AutoHiC parameter recommendation failed validation",
+            "AutoHiC parameter recommendation response could not be parsed",
             failure_kind="parameter_recommendation",
             extra={"current_parameter_recommendation": cursor.model_dump(mode="json")},
         )
 
-    enzyme = recommendation["params"]["restriction_enzyme"]
-    baseline = prompt_payload["baseline_params"]["restriction_enzyme"]
+    enzyme = recommendation["parameters"]["restriction_enzyme"]
     bindings = {
         "attempt_id": recommendation_id,
         "task": "recommend_initial",
@@ -278,11 +264,9 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
                 "recommendation_manifest_hash": manifest_ref.sha256,
                 "method_id": AUTOHIC_METHOD,
                 "task": "recommend_initial",
-                "parameter_diff": {
-                    "restriction_enzyme": {"from": baseline, "to": enzyme}
-                },
+                "parameters": {"restriction_enzyme": enzyme},
                 "rationale": recommendation.get("summary"),
-                "validation_ref": validation_ref.model_dump(mode="json"),
+                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
                 "decisions_allowed": ["approve_parameters", "reject_parameters"],
             },
@@ -344,7 +328,10 @@ def apply_autohic_parameter_approval_decision(
         )
     hic_out = _hic_output(state)
     interrupt = state.get("active_interrupt") or hic_out.get("active_interrupt")
-    if not isinstance(interrupt, dict) or interrupt.get("gate_id") != "parameter_approval":
+    if (
+        not isinstance(interrupt, dict)
+        or interrupt.get("gate_id") != "parameter_approval"
+    ):
         raise ResumeValidationError("no unresolved AutoHiC parameter_approval gate")
 
     required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
@@ -355,12 +342,16 @@ def apply_autohic_parameter_approval_decision(
         )
     for key in required:
         if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(f"stale AutoHiC parameter approval binding: {key}")
+            raise ResumeValidationError(
+                f"stale AutoHiC parameter approval binding: {key}"
+            )
 
     request_ref_value = interrupt.get("request_ref")
     request_id = interrupt.get("review_request_id")
     if not isinstance(request_ref_value, dict) or not isinstance(request_id, str):
-        raise ResumeValidationError("AutoHiC parameter approval has no request identity")
+        raise ResumeValidationError(
+            "AutoHiC parameter approval has no request identity"
+        )
     try:
         request_ref = ArtifactRef.model_validate(request_ref_value)
         request_record = load_review_request(
@@ -372,17 +363,19 @@ def apply_autohic_parameter_approval_decision(
         raise ResumeValidationError(
             "AutoHiC parameter approval request is missing or changed"
         ) from exc
-    if (
-        request_record.get("review_request_id") != request_id
-        or request_ref.sha256 != interrupt.get("request_hash")
-    ):
-        raise ResumeValidationError("AutoHiC parameter approval request binding mismatch")
+    if request_record.get(
+        "review_request_id"
+    ) != request_id or request_ref.sha256 != interrupt.get("request_hash"):
+        raise ResumeValidationError(
+            "AutoHiC parameter approval request binding mismatch"
+        )
     payload = request_record.get("payload")
     if not isinstance(payload, dict):
         raise ResumeValidationError("AutoHiC parameter approval request has no payload")
-    if request.decision not in {"approve_parameters", "reject_parameters"} or request.decision not in set(
-        payload.get("decisions_allowed") or []
-    ):
+    if request.decision not in {
+        "approve_parameters",
+        "reject_parameters",
+    } or request.decision not in set(payload.get("decisions_allowed") or []):
         raise ResumeValidationError("unsupported AutoHiC parameter approval decision")
 
     try:
@@ -424,8 +417,9 @@ def apply_autohic_parameter_approval_decision(
             "AutoHiC parameter recommendation evidence is missing or changed"
         ) from exc
     recommendation = dict(recommendation_record.get("recommendation") or {})
-    enzyme = str((recommendation.get("params") or {}).get("restriction_enzyme") or "").strip()
-    if not enzyme:
+    if not str(
+        (recommendation.get("parameters") or {}).get("restriction_enzyme") or ""
+    ).strip():
         raise ResumeValidationError(
             "AutoHiC recommendation does not contain restriction_enzyme"
         )
@@ -492,45 +486,24 @@ def apply_autohic_parameter_approval_decision(
         }
 
     try:
-        frozen_ref = write_autohic_parameter_artifact(
-            state,
-            cursor.recommendation_id,
-            "frozen_parameters.json",
-            {
-                "schema_version": 2,
-                "stage": "hic_scaffolding",
-                "method_id": AUTOHIC_METHOD,
-                "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
-                "recommendation_hash": manifest_ref.sha256,
-                "approval_decision_ref": decision_ref.model_dump(mode="json"),
-                "parameters": {"restriction_enzyme": enzyme},
-            },
-            artifact_type=HIC_PARAMETER_FROZEN_PARAMETERS,
-            method_name=AUTOHIC_METHOD,
-            scope="attempt",
-        )
         attempt = ParameterAttempt(
             attempt_id=cursor.recommendation_id,
             method_id=AUTOHIC_METHOD,
-            status="frozen",
+            status="recommended",
             task="recommend_initial",
             previous_attempt_id=None,
             recommendation_manifest_ref=manifest_ref,
             approval_decision_ref=decision_ref,
-            frozen_parameters_ref=frozen_ref,
             recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except ValueError as exc:
         raise ResumeValidationError(
-            "approved AutoHiC parameters could not be frozen"
+            "approved AutoHiC parameter attempt could not be recorded"
         ) from exc
-    configured = dict(hic_out.get("autohic_parameters") or {})
-    configured["restriction_enzyme"] = enzyme
     outputs["hic_scaffolding"] = {
         **hic_out,
         "status": "parameters_approved",
         "active_interrupt": None,
-        "autohic_parameters": configured,
         "current_parameter_attempt_id": cursor.recommendation_id,
         "parameter_attempts": [attempt.model_dump(mode="json")],
         "current_parameter_recommendation": cursor.model_copy(
@@ -547,7 +520,7 @@ def apply_autohic_parameter_approval_decision(
 
 
 def load_approved_autohic_parameters(state: TopLevelState) -> dict[str, Any]:
-    """Load the approved frozen parameter payload consumed by execution."""
+    """Load the approved recommendation consumed by the freeze node."""
 
     hic_out = _hic_output(state)
     attempts = hic_out.get("parameter_attempts") or []
@@ -556,27 +529,56 @@ def load_approved_autohic_parameters(state: TopLevelState) -> dict[str, Any]:
             "AutoHiC execution requires one approved parameter attempt"
         )
     attempt = ParameterAttempt.model_validate(attempts[0])
-    if attempt.method_id != AUTOHIC_METHOD or attempt.frozen_parameters_ref is None:
+    if attempt.method_id != AUTOHIC_METHOD or attempt.status != "recommended":
         raise AutoHiCParameterPersistenceError(
-            "AutoHiC parameter attempt is not frozen for AutoHiC"
+            "AutoHiC parameter attempt is not approved and awaiting freeze"
         )
-    frozen = read_autohic_parameter_artifact(
+    decision_record = read_autohic_parameter_artifact(
         state,
-        attempt.frozen_parameters_ref,
-        expected_type=HIC_PARAMETER_FROZEN_PARAMETERS,
+        attempt.approval_decision_ref,
+        expected_type=HIC_PARAMETER_APPROVAL_DECISION,
     )
-    parameters = frozen.get("parameters")
+    decision = decision_record.get("decision")
+    if (
+        not isinstance(decision, dict)
+        or decision.get("decision") != "approve_parameters"
+    ):
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC parameter attempt has no approved decision"
+        )
+    if decision.get("validated_recommendation_hash") != (
+        attempt.recommendation_manifest_ref.sha256
+    ):
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC approval is not bound to the current recommendation"
+        )
+    manifest = read_autohic_parameter_artifact(
+        state,
+        attempt.recommendation_manifest_ref,
+        expected_type=HIC_PARAMETER_RECOMMENDATION_MANIFEST,
+    )
+    recommendation_ref = ArtifactRef.model_validate(
+        (manifest.get("refs") or {}).get("recommendation_ref")
+    )
+    recommendation_record = read_autohic_parameter_artifact(
+        state,
+        recommendation_ref,
+        expected_type=HIC_PARAMETER_RECOMMENDATION,
+    )
+    recommendation = recommendation_record.get("recommendation")
+    parameters = (
+        recommendation.get("parameters") if isinstance(recommendation, dict) else None
+    )
     if not isinstance(parameters, dict) or not parameters.get("restriction_enzyme"):
         raise AutoHiCParameterPersistenceError(
-            "frozen AutoHiC parameters do not contain restriction_enzyme"
+            "approved AutoHiC recommendation does not contain restriction_enzyme"
         )
     return dict(parameters)
 
 
-def _input_profile(state: TopLevelState, hic_out: dict[str, Any]) -> dict[str, Any]:
+def _input_profile(hic_out: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 2,
-        "session_id": state["session_id"],
         "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
         "hic_read_refs": list(hic_out.get("hic_read_refs") or []),
         "hic_read_paths": list(hic_out.get("hic_read_paths") or []),

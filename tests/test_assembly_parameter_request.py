@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 
-from app.domains.assembly.parameter_recommendation import (
+import pytest
+from pydantic import ValidationError
+
+from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_request import (
-    build_parameter_basis_snapshot,
+from app.llm.parameters.assembly.request import (
+    AssemblyParameterRequestDTO,
     build_parameter_request_dto,
-    previous_execution_overrides,
 )
+from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 
 
 def _full_profile(*, previous_attempt: dict | None = None) -> dict:
@@ -73,12 +76,8 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
         "method_id",
         "task",
         "observations",
-        "rules",
-        "recommendation_policy",
         "method_guidance",
-        "readonly_params",
-        "adjustable_params",
-        "baseline_params",
+        "adjustable_parameters",
         "literature_selection",
         "literature_cases",
     }
@@ -89,10 +88,7 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
         "baseline_overrides",
         "payload_hash",
     }.isdisjoint(request)
-    parameter_specs = [
-        *request["readonly_params"].values(),
-        *request["adjustable_params"].values(),
-    ]
+    parameter_specs = list(request["adjustable_parameters"].values())
     for spec in parameter_specs:
         assert set(spec).issubset(
             {
@@ -100,11 +96,20 @@ def test_initial_builder_returns_only_the_strict_model_dto() -> None:
                 "allowed_values",
                 "min",
                 "max",
-                "default",
                 "description",
                 "notes",
             }
         )
+
+
+def test_request_dto_rejects_accidental_audit_fields() -> None:
+    _, request = _initial_request()
+
+    with pytest.raises(ValidationError):
+        AssemblyParameterRequestDTO.model_validate(
+            {**request, "session_id": "must-not-enter-model-input"}
+        )
+    assert "sample-1" not in json.dumps(request, ensure_ascii=False)
 
 
 def test_full_basis_and_model_case_have_separate_explicit_owners() -> None:
@@ -133,22 +138,18 @@ def test_full_basis_and_model_case_have_separate_explicit_owners() -> None:
     assert "methods_path" not in json.dumps(request, ensure_ascii=False)
 
 
-def test_retry_reuses_basis_and_keeps_execution_overrides_out_of_model_input() -> None:
+def test_retry_reuses_basis_and_exposes_previous_recommendation_as_context_only() -> None:
     catalog = load_parameter_catalog("hifiasm")
     initial_profile = _full_profile()
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
         full_profile=initial_profile,
-        session_id="session-1",
-        recommendation_id=0,
     )
     previous = {
         "attempt_id": 0,
         "method_id": "hifiasm",
-        "effective_params": {"purge_level": 1, "kmer_length": 51},
-        "execution_params": {"purge_level": 1},
-        "params": {"purge_level": 1, "kmer_length": 51},
+        "parameters": {"purge_level": 1},
         "execution_status": "failed",
         "failure_class": "memory_exhausted",
     }
@@ -169,26 +170,59 @@ def test_retry_reuses_basis_and_keeps_execution_overrides_out_of_model_input() -
         task="recommend_initial",
         basis_snapshot=basis,
     )["literature_cases"]
-    assert retry["baseline_params"]["purge_level"] == 1
-    assert "baseline_overrides" not in retry
-    assert previous_execution_overrides(
-        retry_profile,
-        task="retry_after_execution_failure",
-    ) == {"purge_level": 1}
+    assert "baseline_params" not in retry
+    assert retry["retry_context"]["previous_attempt"]["parameters"] == {
+        "purge_level": 1
+    }
     assert retry["retry_context"]["previous_attempt"]["failure_class"] == (
         "memory_exhausted"
     )
 
 
-def test_basis_keeps_selection_identity_but_request_omits_audit_locators() -> None:
+def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
+    catalog = load_parameter_catalog("hifiasm")
+    initial_profile = _full_profile()
+    basis = build_parameter_basis_snapshot(
+        method_id="hifiasm",
+        catalog=catalog,
+        full_profile=initial_profile,
+    )
+    retry_profile = _full_profile(
+        previous_attempt={
+            "attempt_id": 9,
+            "method_id": "hifiasm",
+            "tool_version": "0.25",
+            "command_argv": ["hifiasm", "-o", "/private/run/work/out"],
+            "stderr_ref": "artifacts/assembly/attempts/009/stderr.log",
+            "stdout_ref": "artifacts/assembly/attempts/009/stdout.log",
+            "execution_status": "failed",
+            "failure_class": "memory_exhausted",
+        }
+    )
+
+    request = build_parameter_request_dto(
+        method_id="hifiasm",
+        catalog=catalog,
+        full_profile=retry_profile,
+        task="retry_after_execution_failure",
+        basis_snapshot=basis,
+    )
+
+    serialized = json.dumps(request, ensure_ascii=False)
+    assert "command_argv" not in serialized
+    assert "/private/run/work/out" not in serialized
+    assert "stderr_ref" not in serialized
+    assert "stdout_ref" not in serialized
+    assert '"attempt_id"' not in serialized
+
+
+def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators() -> None:
     catalog = load_parameter_catalog("hifiasm")
     profile = _full_profile()
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
         full_profile=profile,
-        session_id="session-2",
-        recommendation_id=0,
     )
     request = build_parameter_request_dto(
         method_id="hifiasm",
@@ -198,9 +232,7 @@ def test_basis_keeps_selection_identity_but_request_omits_audit_locators() -> No
         basis_snapshot=basis,
     )
 
-    assert basis["literature_selection"]["query_id"] == (
-        "session-2:parameter_attempt_0"
-    )
+    assert "query_id" not in basis["literature_selection"]
     assert "query_id" not in request["literature_selection"]
     request_text = json.dumps(request, ensure_ascii=False)
     assert "retrieval_query_ref" not in request_text

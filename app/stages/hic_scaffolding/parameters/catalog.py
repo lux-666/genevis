@@ -10,7 +10,7 @@ import yaml
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 AUTOHIC_PARAMETER_CATALOG = (
     _PROJECT_ROOT
     / "descriptors"

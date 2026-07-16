@@ -14,18 +14,17 @@ def build_hifiasm_retrieval_query(
     *,
     method_id: str,
     task: str,
-    query_id: str | None = None,
 ) -> dict[str, Any]:
     """Normalize initial-profile paths and units before deterministic retrieval."""
 
     if task != "recommend_initial":
         raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
 
-    return _build_query(prompt_profile, method_id=method_id, task=task, query_id=query_id)
+    return _build_query(prompt_profile, method_id=method_id, task=task)
 
 
 def _build_query(
-    prompt_profile: dict[str, Any], *, method_id: str, task: str, query_id: str | None
+    prompt_profile: dict[str, Any], *, method_id: str, task: str
 ) -> dict[str, Any]:
 
     genome_size_bp = _lookup(prompt_profile, "genome_survey.estimated_genome_size")
@@ -45,7 +44,6 @@ def _build_query(
         ),
     )
     query = {
-        "query_id": query_id,
         "method_id": method_id,
         "task": task,
         "read_type": parameter_case_read_type(

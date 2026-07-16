@@ -18,20 +18,21 @@ from pydantic import ValidationError
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import durable_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
     ASSEMBLY_PARAMETER_EXECUTION,
     ASSEMBLY_PARAMETER_FROZEN_ATTEMPT,
-    ArtifactRef,
     ArtifactMeta,
+    ArtifactRef,
     AssemblyCandidateBundle,
     ParameterAttempt,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.assembly.parameter_persistence import (
+from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
     load_recommendation_bundle,
     read_json_artifact,
@@ -69,12 +70,20 @@ def build_method_graph(
     graph.add_edge(START, "freeze")
     graph.add_conditional_edges(
         "freeze",
-        lambda state: "run" if assembly_output(state).get("status") == lifecycle.frozen_status else "done",
+        lambda state: (
+            "run"
+            if assembly_output(state).get("status") == lifecycle.frozen_status
+            else "done"
+        ),
         {"run": "run", "done": "done"},
     )
     graph.add_conditional_edges(
         "run",
-        lambda state: "collect" if assembly_output(state).get("status") == lifecycle.ran_status else "done",
+        lambda state: (
+            "collect"
+            if assembly_output(state).get("status") == lifecycle.ran_status
+            else "done"
+        ),
         {"collect": "collect", "done": "done"},
     )
     graph.add_edge("collect", "done")
@@ -132,14 +141,20 @@ def current_parameter_attempt(
         try:
             attempt = ParameterAttempt.model_validate(item)
         except ValidationError as exc:
-            return None, f"{label} current parameter attempt is not a valid ParameterAttempt: {exc}"
+            return (
+                None,
+                f"{label} current parameter attempt is not a valid ParameterAttempt: {exc}",
+            )
         if attempt.method_id != method_id:
             return None, (
                 f"{label} current parameter attempt method_id {attempt.method_id!r} "
                 f"does not match {method_id!r}"
             )
         return attempt, None
-    return None, f"{label} requires a typed current ParameterAttempt with attempt_id={attempt_id}"
+    return (
+        None,
+        f"{label} requires a typed current ParameterAttempt with attempt_id={attempt_id}",
+    )
 
 
 def current_recommended_parameters(
@@ -160,9 +175,7 @@ def current_recommended_parameters(
     except ParameterPersistenceError as exc:
         return {}, f"{label} recommendation evidence is invalid: {exc}"
     recommendation = dict(bundle["recommendation"].get("recommendation") or {})
-    return dict(
-        recommendation.get("execution_params") or recommendation.get("params") or {}
-    ), None
+    return dict(recommendation.get("parameters") or {}), None
 
 
 def update_current_parameter_attempt(
@@ -198,7 +211,9 @@ def update_current_parameter_attempt(
             continue
         if getattr(attempt, field) != updates[field]:
             return [], f"{label} current parameter attempt {field} is append-once"
-    updated = ParameterAttempt.model_validate({**attempt.model_dump(mode="json"), **updates}).model_dump(mode="json")
+    updated = ParameterAttempt.model_validate(
+        {**attempt.model_dump(mode="json"), **updates}
+    ).model_dump(mode="json")
     attempts: list[dict[str, Any]] = []
     for item in output.get("parameter_attempts") or []:
         if not isinstance(item, dict):
@@ -206,7 +221,9 @@ def update_current_parameter_attempt(
         if item.get("attempt_id") == attempt.attempt_id:
             attempts.append(updated)
         else:
-            attempts.append(ParameterAttempt.model_validate(item).model_dump(mode="json"))
+            attempts.append(
+                ParameterAttempt.model_validate(item).model_dump(mode="json")
+            )
     return attempts, None
 
 
@@ -256,7 +273,7 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=lifecycle.name,
     )
-    result = outcome.result.model_dump(mode="json")
+    result = durable_execution_result(state, outcome.result)
     execution_ref = write_attempt_json_artifact(
         state,
         int(output.get("current_parameter_attempt_id") or 0),
@@ -332,7 +349,10 @@ def collect_method_artifacts(
             stage="assembly",
             method_name=lifecycle.method_name,
             artifact_type=ASSEMBLY_DRAFT_ASSEMBLY,
-            metadata={"attempt_id": attempt.attempt_id, "candidate_id": f"{attempt.session_id}:{lifecycle.method_name}"},
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "candidate_id": f"{attempt.session_id}:{lifecycle.method_name}",
+            },
         )
     ]
     for path, artifact_type in [
@@ -354,7 +374,11 @@ def collect_method_artifacts(
     bundle_path = _candidate_bundle_path(output, lifecycle.method_name)
     if bundle_path is None:
         return update_assembly_output(
-            state, {"status": "failed", "reason": f"missing {lifecycle.name} candidate bundle ref"}
+            state,
+            {
+                "status": "failed",
+                "reason": f"missing {lifecycle.name} candidate bundle ref",
+            },
         )
     bundle_data = json.loads(bundle_path.read_text(encoding="utf-8"))
     bundle_data["status"] = "executed"
@@ -381,7 +405,9 @@ def collect_method_artifacts(
         bundle_path.name.replace(".planned.json", ".executed.json")
     )
     if executed_bundle_path == bundle_path:
-        executed_bundle_path = bundle_path.with_name(f"{bundle_path.stem}.executed.json")
+        executed_bundle_path = bundle_path.with_name(
+            f"{bundle_path.stem}.executed.json"
+        )
     temporary_bundle = Path(attempt.working_dir) / (
         f".{executed_bundle_path.name}.{uuid4().hex}.tmp"
     )
@@ -399,16 +425,26 @@ def collect_method_artifacts(
             stage="assembly",
             method_name=lifecycle.method_name,
             artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
-            metadata={"candidate_id": bundle.candidate_id, "execution_enabled": True, "attempt_id": attempt.attempt_id},
+            metadata={
+                "candidate_id": bundle.candidate_id,
+                "execution_enabled": True,
+                "attempt_id": attempt.attempt_id,
+            },
         )
     )
 
-    append_artifact_records(state.get("data_dir", "data"), attempt.session_id, artifacts)
+    append_artifact_records(
+        state.get("data_dir", "data"), attempt.session_id, artifacts
+    )
     ledger = Ledger(state.get("data_dir", "data"))
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-    ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)
+    ledger.record_attempt_succeeded(
+        attempt.session_id, attempt, artifacts=artifact_payloads
+    )
     for artifact in artifact_payloads:
-        ledger.record_artifact_registered(attempt.session_id, artifact, attempt_id=attempt.attempt_id)
+        ledger.record_artifact_registered(
+            attempt.session_id, artifact, attempt_id=attempt.attempt_id
+        )
 
     substeps = dict(output.get("substeps") or {})
     substeps[lifecycle.substep_key] = {
@@ -425,8 +461,18 @@ def collect_method_artifacts(
             "draft_assembly_ref": str(draft_assembly),
             "candidate_assembly_refs": [str(draft_assembly)],
             "executed_candidate_refs": [str(executed_bundle_path)],
-            "artifact_refs": unique_refs([*list(output.get("artifact_refs") or []), *[str(item.file_path) for item in artifacts]]),
-            "candidate_artifact_refs": unique_refs([*list(output.get("candidate_artifact_refs") or []), str(executed_bundle_path)]),
+            "artifact_refs": unique_refs(
+                [
+                    *list(output.get("artifact_refs") or []),
+                    *[str(item.file_path) for item in artifacts],
+                ]
+            ),
+            "candidate_artifact_refs": unique_refs(
+                [
+                    *list(output.get("candidate_artifact_refs") or []),
+                    str(executed_bundle_path),
+                ]
+            ),
             "substeps": substeps,
         },
     )
@@ -449,10 +495,14 @@ def positive_int(
     try:
         converted = int(value)
     except (TypeError, ValueError):
-        invalid.append({"param": name, "value": value, "reason": "must be a positive integer"})
+        invalid.append(
+            {"param": name, "value": value, "reason": "must be a positive integer"}
+        )
         return None
     if converted <= 0:
-        invalid.append({"param": name, "value": value, "reason": "must be a positive integer"})
+        invalid.append(
+            {"param": name, "value": value, "reason": "must be a positive integer"}
+        )
     return converted
 
 
@@ -480,6 +530,10 @@ def blocked_parameters(
 def _candidate_bundle_path(output: dict[str, Any], method_name: str) -> Path | None:
     for ref in output.get("selected_candidate_refs") or []:
         path = Path(ref)
-        if path.exists() and json.loads(path.read_text(encoding="utf-8")).get("method_name") == method_name:
+        if (
+            path.exists()
+            and json.loads(path.read_text(encoding="utf-8")).get("method_name")
+            == method_name
+        ):
             return path
     return None

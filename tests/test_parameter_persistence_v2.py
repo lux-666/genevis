@@ -6,15 +6,34 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from app.control.lifecycle import resume_review_state
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
-from app.schemas.artifacts import ParameterAttempt, ParameterRecommendationCursor
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    ArtifactRef,
+    ParameterAttempt,
+    ParameterRecommendationCursor,
+    file_sha256,
+)
 from app.schemas.state import initial_state
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_nodes import recommend_assembly_parameters
-from app.stages.assembly.parameter_persistence import load_recommendation_bundle
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
+from app.stages.assembly.parameters.storage import (
+    ParameterPersistenceError,
+    load_recommendation_bundle,
+    recover_recommendation_json_artifact,
+)
+from app.stages.assembly.parameters.workflow import recommend_assembly_parameters
+from app.storage.parameter_evidence import (
+    ParameterEvidenceError,
+    publish_parameter_file,
+    publish_parameter_json,
+    read_parameter_json,
+)
 from app.storage.paths import SessionPaths, ensure_run_layout
+from app.storage.publish import publish_file
 
 
 class _Response:
@@ -55,24 +74,8 @@ def _response(**overrides: int) -> dict:
         {name for name, spec in catalog.parameters.items() if spec.level == 2}
     )
     return {
-        "sample_diagnosis": {
-            "effect_areas": ["assembly_graph"],
-            "summary": "Use a bounded adjustment for this sample.",
-        },
-        "parameter_patch": {
-            parameter: {
-                "value": value,
-                "observation_ids": [],
-                "guidance_ids": [],
-                "literature_anchors": [],
-                "expected_effect": "Improve assembly behavior.",
-                "tradeoffs": ["Requires review."],
-                "confidence": "medium",
-                "reason": "Bounded test adjustment.",
-            }
-            for parameter, value in overrides.items()
-        },
-        "summary": "Apply the bounded sparse parameter patch.",
+        "parameters": dict(overrides),
+        "summary": "Apply the recommended parameters.",
     }
 
 
@@ -155,7 +158,10 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
 ) -> None:
     state = _state(tmp_path)
     model = _Model(_response(purge_level=1, read_length_cutoff=3000))
-    with patch("app.stages.assembly.decision.build_chat_model", return_value=model):
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=model,
+    ):
         update = recommend_assembly_parameters(state)
 
     assembly = update["stage_outputs"]["assembly"]
@@ -170,9 +176,15 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
     )
     model_request = bundle["model_request"]
     assert model_request["messages"] == model.messages
-    assert model_request["parameter_request_schema_version"] == 1
+    assert "request_id" not in model_request
+    assert model_request["parameter_request_schema_version"] == 2
     assert "context_projection_schema_version" not in model_request
     user_message = model_request["messages"][1]["content"]
+    assert user_message == json.dumps(
+        json.loads(user_message),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     for internal_field in (
         "prompt_profile",
         "evidence_registry",
@@ -181,7 +193,7 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         "payload_hash",
     ):
         assert internal_field not in user_message
-    assert bundle["recommendation"]["recommendation"]["params"] == {
+    assert bundle["recommendation"]["recommendation"]["parameters"] == {
         "purge_level": 1,
         "read_length_cutoff": 3000,
     }
@@ -199,7 +211,7 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         "assembly.parameter.model_request",
         "assembly.parameter.model_response",
         "assembly.parameter.recommendation",
-        "assembly.parameter.validation",
+        "assembly.parameter.response_parse",
         "assembly.parameter.recommendation_manifest",
         "assembly.parameter_approval.request",
     }.issubset(types)
@@ -211,13 +223,15 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
 ) -> None:
     state = _state(tmp_path)
     with patch(
-        "app.stages.assembly.decision.build_chat_model",
+        "app.llm.parameters.assembly.recommender.build_chat_model",
         return_value=_Model(_response(purge_level=1)),
     ):
         update = recommend_assembly_parameters(state)
     blocked = _blocked_state(state, update)
 
-    approved = resume_review_state(blocked, _decision_request(blocked, "approve_parameters"))
+    approved = resume_review_state(
+        blocked, _decision_request(blocked, "approve_parameters")
+    )
     attempt = ParameterAttempt.model_validate(
         approved["stage_outputs"]["assembly"]["parameter_attempts"][0]
     )
@@ -234,7 +248,7 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
 
     second_state = _state(tmp_path / "reject")
     with patch(
-        "app.stages.assembly.decision.build_chat_model",
+        "app.llm.parameters.assembly.recommender.build_chat_model",
         return_value=_Model(_response(purge_level=1)),
     ):
         second_update = recommend_assembly_parameters(second_state)
@@ -245,19 +259,23 @@ def test_approval_creates_compact_attempt_but_rejection_does_not(
     )
     rejected_assembly = rejected["stage_outputs"]["assembly"]
     assert rejected_assembly.get("parameter_attempts") in (None, [])
-    assert rejected_assembly.get("retry_counts") in (None, {}, {"execution": 0, "review": 0})
+    assert rejected_assembly.get("retry_counts") in (
+        None,
+        {},
+        {"execution": 0, "review": 0},
+    )
 
 
 def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
     state = _state(tmp_path)
     with patch(
-        "app.stages.assembly.decision.build_chat_model",
+        "app.llm.parameters.assembly.recommender.build_chat_model",
         return_value=_FailingModel(Path(state["data_dir"])),
     ):
         update = recommend_assembly_parameters(state)
 
     assembly = update["stage_outputs"]["assembly"]
-    assert assembly["status"] == "parameter_validation_failed"
+    assert assembly["status"] == "parameter_response_invalid"
     cursor = ParameterRecommendationCursor.model_validate(
         assembly["current_parameter_recommendation"]
     )
@@ -267,3 +285,208 @@ def test_model_request_is_durable_before_invoke_failure(tmp_path: Path) -> None:
     )
     assert bundle["model_response"]["validity"] == "invalid"
     assert "model unavailable" in bundle["model_response"]["error"]
+
+
+def test_stale_checkpoint_reuses_persisted_model_response(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        return_value=_Model(_response(purge_level=1)),
+    ):
+        first = recommend_assembly_parameters(state)
+
+    with patch(
+        "app.llm.parameters.assembly.recommender.build_chat_model",
+        side_effect=AssertionError("the model must not be called during recovery"),
+    ):
+        replay = recommend_assembly_parameters(state)
+
+    first_cursor = ParameterRecommendationCursor.model_validate(
+        first["stage_outputs"]["assembly"]["current_parameter_recommendation"]
+    )
+    replay_cursor = ParameterRecommendationCursor.model_validate(
+        replay["stage_outputs"]["assembly"]["current_parameter_recommendation"]
+    )
+    assert replay["stage_outputs"]["assembly"]["status"] == "blocked_human"
+    assert replay_cursor.manifest_ref == first_cursor.manifest_ref
+    assert replay_cursor.review_request_ref == first_cursor.review_request_ref
+    assert replay_cursor.review_request_id == first_cursor.review_request_id
+
+
+def test_recovery_repairs_file_published_before_index_append(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    paths = SessionPaths.from_run_dir(state["data_dir"])
+    source = paths.work_path("assembly", "parameter_persistence", "response.tmp")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "raw_response": json.dumps(_response(purge_level=1)),
+                "validity": "parsed",
+                "error": None,
+                "model_id": "test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    destination = paths.artifact_path(
+        "assembly",
+        "parameter_recommendations",
+        "000",
+        "model_response.json",
+    )
+    publish_file(source, destination)
+    assert not any(
+        record["path_ref"] == paths.to_ref(destination)
+        for record in read_artifact_records(paths.run_dir, "s1")
+    )
+
+    recovered = recover_recommendation_json_artifact(
+        state,
+        0,
+        "model_response.json",
+        expected_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+        method_name="assembly.parameter_recommender",
+    )
+
+    assert recovered is not None
+    recovered_ref, payload = recovered
+    assert recovered_ref.path_ref == paths.to_ref(destination)
+    assert payload["validity"] == "parsed"
+    assert (
+        sum(
+            record["path_ref"] == recovered_ref.path_ref
+            for record in read_artifact_records(paths.run_dir, "s1")
+        )
+        == 1
+    )
+
+
+def test_parameter_read_requires_exact_index_membership(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    ref = publish_parameter_json(
+        state,
+        stage="assembly",
+        scope="recommendation",
+        identifier=0,
+        filename="indexed.json",
+        payload={"schema_version": 2, "value": "indexed"},
+        artifact_type="assembly.parameter.test",
+        method_name="assembly.parameter.test",
+    )
+    forged = ref.model_copy(update={"artifact_id": "art_" + "0" * 32})
+
+    with pytest.raises(ParameterEvidenceError, match="unreadable"):
+        read_parameter_json(
+            state,
+            forged,
+            expected_type="assembly.parameter.test",
+        )
+
+    paths = SessionPaths.from_run_dir(state["data_dir"])
+    unindexed_path = paths.artifact_path(
+        "assembly",
+        "parameter_recommendations",
+        "000",
+        "unindexed.json",
+    )
+    unindexed_path.parent.mkdir(parents=True, exist_ok=True)
+    unindexed_path.write_text('{"schema_version": 2}\n', encoding="utf-8")
+    unindexed_ref = ArtifactRef(
+        artifact_id="art_" + "f" * 32,
+        path_ref=paths.to_ref(unindexed_path),
+        sha256=file_sha256(unindexed_path),
+        size_bytes=unindexed_path.stat().st_size,
+        artifact_type="assembly.parameter.test",
+    )
+
+    with pytest.raises(ParameterEvidenceError, match="unreadable"):
+        read_parameter_json(
+            state,
+            unindexed_ref,
+            expected_type="assembly.parameter.test",
+        )
+
+
+def test_recovery_fails_closed_when_indexed_file_disappears(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    ref = publish_parameter_json(
+        state,
+        stage="assembly",
+        scope="recommendation",
+        identifier=0,
+        filename="model_response.json",
+        payload={"schema_version": 2, "validity": "parsed"},
+        artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+        method_name="assembly.parameter_recommender",
+    )
+    (Path(state["data_dir"]) / ref.path_ref).unlink()
+
+    with pytest.raises(ParameterPersistenceError, match="recovery failed"):
+        recover_recommendation_json_artifact(
+            state,
+            0,
+            "model_response.json",
+            expected_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+            method_name="assembly.parameter_recommender",
+        )
+
+
+def test_parameter_file_publication_is_idempotent_and_conflicts_fail_closed(
+    tmp_path: Path,
+) -> None:
+    state = _state(tmp_path)
+    source = Path(state["data_dir"]) / "work" / "assembly" / "command.sh"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"set -e\necho exact\n")
+
+    first = publish_parameter_file(
+        state,
+        stage="assembly",
+        scope="attempt",
+        identifier=0,
+        filename="command.sh",
+        source=source,
+        artifact_type="assembly.parameter.script",
+        method_name="assembly.candidate.test",
+    )
+    self_path = Path(state["data_dir"]) / first.path_ref
+    assert self_path.read_bytes() == b"set -e\necho exact\n"
+    assert not source.exists()
+
+    source.write_bytes(b"set -e\necho exact\n")
+    replay = publish_parameter_file(
+        state,
+        stage="assembly",
+        scope="attempt",
+        identifier=0,
+        filename="command.sh",
+        source=source,
+        artifact_type="assembly.parameter.script",
+        method_name="assembly.candidate.test",
+    )
+    assert replay == first
+    assert not source.exists()
+    matching_records = [
+        record
+        for record in read_artifact_records(
+            Path(state["data_dir"]), state["session_id"]
+        )
+        if record["path_ref"] == first.path_ref
+    ]
+    assert len(matching_records) == 1
+
+    source.write_bytes(b"set -e\necho changed\n")
+    with pytest.raises(FileExistsError, match="conflicts with existing snapshot"):
+        publish_parameter_file(
+            state,
+            stage="assembly",
+            scope="attempt",
+            identifier=0,
+            filename="command.sh",
+            source=source,
+            artifact_type="assembly.parameter.script",
+            method_name="assembly.candidate.test",
+        )
+    assert source.read_bytes() == b"set -e\necho changed\n"

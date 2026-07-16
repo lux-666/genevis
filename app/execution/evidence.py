@@ -1,0 +1,255 @@
+"""Immutable execution evidence backing compact stage checkpoints."""
+
+from __future__ import annotations
+
+import json
+import re
+from hashlib import sha256
+from typing import Any, Mapping
+from uuid import uuid4
+
+from app.execution.artifacts import (
+    artifact_ref_for_path,
+    publish_artifact_record,
+    resolve_artifact_ref,
+)
+from app.execution.results import ExecutionResult
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
+
+
+def frozen_attempt_artifact_type(stage: str) -> str:
+    return f"{stage}.frozen_attempt"
+
+
+def execution_result_artifact_type(stage: str) -> str:
+    return f"{stage}.execution_result"
+
+
+def durable_execution_result(
+    state: Mapping[str, Any],
+    result: ExecutionResult,
+) -> dict[str, Any]:
+    """Serialize process facts with indexed logs and no mutable outputs."""
+
+    session_id = str(state.get("session_id") or "")
+    data_dir = state.get("data_dir", "")
+    payload = result.model_dump(mode="json", exclude={"output_paths"})
+    payload["stdout_ref"] = artifact_ref_for_path(
+        data_dir,
+        session_id,
+        result.stdout_path,
+        expected_type="command.stdout",
+    ).model_dump(mode="json")
+    payload["stderr_ref"] = artifact_ref_for_path(
+        data_dir,
+        session_id,
+        result.stderr_path,
+        expected_type="command.stderr",
+    ).model_dump(mode="json")
+    return payload
+
+
+def persist_frozen_attempt(
+    state: Mapping[str, Any],
+    attempt: FrozenAttemptSpec,
+) -> ArtifactRef:
+    """Persist one complete attempt descriptor and return its compact ref."""
+
+    if attempt.session_id != state.get("session_id"):
+        raise DataLayoutError("frozen attempt session does not match the run state")
+    payload = {
+        "schema_version": 2,
+        "record_type": "frozen_attempt",
+        "stage": attempt.stage,
+        "method_name": attempt.method_name,
+        "attempt_id": attempt.attempt_id,
+        "attempt": attempt.model_dump(mode="json"),
+    }
+    return _persist_record(
+        state,
+        stage=attempt.stage,
+        attempt_id=attempt.attempt_id,
+        method_name=attempt.method_name,
+        kind="attempt",
+        artifact_type=frozen_attempt_artifact_type(attempt.stage),
+        payload=payload,
+    )
+
+
+def load_frozen_attempt(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any],
+    *,
+    expected_stage: str,
+    expected_method_name: str | None = None,
+) -> FrozenAttemptSpec:
+    """Integrity-check and hydrate one attempt descriptor from its ref."""
+
+    payload = _load_record(
+        state,
+        value,
+        expected_type=frozen_attempt_artifact_type(expected_stage),
+    )
+    if payload.get("record_type") != "frozen_attempt":
+        raise DataLayoutError("attempt evidence has the wrong record type")
+    attempt = FrozenAttemptSpec.model_validate(payload.get("attempt"))
+    if (
+        attempt.attempt_id != payload.get("attempt_id")
+        or attempt.session_id != state.get("session_id")
+        or attempt.stage != expected_stage
+        or payload.get("stage") != expected_stage
+        or payload.get("method_name") != attempt.method_name
+    ):
+        raise DataLayoutError("attempt evidence identity mismatch")
+    if expected_method_name is not None and attempt.method_name != expected_method_name:
+        raise DataLayoutError("attempt evidence has the wrong method identity")
+    return attempt
+
+
+def persist_execution_result(
+    state: Mapping[str, Any],
+    *,
+    stage: str,
+    method_name: str,
+    result: ExecutionResult,
+) -> ArtifactRef:
+    """Persist one structured process result and return its compact ref."""
+
+    payload = {
+        "schema_version": 2,
+        "record_type": "execution_result",
+        "stage": stage,
+        "method_name": method_name,
+        "attempt_id": result.attempt_id,
+        "result": durable_execution_result(state, result),
+    }
+    return _persist_record(
+        state,
+        stage=stage,
+        attempt_id=result.attempt_id,
+        method_name=method_name,
+        kind="execution",
+        artifact_type=execution_result_artifact_type(stage),
+        payload=payload,
+    )
+
+
+def load_execution_result(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any],
+    *,
+    expected_stage: str,
+    expected_attempt_id: str | None = None,
+    expected_method_name: str | None = None,
+) -> ExecutionResult:
+    """Integrity-check and hydrate one process result from its artifact ref."""
+
+    payload = _load_record(
+        state,
+        value,
+        expected_type=execution_result_artifact_type(expected_stage),
+    )
+    if payload.get("record_type") != "execution_result":
+        raise DataLayoutError("execution evidence has the wrong record type")
+    result = ExecutionResult.model_validate(payload.get("result"))
+    if (
+        result.attempt_id != payload.get("attempt_id")
+        or payload.get("stage") != expected_stage
+    ):
+        raise DataLayoutError("execution evidence identity mismatch")
+    if expected_attempt_id is not None and result.attempt_id != expected_attempt_id:
+        raise DataLayoutError("execution evidence does not match the frozen attempt")
+    if (
+        expected_method_name is not None
+        and payload.get("method_name") != expected_method_name
+    ):
+        raise DataLayoutError("execution evidence has the wrong method identity")
+    return result
+
+
+def _persist_record(
+    state: Mapping[str, Any],
+    *,
+    stage: str,
+    attempt_id: str,
+    method_name: str,
+    kind: str,
+    artifact_type: str,
+    payload: Mapping[str, Any],
+) -> ArtifactRef:
+    session_id = str(state.get("session_id") or "")
+    paths = SessionPaths.from_run_dir(state.get("data_dir", ""))
+    paths.require_session_id(session_id)
+    ensure_run_layout(paths)
+
+    encoded = (
+        json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = sha256(encoded).hexdigest()
+    session_prefix = f"{session_id}:{stage}:"
+    local_attempt_id = (
+        attempt_id[len(session_prefix) :]
+        if attempt_id.startswith(session_prefix)
+        else attempt_id
+    )
+    safe_attempt_id = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "_", local_attempt_id).strip("_") or "attempt"
+    )
+    temporary = paths.work_path(
+        stage,
+        "execution_evidence",
+        f".{kind}.{uuid4().hex}.json",
+    )
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_bytes(encoded)
+    destination = paths.artifact_path(
+        stage,
+        "attempts",
+        safe_attempt_id,
+        f"{kind}.{digest}.json",
+    )
+    artifact = ArtifactMeta.from_file(
+        temporary,
+        stage=stage,
+        method_name=method_name,
+        artifact_type=artifact_type,
+        metadata={"attempt_id": attempt_id},
+    )
+    return publish_artifact_record(
+        paths.run_dir,
+        session_id,
+        artifact,
+        destination=destination,
+    ).ref
+
+
+def _load_record(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any],
+    *,
+    expected_type: str,
+) -> dict[str, Any]:
+    session_id = str(state.get("session_id") or "")
+    ref = value if isinstance(value, ArtifactRef) else ArtifactRef.model_validate(value)
+    if ref.artifact_type != expected_type:
+        raise DataLayoutError(
+            f"unexpected execution evidence type: {ref.artifact_type}"
+        )
+    path = resolve_artifact_ref(state.get("data_dir", ""), session_id, ref)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DataLayoutError(
+            f"execution evidence is unreadable: {ref.path_ref}"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+        raise DataLayoutError(f"execution evidence is not schema v2: {ref.path_ref}")
+    return payload

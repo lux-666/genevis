@@ -10,7 +10,7 @@ import yaml
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 CATALOG_ROOT = _PROJECT_ROOT / "descriptors" / "knowledge_packs" / "assembly" / "methods"
 _REGISTRY_PATH = _PROJECT_ROOT / "descriptors" / "registry.yaml"
 

@@ -32,7 +32,7 @@ from app.stages.assembly.method_application.lifecycle import (
     update_assembly_output,
     write_parameter_attempt_json_artifact,
 )
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
 

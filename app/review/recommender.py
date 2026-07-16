@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.execution.artifacts import append_artifact_records
 from app.llm.factory import build_chat_model
 from app.llm.prompts import PROMPT_ROOT, load_prompt_bundle, render_prompt_messages
-from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.base import ResumeReviewRequest
 from app.review.gates import review_prompt_bundle
-from app.schemas.artifacts import ArtifactMeta
-from app.storage.paths import SessionPaths
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_recommendation,
+)
+from app.schemas.artifacts import ArtifactRef
 
 
 class RecommendationError(ValueError):
@@ -39,17 +42,40 @@ def recommend_review_decision(
     *,
     session_id: str,
     stage: str,
-    request: ReviewPayload,
+    review_request_id: str,
+    request_ref: ArtifactRef | Mapping[str, Any],
+    request_hash: str,
     data_dir: str | Path,
     chat_model: Any | None = None,
 ) -> ResumeReviewRequest:
-    bundle = _load_stage_prompt_bundle(stage, request.gate_id)
+    ref, request_record = _load_bound_review_request(
+        session_id=session_id,
+        stage=stage,
+        review_request_id=review_request_id,
+        request_ref=request_ref,
+        request_hash=request_hash,
+        data_dir=data_dir,
+    )
+    request_body = request_record["payload"]
+    decisions_allowed = request_body.get("decisions_allowed")
+    if not isinstance(decisions_allowed, list) or not all(
+        isinstance(decision, str) for decision in decisions_allowed
+    ):
+        raise RecommendationError(
+            "canonical review request does not contain valid decisions_allowed"
+        )
+    gate_id = request_record["gate_id"]
+    bundle = _load_stage_prompt_bundle(stage, gate_id)
     messages = render_prompt_messages(
         bundle,
         {
             "session_id": session_id,
             "stage": stage,
-            "review_request_json": json.dumps(request.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            "review_request_json": json.dumps(
+                request_record,
+                ensure_ascii=False,
+                indent=2,
+            ),
         },
     )
     model = _bind_recommendation_response_format(chat_model or build_chat_model())
@@ -61,30 +87,37 @@ def recommend_review_decision(
         raise RecommendationError("recommendation session_id does not match review request")
     if draft.stage != stage:
         raise RecommendationError("recommendation stage does not match review request")
-    if draft.decision not in request.decisions_allowed:
+    if draft.decision not in decisions_allowed:
         raise RecommendationError(f"recommendation decision {draft.decision!r} is not allowed")
 
-    artifact_ref = _write_recommendation_artifact(
-        session_id=session_id,
-        stage=stage,
-        data_dir=data_dir,
-        payload={
-            "session_id": session_id,
-            "stage": stage,
-            "model": _model_identifier(model),
-            "prompt_bundle": bundle.name,
-            "prompt_paths": _prompt_paths(bundle.name),
-            "decisions_allowed": list(request.decisions_allowed),
-            "review_request": request.model_dump(mode="json"),
-            "raw_recommendation": raw,
-            "recommendation": normalized,
-            "rationale_text": raw_text,
-        },
-    )
+    try:
+        artifact_ref = persist_review_recommendation(
+            data_dir,
+            session_id=session_id,
+            stage=stage,
+            review_request_id=review_request_id,
+            request_ref=ref,
+            request_hash=request_hash,
+            payload={
+                "model": _model_identifier(model),
+                "prompt_bundle": bundle.name,
+                "prompt_paths": _prompt_paths(bundle.name),
+                "raw_recommendation": raw,
+                "recommendation": normalized,
+                "rationale_text": raw_text,
+            },
+        )
+    except (ReviewPersistenceError, FileExistsError) as exc:
+        raise RecommendationError(
+            f"review recommendation artifact could not be published: {exc}"
+        ) from exc
     completed = {
         **draft.model_dump(mode="json"),
+        "gate_id": gate_id,
+        "review_request_id": review_request_id,
+        "review_request_hash": request_hash,
         "decided_by": "llm_provisional",
-        "rationale_artifact_ref": artifact_ref,
+        "rationale_artifact_ref": artifact_ref.path_ref,
     }
     try:
         return ResumeReviewRequest.model_validate(completed)
@@ -100,6 +133,48 @@ def _load_stage_prompt_bundle(stage: str, gate_id: str | None = None):
     if not bundle_name:
         raise RecommendationError(f"review recommendation prompt not found for stage: {stage}")
     return load_prompt_bundle(bundle_name)
+
+
+def _load_bound_review_request(
+    *,
+    session_id: str,
+    stage: str,
+    review_request_id: str,
+    request_ref: ArtifactRef | Mapping[str, Any],
+    request_hash: str,
+    data_dir: str | Path,
+) -> tuple[ArtifactRef, dict[str, Any]]:
+    try:
+        ref = (
+            request_ref
+            if isinstance(request_ref, ArtifactRef)
+            else ArtifactRef.model_validate(request_ref)
+        )
+    except Exception as exc:
+        raise RecommendationError("review recommendation request_ref is invalid") from exc
+    if request_hash != ref.sha256:
+        raise RecommendationError(
+            "review recommendation request_hash does not match request_ref.sha256"
+        )
+    try:
+        record = load_review_request(
+            data_dir,
+            ref,
+            session_id=session_id,
+        )
+    except ReviewPersistenceError as exc:
+        raise RecommendationError(
+            f"canonical review request could not be verified: {exc}"
+        ) from exc
+    if record.get("review_request_id") != review_request_id:
+        raise RecommendationError(
+            "review recommendation ID does not match canonical review request"
+        )
+    if record.get("stage") != stage:
+        raise RecommendationError(
+            "review recommendation stage does not match canonical review request"
+        )
+    return ref, record
 
 
 def _prompt_paths(bundle_name: str) -> dict[str, str]:
@@ -182,25 +257,3 @@ def _model_identifier(model: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
-
-
-def _write_recommendation_artifact(
-    *,
-    session_id: str,
-    stage: str,
-    data_dir: str | Path,
-    payload: dict[str, Any],
-) -> str:
-    out_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir(stage)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{stage}_review_recommendation.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        path,
-        stage=stage,
-        method_name=f"{stage}.review_recommender",
-        artifact_type=f"{stage}.review_recommendation",
-        metadata={"decided_by": "llm_provisional"},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    return str(path)

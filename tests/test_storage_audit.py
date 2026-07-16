@@ -81,11 +81,11 @@ class StorageAuditTests(unittest.TestCase):
         leaf_ref = self._register_json(
             "leaf.json",
             {"value": 1},
-            artifact_type="assembly.parameter.validation",
+            artifact_type="assembly.parameter.response_parse",
         )
         manifest_ref = self._register_json(
             "recommendation_manifest.json",
-            {"schema_version": 2, "validation_ref": leaf_ref.model_dump(mode="json")},
+            {"schema_version": 2, "response_parse_ref": leaf_ref.model_dump(mode="json")},
             artifact_type="assembly.parameter.recommendation_manifest",
         )
         orphan_ref = self._register_json(

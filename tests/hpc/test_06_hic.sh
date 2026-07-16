@@ -127,7 +127,7 @@ else:
 " 2>&1 && pass "fixed AutoHiC schema" || fail "fixed AutoHiC schema"
 
 python3 -c "
-from app.stages.hic_scaffolding.parameter_catalog import load_autohic_parameter_catalog
+from app.stages.hic_scaffolding.parameters.catalog import load_autohic_parameter_catalog
 catalog = load_autohic_parameter_catalog()
 dynamic = {name for name, spec in catalog.parameters.items() if spec.level == 2}
 assert dynamic == {'restriction_enzyme'}, dynamic

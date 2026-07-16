@@ -8,7 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.execution.artifacts import append_artifact_records, read_artifact_records
+from app.execution.artifacts import (
+    append_artifact_records,
+    publish_artifact_record,
+    read_artifact_records,
+    register_artifact_records,
+    resolve_artifact_ref,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.execution.results import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
@@ -150,6 +156,54 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             self.assertNotIn("s1", published.relative_to(paths.run_dir).parts)
             self.assertEqual(artifact.file_path, published)
             self.assertEqual(artifact.artifact_id, artifact_ref.artifact_id)
+
+    def test_explicit_publication_returns_readable_durable_ref_after_source_move(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            source = paths.work_path("gene_annotation", "miniprot", "candidate.gff3")
+            source.parent.mkdir(parents=True)
+            source.write_text("##gff-version 3\n", encoding="utf-8")
+            artifact = ArtifactMeta.from_file(
+                source,
+                stage="gene_annotation",
+                method_name="gene_annotation.candidate.miniprot",
+                artifact_type="gene_annotation.candidate_gff",
+            )
+
+            published = publish_artifact_record(paths.run_dir, "s1", artifact)
+
+            self.assertFalse(source.exists())
+            self.assertTrue(published.path.is_file())
+            self.assertEqual(published.path.read_text(encoding="utf-8"), "##gff-version 3\n")
+            self.assertEqual(
+                published.path,
+                paths.artifact_path(
+                    "gene_annotation", "outputs", "miniprot", "candidate.gff3"
+                ),
+            )
+            self.assertEqual(
+                resolve_artifact_ref(paths.run_dir, "s1", published.ref),
+                published.path,
+            )
+
+    def test_strict_registration_does_not_implicitly_publish_work_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            source = paths.work_path("gene_annotation", "miniprot", "candidate.gff3")
+            source.parent.mkdir(parents=True)
+            source.write_text("##gff-version 3\n", encoding="utf-8")
+            artifact = ArtifactMeta.from_file(
+                source,
+                stage="gene_annotation",
+                method_name="gene_annotation.candidate.miniprot",
+                artifact_type="gene_annotation.candidate_gff",
+            )
+
+            with self.assertRaises(DataLayoutError):
+                register_artifact_records(paths.run_dir, "s1", [artifact])
+
+            self.assertTrue(source.is_file())
+            self.assertFalse(paths.artifact_index_path.exists())
 
     def test_identical_replay_reuses_ref_and_conflicting_bytes_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:

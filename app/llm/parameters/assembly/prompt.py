@@ -1,4 +1,4 @@
-"""Method-specific rendering for the unified parameter-patch prompt."""
+"""Method-specific rendering for the Assembly parameter recommendation."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def render_assembly_parameter_messages(
             "parameter_request_json": json.dumps(
                 dict(request_dto),
                 ensure_ascii=False,
-                indent=2,
+                separators=(",", ":"),
             ),
         },
     )

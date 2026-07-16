@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.execution.artifacts import register_artifact_records
+from app.execution.results import ExecutionResult
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state
 from app.stages.gene_annotation.nodes import (
@@ -16,6 +19,12 @@ from app.stages.gene_annotation.nodes import (
     run_evm_attempt,
     run_gene_busco_attempt,
 )
+from app.stages.gene_annotation.persistence import (
+    load_gene_attempt,
+    persist_gene_attempt,
+    persist_gene_execution,
+)
+from app.storage.publish import publish_execution_logs
 from tests.data_v2 import v2_run_dir
 
 
@@ -43,6 +52,54 @@ def _write_intake_plan(tmpdir: str) -> str:
         "changed": False,
     }), encoding="utf-8")
     return str(path)
+
+
+def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
+    return persist_gene_attempt(state, attempt).model_dump(mode="json")
+
+
+def _persist_successful_execution(
+    state: dict,
+    attempt: FrozenAttemptSpec,
+    output_paths: list[Path],
+) -> dict:
+    stdout_path = Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stdout.log"
+    stderr_path = Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stderr.log"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    result = ExecutionResult(
+        attempt_id=attempt.attempt_id,
+        success=True,
+        return_code=0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        output_paths=output_paths,
+        status="ok",
+    )
+    result = publish_execution_logs(state["data_dir"], attempt, result)
+    register_artifact_records(
+        state["data_dir"],
+        attempt.session_id,
+        [
+            ArtifactMeta.from_file(
+                path,
+                stage=attempt.stage,
+                method_name=attempt.method_name,
+                artifact_type=artifact_type,
+                metadata={"attempt_id": attempt.attempt_id},
+            )
+            for path, artifact_type in (
+                (result.stdout_path, "command.stdout"),
+                (result.stderr_path, "command.stderr"),
+            )
+        ],
+    )
+    return persist_gene_execution(
+        state,
+        method_name=attempt.method_name,
+        result=result,
+    ).model_dump(mode="json")
 
 
 def _fake_gffread_bin(tmpdir: str) -> Path:
@@ -138,7 +195,7 @@ class EVMFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "evm_frozen")
-            attempt = FrozenAttemptSpec.model_validate(gene["evm_frozen_attempt"])
+            attempt = load_gene_attempt(state, gene["evm_attempt_ref"])
             script = attempt.script_path.read_text(encoding="utf-8")
             weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
@@ -191,7 +248,7 @@ class EVMRunTests(unittest.TestCase):
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:evm",
             session_id="s1", stage="gene_annotation",
-            method_name="gene_annotation.evm",
+            method_name="gene_annotation.merge.evm",
             script_path=script, working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -201,7 +258,10 @@ class EVMRunTests(unittest.TestCase):
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
-            "gene_annotation": {"status": status, "evm_frozen_attempt": attempt.model_dump(mode="json")},
+            "gene_annotation": {
+                "status": status,
+                "evm_attempt_ref": _persist_attempt(state, attempt),
+            },
         }
         return state
 
@@ -228,7 +288,7 @@ class EVMCollectTests(unittest.TestCase):
         attempt = FrozenAttemptSpec(
             attempt_id="s1:gene_annotation:evm",
             session_id="s1", stage="gene_annotation",
-            method_name="gene_annotation.evm",
+            method_name="gene_annotation.merge.evm",
             script_path=Path(tmpdir) / "run_evm.sh", working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
             metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "candidate_refs": {}, "merge_weights": {}},
@@ -244,7 +304,10 @@ class EVMCollectTests(unittest.TestCase):
                 "status": "evm_ran",
                 "genome_input_ref": str(genome),
                 "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                "evm_frozen_attempt": attempt.model_dump(mode="json"),
+                "evm_attempt_ref": _persist_attempt(state, attempt),
+                "evm_execution_ref": _persist_successful_execution(
+                    state, attempt, [output_gff3]
+                ),
             },
         }
         return state
@@ -312,7 +375,7 @@ class GeneBUSBOTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "busco_frozen")
-            attempt = FrozenAttemptSpec.model_validate(gene["busco_frozen_attempt"])
+            attempt = load_gene_attempt(state, gene["busco_attempt_ref"])
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("busco -i", script)
             self.assertEqual(attempt.metadata["busco_input"], str(final_proteins))
@@ -351,7 +414,10 @@ class GeneBUSBOTests(unittest.TestCase):
             state["current_stage"] = "gene_annotation"
             state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
-                "gene_annotation": {"status": "busco_frozen", "busco_frozen_attempt": attempt.model_dump(mode="json")},
+                "gene_annotation": {
+                    "status": "busco_frozen",
+                    "busco_attempt_ref": _persist_attempt(state, attempt),
+                },
             }
             result = run_gene_busco_attempt(state)
 
@@ -387,7 +453,10 @@ class GeneBUSBOTests(unittest.TestCase):
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     "status": "busco_ran",
-                    "busco_frozen_attempt": attempt.model_dump(mode="json"),
+                    "busco_attempt_ref": _persist_attempt(state, attempt),
+                    "busco_execution_ref": _persist_successful_execution(
+                        state, attempt, [short_summary]
+                    ),
                     "final_gff_ref": str(Path(tmpdir) / "final.gff3"),
                 },
             }
@@ -455,7 +524,7 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             busco_bin.write_text("#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8")
             busco_bin.chmod(0o755)
 
-            attempt = FrozenAttemptSpec.model_validate(gene["busco_frozen_attempt"])
+            attempt = load_gene_attempt(busco_state, gene["busco_attempt_ref"])
             attempt_dict = attempt.model_dump(mode="json")
             attempt_dict["env"]["PATH"] = f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', os.environ.get('PATH', ''))}"
             updated_attempt = FrozenAttemptSpec.model_validate(attempt_dict)
@@ -466,7 +535,7 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     "status": "busco_frozen",
-                    "busco_frozen_attempt": updated_attempt.model_dump(mode="json"),
+                    "busco_attempt_ref": _persist_attempt(run_state, updated_attempt),
                 },
             }
             busco_run = run_gene_busco_attempt(run_state)

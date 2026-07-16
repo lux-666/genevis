@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records
+from app.execution.artifacts import (
+    append_artifact_records,
+    publish_or_recover_work_artifact,
+)
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
@@ -22,12 +24,34 @@ from app.review.annotation_intake import (
     rewrite_requested_stages_after_assembly_review,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
-from app.review.persistence import PersistedReviewRequest, persist_review_decision, persist_review_request
+from app.review.persistence import (
+    PersistedReviewRequest,
+    persist_review_decision,
+    persist_review_request,
+)
 from app.review.policy import evaluate
-from app.schemas.artifacts import ArtifactMeta, CandidateBundle, GeneAnnotationBundle, GeneAnnotationPlan
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.artifacts import (
+    ArtifactMeta,
+    CandidateBundle,
+    GeneAnnotationBundle,
+    GeneAnnotationPlan,
+)
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
+from app.stages.gene_annotation.persistence import (
+    load_gene_attempt,
+    load_gene_execution,
+    persist_gene_attempt,
+    persist_gene_execution,
+)
 
 GENE_CANDIDATE_METHODS = [
     "gene_annotation.candidate.augustus",
@@ -73,13 +97,16 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
             return _fail_update(state, "missing softmasked_genome for gene_annotation")
         # Fallback to unmasked assembly
         from app.stages.base import resolve_current_assembly
+
         genome_ref, _ = resolve_current_assembly(
-            state,
-            prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]
+            state, prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]
         )
         genome_source = "final_assembly_for_annotation"
         if not genome_ref:
-            return _fail_update(state, "missing final_assembly_for_annotation for gene_annotation fallback")
+            return _fail_update(
+                state,
+                "missing final_assembly_for_annotation for gene_annotation fallback",
+            )
 
     rnaseq_refs = _asset_paths(state, {"clean_rnaseq_reads", "raw_rnaseq_reads"})
     long_rna_refs = _asset_paths(
@@ -189,8 +216,6 @@ def plan_gene_methods(state: TopLevelState) -> dict:
     if missing:
         return _fail_update(state, f"gene_annotation descriptors missing: {missing}")
 
-    data_dir = Path(state.get("data_dir", "data"))
-    session_id = state["session_id"]
     work_dir = stage_work_dir(state, "gene_annotation")
     expected_outputs = {
         "genes_gff3": str(work_dir / "genes.gff3"),
@@ -272,7 +297,10 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
             "review_required": review_required,
             "review_triggers": review_triggers,
             "plan_artifact_ref": str(plan_ref),
-            "artifact_refs": [*gene_out.get("artifact_refs", []), str(artifact.file_path)],
+            "artifact_refs": [
+                *gene_out.get("artifact_refs", []),
+                str(artifact.file_path),
+            ],
         },
     )
 
@@ -285,7 +313,9 @@ def commit_gene_annotation(state: TopLevelState) -> dict:
     return _commit_planned_gene_annotation(state)
 
 
-def _resolve_final_gene_set(gene_out: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+def _resolve_final_gene_set(
+    gene_out: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
     """Resolve the materialized final gene set: (gff, proteins, cds, error).
 
     Prefers the merged/passthrough refs set during EVM collect; falls back to a
@@ -304,9 +334,19 @@ def _resolve_final_gene_set(gene_out: dict[str, Any]) -> tuple[str | None, str |
             proteins_ref = bundle.get("proteins_fasta_ref")
             cds_ref = bundle.get("cds_fasta_ref")
     if not proteins_ref:
-        return gff_ref, None, None, "no materialized proteins_fasta_ref for final gene set"
+        return (
+            gff_ref,
+            None,
+            None,
+            "no materialized proteins_fasta_ref for final gene set",
+        )
     if not Path(str(proteins_ref)).exists():
-        return gff_ref, None, None, f"final proteins.fa does not exist on disk: {proteins_ref}"
+        return (
+            gff_ref,
+            None,
+            None,
+            f"final proteins.fa does not exist on disk: {proteins_ref}",
+        )
     return gff_ref, str(proteins_ref), (str(cds_ref) if cds_ref else None), None
 
 
@@ -317,11 +357,17 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     out_dir = stage_artifacts_dir(state, "gene_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = gene_out["expected_outputs"]
-    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = _resolve_final_gene_set(gene_out)
+    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = (
+        _resolve_final_gene_set(gene_out)
+    )
     if final_error:
         return _fail_update(state, final_error)
     genes_gff3_ref = final_gff_ref or expected_outputs["genes_gff3"]
-    transcripts_ref = final_cds_ref or gene_out.get("transcripts_fasta_ref") or expected_outputs["transcripts_fasta"]
+    transcripts_ref = (
+        final_cds_ref
+        or gene_out.get("transcripts_fasta_ref")
+        or expected_outputs["transcripts_fasta"]
+    )
     bundle = GeneAnnotationBundle(
         session_id=session_id,
         status="planned",
@@ -375,7 +421,7 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
         "bundle_artifact_ref": str(bundle_ref),
         "artifact_refs": [*gene_out.get("artifact_refs", []), str(artifact.file_path)],
     }
-    trace = [*state.get("route_trace", []), "gene_annotation_stage"]
+    trace = append_route_trace(state, "gene_annotation_stage")
     return {
         "stage_outputs": outputs,
         "current_stage": next_stage_name("gene_annotation"),
@@ -450,7 +496,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
         "bundle_artifact_ref": str(bundle_ref),
         "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
     }
-    trace = [*state.get("route_trace", []), "gene_annotation_stage"]
+    trace = append_route_trace(state, "gene_annotation_stage")
     return {
         "stage_outputs": outputs,
         "current_stage": next_stage_name("gene_annotation"),
@@ -483,7 +529,6 @@ GENE_REVIEW_GATES = (
     "merge_review",
     "final_gene_set_review",
 )
-
 
 
 def _gene_review_policy(state: TopLevelState) -> dict[str, Any]:
@@ -593,10 +638,16 @@ def _record_gene_gate_decision(
         **payload_extra,
     }
     active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError(f"{gate_id} decision is missing review request binding")
+        raise ResumeValidationError(
+            f"{gate_id} decision is missing review request binding"
+        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=session_id,
@@ -641,14 +692,18 @@ def _gene_gate_own_update(
     }
     return {
         "stage_outputs": outputs,
-        "route_trace": [*state.get("route_trace", []), gate_id],
+        "route_trace": append_route_trace(state, gate_id),
         "active_interrupt": None,
     }
 
 
-def _gene_gate_stop(state: TopLevelState, gate_id: str, request: ResumeReviewRequest) -> dict:
+def _gene_gate_stop(
+    state: TopLevelState, gate_id: str, request: ResumeReviewRequest
+) -> dict:
     decision_ref = _record_gene_gate_decision(state, gate_id, request, {})
-    own = _gene_gate_own_update(state, gate_id, request, {"status": "stopped"}, decision_ref)
+    own = _gene_gate_own_update(
+        state, gate_id, request, {"status": "stopped"}, decision_ref
+    )
     return {
         **own,
         "current_stage": "gene_annotation",
@@ -662,14 +717,21 @@ def _require_gene_stage(request: ResumeReviewRequest, gate_id: str) -> None:
         raise ResumeValidationError(f"{gate_id} resume requires stage gene_annotation")
 
 
-def _gene_method_readiness_issues(state: TopLevelState, methods: list[str]) -> list[str]:
+def _gene_method_readiness_issues(
+    state: TopLevelState, methods: list[str]
+) -> list[str]:
     issues: list[str] = []
-    if AUGUSTUS_METHOD in methods and not _lineage_or_species_hints(state).get("augustus_species_model"):
-        issues.append("gene_annotation.candidate.augustus requires augustus_species_model before execution")
+    if AUGUSTUS_METHOD in methods and not _lineage_or_species_hints(state).get(
+        "augustus_species_model"
+    ):
+        issues.append(
+            "gene_annotation.candidate.augustus requires augustus_species_model before execution"
+        )
     return issues
 
 
 # --- gate 1: gene method planning ----------------------------------------------
+
 
 def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPayload:
     gene_out = _gene_output(state)
@@ -710,7 +772,9 @@ def build_gene_method_planning_review_payload(state: TopLevelState) -> ReviewPay
         candidates=candidates,
         signals=signals,
         decisions_allowed=["select_methods", "accept", "stop"],
-        auto_decidable=len(candidate_methods) == 1 and not conflict and not readiness_issues,
+        auto_decidable=len(candidate_methods) == 1
+        and not conflict
+        and not readiness_issues,
         notes=[*gene_out.get("notes", []), *readiness_issues],
     )
 
@@ -728,10 +792,14 @@ def block_gene_method_planning_review(state: TopLevelState) -> dict:
     )
 
 
-def apply_gene_method_planning_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_gene_method_planning_review_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     _require_gene_stage(request, "gene_method_planning_review")
     if request.decision not in {"select_methods", "accept", "stop"}:
-        raise ResumeValidationError(f"unsupported gene_method_planning_review decision: {request.decision!r}")
+        raise ResumeValidationError(
+            f"unsupported gene_method_planning_review decision: {request.decision!r}"
+        )
     if request.decision == "stop":
         return _gene_gate_stop(state, "gene_method_planning_review", request)
 
@@ -740,7 +808,9 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
     if request.decision == "select_methods":
         confirmed = list(request.metadata.get("selected_methods") or [])
         if not confirmed:
-            raise ResumeValidationError("select_methods requires metadata.selected_methods")
+            raise ResumeValidationError(
+                "select_methods requires metadata.selected_methods"
+            )
     else:
         confirmed = candidate_methods
 
@@ -763,7 +833,11 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
     )
     # Only this gate may rewrite the downstream stage suffix.
     if request.decision == "select_methods" and state.get("requested_stages"):
-        downstream = [stage for stage in state.get("requested_stages", []) if stage in DOWNSTREAM_STAGES]
+        downstream = [
+            stage
+            for stage in state.get("requested_stages", [])
+            if stage in DOWNSTREAM_STAGES
+        ]
         own["requested_stages"] = rewrite_requested_stages_after_assembly_review(
             state.get("requested_stages"), downstream
         )
@@ -772,13 +846,18 @@ def apply_gene_method_planning_review_decision(state: TopLevelState, request: Re
 
 # --- executable method preparation ---------------------------------------------
 
+
 def prepare_gene_method_execution(state: TopLevelState) -> dict:
     """Prepare output targets for confirmed executable methods."""
     gene_out = _gene_output(state)
     if gene_out.get("status") != "methods_confirmed":
         return {}
-    methods = list(gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or [])
-    unsupported = [method for method in methods if method not in GENE_EXECUTABLE_METHODS]
+    methods = list(
+        gene_out.get("confirmed_methods") or gene_out.get("candidate_methods") or []
+    )
+    unsupported = [
+        method for method in methods if method not in GENE_EXECUTABLE_METHODS
+    ]
     if unsupported:
         return _fail_update(
             state,
@@ -800,6 +879,7 @@ def prepare_gene_method_execution(state: TopLevelState) -> dict:
 
 # --- gate 2: candidate evidence ------------------------------------------------
 
+
 def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPayload:
     gene_out = _gene_output(state)
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
@@ -813,7 +893,9 @@ def build_candidate_evidence_review_payload(state: TopLevelState) -> ReviewPaylo
             "candidate_ref": ref,
             "gene_count": gene_counts.get(method, 0),
             "proteins_fasta_ref": (bundles.get(method) or {}).get("proteins_fasta_ref"),
-            "conflict_signals": ["rna_protein_evidence_conflict_review"] if conflict else [],
+            "conflict_signals": ["rna_protein_evidence_conflict_review"]
+            if conflict
+            else [],
         }
         for method, ref in candidate_refs.items()
     ]
@@ -845,22 +927,38 @@ def block_candidate_evidence_review(state: TopLevelState) -> dict:
     )
 
 
-def apply_candidate_evidence_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_candidate_evidence_review_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     _require_gene_stage(request, "candidate_evidence_review")
-    if request.decision not in {"accept_candidate", "merge_with_evm", "proceed_merge", "request_rerun", "stop"}:
-        raise ResumeValidationError(f"unsupported candidate_evidence_review decision: {request.decision!r}")
+    if request.decision not in {
+        "accept_candidate",
+        "merge_with_evm",
+        "proceed_merge",
+        "request_rerun",
+        "stop",
+    }:
+        raise ResumeValidationError(
+            f"unsupported candidate_evidence_review decision: {request.decision!r}"
+        )
     if request.decision == "stop":
         return _gene_gate_stop(state, "candidate_evidence_review", request)
 
     gene_out = _gene_output(state)
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
     if request.decision == "request_rerun":
-        decision_ref = _record_gene_gate_decision(state, "candidate_evidence_review", request, {})
+        decision_ref = _record_gene_gate_decision(
+            state, "candidate_evidence_review", request, {}
+        )
         own = _gene_gate_own_update(
             state,
             "candidate_evidence_review",
             request,
-            {"status": "methods_confirmed", "candidate_refs": {}, "accepted_candidate_refs": {}},
+            {
+                "status": "methods_confirmed",
+                "candidate_refs": {},
+                "accepted_candidate_refs": {},
+            },
             decision_ref,
         )
         return own
@@ -935,17 +1033,23 @@ def block_merge_review(state: TopLevelState) -> dict:
     )
 
 
-def apply_merge_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_merge_review_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     _require_gene_stage(request, "merge_review")
     if request.decision not in {"accept_weights", "adjust_weights", "stop"}:
-        raise ResumeValidationError(f"unsupported merge_review decision: {request.decision!r}")
+        raise ResumeValidationError(
+            f"unsupported merge_review decision: {request.decision!r}"
+        )
     if request.decision == "stop":
         return _gene_gate_stop(state, "merge_review", request)
 
     if request.decision == "adjust_weights":
         merge_weights = dict(request.metadata.get("merge_weights") or {})
         if not merge_weights:
-            raise ResumeValidationError("adjust_weights requires metadata.merge_weights")
+            raise ResumeValidationError(
+                "adjust_weights requires metadata.merge_weights"
+            )
     else:
         merge_weights = dict(_DEFAULT_MERGE_WEIGHTS)
 
@@ -967,6 +1071,7 @@ def apply_merge_review_decision(state: TopLevelState, request: ResumeReviewReque
 
 # --- gate 4: final gene set + BUSCO --------------------------------------------
 
+
 def build_final_gene_set_review_payload(state: TopLevelState) -> ReviewPayload:
     gene_out = _gene_output(state)
     busco_score = gene_out.get("busco_completeness")
@@ -977,7 +1082,9 @@ def build_final_gene_set_review_payload(state: TopLevelState) -> ReviewPayload:
         status=busco_status,
         metadata={"score": busco_score} if busco_score is not None else {},
     )
-    auto_decidable = busco_status == "missing" or (isinstance(busco_score, (int, float)) and busco_score >= 80.0)
+    auto_decidable = busco_status == "missing" or (
+        isinstance(busco_score, (int, float)) and busco_score >= 80.0
+    )
     return ReviewPayload(
         stage="gene_annotation",
         gate_id="final_gene_set_review",
@@ -1001,15 +1108,21 @@ def block_final_gene_set_review(state: TopLevelState) -> dict:
     )
 
 
-def apply_final_gene_set_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_final_gene_set_review_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     _require_gene_stage(request, "final_gene_set_review")
     if request.decision not in {"accept", "reject", "stop"}:
-        raise ResumeValidationError(f"unsupported final_gene_set_review decision: {request.decision!r}")
+        raise ResumeValidationError(
+            f"unsupported final_gene_set_review decision: {request.decision!r}"
+        )
     if request.decision == "stop":
         return _gene_gate_stop(state, "final_gene_set_review", request)
 
     if request.decision == "reject":
-        decision_ref = _record_gene_gate_decision(state, "final_gene_set_review", request, {})
+        decision_ref = _record_gene_gate_decision(
+            state, "final_gene_set_review", request, {}
+        )
         own = _gene_gate_own_update(
             state,
             "final_gene_set_review",
@@ -1019,7 +1132,9 @@ def apply_final_gene_set_review_decision(state: TopLevelState, request: ResumeRe
         )
         return own
 
-    decision_ref = _record_gene_gate_decision(state, "final_gene_set_review", request, {})
+    decision_ref = _record_gene_gate_decision(
+        state, "final_gene_set_review", request, {}
+    )
     own = _gene_gate_own_update(
         state,
         "final_gene_set_review",
@@ -1162,20 +1277,26 @@ def _write_candidate_bundle(
     gene_count: int,
 ) -> dict[str, Any]:
     """Write minimal metrics/provenance and return a CandidateBundle dict."""
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
     work_dir = stage_work_dir(state, "gene_annotation", suffix)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_path = work_dir / "metrics.json"
     metrics_path.write_text(
-        json.dumps({"method_name": method_name, "gene_count": gene_count}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"method_name": method_name, "gene_count": gene_count},
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     provenance_path = work_dir / "provenance.json"
     provenance_path.write_text(
         json.dumps(
-            {"method_name": method_name, "annotation_gff_ref": str(output_gff3), "materialized_with": "gffread"},
+            {
+                "method_name": method_name,
+                "annotation_gff_ref": str(output_gff3),
+                "materialized_with": "gffread",
+            },
             ensure_ascii=False,
             indent=2,
         ),
@@ -1247,12 +1368,12 @@ def _freeze_gene_method_attempt(
         return _update_gene_output(state, blocked)
 
     working_dir = stage_work_dir(state, "gene_annotation", cfg["suffix"])
-    artifact_dir = stage_artifacts_dir(state, "gene_annotation", cfg["suffix"])
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
-    output_gff3 = Path(candidate_refs.get(method_name, str(artifact_dir / f"{cfg['suffix']}.gff3")))
+    output_gff3 = Path(
+        candidate_refs.get(method_name, str(working_dir / f"{cfg['suffix']}.gff3"))
+    )
 
     script_path = working_dir / f"run_{cfg['suffix']}.sh"
     script_path.write_text(script_body, encoding="utf-8")
@@ -1274,25 +1395,40 @@ def _freeze_gene_method_attempt(
             **(extra_metadata or {}),
         },
     )
+    attempt_ref = persist_gene_attempt(state, attempt)
 
     return _update_gene_output(
         state,
         {
             "status": cfg["frozen_status"],
-            f"{cfg['suffix']}_frozen_attempt": attempt.model_dump(mode="json"),
+            f"{cfg['suffix']}_attempt_ref": attempt_ref.model_dump(mode="json"),
         },
     )
 
 
-def _run_gene_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> dict:
-    """Shared run path: deserialize FrozenAttemptSpec and execute via LocalRunner."""
+def _run_gene_method_attempt(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    cfg: dict[str, str],
+) -> dict:
+    """Shared run path: hydrate a verified FrozenAttemptSpec and execute it."""
     gene_out = _gene_output(state)
-    attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out[f"{cfg['suffix']}_attempt_ref"],
+        expected_method_name=method_name,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=cfg["suffix"],
+    )
+    execution_ref = persist_gene_execution(
+        state,
+        method_name=attempt.method_name,
+        result=outcome.result,
     )
     if not outcome.success:
         return _update_gene_output(
@@ -1300,50 +1436,69 @@ def _run_gene_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> di
             {
                 "status": "failed",
                 "reason": outcome.error,
-                f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
+                f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
             },
         )
     return _update_gene_output(
         state,
         {
             "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
+            f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
         },
     )
 
 
-def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cfg: dict[str, str]) -> dict:
+def _collect_gene_method_artifacts(
+    state: TopLevelState, *, method_name: str, cfg: dict[str, str]
+) -> dict:
     """Shared collect path: register GFF3 artifact and advance execution state."""
     gene_out = _gene_output(state)
-    attempt = FrozenAttemptSpec.model_validate(gene_out[f"{cfg['suffix']}_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out[f"{cfg['suffix']}_attempt_ref"],
+        expected_method_name=method_name,
+    )
+    load_gene_execution(
+        state,
+        gene_out[f"{cfg['suffix']}_execution_ref"],
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=method_name,
+    )
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_gff3 = Path(str(attempt.metadata["output_gff3"]))
 
-    if not output_gff3.exists():
+    try:
+        published = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            output_gff3,
+            stage="gene_annotation",
+            method_name=method_name,
+            artifact_type=CANDIDATE_GFF_TYPE,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except FileNotFoundError:
         reason = f"expected {cfg['suffix']} GFF3 missing: {output_gff3}"
         Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=reason,
+            attempt.session_id,
+            attempt,
+            return_code=0,
+            error=reason,
         )
         return _update_gene_output(state, {"status": "failed", "reason": reason})
-
-    artifact = ArtifactMeta.from_file(
-        output_gff3,
-        stage="gene_annotation",
-        method_name=method_name,
-        artifact_type=CANDIDATE_GFF_TYPE,
-        metadata={"attempt_id": attempt.attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    published_gff3 = Path(artifact.file_path)
+    published_gff3 = published.path
 
     Ledger(data_dir).record_attempt_succeeded(
-        attempt.session_id, attempt,
-        artifacts=[{"path": str(published_gff3), "artifact_type": CANDIDATE_GFF_TYPE}],
+        attempt.session_id,
+        attempt,
+        artifacts=[published.ref.model_dump(mode="json")],
     )
 
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
     candidate_refs[method_name] = str(published_gff3)
+    candidate_artifact_refs = dict(gene_out.get("candidate_artifact_refs") or {})
+    candidate_artifact_refs[method_name] = published.ref.model_dump(mode="json")
 
     gene_count = 0
     try:
@@ -1370,9 +1525,14 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
     )
     if mat_error:
         Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=mat_error,
+            attempt.session_id,
+            attempt,
+            return_code=0,
+            error=mat_error,
         )
-        return _update_gene_output(state, {"status": "materialization_failed", "reason": mat_error})
+        return _update_gene_output(
+            state, {"status": "materialization_failed", "reason": mat_error}
+        )
 
     bundle = _write_candidate_bundle(
         state,
@@ -1397,6 +1557,7 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
         {
             "status": "pending_execution" if pending else "candidates_ready",
             "candidate_refs": candidate_refs,
+            "candidate_artifact_refs": candidate_artifact_refs,
             "candidate_bundles": candidate_bundles,
             "candidate_gene_counts": candidate_gene_counts,
             "candidate_gff_ref": str(published_gff3),
@@ -1424,7 +1585,12 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
         return _fail_update(state, "miniprot requires protein_evidence_refs")
     genome_arg = shlex.quote(str(gene_out["genome_input_ref"]))
     protein_args = " ".join(shlex.quote(str(ref)) for ref in protein_refs)
-    output_arg = shlex.quote(str(Path(gene_out.get("candidate_refs", {}).get(MINIPROT_METHOD, "")) or "miniprot.gff3"))
+    output_arg = shlex.quote(
+        str(
+            Path(gene_out.get("candidate_refs", {}).get(MINIPROT_METHOD, ""))
+            or "miniprot.gff3"
+        )
+    )
     script = (
         "set -e\n"
         f"miniprot --gff {genome_arg} {protein_args} > {output_arg}\n"
@@ -1443,7 +1609,11 @@ def run_miniprot_attempt(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "miniprot_frozen":
         return {}
-    return _run_gene_method_attempt(state, cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD])
+    return _run_gene_method_attempt(
+        state,
+        method_name=MINIPROT_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
+    )
 
 
 def collect_miniprot_artifacts(state: TopLevelState) -> dict:
@@ -1451,7 +1621,9 @@ def collect_miniprot_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "miniprot_ran":
         return {}
     return _collect_gene_method_artifacts(
-        state, method_name=MINIPROT_METHOD, cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
+        state,
+        method_name=MINIPROT_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
     )
 
 
@@ -1484,7 +1656,12 @@ def freeze_augustus_attempt(state: TopLevelState) -> dict:
         warnings.append("augustus_repeat_masking_missing")
     genome_arg = shlex.quote(str(gene_out["genome_input_ref"]))
     species_arg = shlex.quote(str(species))
-    output_arg = shlex.quote(str(Path(gene_out.get("candidate_refs", {}).get(AUGUSTUS_METHOD, "")) or "augustus.gff3"))
+    output_arg = shlex.quote(
+        str(
+            Path(gene_out.get("candidate_refs", {}).get(AUGUSTUS_METHOD, ""))
+            or "augustus.gff3"
+        )
+    )
     script = (
         "set -e\n"
         f"augustus --species={species_arg} --gff3=on {genome_arg} > {output_arg}\n"
@@ -1503,7 +1680,11 @@ def run_augustus_attempt(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     if gene_out.get("status") != "augustus_frozen":
         return {}
-    return _run_gene_method_attempt(state, cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD])
+    return _run_gene_method_attempt(
+        state,
+        method_name=AUGUSTUS_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
+    )
 
 
 def collect_augustus_artifacts(state: TopLevelState) -> dict:
@@ -1511,7 +1692,9 @@ def collect_augustus_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "augustus_ran":
         return {}
     return _collect_gene_method_artifacts(
-        state, method_name=AUGUSTUS_METHOD, cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
+        state,
+        method_name=AUGUSTUS_METHOD,
+        cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
     )
 
 
@@ -1529,7 +1712,9 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     if gene_out.get("status") != "merge_accepted":
         return {}
 
-    candidate_refs = dict(gene_out.get("accepted_candidate_refs") or gene_out.get("candidate_refs") or {})
+    candidate_refs = dict(
+        gene_out.get("accepted_candidate_refs") or gene_out.get("candidate_refs") or {}
+    )
     merge_weights = dict(gene_out.get("merge_weights") or _DEFAULT_MERGE_WEIGHTS)
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -1558,9 +1743,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
         return _fail_update(state, "evm requires genome_input_ref")
 
     working_dir = stage_work_dir(state, "gene_annotation", "evm")
-    artifact_dir = stage_artifacts_dir(state, "gene_annotation", "evm")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     weights_path = working_dir / "weights.txt"
     weight_lines = []
@@ -1574,13 +1757,15 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     for method_name, method_ref in sorted(candidate_refs.items()):
         evm_class = _method_evm_class(method_name)
         weight_key = _EVM_CLASS_WEIGHT_KEY.get(evm_class, "ab_initio")
-        weight = merge_weights.get(weight_key, _DEFAULT_MERGE_WEIGHTS.get(weight_key, 1))
+        weight = merge_weights.get(
+            weight_key, _DEFAULT_MERGE_WEIGHTS.get(weight_key, 1)
+        )
         source_type = _evm_source_type(gene_out, method_name)
         weight_lines.append(f"{evm_class}\t{source_type}\t{weight}")
         evm_inputs[_evm_argument_bucket(evm_class)].append(method_ref)
     weights_path.write_text("\n".join(weight_lines) + "\n", encoding="utf-8")
 
-    output_gff3 = artifact_dir / "evm_merged.gff3"
+    output_gff3 = working_dir / "evm_merged.gff3"
     script_path = working_dir / "run_evm.sh"
     evm_args = [
         f"--genome {shlex.quote(str(genome_ref))}",
@@ -1599,8 +1784,11 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     script_path.chmod(0o755)
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out, stage="gene_annotation", method_name=EVM_METHOD,
-        session_id=session_id, data_dir=data_dir,
+        gene_out,
+        stage="gene_annotation",
+        method_name=EVM_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
@@ -1624,12 +1812,13 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
             "output_gff3": str(output_gff3),
         },
     )
+    attempt_ref = persist_gene_attempt(state, attempt)
 
     return _update_gene_output(
         state,
         {
             "status": "evm_frozen",
-            "evm_frozen_attempt": attempt.model_dump(mode="json"),
+            "evm_attempt_ref": attempt_ref.model_dump(mode="json"),
         },
     )
 
@@ -1640,17 +1829,39 @@ def run_evm_attempt(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evm_frozen":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out["evm_attempt_ref"],
+        expected_method_name=EVM_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label="evm",
     )
+    execution_ref = persist_gene_execution(
+        state,
+        method_name=attempt.method_name,
+        result=outcome.result,
+    )
     if not outcome.success:
-        return _update_gene_output(state, {"status": "failed", "reason": outcome.error, "evm_execution_result": outcome.result.model_dump(mode="json")})
+        return _update_gene_output(
+            state,
+            {
+                "status": "failed",
+                "reason": outcome.error,
+                "evm_execution_ref": execution_ref.model_dump(mode="json"),
+            },
+        )
 
-    return _update_gene_output(state, {"status": "evm_ran", "evm_execution_result": outcome.result.model_dump(mode="json")})
+    return _update_gene_output(
+        state,
+        {
+            "status": "evm_ran",
+            "evm_execution_ref": execution_ref.model_dump(mode="json"),
+        },
+    )
 
 
 def collect_evm_artifacts(state: TopLevelState) -> dict:
@@ -1659,41 +1870,67 @@ def collect_evm_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evm_ran":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(gene_out["evm_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out["evm_attempt_ref"],
+        expected_method_name=EVM_METHOD,
+    )
+    load_gene_execution(
+        state,
+        gene_out["evm_execution_ref"],
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=EVM_METHOD,
+    )
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_gff3 = Path(str(attempt.metadata["output_gff3"]))
 
-    if not output_gff3.exists():
+    try:
+        published = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            output_gff3,
+            stage="gene_annotation",
+            method_name=EVM_METHOD,
+            artifact_type=FINAL_GFF_TYPE,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except FileNotFoundError:
         reason = f"expected EVM merged GFF3 missing: {output_gff3}"
-        Ledger(data_dir).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=reason)
+        Ledger(data_dir).record_attempt_failed(
+            attempt.session_id, attempt, return_code=0, error=reason
+        )
         return _update_gene_output(state, {"status": "failed", "reason": reason})
-
-    artifact = ArtifactMeta.from_file(
-        output_gff3, stage="gene_annotation", method_name=EVM_METHOD,
-        artifact_type=FINAL_GFF_TYPE, metadata={"attempt_id": attempt.attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
+    published_gff3 = published.path
     Ledger(data_dir).record_attempt_succeeded(
-        attempt.session_id, attempt,
-        artifacts=[{"path": str(output_gff3), "artifact_type": FINAL_GFF_TYPE}],
+        attempt.session_id,
+        attempt,
+        artifacts=[published.ref.model_dump(mode="json")],
     )
 
     # Materialize proteins from the merged GFF so the final gene set carries a
     # real proteins.fa before BUSCO and commit.
     proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
-        state, method_name=EVM_METHOD, suffix="evm", output_gff3=output_gff3,
+        state,
+        method_name=EVM_METHOD,
+        suffix="evm",
+        output_gff3=published_gff3,
     )
     if mat_error:
-        Ledger(data_dir).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=mat_error)
-        return _update_gene_output(state, {"status": "materialization_failed", "reason": mat_error})
+        Ledger(data_dir).record_attempt_failed(
+            attempt.session_id, attempt, return_code=0, error=mat_error
+        )
+        return _update_gene_output(
+            state, {"status": "materialization_failed", "reason": mat_error}
+        )
 
     return _update_gene_output(
         state,
         {
             "status": "evm_collected",
             "merge_method": "evm",
-            "final_gff_ref": str(output_gff3),
+            "final_gff_ref": str(published_gff3),
+            "final_gff_artifact_ref": published.ref.model_dump(mode="json"),
             "final_proteins_ref": str(proteins_fa),
             "final_cds_ref": str(cds_fa) if cds_fa else None,
         },
@@ -1706,7 +1943,9 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evm_collected":
         return {}
 
-    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = _resolve_final_gene_set(gene_out)
+    final_gff_ref, final_proteins_ref, final_cds_ref, final_error = (
+        _resolve_final_gene_set(gene_out)
+    )
     if not final_gff_ref:
         return _update_gene_output(
             state,
@@ -1760,21 +1999,24 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     session_id = state["session_id"]
 
     env_spec, _packages, blocked = resolve_method_env(
-        gene_out, stage="gene_annotation", method_name=GENE_BUSCO_METHOD,
-        session_id=session_id, data_dir=data_dir,
+        gene_out,
+        stage="gene_annotation",
+        method_name=GENE_BUSCO_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
     working_dir = stage_work_dir(state, "gene_annotation", "busco")
-    artifact_dir = stage_artifacts_dir(state, "gene_annotation", "busco")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     out_name = "busco_gene"
     lineage_name = Path(busco_lineage).name
-    short_summary = artifact_dir / out_name / f"short_summary.specific.{lineage_name}.{out_name}.txt"
+    short_summary = (
+        working_dir / out_name / f"short_summary.specific.{lineage_name}.{out_name}.txt"
+    )
     script_path = working_dir / "run_busco.sh"
     script_path.write_text(
         "set -e\n"
@@ -1802,16 +2044,17 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
             "busco_input": busco_input,
             "busco_mode": busco_mode,
             "busco_lineage": str(busco_lineage),
-            "busco_output_dir": str(artifact_dir / out_name),
+            "busco_output_dir": str(working_dir / out_name),
             "short_summary_ref": str(short_summary),
         },
     )
+    attempt_ref = persist_gene_attempt(state, attempt)
 
     return _update_gene_output(
         state,
         {
             "status": "busco_frozen",
-            "busco_frozen_attempt": attempt.model_dump(mode="json"),
+            "busco_attempt_ref": attempt_ref.model_dump(mode="json"),
         },
     )
 
@@ -1822,13 +2065,22 @@ def run_gene_busco_attempt(state: TopLevelState) -> dict:
     if gene_out.get("status") != "busco_frozen":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out["busco_attempt_ref"],
+        expected_method_name=GENE_BUSCO_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label="busco",
         cleanup_outputs=False,
+    )
+    execution_ref = persist_gene_execution(
+        state,
+        method_name=attempt.method_name,
+        result=outcome.result,
     )
     if not outcome.success:
         return _update_gene_output(
@@ -1837,11 +2089,17 @@ def run_gene_busco_attempt(state: TopLevelState) -> dict:
                 "status": "merge_accepted",
                 "busco_completeness_status": "missing",
                 "busco_note": f"busco failed: {outcome.error}",
-                "busco_execution_result": outcome.result.model_dump(mode="json"),
+                "busco_execution_ref": execution_ref.model_dump(mode="json"),
             },
         )
 
-    return _update_gene_output(state, {"status": "busco_ran", "busco_execution_result": outcome.result.model_dump(mode="json")})
+    return _update_gene_output(
+        state,
+        {
+            "status": "busco_ran",
+            "busco_execution_ref": execution_ref.model_dump(mode="json"),
+        },
+    )
 
 
 def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
@@ -1850,14 +2108,36 @@ def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "busco_ran":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(gene_out["busco_frozen_attempt"])
+    attempt = load_gene_attempt(
+        state,
+        gene_out["busco_attempt_ref"],
+        expected_method_name=GENE_BUSCO_METHOD,
+    )
+    load_gene_execution(
+        state,
+        gene_out["busco_execution_ref"],
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=GENE_BUSCO_METHOD,
+    )
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     short_summary = Path(str(attempt.metadata["short_summary_ref"]))
 
-    if not short_summary.exists():
+    try:
+        published = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            short_summary,
+            stage="gene_annotation",
+            method_name=GENE_BUSCO_METHOD,
+            artifact_type=BUSCO_SUMMARY_TYPE,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except FileNotFoundError:
         Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0,
+            attempt.session_id,
+            attempt,
+            return_code=0,
             error=f"BUSCO short summary missing: {short_summary}",
         )
         return _update_gene_output(
@@ -1869,17 +2149,12 @@ def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
             },
         )
 
-    metrics = _parse_busco_short_summary(short_summary)
+    metrics = _parse_busco_short_summary(published.path)
     busco_score = metrics.get("complete_percent")
-
-    artifact = ArtifactMeta.from_file(
-        short_summary, stage="gene_annotation", method_name=GENE_BUSCO_METHOD,
-        artifact_type=BUSCO_SUMMARY_TYPE, metadata={"attempt_id": attempt.attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_attempt_succeeded(
-        attempt.session_id, attempt,
-        artifacts=[{"path": str(short_summary), "artifact_type": BUSCO_SUMMARY_TYPE}],
+        attempt.session_id,
+        attempt,
+        artifacts=[published.ref.model_dump(mode="json")],
     )
 
     return _update_gene_output(
@@ -1888,8 +2163,12 @@ def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
             "status": "merge_accepted",
             "final_gff_ref": gene_out.get("final_gff_ref"),
             "busco_completeness": busco_score,
-            "busco_completeness_status": "available" if busco_score is not None else "missing",
+            "busco_completeness_status": "available"
+            if busco_score is not None
+            else "missing",
             "busco_metrics": metrics,
+            "busco_summary_ref": str(published.path),
+            "busco_summary_artifact_ref": published.ref.model_dump(mode="json"),
         },
     )
 
@@ -1912,11 +2191,15 @@ def _parse_busco_short_summary(path: Path) -> dict[str, Any]:
         if stripped.startswith("C:"):
             metrics["summary_line"] = stripped
             for key, value in re.findall(r"([CSDFM]):([0-9.]+)%", stripped):
-                metrics[{
-                    "C": "complete_percent", "S": "single_copy_percent",
-                    "D": "duplicated_percent", "F": "fragmented_percent",
-                    "M": "missing_percent",
-                }[key]] = float(value)
+                metrics[
+                    {
+                        "C": "complete_percent",
+                        "S": "single_copy_percent",
+                        "D": "duplicated_percent",
+                        "F": "fragmented_percent",
+                        "M": "missing_percent",
+                    }[key]
+                ] = float(value)
             continue
         match = re.match(r"^(\d+)\s+(.+)$", stripped)
         if not match:
@@ -1956,7 +2239,9 @@ def _explicit_unmasked_fallback_reason(state: TopLevelState) -> str | None:
     return str(skip_reason) if skip_reason else None
 
 
-def _registry_assets(state: TopLevelState, asset_types: set[str]) -> list[dict[str, Any]]:
+def _registry_assets(
+    state: TopLevelState, asset_types: set[str]
+) -> list[dict[str, Any]]:
     registry_ref = state.get("asset_registry_ref")
     if not registry_ref:
         return []
@@ -1978,7 +2263,9 @@ def _asset_paths(state: TopLevelState, asset_types: set[str]) -> list[str]:
 def _first_asset_path(state: TopLevelState, asset_type: str) -> str | None:
     assets = _registry_assets(state, {asset_type})
     if len(assets) > 1:
-        raise ValueError(f"adoption asset {asset_type!r} has {len(assets)} registry entries; manifest validation should have rejected this")
+        raise ValueError(
+            f"adoption asset {asset_type!r} has {len(assets)} registry entries; manifest validation should have rejected this"
+        )
     return str(assets[0]["path"]) if assets else None
 
 
@@ -1994,7 +2281,11 @@ def _provided_annotation_review_triggers(gene_out: dict[str, Any]) -> list[str]:
     triggers: list[str] = []
     if gene_out.get("genome_input_source") == "final_assembly_for_annotation":
         triggers.append("unmasked_genome_fallback_requires_review")
-    if gene_out.get("rnaseq_read_refs") or gene_out.get("long_rna_read_refs") or gene_out.get("protein_evidence_refs"):
+    if (
+        gene_out.get("rnaseq_read_refs")
+        or gene_out.get("long_rna_read_refs")
+        or gene_out.get("protein_evidence_refs")
+    ):
         triggers.append("provided_annotation_with_additional_evidence_review")
     return triggers
 

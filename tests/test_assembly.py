@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import inspect
 from pathlib import Path
+from unittest.mock import patch
 
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
@@ -41,6 +42,27 @@ def _attempt_command(state: dict, attempt: dict) -> dict:
 
 def _attempt_execution(state: dict, attempt: dict) -> dict:
     return _ref_json(state, attempt["execution_ref"])
+
+
+class _ParameterResponse:
+    def __init__(self, parameters: dict) -> None:
+        self.content = json.dumps(
+            {
+                "parameters": parameters,
+                "summary": "Return the explicit L2 parameters for this test.",
+            }
+        )
+
+
+class _ParameterModel:
+    def invoke(self, _messages: list[dict[str, str]]) -> _ParameterResponse:
+        request = json.loads(_messages[1]["content"])
+        parameters = (
+            {"read_cutoff": 1000, "nextgraph_a": 1}
+            if request["method_id"].endswith("nextdenovo")
+            else {}
+        )
+        return _ParameterResponse(parameters)
 
 
 class AssemblyDescriptorTests(unittest.TestCase):
@@ -80,6 +102,13 @@ class AssemblyDescriptorTests(unittest.TestCase):
 
 
 class AssemblyStageTests(unittest.TestCase):
+    def _invoke(self, graph, state: dict) -> dict:
+        with patch(
+            "app.llm.parameters.assembly.recommender.build_chat_model",
+            return_value=_ParameterModel(),
+        ):
+            return graph.invoke(state)
+
     def _parameter_approval_request(self, blocked: dict) -> ResumeReviewRequest:
         """Bind an approval to the exact proposed parameter attempt."""
 
@@ -119,7 +148,7 @@ class AssemblyStageTests(unittest.TestCase):
         graph = build_stage()
         current = state
         for _ in range(8):
-            result = graph.invoke(current)
+            result = AssemblyStageTests._invoke(self, graph, current)
             interrupt = result.get("active_interrupt") or {}
             if not (
                 result.get("supervision_state") == "blocked_human"
@@ -558,7 +587,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "flye_parameters": {
                         "read_type": "nano-raw",
                         "estimated_genome_size": 2_000_000,
@@ -599,7 +627,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "flye_parameters": {
                         "read_type": "nano-raw",
                         "estimated_genome_size": 2_000_000,
@@ -608,7 +635,7 @@ class AssemblyStageTests(unittest.TestCase):
                 }
             }
 
-            blocked = build_stage().invoke(state)
+            blocked = self._invoke(build_stage(), state)
             self.assertEqual(blocked["supervision_state"], "blocked_human")
             interrupt = blocked["active_interrupt"]
             self.assertEqual(interrupt["gate_id"], "parameter_approval")
@@ -616,7 +643,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(interrupt["attempt_id"], 0)
             self.assertIsNone(interrupt["previous_attempt_id"])
             approved = self._approve_parameter_gate(blocked)
-            result = build_stage().invoke(approved)
+            result = self._invoke(build_stage(), approved)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
@@ -674,7 +701,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "flye_parameters": {
                         "read_type": "nano-raw",
                         "estimated_genome_size": 2_000_000,
@@ -709,7 +735,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "flye_parameters": {
                         "read_type": "nano-raw",
                         "estimated_genome_size": 2_000_000,
@@ -762,7 +787,6 @@ class AssemblyStageTests(unittest.TestCase):
                         "fallback": "assembly.candidate.nextdenovo",
                     },
                     "parameter_recommendation": {
-                        "allow_model_unavailable_defaults": True,
                         "max_execution_retries": 0,
                     },
                     "flye_parameters": {
@@ -784,6 +808,9 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
             self.assertIn("fake flye failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            self.assertNotIn("output_paths", execution)
+            self.assertIn("stdout_ref", execution)
+            self.assertIn("stderr_ref", execution)
             artifact_index = Path(result["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = {json.loads(line)["artifact_type"] for line in artifact_index.read_text().splitlines()}
             self.assertNotIn("assembly.draft_assembly", artifact_types)
@@ -820,7 +847,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "hifi",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                 }
             }
 
@@ -869,7 +895,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "ont",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_ont_parameters": {"read_type": "ont"},
                 },
             }
@@ -909,7 +934,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.hifiasm"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "hifiasm_parameters": {"read_type": "hifi", "threads": 0},
                 }
             }
@@ -943,7 +967,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "parameter_recommendation": {
-                        "allow_model_unavailable_defaults": True,
                         "max_execution_retries": 0,
                     },
                 }
@@ -959,6 +982,9 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
             self.assertIn("fake hifiasm failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            self.assertNotIn("output_paths", execution)
+            self.assertIn("stdout_ref", execution)
+            self.assertIn("stderr_ref", execution)
             ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             events = [
                 json.loads(line)["event_type"]
@@ -998,7 +1024,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.nextdenovo"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "nextdenovo_parameters": {
                         "read_type": "ont",
                         "genome_size": 2_000_000,
@@ -1041,7 +1066,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("attempt_started", events)
             self.assertIn("attempt_succeeded", events)
 
-    def test_local_nextdenovo_omitted_read_cutoff_uses_catalog_default(self):
+    def test_local_nextdenovo_uses_the_explicit_llm_parameter_set(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
             clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -1070,7 +1095,6 @@ class AssemblyStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
                     "method_decision": {"primary": "assembly.candidate.nextdenovo"},
-                    "parameter_recommendation": {"allow_model_unavailable_defaults": True},
                     "nextdenovo_parameters": {
                         "read_type": "ont",
                         "genome_size": 2_000_000,
@@ -1169,7 +1193,6 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             "assembly_route": "cyclone",
             "execution_mode": "local",
             "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-            "parameter_recommendation": {"allow_model_unavailable_defaults": True},
         }
         if flye_parameters is not None:
             assembly_out["flye_parameters"] = flye_parameters

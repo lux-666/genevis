@@ -18,8 +18,13 @@ from app.control.ledger import Ledger
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import ReviewGateDeclaration, get_review_gate, register_review_gate
-from app.review.persistence import persist_review_request
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_request,
+)
 from app.review.recommender import recommend_review_decision
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -150,17 +155,29 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     }
                 )
             )
+            persisted = persist_review_request(
+                {"session_id": "s1", "data_dir": str(run_dir)},
+                stage="unit_review_gate",
+                gate_id="unit_review_gate",
+                reason="review",
+                payload=request,
+            )
 
             decision = recommend_review_decision(
                 session_id="s1",
                 stage="unit_review_gate",
-                request=request,
+                review_request_id=persisted.review_request_id,
+                request_ref=persisted.request_ref,
+                request_hash=persisted.request_hash,
                 data_dir=run_dir,
                 chat_model=chat,
             )
 
             self.assertEqual(decision.stage, "unit_review_gate")
-            artifact = json.loads(Path(decision.rationale_artifact_ref or "").read_text(encoding="utf-8"))
+            artifact_path = SessionPaths.from_run_dir(run_dir).resolve_ref(
+                decision.rationale_artifact_ref or ""
+            )
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(artifact["prompt_bundle"], "review.assembly_review_recommend")
 
     def test_recommender_uses_gate_id_when_stage_has_multiple_gates(self):
@@ -181,18 +198,106 @@ class ReviewGateRegistryTests(unittest.TestCase):
                     }
                 )
             )
+            persisted = persist_review_request(
+                {"session_id": "s1", "data_dir": str(run_dir)},
+                stage="unit_multi_stage",
+                gate_id="gate_b",
+                reason="review",
+                payload=request,
+            )
 
             decision = recommend_review_decision(
                 session_id="s1",
                 stage="unit_multi_stage",
-                request=request,
+                review_request_id=persisted.review_request_id,
+                request_ref=persisted.request_ref,
+                request_hash=persisted.request_hash,
                 data_dir=run_dir,
                 chat_model=chat,
             )
 
             self.assertEqual(decision.stage, "unit_multi_stage")
-            artifact = json.loads(Path(decision.rationale_artifact_ref or "").read_text(encoding="utf-8"))
-            self.assertEqual(artifact["review_request"]["gate_id"], "gate_b")
+            self.assertEqual(decision.gate_id, "gate_b")
+            artifact_path = SessionPaths.from_run_dir(run_dir).resolve_ref(
+                decision.rationale_artifact_ref or ""
+            )
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(artifact["review_request_id"], persisted.review_request_id)
+            self.assertEqual(artifact["request_hash"], persisted.request_hash)
+            self.assertNotIn("review_request", artifact)
+
+    def test_review_request_envelope_is_the_only_owner_of_gate_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
+            request = ReviewPayload(
+                stage="unit_review_gate",
+                gate_id="unit_review_gate",
+                reason="unit review",
+                candidates=[{"candidate_id": "candidate-a"}],
+                decisions_allowed=["accept", "stop_human_review"],
+            )
+            persisted = persist_review_request(
+                {"session_id": "s1", "data_dir": str(run_dir)},
+                stage="unit_review_gate",
+                gate_id="unit_review_gate",
+                reason="unit review",
+                payload=request,
+            )
+
+            record = load_review_request(
+                run_dir,
+                persisted.request_ref,
+                session_id="s1",
+            )
+
+            self.assertEqual(record["stage"], "unit_review_gate")
+            self.assertEqual(record["gate_id"], "unit_review_gate")
+            self.assertEqual(record["reason"], "unit review")
+            self.assertFalse({"stage", "gate_id", "reason"} & set(record["payload"]))
+
+    def test_review_request_rejects_conflicting_envelope_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
+            state = {"session_id": "s1", "data_dir": str(run_dir)}
+            baseline = {
+                "stage": "unit_review_gate",
+                "gate_id": "unit_review_gate",
+                "reason": "unit review",
+                "decisions_allowed": ["accept"],
+            }
+            mismatches = {
+                "stage": "different_stage",
+                "gate_id": "different_gate",
+                "reason": "different reason",
+            }
+
+            for field, mismatch in mismatches.items():
+                with self.subTest(field=field):
+                    payload = {**baseline, field: mismatch}
+                    with self.assertRaisesRegex(
+                        ReviewPersistenceError,
+                        f"payload {field} does not match canonical envelope",
+                    ):
+                        persist_review_request(
+                            state,
+                            stage="unit_review_gate",
+                            gate_id="unit_review_gate",
+                            reason="unit review",
+                            payload=payload,
+                        )
+
+            with self.subTest(field="gate_id_explicit_none"):
+                with self.assertRaisesRegex(
+                    ReviewPersistenceError,
+                    "payload gate_id does not match canonical envelope",
+                ):
+                    persist_review_request(
+                        state,
+                        stage="unit_review_gate",
+                        gate_id="unit_review_gate",
+                        reason="unit review",
+                        payload={**baseline, "gate_id": None},
+                    )
 
     def test_inspect_and_template_use_registered_gate_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

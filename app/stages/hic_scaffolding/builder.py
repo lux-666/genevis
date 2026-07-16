@@ -14,7 +14,7 @@ from app.stages.hic_scaffolding.nodes import (
     prepare_autohic_adoption_review,
     resolve_hic_inputs,
 )
-from app.stages.hic_scaffolding.parameter_nodes import (
+from app.stages.hic_scaffolding.parameters.workflow import (
     recommend_autohic_parameters,
 )
 from app.stages.hic_scaffolding.routing import (

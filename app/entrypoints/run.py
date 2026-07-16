@@ -16,7 +16,7 @@ import sys
 import yaml
 from datetime import datetime
 from pathlib import Path
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from app.domains.assembly.selection import (
     AssemblySelection,
@@ -46,6 +46,9 @@ from app.storage.paths import (
     ensure_run_layout,
     locate_session_data_dir,
 )
+
+if TYPE_CHECKING:
+    from app.schemas.ask_plan import AskPlanState
 
 
 _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))

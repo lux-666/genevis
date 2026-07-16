@@ -581,10 +581,9 @@ def test_query_adapter_records_units_precedence_and_source_paths():
         },
         method_id="assembly.candidate.hifiasm",
         task="recommend_initial",
-        query_id="session:parameter_attempt_2",
     )
 
-    assert query["query_id"] == "session:parameter_attempt_2"
+    assert "query_id" not in query
     assert query["method_id"] == "assembly.candidate.hifiasm"
     assert query["read_type"] == "hifi"
     assert "assembly_goal" not in query

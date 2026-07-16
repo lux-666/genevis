@@ -354,7 +354,7 @@ class InventoryStageTests(unittest.TestCase):
             path = self._build_manifest_file(tmpdir, manifest)
             state = self._state("s5", path)
             graph = build_stage()
-            result = graph.invoke(state)
+            graph.invoke(state)
             events_path = Path(state["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")

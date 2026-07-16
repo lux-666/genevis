@@ -17,7 +17,7 @@ from app.schemas.assets import AssetRecord
 from app.schemas.manifest import InputManifest, validate_manifest
 from app.schemas.state import TopLevelState
 from app.review.persistence import persist_review_decision
-from app.stages.base import resolve_run_ref
+from app.stages.base import append_route_trace, resolve_run_ref
 from app.storage.paths import SessionPaths
 
 
@@ -237,7 +237,7 @@ def commit_inventory(state: TopLevelState) -> dict:
     """Advance to the next stage based on routing decision."""
     from app.graph.routing import next_stage_name
 
-    trace = [*state.get("route_trace", []), "inventory_stage"]
+    trace = append_route_trace(state, "inventory_stage")
     inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
     if inventory_out.get("entry_mode") == "existing_assembly":
         next_stage = "assembly_review"

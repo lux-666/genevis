@@ -8,6 +8,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.reports._projection import atomic_write_text, source_watermark
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.paths import DataLayoutError, SessionPaths
 
 
@@ -49,7 +50,8 @@ def write_operator_report(
         ),
         "relevant_refs": _selected_result_refs(result, paths),
         "route_trace_tail": [
-            str(item) for item in list(result.get("route_trace") or [])[-16:]
+            str(item)
+            for item in list(result.get("route_trace") or [])[-ROUTE_TRACE_LIMIT:]
         ],
     }
     report_ref = paths.report_path("current_status.json")
@@ -67,7 +69,9 @@ def write_final_review_report(data_dir: str | Path, session_id: str) -> str:
     result = write_session_trace(data_dir, session_id)
     report_ref = result.get("json_ref")
     if not report_ref:
-        raise ValueError(f"cannot write a session summary for unknown session {session_id!r}")
+        raise ValueError(
+            f"cannot write a session summary for unknown session {session_id!r}"
+        )
     return str(report_ref)
 
 
@@ -92,7 +96,9 @@ def _compact_active_interrupt(
         if key in active_interrupt:
             compact[key] = _bounded_value(active_interrupt[key])
 
-    request_ref = _normalize_ref(paths, active_interrupt.get("review_request_artifact_ref"))
+    request_ref = _normalize_ref(
+        paths, active_interrupt.get("review_request_artifact_ref")
+    )
     if request_ref:
         compact["review_request_artifact_ref"] = request_ref
     compact_request_ref = _normalize_ref(paths, active_interrupt.get("request_ref"))
@@ -101,7 +107,9 @@ def _compact_active_interrupt(
 
     candidate_methods = active_interrupt.get("candidate_methods")
     if isinstance(candidate_methods, list):
-        compact["candidate_methods"] = [str(item)[:256] for item in candidate_methods[:32]]
+        compact["candidate_methods"] = [
+            str(item)[:256] for item in candidate_methods[:32]
+        ]
     candidates = active_interrupt.get("candidates")
     if isinstance(candidates, list):
         compact["candidate_ids"] = [
@@ -184,9 +192,7 @@ def _pending_confirmations(
                 "timestamp": event.get("timestamp"),
                 "stage": event.get("stage"),
                 "reason": event.get("reason"),
-                "review_request_artifact_ref": event.get(
-                    "review_request_artifact_ref"
-                ),
+                "review_request_artifact_ref": event.get("review_request_artifact_ref"),
                 "auto_decidable": event.get("auto_decidable"),
                 "policy_mode": event.get("policy_mode"),
                 "resolved": request_id in decided_request_ids,

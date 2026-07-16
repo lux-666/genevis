@@ -34,7 +34,7 @@ ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST = "assembly.parameter.recommendation_
 ASSEMBLY_PARAMETER_RETRIEVAL_QUERY = "assembly.parameter.retrieval_query"
 ASSEMBLY_PARAMETER_RETRIEVAL_TRACE = "assembly.parameter.retrieval_trace"
 ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
-ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
+ASSEMBLY_PARAMETER_RESPONSE_PARSE = "assembly.parameter.response_parse"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
 ASSEMBLY_PARAMETER_FROZEN_PARAMETERS = "assembly.parameter.frozen_parameters"
 ASSEMBLY_PARAMETER_FROZEN_ATTEMPT = "assembly.parameter.frozen_attempt"
@@ -67,7 +67,7 @@ HIC_PARAMETER_BASIS = "hic_scaffolding.parameter.basis_snapshot"
 HIC_PARAMETER_MODEL_REQUEST = "hic_scaffolding.parameter.model_request"
 HIC_PARAMETER_MODEL_RESPONSE = "hic_scaffolding.parameter.model_response"
 HIC_PARAMETER_RECOMMENDATION = "hic_scaffolding.parameter.recommendation"
-HIC_PARAMETER_VALIDATION = "hic_scaffolding.parameter.validation"
+HIC_PARAMETER_RESPONSE_PARSE = "hic_scaffolding.parameter.response_parse"
 HIC_PARAMETER_RECOMMENDATION_MANIFEST = "hic_scaffolding.parameter.recommendation_manifest"
 HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
 HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
@@ -178,7 +178,7 @@ ParameterAttemptTask = Literal[
     "retry_after_review_failure",
 ]
 ParameterRecommendationStatus = Literal[
-    "validation_failed",
+    "response_invalid",
     "pending_approval",
     "approved",
     "rejected",
@@ -234,7 +234,9 @@ class ParameterAttempt(BaseModel):
     execution_ref: ArtifactRef | None = None
     review_ref: ArtifactRef | None = None
     attempt_manifest_ref: ArtifactRef | None = None
-    recommendation_contract: Literal["parameter_patch_v2", "literature_patch_v1"] = "parameter_patch_v2"
+    recommendation_contract: Literal[
+        "parameter_recommendation_v1",
+    ] = "parameter_recommendation_v1"
     previous_attempt_seal_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",

@@ -2,12 +2,12 @@
 
 ## Contract
 
-Design a sparse L2 parameter patch for Flye, NextDenovo, hifiasm, or hifiasm-ont. L0 execution mechanics and L1 measured/provided facts are readonly. Deterministic validation remains authoritative for parameter keys, types, ranges, and hard biological rules.
+Recommend an explicit parameter mapping for Flye, NextDenovo, hifiasm, or hifiasm-ont. L0 execution mechanics and measured/provided biological facts are context, not model-adjustable values. The recommendation is not merged with catalog defaults or a previous attempt and is not judged by application-owned biological hard rules; it is presented to a human for approval.
 
 The model receives four distinct inputs:
 
 1. Current-sample observations from read QC, genome survey, and run configuration.
-2. The L2 catalog and its deterministic baseline.
+2. The model-adjustable parameter catalog, without an application-selected baseline.
 3. Optional paper case cards containing original parameters, excerpts, rationale, citation, applicability, outcomes, and numeric similarity.
 4. Method-guidance cards describing biological mechanisms without fixed trigger values.
 
@@ -17,8 +17,8 @@ Paper cards are analogs, not recipes. Method, read type, route, assembly goal, a
 
 - Selection ranks paper cards by missing-aware numeric similarity across genome size, coverage, read N50, heterozygosity, and ploidy. Actionability only breaks ties. Missing dimensions are excluded and weights are renormalized.
 - Augmentation presents each selected card exactly once and adds applicable method-guidance cards. It never synthesizes a second copy of parameters, quotes, rationale, or citation.
-- Generation is one LLM call. The model diagnoses relevant effect areas, judges case applicability implicitly, and emits only parameters it chose to change. It references observations, guidance IDs, and optional paper/quote IDs instead of rewriting their contents.
-- Validation checks the sparse patch against the catalog and hard rules, and verifies every cited ID exists on the visible prompt surface.
+- Generation is one LLM call. The model judges the evidence and returns the entire set of parameters it recommends passing explicitly for this attempt.
+- Application parsing checks only the declared JSON response shape. Parameter values are shown to the human reviewer without catalog-range or biological hard-rule rejection.
 
 ## Biological Reasoning
 
@@ -30,10 +30,10 @@ Repeat fraction and genome size affect graph complexity and resource pressure. T
 
 ## Retry
 
-Retry context is same-run evidence, never a literature case. The baseline is the previous attempt's effective parameter set, and execution retains previous explicit overrides unless the new sparse patch changes them.
+Retry context is same-run evidence, never a literature case. The previous recommendation is context only. It is not a baseline and is not merged into the new recommendation.
 
-For missing input, binary, permission, environment, or invalid-wrapper failures, prefer `expert_review` or `stop` instead of inventing a biological parameter change. For memory, timeout, parsing, or review-quality failures, make a small targeted patch and state the expected effect and tradeoffs.
+For missing input, binary, permission, environment, or invalid-wrapper failures, prefer `expert_review` or `stop` instead of inventing a biological parameter change. For memory, timeout, parsing, or review-quality failures, return the complete explicit parameter set recommended for the next attempt.
 
 ## Response
 
-Return `sample_diagnosis`, sparse `parameter_patch`, and `summary`. Each patch entry includes a value, visible observation/guidance/literature references, expected effect, tradeoffs, confidence, and concise reasoning. On retry also return `retry_disposition` (`retry`, `stop`, or `expert_review`). Do not restate paper cards or emit unchanged baseline values.
+Return `parameters` and optionally `summary`. `parameters` is the exact mapping shown to the reviewer and consumed by command construction after approval. Do not return compatibility aliases, rich per-parameter wrappers, or copied evidence IDs. On retry also return `retry_disposition` (`retry`, `stop`, or `expert_review`).

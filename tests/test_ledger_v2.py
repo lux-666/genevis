@@ -13,6 +13,7 @@ from app.control.ledger import (
     Ledger,
     LedgerConflictError,
 )
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 
@@ -45,7 +46,9 @@ class LedgerV2Tests(unittest.TestCase):
 
             rows = ledger.read_event_rows("s1")
             self.assertEqual([row["sequence"] for row in rows], [1, 2])
-            self.assertTrue(all(row["schema_version"] == LEDGER_SCHEMA_VERSION for row in rows))
+            self.assertTrue(
+                all(row["schema_version"] == LEDGER_SCHEMA_VERSION for row in rows)
+            )
             self.assertTrue(all(row["event_id"].startswith("evt_") for row in rows))
             self.assertTrue(all(row["idempotency_key"] for row in rows))
             self.assertFalse((paths.ledger_dir / "session.json").exists())
@@ -105,7 +108,9 @@ class LedgerV2Tests(unittest.TestCase):
             self.assertNotIn('"candidates"', serialized)
             self.assertEqual(row["summary"]["signal_count"], 1)
             self.assertEqual(row["summary"]["candidate_count"], 1)
-            self.assertEqual(row["refs"][0]["path_ref"], "artifacts/reviews/r1/request.json")
+            self.assertEqual(
+                row["refs"][0]["path_ref"], "artifacts/reviews/r1/request.json"
+            )
 
     def test_review_decisions_bind_to_request_id_not_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,6 +159,21 @@ class LedgerV2Tests(unittest.TestCase):
                     "artifact_registered",
                     {"artifact_ref": str(Path(tmp).parent / "outside.json")},
                 )
+
+    def test_route_trace_summary_keeps_latest_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+            route_trace = [f"route_{index}" for index in range(ROUTE_TRACE_LIMIT + 4)]
+
+            ledger.record_event("s1", "route_snapshot", {"route_trace": route_trace})
+
+            row = ledger.read_event_rows("s1")[-1]
+            self.assertEqual(
+                row["summary"]["route_trace"],
+                route_trace[-ROUTE_TRACE_LIMIT:],
+            )
 
 
 if __name__ == "__main__":

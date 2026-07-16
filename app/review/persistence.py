@@ -91,7 +91,13 @@ def persist_review_request(
     """
 
     paths = _paths_for_state(state)
-    portable_payload = _portable_value(paths, _dump_payload(payload))
+    request_body = _review_request_body(
+        _dump_payload(payload),
+        stage=stage,
+        gate_id=gate_id,
+        reason=reason,
+    )
+    portable_payload = _portable_value(paths, request_body)
     portable_bindings = _portable_value(paths, dict(bindings or {}))
     identity_payload = {
         "schema_version": 2,
@@ -119,6 +125,81 @@ def persist_review_request(
         metadata={"review_request_id": review_request_id},
     )
     return PersistedReviewRequest(review_request_id=review_request_id, request_ref=ref)
+
+
+def persist_review_recommendation(
+    data_dir: str | Path,
+    *,
+    session_id: str,
+    stage: str,
+    review_request_id: str,
+    request_ref: ArtifactRef | Mapping[str, Any],
+    request_hash: str,
+    payload: Mapping[str, Any],
+) -> ArtifactRef:
+    """Publish one immutable recommendation bound to one canonical request."""
+
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(session_id)
+    _safe_component(review_request_id, "review_request_id")
+    ref = request_ref if isinstance(request_ref, ArtifactRef) else ArtifactRef.model_validate(request_ref)
+    if request_hash != ref.sha256:
+        raise ReviewPersistenceError(
+            "review recommendation request_hash does not match request_ref.sha256"
+        )
+    request_record = load_review_request(
+        paths.run_dir,
+        ref,
+        session_id=session_id,
+    )
+    if request_record.get("review_request_id") != review_request_id:
+        raise ReviewPersistenceError(
+            "review recommendation ID does not match the canonical request"
+        )
+    if request_record.get("stage") != stage:
+        raise ReviewPersistenceError(
+            "review recommendation stage does not match the canonical request"
+        )
+
+    recommendation_body = dict(payload)
+    reserved = {
+        "schema_version",
+        "review_request_id",
+        "request_ref",
+        "request_hash",
+        "review_request",
+    }
+    duplicated = sorted(reserved & set(recommendation_body))
+    if duplicated:
+        raise ReviewPersistenceError(
+            "review recommendation payload contains reserved fields: "
+            + ", ".join(duplicated)
+        )
+    record = {
+        "schema_version": 2,
+        "review_request_id": review_request_id,
+        "request_ref": ref.model_dump(mode="json"),
+        "request_hash": request_hash,
+        **_portable_value(paths, recommendation_body),
+    }
+    destination = paths.artifact_path(
+        "reviews",
+        review_request_id,
+        "recommendation.json",
+    )
+    return _publish_json(
+        paths,
+        session_id=session_id,
+        destination=destination,
+        payload=record,
+        stage=stage,
+        method_name=f"{stage}.review_recommender",
+        artifact_type=f"{stage}.review_recommendation",
+        metadata={
+            "review_request_id": review_request_id,
+            "decided_by": "llm_provisional",
+        },
+    )
 
 
 def persist_review_decision(
@@ -192,8 +273,9 @@ def load_review_request(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ReviewPersistenceError(f"review request is unreadable: {ref.path_ref}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+    if not isinstance(payload, dict):
         raise ReviewPersistenceError(f"invalid review request record: {ref.path_ref}")
+    _validate_review_request_record(payload, ref.path_ref)
     return payload
 
 
@@ -280,11 +362,74 @@ def _portable_value(paths: SessionPaths, value: Any) -> Any:
 def _dump_payload(payload: Mapping[str, Any] | Any) -> dict[str, Any]:
     if hasattr(payload, "model_dump"):
         dumped = payload.model_dump(mode="json")
+        fields_set = getattr(payload, "model_fields_set", set())
+        if dumped.get("gate_id") is None and "gate_id" not in fields_set:
+            dumped.pop("gate_id", None)
     else:
         dumped = dict(payload)
     if not isinstance(dumped, dict):
         raise ReviewPersistenceError("review payload must be a JSON object")
     return dumped
+
+
+def _review_request_body(
+    payload: Mapping[str, Any],
+    *,
+    stage: str,
+    gate_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Validate envelope duplicates, then return the gate-specific body only."""
+
+    body = dict(payload)
+    expected = {
+        "stage": stage,
+        "gate_id": gate_id,
+        "reason": reason,
+    }
+    for key, expected_value in expected.items():
+        if key not in body:
+            continue
+        actual = body.pop(key)
+        if actual != expected_value:
+            raise ReviewPersistenceError(
+                f"review request payload {key} does not match canonical envelope"
+            )
+    return body
+
+
+def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) -> None:
+    if record.get("schema_version") != 2:
+        raise ReviewPersistenceError(f"invalid review request record: {path_ref}")
+    stage = record.get("stage")
+    gate_id = record.get("gate_id")
+    reason = record.get("reason")
+    bindings = record.get("bindings")
+    body = record.get("payload")
+    request_id = record.get("review_request_id")
+    if not isinstance(stage, str) or not isinstance(gate_id, str) or not isinstance(reason, str):
+        raise ReviewPersistenceError(f"invalid review request envelope: {path_ref}")
+    if not isinstance(bindings, dict) or not isinstance(body, dict):
+        raise ReviewPersistenceError(f"invalid review request body: {path_ref}")
+    duplicated = sorted({"stage", "gate_id", "reason"} & set(body))
+    if duplicated:
+        raise ReviewPersistenceError(
+            "review request body duplicates canonical envelope fields: "
+            + ", ".join(duplicated)
+        )
+    identity_payload = {
+        "schema_version": 2,
+        "stage": stage,
+        "gate_id": gate_id,
+        "reason": reason,
+        "bindings": bindings,
+        "payload": body,
+    }
+    expected_id = f"review_{sha256(_canonical_bytes(identity_payload)).hexdigest()[:24]}"
+    if request_id != expected_id:
+        raise ReviewPersistenceError(
+            f"review request ID does not match canonical content: {path_ref}"
+        )
 
 
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:

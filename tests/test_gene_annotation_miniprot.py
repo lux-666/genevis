@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.execution.artifacts import register_artifact_records
+from app.execution.results import ExecutionResult
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state
 from app.stages.gene_annotation.nodes import (
@@ -16,6 +19,13 @@ from app.stages.gene_annotation.nodes import (
     run_augustus_attempt,
     run_miniprot_attempt,
 )
+from app.stages.gene_annotation.persistence import (
+    load_gene_attempt,
+    load_gene_execution,
+    persist_gene_attempt,
+    persist_gene_execution,
+)
+from app.storage.publish import publish_execution_logs
 from tests.data_v2 import v2_run_dir
 
 
@@ -50,12 +60,66 @@ def _write_intake_plan(tmpdir: str) -> str:
     return str(path)
 
 
+def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
+    return persist_gene_attempt(state, attempt).model_dump(mode="json")
+
+
+def _persist_successful_execution(
+    state: dict,
+    attempt: FrozenAttemptSpec,
+    output_paths: list[Path],
+) -> dict:
+    stdout_path = (
+        Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stdout.log"
+    )
+    stderr_path = (
+        Path(state["data_dir"]) / "work" / "gene_annotation" / "test.stderr.log"
+    )
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    result = ExecutionResult(
+        attempt_id=attempt.attempt_id,
+        success=True,
+        return_code=0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        output_paths=output_paths,
+        status="ok",
+    )
+    result = publish_execution_logs(state["data_dir"], attempt, result)
+    register_artifact_records(
+        state["data_dir"],
+        attempt.session_id,
+        [
+            ArtifactMeta.from_file(
+                path,
+                stage=attempt.stage,
+                method_name=attempt.method_name,
+                artifact_type=artifact_type,
+                metadata={"attempt_id": attempt.attempt_id},
+            )
+            for path, artifact_type in (
+                (result.stdout_path, "command.stdout"),
+                (result.stderr_path, "command.stderr"),
+            )
+        ],
+    )
+    return persist_gene_execution(
+        state,
+        method_name=attempt.method_name,
+        result=result,
+    ).model_dump(mode="json")
+
+
 def _fake_miniprot_bin(tmpdir: str, *, fail: bool = False) -> Path:
     bin_dir = Path(tmpdir) / "bin"
     bin_dir.mkdir(exist_ok=True)
     mp = bin_dir / "miniprot"
     if fail:
-        mp.write_text("#!/bin/sh\necho fake miniprot failed >&2\nexit 3\n", encoding="utf-8")
+        mp.write_text(
+            "#!/bin/sh\necho fake miniprot failed >&2\nexit 3\n", encoding="utf-8"
+        )
     else:
         mp.write_text(
             "#!/bin/sh\n"
@@ -78,7 +142,9 @@ def _fake_augustus_bin(tmpdir: str, *, fail: bool = False) -> Path:
     bin_dir.mkdir(exist_ok=True)
     aug = bin_dir / "augustus"
     if fail:
-        aug.write_text("#!/bin/sh\necho fake augustus failed >&2\nexit 3\n", encoding="utf-8")
+        aug.write_text(
+            "#!/bin/sh\necho fake augustus failed >&2\nexit 3\n", encoding="utf-8"
+        )
     else:
         aug.write_text(
             "#!/bin/sh\n"
@@ -98,17 +164,17 @@ def _fake_gffread_bin(tmpdir: str) -> Path:
     gffread = bin_dir / "gffread"
     gffread.write_text(
         "#!/bin/sh\n"
-        "prot=\"\"; cds=\"\"\n"
+        'prot=""; cds=""\n'
         "while [ $# -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
-        "    -y) prot=\"$2\"; shift 2;;\n"
-        "    -x) cds=\"$2\"; shift 2;;\n"
+        '  case "$1" in\n'
+        '    -y) prot="$2"; shift 2;;\n'
+        '    -x) cds="$2"; shift 2;;\n'
         "    -g) shift 2;;\n"
         "    *) shift;;\n"
         "  esac\n"
         "done\n"
-        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
-        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        '[ -n "$prot" ] && printf \'>g1\\nMKT\\n\' > "$prot"\n'
+        '[ -n "$cds" ] && printf \'>g1\\nATGAAAACC\\n\' > "$cds"\n',
         encoding="utf-8",
     )
     gffread.chmod(0o755)
@@ -157,13 +223,17 @@ class MiniprotFreezeTests(unittest.TestCase):
 
     def test_freeze_skips_when_miniprot_not_confirmed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._freeze_state(tmpdir, confirmed_methods=["gene_annotation.candidate.augustus"])
+            state = self._freeze_state(
+                tmpdir, confirmed_methods=["gene_annotation.candidate.augustus"]
+            )
             result = freeze_miniprot_attempt(state)
             self.assertEqual(result, {})
 
     def test_freeze_skips_when_miniprot_already_executed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._freeze_state(tmpdir, executed_methods=["gene_annotation.candidate.miniprot"])
+            state = self._freeze_state(
+                tmpdir, executed_methods=["gene_annotation.candidate.miniprot"]
+            )
             result = freeze_miniprot_attempt(state)
             self.assertEqual(result, {})
 
@@ -174,7 +244,7 @@ class MiniprotFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "miniprot_frozen")
-            attempt = FrozenAttemptSpec.model_validate(gene["miniprot_frozen_attempt"])
+            attempt = load_gene_attempt(state, gene["miniprot_attempt_ref"])
             self.assertEqual(attempt.method_name, "gene_annotation.candidate.miniprot")
             self.assertIn("miniprot", attempt.script_path.name)
 
@@ -187,17 +257,23 @@ class MiniprotFreezeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._freeze_state(tmpdir, genome_input_ref=None)
             result = freeze_miniprot_attempt(state)
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "failed")
+            self.assertEqual(
+                result["stage_outputs"]["gene_annotation"]["status"], "failed"
+            )
 
     def test_freeze_fails_without_protein_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._freeze_state(tmpdir, protein_evidence_refs=[])
             result = freeze_miniprot_attempt(state)
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "failed")
+            self.assertEqual(
+                result["stage_outputs"]["gene_annotation"]["status"], "failed"
+            )
 
 
 class MiniprotRunTests(unittest.TestCase):
-    def _run_state(self, tmpdir: str, bin_dir: Path, *, status: str = "miniprot_frozen"):
+    def _run_state(
+        self, tmpdir: str, bin_dir: Path, *, status: str = "miniprot_frozen"
+    ):
         output_gff3 = Path(tmpdir) / "miniprot.gff3"
         script = Path(tmpdir) / "run_miniprot.sh"
         script.write_text(
@@ -223,10 +299,12 @@ class MiniprotRunTests(unittest.TestCase):
         state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
             "gene_annotation": {
                 "status": status,
-                "miniprot_frozen_attempt": attempt.model_dump(mode="json"),
+                "miniprot_attempt_ref": _persist_attempt(state, attempt),
             },
         }
         return state
@@ -246,7 +324,12 @@ class MiniprotRunTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "miniprot_ran")
-            self.assertIsNotNone(gene.get("miniprot_execution_result"))
+            execution = load_gene_execution(
+                state,
+                gene["miniprot_execution_ref"],
+                expected_attempt_id="s1:gene_annotation:miniprot",
+            )
+            self.assertTrue(execution.success)
 
     def test_run_failure_records_attempt_failed_and_sets_failed_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -259,7 +342,9 @@ class MiniprotRunTests(unittest.TestCase):
             self.assertIn("miniprot failed", gene["reason"])
 
             ledger_path = Path(state["data_dir"]) / "ledger" / "events.jsonl"
-            self.assertTrue(ledger_path.exists(), "ledger should record attempt_failed event")
+            self.assertTrue(
+                ledger_path.exists(), "ledger should record attempt_failed event"
+            )
             events = [
                 json.loads(line)
                 for line in ledger_path.read_text(encoding="utf-8").splitlines()
@@ -303,13 +388,22 @@ class MiniprotCollectTests(unittest.TestCase):
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
             "gene_annotation": {
                 "status": "miniprot_ran",
                 "genome_input_ref": str(genome),
-                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                "miniprot_frozen_attempt": attempt.model_dump(mode="json"),
-                "candidate_refs": {"gene_annotation.candidate.miniprot": str(output_gff3)},
+                "env": {
+                    "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                },
+                "miniprot_attempt_ref": _persist_attempt(state, attempt),
+                "miniprot_execution_ref": _persist_successful_execution(
+                    state, attempt, [output_gff3]
+                ),
+                "candidate_refs": {
+                    "gene_annotation.candidate.miniprot": str(output_gff3)
+                },
                 "candidate_gene_counts": {"gene_annotation.candidate.miniprot": 0},
                 "confirmed_methods": ["gene_annotation.candidate.miniprot"],
                 "executed_methods": [],
@@ -327,6 +421,11 @@ class MiniprotCollectTests(unittest.TestCase):
     def test_collect_registers_candidate_gff_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir)
+            source = Path(
+                state["stage_outputs"]["gene_annotation"]["candidate_refs"][
+                    "gene_annotation.candidate.miniprot"
+                ]
+            )
             result = collect_miniprot_artifacts(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
@@ -342,10 +441,17 @@ class MiniprotCollectTests(unittest.TestCase):
                     / "miniprot.gff3"
                 ),
             )
+            self.assertFalse(
+                source.exists(), "publication should move the mutable work file"
+            )
+            self.assertTrue(Path(gene["candidate_gff_ref"]).is_file())
             self.assertIn("gene_annotation.candidate.miniprot", gene["candidate_refs"])
             self.assertGreater(gene["miniprot_gene_count"], 0)
-            self.assertEqual(gene["miniprot_gene_count"], 2,
-                             "gene count should count only GFF3 gene features")
+            self.assertEqual(
+                gene["miniprot_gene_count"],
+                2,
+                "gene count should count only GFF3 gene features",
+            )
             self.assertEqual(
                 gene["candidate_gene_counts"]["gene_annotation.candidate.miniprot"],
                 gene["miniprot_gene_count"],
@@ -358,6 +464,25 @@ class MiniprotCollectTests(unittest.TestCase):
                 for line in artifacts_path.read_text(encoding="utf-8").splitlines()
             ]
             self.assertIn("gene_annotation.candidate_gff", artifact_types)
+
+    def test_collect_replay_recovers_already_published_gff(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._collect_state(tmpdir)
+
+            first = collect_miniprot_artifacts(state)
+            replay = collect_miniprot_artifacts(state)
+
+            first_gene = first["stage_outputs"]["gene_annotation"]
+            replay_gene = replay["stage_outputs"]["gene_annotation"]
+            self.assertEqual(replay_gene["status"], "candidates_ready")
+            self.assertEqual(
+                replay_gene["candidate_artifact_refs"],
+                first_gene["candidate_artifact_refs"],
+            )
+            self.assertEqual(
+                replay_gene["candidate_gff_ref"],
+                first_gene["candidate_gff_ref"],
+            )
 
     def test_collect_materialization_failure_sets_materialization_failed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -398,8 +523,12 @@ class MiniprotCollectTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "pending_execution")
-            self.assertIn("gene_annotation.candidate.miniprot", gene["executed_methods"])
-            self.assertNotIn("gene_annotation.candidate.augustus", gene["executed_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.miniprot", gene["executed_methods"]
+            )
+            self.assertNotIn(
+                "gene_annotation.candidate.augustus", gene["executed_methods"]
+            )
 
 
 class MiniprotFullSliceTests(unittest.TestCase):
@@ -421,21 +550,30 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             )
             freeze_result = freeze_miniprot_attempt(freeze_state)
-            self.assertEqual(freeze_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_frozen")
+            self.assertEqual(
+                freeze_result["stage_outputs"]["gene_annotation"]["status"],
+                "miniprot_frozen",
+            )
 
             run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": freeze_result["stage_outputs"]["gene_annotation"],
             }
             run_result = run_miniprot_attempt(run_state)
-            self.assertEqual(run_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran")
+            self.assertEqual(
+                run_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran"
+            )
 
             collect_state = _v2_state(tmpdir)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     **run_result["stage_outputs"]["gene_annotation"],
                     "candidate_refs": {
@@ -454,10 +592,73 @@ class MiniprotFullSliceTests(unittest.TestCase):
             self.assertEqual(gene["status"], "candidates_ready")
             self.assertIn("candidate_gff_ref", gene)
             self.assertTrue(Path(gene["candidate_gff_ref"]).exists())
-            self.assertIn("gene_annotation.candidate.miniprot", gene["executed_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.miniprot", gene["executed_methods"]
+            )
+
+    def test_checkpoint_keeps_attempt_and_execution_as_compact_refs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proteins = Path(tmpdir) / "proteins.fa"
+            proteins.write_text(">p1\nMKT\n", encoding="utf-8")
+            bin_dir = _fake_miniprot_bin(tmpdir)
+            freeze_state = _pending_execution_state(
+                tmpdir,
+                protein_evidence_refs=[str(proteins)],
+                env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+            )
+
+            frozen = freeze_miniprot_attempt(freeze_state)["stage_outputs"][
+                "gene_annotation"
+            ]
+            attempt_ref = frozen["miniprot_attempt_ref"]
+            self.assertEqual(
+                set(attempt_ref),
+                {
+                    "schema_version",
+                    "artifact_id",
+                    "path_ref",
+                    "sha256",
+                    "size_bytes",
+                    "artifact_type",
+                },
+            )
+            self.assertNotIn("env", attempt_ref)
+            self.assertNotIn("s1_gene_annotation", attempt_ref["path_ref"])
+            self.assertEqual(
+                load_gene_attempt(freeze_state, attempt_ref).attempt_id,
+                "s1:gene_annotation:miniprot",
+            )
+
+            run_state = _v2_state(tmpdir)
+            run_state["current_stage"] = "gene_annotation"
+            run_state["stage_outputs"] = {
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
+                "gene_annotation": frozen,
+            }
+            ran = run_miniprot_attempt(run_state)["stage_outputs"]["gene_annotation"]
+            execution_ref = ran["miniprot_execution_ref"]
+            self.assertEqual(set(execution_ref), set(attempt_ref))
+            self.assertNotIn("env", execution_ref)
+            self.assertTrue(load_gene_execution(run_state, execution_ref).success)
+
+            self.assertNotIn("miniprot_frozen_attempt", ran)
+            self.assertNotIn("miniprot_execution_result", ran)
+            checkpoint_json = json.dumps(ran, sort_keys=True)
+            for forbidden in (
+                "script_path",
+                "working_dir",
+                "expected_outputs",
+                "stdout_path",
+                "stderr_path",
+                "output_paths",
+            ):
+                self.assertNotIn(forbidden, checkpoint_json)
 
 
 # --- AUGUSTUS tests -----------------------------------------------------------
+
 
 def _augustus_pending_state(tmpdir: str, **gene_updates):
     state = _pending_execution_state(tmpdir, **gene_updates)
@@ -467,7 +668,9 @@ def _augustus_pending_state(tmpdir: str, **gene_updates):
     gene.setdefault("candidate_refs", {})["gene_annotation.candidate.augustus"] = str(
         _gene_work_path(tmpdir, "augustus", "augustus.gff3")
     )
-    gene.setdefault("candidate_gene_counts", {})["gene_annotation.candidate.augustus"] = 0
+    gene.setdefault("candidate_gene_counts", {})[
+        "gene_annotation.candidate.augustus"
+    ] = 0
     # AUGUSTUS now requires an explicit species model; supply one by default
     # unless the caller passed its own lineage_or_species_hints.
     if "lineage_or_species_hints" not in gene_updates:
@@ -487,13 +690,17 @@ class AugustusFreezeTests(unittest.TestCase):
 
     def test_freeze_skips_when_augustus_not_confirmed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._freeze_state(tmpdir, confirmed_methods=["gene_annotation.candidate.miniprot"])
+            state = self._freeze_state(
+                tmpdir, confirmed_methods=["gene_annotation.candidate.miniprot"]
+            )
             result = freeze_augustus_attempt(state)
             self.assertEqual(result, {})
 
     def test_freeze_skips_when_already_executed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._freeze_state(tmpdir, executed_methods=["gene_annotation.candidate.augustus"])
+            state = self._freeze_state(
+                tmpdir, executed_methods=["gene_annotation.candidate.augustus"]
+            )
             result = freeze_augustus_attempt(state)
             self.assertEqual(result, {})
 
@@ -504,7 +711,7 @@ class AugustusFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "augustus_frozen")
-            attempt = FrozenAttemptSpec.model_validate(gene["augustus_frozen_attempt"])
+            attempt = load_gene_attempt(state, gene["augustus_attempt_ref"])
             self.assertEqual(attempt.method_name, "gene_annotation.candidate.augustus")
 
             script = attempt.script_path.read_text(encoding="utf-8")
@@ -521,7 +728,7 @@ class AugustusFreezeTests(unittest.TestCase):
             result = freeze_augustus_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
-            attempt = FrozenAttemptSpec.model_validate(gene["augustus_frozen_attempt"])
+            attempt = load_gene_attempt(state, gene["augustus_attempt_ref"])
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("--species=human", script)
 
@@ -536,7 +743,9 @@ class AugustusFreezeTests(unittest.TestCase):
 
 
 class AugustusRunTests(unittest.TestCase):
-    def _run_state(self, tmpdir: str, bin_dir: Path, *, status: str = "augustus_frozen"):
+    def _run_state(
+        self, tmpdir: str, bin_dir: Path, *, status: str = "augustus_frozen"
+    ):
         output_gff3 = Path(tmpdir) / "augustus.gff3"
         script = Path(tmpdir) / "run_augustus.sh"
         script.write_text(
@@ -553,13 +762,22 @@ class AugustusRunTests(unittest.TestCase):
             working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-            metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "species": "fly"},
+            metadata={
+                "output_gff3": str(output_gff3),
+                "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
+                "species": "fly",
+            },
         )
         state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
-            "gene_annotation": {"status": status, "augustus_frozen_attempt": attempt.model_dump(mode="json")},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
+            "gene_annotation": {
+                "status": status,
+                "augustus_attempt_ref": _persist_attempt(state, attempt),
+            },
         }
         return state
 
@@ -601,7 +819,11 @@ class AugustusCollectTests(unittest.TestCase):
             script_path=Path(tmpdir) / "run_augustus.sh",
             working_dir=Path(tmpdir),
             expected_outputs=[output_gff3],
-            metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "species": "fly"},
+            metadata={
+                "output_gff3": str(output_gff3),
+                "genome_input_ref": str(Path(tmpdir) / "genome.fa"),
+                "species": "fly",
+            },
         )
         state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
@@ -609,13 +831,22 @@ class AugustusCollectTests(unittest.TestCase):
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
         gffread_bin = _fake_gffread_bin(tmpdir)
         state["stage_outputs"] = {
-            "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+            "assembly_review": {
+                "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+            },
             "gene_annotation": {
                 "status": "augustus_ran",
                 "genome_input_ref": str(genome),
-                "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                "augustus_frozen_attempt": attempt.model_dump(mode="json"),
-                "candidate_refs": {"gene_annotation.candidate.augustus": str(output_gff3)},
+                "env": {
+                    "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                },
+                "augustus_attempt_ref": _persist_attempt(state, attempt),
+                "augustus_execution_ref": _persist_successful_execution(
+                    state, attempt, [output_gff3]
+                ),
+                "candidate_refs": {
+                    "gene_annotation.candidate.augustus": str(output_gff3)
+                },
                 "candidate_gene_counts": {"gene_annotation.candidate.augustus": 0},
                 "confirmed_methods": ["gene_annotation.candidate.augustus"],
                 "executed_methods": [],
@@ -631,7 +862,9 @@ class AugustusCollectTests(unittest.TestCase):
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "candidates_ready")
             self.assertEqual(gene["augustus_gene_count"], 2)
-            self.assertIn("gene_annotation.candidate.augustus", gene["executed_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.augustus", gene["executed_methods"]
+            )
 
             artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [
@@ -670,23 +903,32 @@ class MultiMethodExecutionTests(unittest.TestCase):
             )
             # miniprot freeze
             mp_freeze = freeze_miniprot_attempt(state)
-            self.assertEqual(mp_freeze["stage_outputs"]["gene_annotation"]["status"], "miniprot_frozen")
+            self.assertEqual(
+                mp_freeze["stage_outputs"]["gene_annotation"]["status"],
+                "miniprot_frozen",
+            )
 
             # miniprot run
             run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": mp_freeze["stage_outputs"]["gene_annotation"],
             }
             mp_run = run_miniprot_attempt(run_state)
-            self.assertEqual(mp_run["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran")
+            self.assertEqual(
+                mp_run["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran"
+            )
 
             # miniprot collect
             collect_state = _v2_state(tmpdir)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     **mp_run["stage_outputs"]["gene_annotation"],
                     "candidate_refs": {
@@ -712,33 +954,46 @@ class MultiMethodExecutionTests(unittest.TestCase):
             gene = mp_collect["stage_outputs"]["gene_annotation"]
             # Should still be pending_execution because augustus is not yet executed
             self.assertEqual(gene["status"], "pending_execution")
-            self.assertIn("gene_annotation.candidate.miniprot", gene["executed_methods"])
+            self.assertIn(
+                "gene_annotation.candidate.miniprot", gene["executed_methods"]
+            )
 
             # Step 2: augustus freeze
             aug_state = _v2_state(tmpdir)
             aug_state["current_stage"] = "gene_annotation"
             aug_state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": mp_collect["stage_outputs"]["gene_annotation"],
             }
             aug_freeze = freeze_augustus_attempt(aug_state)
-            self.assertEqual(aug_freeze["stage_outputs"]["gene_annotation"]["status"], "augustus_frozen")
+            self.assertEqual(
+                aug_freeze["stage_outputs"]["gene_annotation"]["status"],
+                "augustus_frozen",
+            )
 
             # augustus run
             run2 = _v2_state(tmpdir)
             run2["current_stage"] = "gene_annotation"
             run2["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": aug_freeze["stage_outputs"]["gene_annotation"],
             }
             aug_run = run_augustus_attempt(run2)
-            self.assertEqual(aug_run["stage_outputs"]["gene_annotation"]["status"], "augustus_ran")
+            self.assertEqual(
+                aug_run["stage_outputs"]["gene_annotation"]["status"], "augustus_ran"
+            )
 
             # augustus collect
             coll2 = _v2_state(tmpdir)
             coll2["current_stage"] = "gene_annotation"
             coll2["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
+                "assembly_review": {
+                    "annotation_intake_plan_ref": _write_intake_plan(tmpdir)
+                },
                 "gene_annotation": {
                     **aug_run["stage_outputs"]["gene_annotation"],
                     "candidate_refs": {
@@ -764,7 +1019,10 @@ class MultiMethodExecutionTests(unittest.TestCase):
             gene = aug_collect["stage_outputs"]["gene_annotation"]
             # Both methods done → candidates_ready
             self.assertEqual(gene["status"], "candidates_ready")
-            self.assertEqual(set(gene["executed_methods"]), {
-                "gene_annotation.candidate.miniprot",
-                "gene_annotation.candidate.augustus",
-            })
+            self.assertEqual(
+                set(gene["executed_methods"]),
+                {
+                    "gene_annotation.candidate.miniprot",
+                    "gene_annotation.candidate.augustus",
+                },
+            )

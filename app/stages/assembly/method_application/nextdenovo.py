@@ -32,7 +32,7 @@ from app.stages.assembly.method_application.lifecycle import (
     update_assembly_output,
     write_parameter_attempt_json_artifact,
 )
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
 
@@ -338,9 +338,6 @@ def _merge_catalog_sources(parameter_sources: dict[str, dict[str, Any]], catalog
     merged: dict[str, Any] = {}
     for group_name in ("l0_fixed", "l1_readonly", "l2_recommended"):
         merged.update(parameter_sources.get(group_name) or {})
-    for key, spec in catalog.parameters.items():
-        if spec.level == 2 and key not in merged and spec.default is not None:
-            merged[key] = spec.default
     return {
         "read_type": _required_string(merged, "read_type"),
         "genome_size": _required_int(merged, "genome_size"),

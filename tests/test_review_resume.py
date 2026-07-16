@@ -781,11 +781,70 @@ class ReviewResumeTests(unittest.TestCase):
 
             summary = inspect_session(session_id, data_dir)
 
-            self.assertIsNotNone(summary["latest_blocked_operator_report"])
+            self.assertIsNotNone(summary["latest_operator_report"])
+            self.assertIsNone(summary["latest_blocked_operator_report"])
+            self.assertIsNone(summary["latest_operator_report_payload"])
             self.assertEqual(summary["supervision_state"], "running")
             self.assertIsNone(summary["current_stage"])
             self.assertEqual(summary["route_trace"], [])
             self.assertIsNone(summary["decision_requirements"])
+
+    def test_inspect_session_ignores_stale_operator_report_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_id = "stale-operator-report"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+            from app.control.ledger import Ledger
+
+            ledger = Ledger(data_dir)
+            ledger.create_session(session_id, "control/manifest.yaml")
+            write_operator_report(
+                data_dir,
+                session_id,
+                {
+                    "current_stage": "assembly",
+                    "supervision_state": "blocked_human",
+                    "active_interrupt": {
+                        "stage": "assembly",
+                        "gate_id": "route_selection",
+                        "reason": "stale block",
+                    },
+                    "route_trace": ["assembly_stage"],
+                },
+            )
+            ledger.record_session_terminal(
+                session_id,
+                outcome="completed",
+                stage="function_annotation",
+            )
+
+            summary = inspect_session(session_id, data_dir)
+
+            self.assertEqual(summary["supervision_state"], "completed")
+            self.assertEqual(summary["next_action"]["kind"], "completed")
+            self.assertIsNotNone(summary["latest_operator_report"])
+            self.assertIsNone(summary["latest_blocked_operator_report"])
+            self.assertIsNone(summary["latest_failed_operator_report"])
+            self.assertIsNone(summary["latest_operator_report_payload"])
+
+    def test_inspect_session_does_not_require_operator_report(self):
+        state = _assembly_blocked_state()
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        write_operator_report(
+            state["data_dir"],
+            state["session_id"],
+            state,
+        )
+        paths.report_path("current_status.json").unlink()
+
+        summary = inspect_session(state["session_id"], state["data_dir"])
+
+        self.assertEqual(summary["supervision_state"], "blocked_human")
+        self.assertEqual(
+            summary["decision_requirements"]["stage"],
+            "assembly_review",
+        )
+        self.assertIsNone(summary["latest_operator_report"])
+        self.assertIsNone(summary["latest_blocked_operator_report"])
 
     def test_inspect_session_reports_durable_timeout_status(self):
         state = _assembly_blocked_state()

@@ -224,7 +224,7 @@ register_review_gate(
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
         decision_applier=(
-            "app.stages.hic_scaffolding.parameter_nodes:"
+            "app.stages.hic_scaffolding.parameters.workflow:"
             "apply_autohic_parameter_approval_decision"
         ),
         prompt_adapter="generic",

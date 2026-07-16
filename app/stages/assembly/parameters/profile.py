@@ -24,7 +24,6 @@ PROFILE_SECTIONS = (
 )
 
 INITIAL_SAMPLE_FIELDS = (
-    "sample_id",
     "organism",
     "taxon_id",
     "clade",
@@ -44,31 +43,17 @@ PROMPT_ASSET_FIELDS = (
     "has_rnaseq",
 )
 EXECUTION_REPAIR_FIELDS = (
-    "attempt_id",
-    "method_id",
     "tool_version",
-    "params",
-    "effective_params",
-    "execution_params",
-    "command_argv",
-    "literature_case_ids",
+    "parameters",
     "exit_code",
     "failure_class",
     "execution_status",
     "execution_status_detail",
-    "stderr_ref",
-    "stdout_ref",
     "resource_facts",
 )
 QUALITY_REPLAN_PREVIOUS_FIELDS = (
-    "attempt_id",
-    "method_id",
     "tool_version",
-    "params",
-    "effective_params",
-    "execution_params",
-    "command_argv",
-    "literature_case_ids",
+    "parameters",
 )
 QUALITY_REVIEW_FIELDS = (
     "failure_mode",
@@ -113,7 +98,13 @@ def build_full_parameter_profile(
 
 
 def build_prompt_profile(full_profile: dict[str, Any], task: ParameterPromptTask) -> dict[str, Any]:
-    """Return the task-scoped profile section intended for LLM prompting."""
+    """Return explicitly allowed task facts for the Assembly request builder.
+
+    The full profile remains the audit owner.  This selection deliberately
+    excludes attempt identity, command/file locators, log refs, and evidence
+    bookkeeping so the LLM layer never receives a rich audit envelope that it
+    must clean up later.
+    """
 
     if task == "recommend_initial":
         return {
@@ -124,7 +115,7 @@ def build_prompt_profile(full_profile: dict[str, Any], task: ParameterPromptTask
         }
     if task == "retry_after_execution_failure":
         return {
-            "sample": _pick(full_profile.get("sample") or {}, ("sample_id", "organism", "clade", "target_level")),
+            "sample": _pick(full_profile.get("sample") or {}, ("organism", "clade", "target_level")),
             "assets": _pick(full_profile.get("assets") or {}, PROMPT_ASSET_FIELDS),
             "previous_attempt": _pick(full_profile.get("previous_attempt") or {}, EXECUTION_REPAIR_FIELDS),
         }
@@ -137,33 +128,15 @@ def build_prompt_profile(full_profile: dict[str, Any], task: ParameterPromptTask
     raise ValueError(f"Unknown parameter prompt task: {task}")
 
 
-def flatten_profile_facts(full_profile: dict[str, Any]) -> dict[str, Any]:
-    """Flatten a full profile into dotted facts for rule validation."""
-
-    facts: dict[str, Any] = {}
-
-    def visit(prefix: str, value: Any) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                child_prefix = f"{prefix}.{key}" if prefix else str(key)
-                visit(child_prefix, child)
-            return
-        if value is None:
-            return
-        facts[prefix] = value
-        leaf = prefix.rsplit(".", 1)[-1]
-        facts.setdefault(leaf, value)
-
-    visit("", full_profile)
-    return facts
-
-
 def _sample_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[str, Any]:
     input_profile = dict(assembly_out.get("input_profile") or {})
     shared = state.get("shared_parameters") or {}
     return _drop_empty(
         {
-            "sample_id": _first_value(state.get("session_id"), _lookup(shared, "sample_id"), _lookup(input_profile, "sample_id")),
+            "sample_id": _first_value(
+                _lookup(shared, "sample_id"),
+                _lookup(input_profile, "sample_id"),
+            ),
             "organism": _first_value(_lookup(shared, "organism"), _lookup(input_profile, "organism")),
             "taxon_id": _first_value(_lookup(shared, "taxon_id"), _lookup(input_profile, "taxon_id")),
             "clade": _first_value(_lookup(shared, "clade"), _lookup(input_profile, "clade")),
@@ -307,10 +280,8 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             "attempt_id": previous_attempt.get("attempt_id"),
             "method_id": previous_attempt.get("method_id"),
             "tool_version": previous_attempt.get("tool_version"),
-            "params": _rendered_previous_params(previous_attempt),
-            "effective_params": previous_attempt.get("effective_params"),
-            "execution_params": _first_value(
-                previous_attempt.get("execution_params"),
+            "parameters": _first_value(
+                previous_attempt.get("parameters"),
                 previous_attempt.get("recommended_params"),
             ),
             "command_argv": _first_value(previous_attempt.get("argv"), previous_attempt.get("command_argv")),
@@ -336,21 +307,6 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             "stdout_tail": previous_attempt.get("stdout_tail"),
         }
     )
-
-
-def _rendered_previous_params(previous_attempt: dict[str, Any]) -> dict[str, Any] | None:
-    rendered = previous_attempt.get("rendered_parameters")
-    if isinstance(rendered, dict) and rendered:
-        return dict(rendered)
-    values: dict[str, Any] = {}
-    snapshot = previous_attempt.get("catalog_snapshot") or {}
-    for key, spec in (snapshot.get("parameters") or {}).items():
-        if isinstance(spec, dict) and spec.get("level") == 2 and spec.get("default") is not None:
-            values[key] = spec["default"]
-    for source in (previous_attempt.get("params"), previous_attempt.get("recommended_params")):
-        if isinstance(source, dict):
-            values.update(source)
-    return values or None
 
 
 def _assembly_review_profile(assembly_review: dict[str, Any]) -> dict[str, Any]:

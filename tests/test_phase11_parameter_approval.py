@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.schemas.artifacts import ArtifactRef, ParameterAttempt
-from app.stages.assembly.parameter_nodes import (
+from app.stages.assembly.parameters.workflow import (
     _seal_parameter_attempt,
     _validate_parameter_attempt_chain,
     build_parameter_attempt_timeline,
@@ -71,7 +71,7 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
     def _blocked(self, root: Path) -> dict:
         state = _state(root)
         with patch(
-            "app.stages.assembly.decision.build_chat_model",
+            "app.llm.parameters.assembly.recommender.build_chat_model",
             return_value=_Model(_response(purge_level=1)),
         ):
             update = recommend_assembly_parameters(state)

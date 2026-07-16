@@ -28,11 +28,9 @@ from app.knowledge.evidence_cases import (
     MAX_METHODS_FILE_BYTES,
 )
 from app.knowledge.packs import load_knowledge_pack
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_request import (
-    build_parameter_basis_snapshot,
-    build_parameter_request_dto,
-)
+from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,8 +108,6 @@ def _build_parameter_request(
     full_profile: dict,
     *,
     knowledge_root: Path,
-    session_id: str | None = None,
-    recommendation_id: int | None = None,
 ) -> tuple[dict, dict]:
     catalog = load_parameter_catalog("hifiasm")
     basis = build_parameter_basis_snapshot(
@@ -119,8 +115,6 @@ def _build_parameter_request(
         catalog=catalog,
         full_profile=full_profile,
         knowledge_root=knowledge_root,
-        session_id=session_id,
-        recommendation_id=recommendation_id,
     )
     request = build_parameter_request_dto(
         method_id="hifiasm",
@@ -918,7 +912,7 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     assert "evidence_spans" not in request["literature_cases"][0]
 
 
-def test_hifiasm_selection_identity_stays_in_basis_and_card_is_embedded_once(tmp_path):
+def test_hifiasm_selection_omits_identity_and_embeds_card_once(tmp_path):
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     _write_case_pack(
@@ -941,8 +935,6 @@ def test_hifiasm_selection_identity_stays_in_basis_and_card_is_embedded_once(tmp
             "assembly_review": {},
         },
         knowledge_root=tmp_path,
-        session_id="session_a",
-        recommendation_id=2,
     )
 
     retrieval = basis["literature_selection"]
@@ -950,7 +942,7 @@ def test_hifiasm_selection_identity_stays_in_basis_and_card_is_embedded_once(tmp
     assert "trace" not in retrieval
     assert "query_ref" not in retrieval
     assert "trace_ref" not in retrieval
-    assert retrieval["query_id"] == "session_a:parameter_attempt_2"
+    assert "query_id" not in retrieval
     assert "query_id" not in request["literature_selection"]
     assert "retrieval_query_ref" not in request
     assert "retrieval_trace_ref" not in request

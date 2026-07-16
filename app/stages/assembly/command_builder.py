@@ -197,6 +197,40 @@ def _validate_groups(catalog: MethodParameterCatalog, parameter_sources: dict[st
                 raise ParameterCommandError(f"Unknown parameter for {group_name}: {key}")
             if spec.level != expected_level:
                 raise ParameterCommandError(f"{key} belongs to L{spec.level}, not {group_name}")
+            if group_name == "l2_recommended":
+                _validate_renderable_l2_value(key, spec, group[key])
+
+
+def _validate_renderable_l2_value(
+    key: str,
+    spec: ParameterSpec,
+    value: Any,
+) -> None:
+    """Reject only values that cannot be rendered as the declared CLI type.
+
+    This runs after human approval.  It deliberately does not enforce catalog
+    enums, ranges, or biological rules and never substitutes a default.
+    """
+
+    valid = True
+    if spec.value_type == "boolean":
+        valid = isinstance(value, bool)
+    elif spec.value_type == "int":
+        valid = isinstance(value, int) and not isinstance(value, bool)
+    elif spec.value_type == "float":
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+    elif spec.value_type in {"string", "path"}:
+        valid = isinstance(value, str) and bool(value)
+    elif spec.value_type == "path_list":
+        valid = (
+            isinstance(value, list)
+            and bool(value)
+            and all(isinstance(item, str) and bool(item) for item in value)
+        )
+    if not valid:
+        raise ParameterCommandError(
+            f"{key} cannot be rendered as {spec.value_type}: {value!r}"
+        )
 
 
 def _ordered_keys(
@@ -222,7 +256,7 @@ def _is_fixed_truthy_boolean(spec: ParameterSpec, value: Any) -> bool:
 
 
 def _emit_parameter(spec: ParameterSpec, value: Any) -> tuple[list[str], list[str]]:
-    if value is None or value == "" or value == "default":
+    if value is None or value == "":
         return [], []
     if spec.value_type == "boolean":
         if not value:

@@ -10,8 +10,7 @@ from typing import Any, Mapping
 from app.llm.factory import build_chat_model
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
-
-PROMPT_BUNDLE = "hic_scaffolding.parameter_autohic"
+PROMPT_BUNDLE = "hic.parameter_autohic"
 
 
 @dataclass(frozen=True)
@@ -36,7 +35,7 @@ def render_autohic_parameter_messages(
             "prompt_payload_json": json.dumps(
                 dict(prompt_payload),
                 ensure_ascii=False,
-                indent=2,
+                separators=(",", ":"),
             )
         },
     )
@@ -55,7 +54,7 @@ def autohic_parameter_prompt_hash() -> str:
     return sha256(canonical).hexdigest()
 
 
-def recommend_autohic_parameter_patch(
+def recommend_autohic_parameters(
     prompt_payload: Mapping[str, Any],
     *,
     messages: list[dict[str, str]] | None = None,
@@ -98,32 +97,65 @@ def recommend_autohic_parameter_patch(
     )
 
 
+def restore_autohic_parameter_decision(
+    record: Mapping[str, Any],
+) -> AutoHiCParameterDecision:
+    """Rehydrate a decision from immutable model-response evidence."""
+
+    if record.get("schema_version") != 2:
+        raise ValueError("persisted AutoHiC model response is not schema v2")
+    raw_response = record.get("raw_response")
+    validity = record.get("validity")
+    error = record.get("error")
+    model_id = record.get("model_id")
+    if not isinstance(raw_response, str) or validity not in {"parsed", "invalid"}:
+        raise ValueError("persisted AutoHiC model response is malformed")
+    if error is not None and not isinstance(error, str):
+        raise ValueError("persisted AutoHiC model response has an invalid error")
+    if model_id is not None and not isinstance(model_id, str):
+        raise ValueError("persisted AutoHiC model response has an invalid model_id")
+    if validity == "invalid":
+        return AutoHiCParameterDecision(
+            raw_response=raw_response,
+            recommendation=None,
+            valid=False,
+            error=error,
+            model_id=model_id,
+        )
+    return AutoHiCParameterDecision(
+        raw_response=raw_response,
+        recommendation=_normalize_direct_recommendation(
+            _parse_json_object(raw_response)
+        ),
+        valid=True,
+        error=error,
+        model_id=model_id,
+    )
+
+
 def _normalize_direct_recommendation(response: dict[str, Any]) -> dict[str, Any]:
-    unexpected_fields = sorted(set(response) - {"parameter_patch", "summary"})
+    unexpected_fields = sorted(set(response) - {"parameters", "summary"})
     if unexpected_fields:
         raise ValueError(
             f"AutoHiC response contains unsupported fields: {unexpected_fields}"
         )
-    patch = response.get("parameter_patch")
-    if not isinstance(patch, dict):
-        raise ValueError("AutoHiC response requires a parameter_patch object")
-    if set(patch) != {"restriction_enzyme"}:
-        raise ValueError(
-            "AutoHiC parameter_patch must contain only restriction_enzyme"
-        )
-    enzyme = patch["restriction_enzyme"]
+    parameters = response.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("AutoHiC response requires a parameters object")
+    if set(parameters) != {"restriction_enzyme"}:
+        raise ValueError("AutoHiC parameters must contain only restriction_enzyme")
+    enzyme = parameters["restriction_enzyme"]
     if not isinstance(enzyme, str) or not enzyme.strip():
         raise ValueError("restriction_enzyme must be a non-empty string")
     enzyme = enzyme.strip()
-    if any(character in enzyme for character in ("\n", "\r", "=")):
-        raise ValueError("restriction_enzyme contains invalid config characters")
     summary = response.get("summary")
-    if summary is not None and not isinstance(summary, str):
-        raise ValueError("summary must be a string when provided")
+    if summary is not None:
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("summary must be a non-empty string when provided")
+        summary = summary.strip()
     return {
-        "parameter_patch": {"restriction_enzyme": enzyme},
-        "params": {"restriction_enzyme": enzyme},
-        "summary": (summary or "LLM recommended a Hi-C restriction enzyme for review").strip(),
+        "parameters": {"restriction_enzyme": enzyme},
+        "summary": summary,
     }
 
 

@@ -10,8 +10,17 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.execution.artifacts import (
+    append_artifact_records,
+    publish_or_recover_work_artifact,
+)
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import (
+    load_execution_result,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
@@ -21,9 +30,15 @@ from app.schemas.artifacts import (
     FunctionDatabaseProvenance,
     FunctionMethodResult,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
 
 FUNCTION_CANDIDATE_METHODS = [
     "function_annotation.candidate.diamond",
@@ -33,7 +48,11 @@ FUNCTION_CONTRACT_METHOD = "function_annotation.contract"
 DIAMOND_METHOD = "function_annotation.candidate.diamond"
 
 FUNCTION_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
-    "function_annotation.candidate.diamond": {"suffix": "diamond", "frozen_status": "diamond_frozen", "ran_status": "diamond_ran"},
+    "function_annotation.candidate.diamond": {
+        "suffix": "diamond",
+        "frozen_status": "diamond_frozen",
+        "ran_status": "diamond_ran",
+    },
 }
 
 
@@ -59,7 +78,9 @@ def resolve_protein_inputs(state: TopLevelState) -> dict:
     if _function_output(state).get("status"):
         return {}
     gene_out = (state.get("stage_outputs") or {}).get("gene_annotation") or {}
-    proteins_ref = _first_value(gene_out, ["proteins_fasta_ref", "predicted_proteins_ref", "predicted_proteins"])
+    proteins_ref = _first_value(
+        gene_out, ["proteins_fasta_ref", "predicted_proteins_ref", "predicted_proteins"]
+    )
     if not proteins_ref:
         return _fail_update(state, "missing proteins.fa for function_annotation")
 
@@ -68,7 +89,9 @@ def resolve_protein_inputs(state: TopLevelState) -> dict:
         {
             "status": "resolved",
             "proteins_fasta_ref": proteins_ref,
-            "genes_gff3_ref": _first_value(gene_out, ["genes_gff3_ref", "gene_models_ref", "gene_models"]),
+            "genes_gff3_ref": _first_value(
+                gene_out, ["genes_gff3_ref", "gene_models_ref", "gene_models"]
+            ),
             "transcripts_fasta_ref": _first_value(gene_out, ["transcripts_fasta_ref"]),
         },
     )
@@ -81,12 +104,16 @@ def plan_function_methods(state: TopLevelState) -> dict:
         return {}
 
     registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-    missing = [method for method in FUNCTION_CANDIDATE_METHODS if method not in registry.methods]
+    missing = [
+        method
+        for method in FUNCTION_CANDIDATE_METHODS
+        if method not in registry.methods
+    ]
     if missing:
-        return _fail_update(state, f"function_annotation descriptors missing: {missing}")
+        return _fail_update(
+            state, f"function_annotation descriptors missing: {missing}"
+        )
 
-    data_dir = Path(state.get("data_dir", "data"))
-    session_id = state["session_id"]
     work_dir = stage_work_dir(state, "function_annotation")
     expected_outputs = {
         "gene_function_tsv": str(work_dir / "gene_function.tsv"),
@@ -95,7 +122,9 @@ def plan_function_methods(state: TopLevelState) -> dict:
         "pfam_interpro_table": str(work_dir / "pfam_interpro.tsv"),
     }
     if function_out.get("genes_gff3_ref"):
-        expected_outputs["annotated_gene_models_gff3"] = str(work_dir / "annotated_gene_models.gff3")
+        expected_outputs["annotated_gene_models_gff3"] = str(
+            work_dir / "annotated_gene_models.gff3"
+        )
 
     return _update_function_output(
         state,
@@ -120,7 +149,9 @@ def validate_database_provenance(state: TopLevelState) -> dict:
         return {}
 
     raw_provenance = function_out.get("database_provenance")
-    provenance, error = _validate_provenance_records(raw_provenance, function_out["proteins_fasta_ref"])
+    provenance, error = _validate_provenance_records(
+        raw_provenance, function_out["proteins_fasta_ref"]
+    )
     if error:
         return _fail_update(state, error)
     protein_error = _validate_protein_artifact_ref(function_out["proteins_fasta_ref"])
@@ -165,12 +196,16 @@ def validate_database_provenance(state: TopLevelState) -> dict:
         },
     )
     append_artifact_records(data_dir, session_id, [artifact])
-    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
+    Ledger(data_dir).record_artifact_registered(
+        session_id, artifact.model_dump(mode="json")
+    )
     return _update_function_output(
         state,
         {
             "status": "provenance_validated",
-            "database_provenance": [record.model_dump(mode="json") for record in provenance],
+            "database_provenance": [
+                record.model_dump(mode="json") for record in provenance
+            ],
             "plan_artifact_ref": str(plan_ref),
             "artifact_refs": [str(artifact.file_path)],
         },
@@ -204,11 +239,9 @@ def _freeze_func_method_attempt(
         return _update_function_output(state, blocked)
 
     working_dir = stage_work_dir(state, "function_annotation", cfg["suffix"])
-    artifact_dir = stage_artifacts_dir(state, "function_annotation", cfg["suffix"])
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    output_tsv = artifact_dir / f"{cfg['suffix']}_hits.tsv"
+    output_tsv = working_dir / f"{cfg['suffix']}_hits.tsv"
 
     script_path = working_dir / f"run_{cfg['suffix']}.sh"
     script_path.write_text(script_body, encoding="utf-8")
@@ -230,24 +263,41 @@ def _freeze_func_method_attempt(
             **(extra_metadata or {}),
         },
     )
+    attempt_ref = persist_frozen_attempt(state, attempt)
 
     return _update_function_output(
         state,
         {
             "status": cfg["frozen_status"],
-            f"{cfg['suffix']}_frozen_attempt": attempt.model_dump(mode="json"),
+            f"{cfg['suffix']}_attempt_ref": attempt_ref.model_dump(mode="json"),
         },
     )
 
 
-def _run_func_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> dict:
+def _run_func_method_attempt(
+    state: TopLevelState,
+    *,
+    method_name: str,
+    cfg: dict[str, str],
+) -> dict:
     function_out = _function_output(state)
-    attempt = FrozenAttemptSpec.model_validate(function_out[f"{cfg['suffix']}_frozen_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        function_out[f"{cfg['suffix']}_attempt_ref"],
+        expected_stage="function_annotation",
+        expected_method_name=method_name,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=cfg["suffix"],
+    )
+    execution_ref = persist_execution_result(
+        state,
+        stage="function_annotation",
+        method_name=attempt.method_name,
+        result=outcome.result,
     )
     if not outcome.success:
         return _update_function_output(
@@ -255,14 +305,14 @@ def _run_func_method_attempt(state: TopLevelState, *, cfg: dict[str, str]) -> di
             {
                 "status": "failed",
                 "reason": outcome.error,
-                f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
+                f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
             },
         )
     return _update_function_output(
         state,
         {
             "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_result": outcome.result.model_dump(mode="json"),
+            f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
         },
     )
 
@@ -271,38 +321,59 @@ def _collect_func_method_artifacts(
     state: TopLevelState, *, method_name: str, cfg: dict[str, str], artifact_type: str
 ) -> dict:
     function_out = _function_output(state)
-    attempt = FrozenAttemptSpec.model_validate(function_out[f"{cfg['suffix']}_frozen_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        function_out[f"{cfg['suffix']}_attempt_ref"],
+        expected_stage="function_annotation",
+        expected_method_name=method_name,
+    )
+    load_execution_result(
+        state,
+        function_out[f"{cfg['suffix']}_execution_ref"],
+        expected_stage="function_annotation",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=method_name,
+    )
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_tsv = Path(str(attempt.metadata["output_tsv"]))
 
-    if not output_tsv.exists():
+    try:
+        published = publish_or_recover_work_artifact(
+            data_dir,
+            session_id,
+            output_tsv,
+            stage="function_annotation",
+            method_name=method_name,
+            artifact_type=artifact_type,
+            metadata={"attempt_id": attempt.attempt_id},
+        )
+    except FileNotFoundError:
         reason = f"expected {cfg['suffix']} TSV missing: {output_tsv}"
         Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=reason,
+            attempt.session_id,
+            attempt,
+            return_code=0,
+            error=reason,
         )
         return _update_function_output(state, {"status": "failed", "reason": reason})
 
-    artifact = ArtifactMeta.from_file(
-        output_tsv,
-        stage="function_annotation",
-        method_name=method_name,
-        artifact_type=artifact_type,
-        metadata={"attempt_id": attempt.attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-
     Ledger(data_dir).record_attempt_succeeded(
-        attempt.session_id, attempt,
-        artifacts=[{"path": str(output_tsv), "artifact_type": artifact_type}],
+        attempt.session_id,
+        attempt,
+        artifacts=[published.ref.model_dump(mode="json")],
     )
 
     return _update_function_output(
         state,
         {
             "status": f"{cfg['suffix']}_completed",
-            f"{cfg['suffix']}_hits_ref": str(output_tsv),
-            "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path)],
+            f"{cfg['suffix']}_hits_ref": str(published.path),
+            f"{cfg['suffix']}_hits_artifact_ref": published.ref.model_dump(mode="json"),
+            "artifact_refs": [
+                *function_out.get("artifact_refs", []),
+                str(published.path),
+            ],
         },
     )
 
@@ -328,21 +399,22 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
 
     database_source = Path(str(db_path)).expanduser()
     if not database_source.is_file():
-        return _fail_update(state, f"diamond database source not found: {database_source}")
+        return _fail_update(
+            state, f"diamond database source not found: {database_source}"
+        )
 
     proteins_ref = function_out.get("proteins_fasta_ref")
     if not proteins_ref:
         return _fail_update(state, "diamond requires proteins_fasta_ref")
 
-    data_dir = Path(state.get("data_dir", "data"))
-    session_id = state["session_id"]
     working_dir = stage_work_dir(state, "function_annotation", "diamond")
     database_is_index = database_source.suffix.lower() == ".dmnd"
-    dmnd_index = database_source if database_is_index else working_dir / "reference.dmnd"
+    dmnd_index = (
+        database_source if database_is_index else working_dir / "reference.dmnd"
+    )
 
     cfg = FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD]
-    artifact_dir = stage_artifacts_dir(state, "function_annotation", cfg["suffix"])
-    output_tsv = artifact_dir / f"{cfg['suffix']}_hits.tsv"
+    output_tsv = working_dir / f"{cfg['suffix']}_hits.tsv"
 
     threads = function_out.get("diamond_parameters", {}).get("threads", 4)
     try:
@@ -350,8 +422,12 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
     except (TypeError, ValueError):
         threads = 4
 
-    setup_command = "" if database_is_index else (
-        f"diamond makedb --in {shlex.quote(str(database_source))} -d {shlex.quote(str(dmnd_index))}\n"
+    setup_command = (
+        ""
+        if database_is_index
+        else (
+            f"diamond makedb --in {shlex.quote(str(database_source))} -d {shlex.quote(str(dmnd_index))}\n"
+        )
     )
     script = (
         "set -e\n"
@@ -369,7 +445,9 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
         extra_metadata={
             "database_source_ref": str(database_source),
             "database_index_ref": str(dmnd_index),
-            "database_source_kind": "diamond_index" if database_is_index else "sequence_fasta",
+            "database_source_kind": "diamond_index"
+            if database_is_index
+            else "sequence_fasta",
             "dmnd_index": str(dmnd_index),
             "threads": threads,
         },
@@ -380,7 +458,11 @@ def run_diamond_attempt(state: TopLevelState) -> dict:
     function_out = _function_output(state)
     if function_out.get("status") != "diamond_frozen":
         return {}
-    return _run_func_method_attempt(state, cfg=FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD])
+    return _run_func_method_attempt(
+        state,
+        method_name=DIAMOND_METHOD,
+        cfg=FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD],
+    )
 
 
 def collect_diamond_artifacts(state: TopLevelState) -> dict:
@@ -404,13 +486,22 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = function_out.get("expected_outputs", {})
     diamond_hits_ref = function_out.get("diamond_hits_ref")
-    materialized_gene_function = _existing_file_ref(expected_outputs.get("gene_function_tsv"))
+    materialized_gene_function = _existing_file_ref(
+        expected_outputs.get("gene_function_tsv")
+    )
     materialized_go = _existing_file_ref(expected_outputs.get("go_annotation_table"))
-    materialized_kegg = _existing_file_ref(expected_outputs.get("kegg_annotation_table"))
+    materialized_kegg = _existing_file_ref(
+        expected_outputs.get("kegg_annotation_table")
+    )
     materialized_pfam = _existing_file_ref(expected_outputs.get("pfam_interpro_table"))
-    materialized_annotated_gff = _existing_file_ref(expected_outputs.get("annotated_gene_models_gff3"))
-    provenance = [FunctionDatabaseProvenance.model_validate(record) for record in function_out.get("database_provenance", [])]
-    method_results = _function_method_results(function_out, provenance)
+    materialized_annotated_gff = _existing_file_ref(
+        expected_outputs.get("annotated_gene_models_gff3")
+    )
+    provenance = [
+        FunctionDatabaseProvenance.model_validate(record)
+        for record in function_out.get("database_provenance", [])
+    ]
+    method_results = _function_method_results(state, function_out, provenance)
     bundle = FunctionAnnotationBundle(
         session_id=session_id,
         status="planned",
@@ -451,7 +542,9 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         },
     )
     append_artifact_records(data_dir, session_id, [artifact])
-    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
+    Ledger(data_dir).record_artifact_registered(
+        session_id, artifact.model_dump(mode="json")
+    )
     outputs = dict(state.get("stage_outputs") or {})
     outputs["function_annotation"] = {
         **function_out,
@@ -464,13 +557,16 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         "annotated_gene_models_gff3_ref": materialized_annotated_gff,
         "method_results": [result.model_dump(mode="json") for result in method_results],
         "bundle_artifact_ref": str(bundle_ref),
-        "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path)],
+        "artifact_refs": [
+            *function_out.get("artifact_refs", []),
+            str(artifact.file_path),
+        ],
     }
     return {
         "stage_outputs": outputs,
         "current_stage": next_stage_name("function_annotation"),
         "supervision_state": "completed",
-        "route_trace": [*state.get("route_trace", []), "function_annotation_stage"],
+        "route_trace": append_route_trace(state, "function_annotation_stage"),
     }
 
 
@@ -482,21 +578,40 @@ def _existing_file_ref(ref: Any) -> str | None:
 
 
 def _function_method_results(
+    state: TopLevelState,
     function_out: dict[str, Any],
     provenance: list[FunctionDatabaseProvenance],
 ) -> list[FunctionMethodResult]:
     results: list[FunctionMethodResult] = []
     diamond_hits_ref = function_out.get("diamond_hits_ref")
     if diamond_hits_ref and Path(str(diamond_hits_ref)).is_file():
-        diamond_provenance = [record for record in provenance if record.method_name == DIAMOND_METHOD]
+        diamond_provenance = [
+            record for record in provenance if record.method_name == DIAMOND_METHOD
+        ]
         metadata: dict[str, Any] = {"outfmt": "6"}
-        frozen = function_out.get("diamond_frozen_attempt") or {}
-        frozen_metadata = frozen.get("metadata") if isinstance(frozen, dict) else None
-        if isinstance(frozen_metadata, dict):
-            if frozen_metadata.get("dmnd_index"):
-                metadata["database_index_ref"] = frozen_metadata["dmnd_index"]
-            if frozen_metadata.get("database_source_ref"):
-                metadata["database_source_ref"] = frozen_metadata["database_source_ref"]
+        attempt_ref = function_out.get("diamond_attempt_ref")
+        if attempt_ref:
+            attempt = load_frozen_attempt(
+                state,
+                attempt_ref,
+                expected_stage="function_annotation",
+                expected_method_name=DIAMOND_METHOD,
+            )
+            execution_ref = function_out.get("diamond_execution_ref")
+            if execution_ref:
+                load_execution_result(
+                    state,
+                    execution_ref,
+                    expected_stage="function_annotation",
+                    expected_attempt_id=attempt.attempt_id,
+                    expected_method_name=DIAMOND_METHOD,
+                )
+            if attempt.metadata.get("dmnd_index"):
+                metadata["database_index_ref"] = attempt.metadata["dmnd_index"]
+            if attempt.metadata.get("database_source_ref"):
+                metadata["database_source_ref"] = attempt.metadata[
+                    "database_source_ref"
+                ]
         results.append(
             FunctionMethodResult(
                 method_name=DIAMOND_METHOD,
@@ -559,11 +674,17 @@ def _validate_provenance_records(
             message = f"{field}: {error['msg']}" if field else error["msg"]
             return [], f"invalid database_provenance[{index}]: {message}"
         if record.method_name not in FUNCTION_EXECUTABLE_METHODS:
-            return [], f"unsupported function_annotation provenance method: {record.method_name}"
+            return (
+                [],
+                f"unsupported function_annotation provenance method: {record.method_name}",
+            )
         if record.input_proteins_ref is None:
             record = record.model_copy(update={"input_proteins_ref": proteins_ref})
         elif record.input_proteins_ref != proteins_ref:
-            return [], f"database_provenance[{index}].input_proteins_ref does not match proteins_fasta_ref"
+            return (
+                [],
+                f"database_provenance[{index}].input_proteins_ref does not match proteins_fasta_ref",
+            )
         records.append(record)
     if not records:
         return [], "database_provenance must be a non-empty list"

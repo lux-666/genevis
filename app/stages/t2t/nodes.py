@@ -36,7 +36,14 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -103,8 +110,6 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
         return _fail(state, f"t2t input assembly is not a valid FASTA: {assembly_ref}")
 
     reads_ref, reads_source = _ont_reads_ref(state, config.get("ont_reads_ref"))
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
     out_dir = stage_artifacts_dir(state, "t2t", "t2t_finishing")
     work_dir = stage_work_dir(state, "t2t", "t2t_finishing")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -458,7 +463,7 @@ def commit_t2t(state: TopLevelState) -> dict:
     return {
         "current_stage": next_stage_name("t2t"),
         "supervision_state": "running_stage",
-        "route_trace": [*state.get("route_trace", []), "t2t_stage"],
+        "route_trace": append_route_trace(state, "t2t_stage"),
     }
 
 

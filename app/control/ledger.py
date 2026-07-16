@@ -16,14 +16,13 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.paths import SessionPaths, ensure_run_layout
-
 
 LEDGER_SCHEMA_VERSION = 2
 SUMMARY_MAX_BYTES = 12 * 1024
 MAX_REFS = 64
 MAX_LIST_ITEMS = 32
-MAX_ROUTE_ITEMS = 16
 MAX_TEXT_CHARS = 4096
 
 _COLLECTION_FACTS = frozenset({"artifacts", "assets", "candidates", "signals"})
@@ -123,7 +122,9 @@ class Ledger:
             idempotency_key=f"attempt:{attempt.attempt_id}:recorded:{status}",
         )
 
-    def record_attempt_started(self, session_id: str, attempt: FrozenAttemptSpec) -> None:
+    def record_attempt_started(
+        self, session_id: str, attempt: FrozenAttemptSpec
+    ) -> None:
         """Append an idempotent attempt-start event."""
         self.record_event(
             session_id,
@@ -301,7 +302,9 @@ class Ledger:
         if artifact_ref:
             refs.append(self._path_ref("artifact_ref", artifact_ref))
         if rationale_artifact_ref:
-            refs.append(self._path_ref("rationale_artifact_ref", rationale_artifact_ref))
+            refs.append(
+                self._path_ref("rationale_artifact_ref", rationale_artifact_ref)
+            )
         payload = {
             "review_request_id": request_id,
             "gate_id": gate_id,
@@ -395,14 +398,19 @@ class Ledger:
             stage=stage,
             subject_id=session_id,
             refs=refs,
-            idempotency_key=idempotency_key or f"session:{session_id}:terminal:{outcome}",
+            idempotency_key=idempotency_key
+            or f"session:{session_id}:terminal:{outcome}",
         )
 
     def read_session(self, session_id: str) -> dict[str, Any] | None:
         """Project session metadata from ``session_created``."""
         self.paths.require_session_id(session_id)
         created = next(
-            (row for row in self.read_events(session_id) if row["event_type"] == "session_created"),
+            (
+                row
+                for row in self.read_events(session_id)
+                if row["event_type"] == "session_created"
+            ),
             None,
         )
         if created is None:
@@ -464,8 +472,7 @@ class Ledger:
         reserved = sorted(set(raw) & _RESERVED_PAYLOAD_KEYS)
         if reserved:
             raise ValueError(
-                "ledger payload cannot override envelope fields: "
-                + ", ".join(reserved)
+                "ledger payload cannot override envelope fields: " + ", ".join(reserved)
             )
         stage = stage or _optional_text(raw.pop("stage", None))
         subject_id = subject_id or _subject_from_payload(raw)
@@ -516,7 +523,9 @@ class Ledger:
                     "summary": summary,
                 }
                 handle.seek(0, os.SEEK_END)
-                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                handle.write(
+                    json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
                 handle.flush()
                 os.fsync(handle.fileno())
                 return row
@@ -559,13 +568,21 @@ class Ledger:
                 f"unsupported ledger schema at line {line_number}: {row['schema_version']!r}"
             )
         if row["session_id"] != self.paths.session_id:
-            raise LedgerFormatError(f"session mismatch in ledger row at line {line_number}")
+            raise LedgerFormatError(
+                f"session mismatch in ledger row at line {line_number}"
+            )
         if not isinstance(row["sequence"], int) or row["sequence"] < 1:
-            raise LedgerFormatError(f"invalid sequence in ledger row at line {line_number}")
+            raise LedgerFormatError(
+                f"invalid sequence in ledger row at line {line_number}"
+            )
         if not isinstance(row["refs"], list) or not isinstance(row["summary"], dict):
-            raise LedgerFormatError(f"invalid refs/summary in ledger row at line {line_number}")
+            raise LedgerFormatError(
+                f"invalid refs/summary in ledger row at line {line_number}"
+            )
         if _json_size(row["summary"]) > SUMMARY_MAX_BYTES:
-            raise LedgerFormatError(f"oversized summary in ledger row at line {line_number}")
+            raise LedgerFormatError(
+                f"oversized summary in ledger row at line {line_number}"
+            )
 
     def _split_payload(
         self, payload: dict[str, Any]
@@ -590,7 +607,9 @@ class Ledger:
                             item = item.model_dump(mode="json")
                         if isinstance(item, Mapping):
                             refs.append({**dict(item), "role": "artifact"})
-                summary[f"{key[:-1]}_count"] = len(value) if isinstance(value, list) else 0
+                summary[f"{key[:-1]}_count"] = (
+                    len(value) if isinstance(value, list) else 0
+                )
                 continue
             if _is_ref_key(key) and value:
                 refs.append(self._path_ref(key, value))
@@ -603,7 +622,9 @@ class Ledger:
             summary[key] = value
         return refs, summary
 
-    def _refs_from_nested(self, value: Any, *, role_prefix: str) -> list[dict[str, Any]]:
+    def _refs_from_nested(
+        self, value: Any, *, role_prefix: str
+    ) -> list[dict[str, Any]]:
         refs: list[dict[str, Any]] = []
         if isinstance(value, Mapping):
             for key, nested in value.items():
@@ -614,7 +635,9 @@ class Ledger:
                     refs.extend(self._refs_from_nested(nested, role_prefix=role))
         elif isinstance(value, list):
             for index, nested in enumerate(value[:MAX_REFS]):
-                refs.extend(self._refs_from_nested(nested, role_prefix=f"{role_prefix}.{index}"))
+                refs.extend(
+                    self._refs_from_nested(nested, role_prefix=f"{role_prefix}.{index}")
+                )
         return refs
 
     def _normalize_refs(self, refs: Iterable[Any]) -> list[dict[str, Any]]:
@@ -626,7 +649,9 @@ class Ledger:
             ref = self._normalize_ref(value)
             if ref is None:
                 continue
-            identity = json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            identity = json.dumps(
+                ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
             if identity in seen:
                 continue
             normalized.append(ref)
@@ -693,7 +718,10 @@ class Ledger:
             if event.get("event_type") == "review_decision"
         }
         for event in reversed(events):
-            if event.get("event_type") != "review_requested" or event.get("stage") != stage:
+            if (
+                event.get("event_type") != "review_requested"
+                or event.get("stage") != stage
+            ):
                 continue
             request_id = str(event.get("review_request_id") or event.get("subject_id"))
             if request_id not in decided:
@@ -740,7 +768,9 @@ def _semantic_body(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _default_idempotency_key(semantic: Mapping[str, Any]) -> str:
     digest = hashlib.sha256(
-        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     ).hexdigest()
     return f"event:{semantic['event_type']}:{digest[:32]}"
 
@@ -774,7 +804,9 @@ def _bounded_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {
         "summary_truncated": True,
         "summary_sha256": _sha256_text(
-            json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            json.dumps(
+                candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
         ),
     }
     omitted: list[str] = []
@@ -804,7 +836,11 @@ def _bounded_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def _bounded_value(key: str, value: Any) -> Any:
     if isinstance(value, (str, Path)):
-        limit = MAX_TEXT_CHARS if key in {"error", "detail", "reason", "last_error"} else 1024
+        limit = (
+            MAX_TEXT_CHARS
+            if key in {"error", "detail", "reason", "last_error"}
+            else 1024
+        )
         text = str(value)
         return text if len(text) <= limit else text[: limit - 1] + "…"
     if isinstance(value, (bool, int, float)):
@@ -812,12 +848,18 @@ def _bounded_value(key: str, value: Any) -> Any:
     if isinstance(value, list):
         if key in {"notes", "signals", "candidates", "assets", "artifacts"}:
             return len(value)
-        limit = MAX_ROUTE_ITEMS if key == "route_trace" else MAX_LIST_ITEMS
-        if all(isinstance(item, (str, bool, int, float, Path)) or item is None for item in value):
-            return [_bounded_scalar(item) for item in value[:limit] if item is not None]
+        limit = ROUTE_TRACE_LIMIT if key == "route_trace" else MAX_LIST_ITEMS
+        items = value[-limit:] if key == "route_trace" else value[:limit]
+        if all(
+            isinstance(item, (str, bool, int, float, Path)) or item is None
+            for item in value
+        ):
+            return [_bounded_scalar(item) for item in items if item is not None]
         ids = [
-            _bounded_scalar(item.get("candidate_id") or item.get("artifact_id") or item.get("id"))
-            for item in value[:limit]
+            _bounded_scalar(
+                item.get("candidate_id") or item.get("artifact_id") or item.get("id")
+            )
+            for item in items
             if isinstance(item, Mapping)
             and (item.get("candidate_id") or item.get("artifact_id") or item.get("id"))
         ]
@@ -832,7 +874,13 @@ def _bounded_value(key: str, value: Any) -> Any:
                 for nested_key, nested in value.items()
                 if nested is not None
             }
-        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
         return {
             "item_count": len(value),
             "keys": [str(nested_key) for nested_key in list(value)[:MAX_LIST_ITEMS]],
@@ -870,7 +918,12 @@ def _reference_identity(value: Any) -> str:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     if isinstance(value, Mapping):
-        return str(value.get("artifact_id") or value.get("path_ref") or value.get("file_path") or "")
+        return str(
+            value.get("artifact_id")
+            or value.get("path_ref")
+            or value.get("file_path")
+            or ""
+        )
     return str(value)
 
 
@@ -898,9 +951,13 @@ def _sha256_text(value: str) -> str:
 
 def _json_size(value: Any) -> int:
     return len(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
     )
 
 

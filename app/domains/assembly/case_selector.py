@@ -27,13 +27,12 @@ def select_evidence_cases(
     max_cases: int | None = None,
     strategy: dict[str, Any] | None = None,
     source_root: Path | str | None = None,
-    query_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Rank paper cards by numeric sample similarity without compatibility gates.
 
     Method, read type, route, assembly goal, and clade are intentionally neither
-    filters nor score terms.  They remain inside each card so the LLM can judge
-    transferability while designing a parameter patch.
+    filters nor score terms. They remain inside each card so the LLM can judge
+    transferability while recommending the full parameter set.
     """
 
     del min_cases
@@ -68,7 +67,6 @@ def select_evidence_cases(
         prompt_profile,
         method_id=method_id,
         task=task,
-        query_id=query_id,
     )
     result = retriever.select(validated_cases, query=query)
     metadata = result.metadata
@@ -81,7 +79,6 @@ def select_evidence_cases(
         "total_cases": metadata.get("total_cases"),
         "evidence_available": bool(metadata.get("evidence_available")),
         "warning": metadata.get("warning"),
-        "query_id": query.get("query_id"),
     }
 
 

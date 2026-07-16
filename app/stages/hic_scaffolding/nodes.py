@@ -19,14 +19,13 @@ from app.review.persistence import (
 from app.schemas.artifacts import ArtifactRef, HiCScaffoldDecisionArtifact
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, append_route_trace
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     hic_output as _hic_output,
 )
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     update_hic_output as _update_hic_output,
 )
-
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
@@ -63,7 +62,8 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
         "hic_read_refs": hic_read_refs,
         "hic_read_paths": hic_read_paths,
         "hic_library_metadata": [
-            dict(asset.get("metadata") or {}) for asset in hic_assets
+            dict(asset.get("metadata") or {})
+            for asset in hic_assets
             if asset.get("metadata")
         ],
         "target_assembly_level": _target_assembly_level(state),
@@ -248,9 +248,7 @@ def apply_hic_scaffolding_resume_decision(
             f"unsupported AutoHiC adoption decision: {request.decision}"
         )
     if request.method_name and request.method_name != AUTOHIC_METHOD:
-        raise ResumeValidationError(
-            f"AutoHiC adoption method must be {AUTOHIC_METHOD}"
-        )
+        raise ResumeValidationError(f"AutoHiC adoption method must be {AUTOHIC_METHOD}")
 
     candidate = dict((hic_out.get("method_candidates") or {}).get(AUTOHIC_METHOD) or {})
     pre_hic_assembly_ref = hic_out.get("pre_hic_assembly_ref")
@@ -265,7 +263,9 @@ def apply_hic_scaffolding_resume_decision(
     else:
         final_assembly = str(pre_hic_assembly_ref)
 
-    active_interrupt = state.get("active_interrupt") or hic_out.get("active_interrupt") or {}
+    active_interrupt = (
+        state.get("active_interrupt") or hic_out.get("active_interrupt") or {}
+    )
     review_request_id = request.review_request_id or active_interrupt.get(
         "review_request_id"
     )
@@ -273,7 +273,9 @@ def apply_hic_scaffolding_resume_decision(
         "request_hash"
     )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("AutoHiC adoption decision is missing request binding")
+        raise ResumeValidationError(
+            "AutoHiC adoption decision is missing request binding"
+        )
     try:
         review_request_ref = ArtifactRef.model_validate(
             active_interrupt.get("request_ref")
@@ -368,10 +370,7 @@ def apply_hic_scaffolding_resume_decision(
         "supervision_state": "running_stage",
         "active_interrupt": None,
         "stage_outputs": outputs,
-        "route_trace": [
-            *state.get("route_trace", []),
-            "hic_scaffolding_stage",
-        ],
+        "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
     }
 
 
@@ -418,6 +417,5 @@ def _hic_assets(state: TopLevelState) -> list[dict[str, Any]]:
     return [
         asset
         for asset in registry.get("assets", [])
-        if isinstance(asset, dict)
-        and asset.get("asset_type") == "hic_reads_registered"
+        if isinstance(asset, dict) and asset.get("asset_type") == "hic_reads_registered"
     ]

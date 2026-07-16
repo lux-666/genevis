@@ -14,13 +14,21 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.domains.assembly.parameter_recommendation import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
-)
 from app.domains.assembly.selection import AssemblySelection
-from app.llm.assembly_parameter_prompts import (
+from app.llm.parameters.assembly.prompt import (
     parameter_prompt_bundle_hash,
     parameter_prompt_bundle_name,
+    render_assembly_parameter_messages,
+)
+from app.llm.parameters.assembly.recommender import (
+    recommend_assembly_parameters as invoke_assembly_parameter_model,
+)
+from app.llm.parameters.assembly.recommender import (
+    restore_assembly_parameter_decision,
+)
+from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.llm.parameters.assembly.response import (
+    PARAMETER_RECOMMENDATION_CONTRACT,
 )
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
@@ -39,37 +47,25 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    ASSEMBLY_PARAMETER_RESPONSE_PARSE,
     ASSEMBLY_PARAMETER_REVIEW,
-    ASSEMBLY_PARAMETER_VALIDATION,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import TopLevelState
-from app.stages.assembly.decision import (
-    AssemblyDecisionRequest,
-    make_assembly_decision,
-    render_assembly_decision_messages,
-)
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_persistence import (
+from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
+from app.stages.assembly.parameters.profile import build_full_parameter_profile
+from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
     load_recommendation_bundle,
     read_json_artifact,
+    recover_recommendation_json_artifact,
     write_attempt_json_artifact,
     write_recommendation_json_artifact,
 )
-from app.stages.assembly.parameter_request import (
-    build_parameter_basis_snapshot,
-    build_parameter_request_dto,
-    previous_execution_overrides,
-)
-from app.stages.assembly.parameter_profile import (
-    build_full_parameter_profile,
-    flatten_profile_facts,
-)
-from app.stages.assembly.parameter_validation import validate_recommended_parameters
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 
@@ -137,21 +133,29 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     recommendation_id = int(
         assembly_out.get("proposed_parameter_attempt_id")
         if assembly_out.get("proposed_parameter_attempt_id") is not None
-        else assembly_out.get("current_parameter_attempt_id")
-        or len(attempts_before)
+        else assembly_out.get("current_parameter_attempt_id") or len(attempts_before)
     )
     previous_attempt = _previous_parameter_attempt(assembly_out, recommendation_id)
     hydrated_previous: dict[str, Any] = {}
     if task != "recommend_initial":
-        if not previous_attempt or previous_attempt.get("attempt_id") != recommendation_id - 1:
+        if (
+            not previous_attempt
+            or previous_attempt.get("attempt_id") != recommendation_id - 1
+        ):
             return _retry_transition_failure(state, "missing_failure_signal")
         if not previous_attempt.get("seal_hash"):
             return _retry_transition_failure(state, "unsealed_previous_attempt")
         retry_request = dict(assembly_out.get("parameter_retry_request") or {})
-        if retry_request.get("previous_attempt_id") != previous_attempt.get("attempt_id"):
+        if retry_request.get("previous_attempt_id") != previous_attempt.get(
+            "attempt_id"
+        ):
             return _retry_transition_failure(state, "missing_failure_signal")
-        if retry_request.get("previous_attempt_seal_hash") != previous_attempt.get("seal_hash"):
-            return _retry_transition_failure(state, "previous_attempt_seal_hash_mismatch")
+        if retry_request.get("previous_attempt_seal_hash") != previous_attempt.get(
+            "seal_hash"
+        ):
+            return _retry_transition_failure(
+                state, "previous_attempt_seal_hash_mismatch"
+            )
         try:
             hydrated_previous = hydrate_parameter_attempt(state, previous_attempt)
         except ParameterPersistenceError as exc:
@@ -169,8 +173,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 method_id=catalog.method_id,
                 catalog=catalog,
                 full_profile=full_profile,
-                session_id=state["session_id"],
-                recommendation_id=recommendation_id,
             )
         assert basis_snapshot is not None
         request_dto = build_parameter_request_dto(
@@ -179,10 +181,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             full_profile=full_profile,
             task=task,
             basis_snapshot=basis_snapshot,
-        )
-        normalization_overrides = previous_execution_overrides(
-            full_profile,
-            task=task,
         )
     except Exception as exc:
         return _fail_update(state, f"Assembly parameter request failed: {exc}")
@@ -207,60 +205,72 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             )
         assert basis_ref is not None
 
-        decision_request = AssemblyDecisionRequest(
-            kind="parameter_recommendation",
-            session_id=state["session_id"],
-            prompt_payload=request_dto,
-            allow_default_on_error=bool(
-                _parameter_recommendation_config(state, assembly_out).get(
-                    "allow_model_unavailable_defaults", False
-                )
-            ),
-        )
-        messages = render_assembly_decision_messages(decision_request)
+        messages = render_assembly_parameter_messages(request_dto)
         model_request_ref = write_recommendation_json_artifact(
             state,
             recommendation_id,
             "model_request.json",
             {
                 "schema_version": 2,
-                "request_id": (
-                    f"{state['session_id']}:assembly:parameter_recommendation:"
-                    f"{recommendation_id}"
-                ),
                 "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
-                "prompt_template_sha256": parameter_prompt_bundle_hash(catalog.method_id),
-                "parameter_request_schema_version": 1,
+                "prompt_template_sha256": parameter_prompt_bundle_hash(
+                    catalog.method_id
+                ),
+                "parameter_request_schema_version": 2,
                 "messages": messages,
             },
             artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
             method_name="assembly.parameter_recommender",
         )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
-        return _fail_update(state, f"Assembly parameter request persistence failed: {exc}")
+        return _fail_update(
+            state, f"Assembly parameter request persistence failed: {exc}"
+        )
 
-    # The persisted list above is the same object passed to invoke.  There is
-    # no second render that could drift from the evidence on disk.
-    decision = make_assembly_decision(
-        decision_request,
-        messages=messages,
-        parameter_baseline_overrides=normalization_overrides,
-    )
+    # A stale checkpoint may replay after the nondeterministic response was
+    # durably published.  Recover and re-parse that exact response instead of
+    # invoking the model again.
+    model_response_ref: ArtifactRef | None = None
     try:
-        model_response_ref = write_recommendation_json_artifact(
+        recovered_response = recover_recommendation_json_artifact(
             state,
             recommendation_id,
             "model_response.json",
-            {
-                "schema_version": 2,
-                "raw_response": decision.raw_response,
-                "validity": "parsed" if decision.valid else "invalid",
-                "error": decision.error,
-                "model_id": decision.model_id,
-            },
-            artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+            expected_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
             method_name="assembly.parameter_recommender",
         )
+        if recovered_response is None:
+            decision = invoke_assembly_parameter_model(
+                request_dto,
+                messages=messages,
+            )
+        else:
+            model_response_ref, response_record = recovered_response
+            decision = restore_assembly_parameter_decision(
+                response_record,
+                request_dto,
+            )
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"Assembly parameter response recovery failed: {exc}",
+        )
+    try:
+        if model_response_ref is None:
+            model_response_ref = write_recommendation_json_artifact(
+                state,
+                recommendation_id,
+                "model_response.json",
+                {
+                    "schema_version": 2,
+                    "raw_response": decision.raw_response,
+                    "validity": "parsed" if decision.valid else "invalid",
+                    "error": decision.error,
+                    "model_id": decision.model_id,
+                },
+                artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+                method_name="assembly.parameter_recommender",
+            )
         parsed = decision.parsed or {}
         recommendation_ref = write_recommendation_json_artifact(
             state,
@@ -276,58 +286,34 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             method_name="assembly.parameter_recommender",
         )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
-        return _fail_update(state, f"Assembly parameter response persistence failed: {exc}")
-
-    recommended_params = dict(parsed.get("params") or {}) if decision.valid else {}
-    if decision.valid:
-        validation = validate_recommended_parameters(
-            method_id=catalog.method_id,
-            catalog=catalog,
-            recommended_params=recommended_params,
-            readonly_facts=flatten_profile_facts(full_profile),
-            rules=dict(basis_snapshot.get("rules") or {}),
-            full_profile=full_profile,
+        return _fail_update(
+            state, f"Assembly parameter response persistence failed: {exc}"
         )
-    else:
-        validation = {
-            "valid": False,
-            "method_id": catalog.method_id,
-            "violations": [
-                {
-                    "param": None,
-                    "value": decision.raw_response,
-                    "reason": decision.error or "parameter recommendation failed",
-                    "severity": "critical",
-                }
-            ],
-            "warnings": [],
-        }
+
+    recommended_params = dict(parsed.get("parameters") or {}) if decision.valid else {}
+    response_parse = {
+        "schema_version": 1,
+        "parsed": bool(decision.valid),
+        "error": decision.error,
+    }
     try:
-        validation_ref = write_recommendation_json_artifact(
+        response_parse_ref = write_recommendation_json_artifact(
             state,
             recommendation_id,
-            "validation.json",
-            validation,
-            artifact_type=ASSEMBLY_PARAMETER_VALIDATION,
-            method_name="assembly.parameter_validator",
+            "response_parse.json",
+            response_parse,
+            artifact_type=ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+            method_name="assembly.parameter_response_parser",
         )
     except (OSError, ValueError, ParameterPersistenceError) as exc:
-        return _fail_update(state, f"Assembly parameter validation persistence failed: {exc}")
-
-    baseline_params = dict(parsed.get("baseline_params") or {})
-    proposed_parameter_changes = {
-        key: {"from": baseline_params.get(key), "to": value}
-        for key, value in recommended_params.items()
-        if baseline_params.get(key) != value
-    }
-    retry_disposition = parsed.get("retry_disposition")
-    if not validation.get("valid"):
-        cursor_status = "validation_failed"
-        stage_status = (
-            "parameter_retry_validation_failed"
-            if task != "recommend_initial"
-            else "parameter_validation_failed"
+        return _fail_update(
+            state, f"Assembly parameter parse persistence failed: {exc}"
         )
+
+    retry_disposition = parsed.get("retry_disposition")
+    if not decision.valid:
+        cursor_status = "response_invalid"
+        stage_status = "parameter_response_invalid"
     elif retry_disposition == "stop":
         cursor_status = "retry_stopped"
         stage_status = "parameter_retry_stopped"
@@ -362,12 +348,10 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             "model_request_ref": model_request_ref.model_dump(mode="json"),
             "model_response_ref": model_response_ref.model_dump(mode="json"),
             "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-            "validation_ref": validation_ref.model_dump(mode="json"),
+            "response_parse_ref": response_parse_ref.model_dump(mode="json"),
         },
         "summary": {
-            "validation_valid": bool(validation.get("valid")),
-            "violation_count": len(validation.get("violations") or []),
-            "warning_count": len(validation.get("warnings") or []),
+            "response_parsed": bool(decision.valid),
             "retry_disposition": retry_disposition,
         },
     }
@@ -388,7 +372,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         method_id=method_name,
         task=task,
         status=cursor_status,
-        previous_attempt_id=(previous_attempt.get("attempt_id") if previous_attempt else None),
+        previous_attempt_id=(
+            previous_attempt.get("attempt_id") if previous_attempt else None
+        ),
         manifest_ref=manifest_ref,
         recommendation_hash=manifest_ref.sha256,
         previous_attempt_seal_hash=(
@@ -400,8 +386,10 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         "proposed_parameter_attempt_id": recommendation_id,
         "current_parameter_recommendation": cursor.model_dump(mode="json"),
     }
-    if not validation.get("valid"):
-        update["reason"] = "Assembly parameter recommendation failed validation"
+    if not decision.valid:
+        update["reason"] = (
+            "Assembly parameter recommendation response could not be parsed"
+        )
         return _update_assembly_output(state, update)
     if retry_disposition in {"stop", "expert_review"}:
         update["reason"] = parsed.get("summary") or (
@@ -429,9 +417,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 "recommendation_manifest_hash": manifest_ref.sha256,
                 "method_id": method_name,
                 "task": task,
-                "parameter_diff": proposed_parameter_changes,
-                "rationale": parsed.get("summary") or parsed.get("reasoning"),
-                "validation_ref": validation_ref.model_dump(mode="json"),
+                "parameters": recommended_params,
+                "rationale": parsed.get("summary"),
+                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
                 "failure_signal_ref": (
                     previous_attempt.get("review_ref")
@@ -493,7 +481,10 @@ def apply_parameter_approval_decision(
         )
     assembly_out = _assembly_output(state)
     interrupt = state.get("active_interrupt") or assembly_out.get("active_interrupt")
-    if not isinstance(interrupt, dict) or interrupt.get("gate_id") != "parameter_approval":
+    if (
+        not isinstance(interrupt, dict)
+        or interrupt.get("gate_id") != "parameter_approval"
+    ):
         raise ResumeValidationError("no unresolved parameter_approval gate")
 
     required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
@@ -517,7 +508,9 @@ def apply_parameter_approval_decision(
             session_id=state["session_id"],
         )
     except (ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError("parameter approval request is missing or changed") from exc
+        raise ResumeValidationError(
+            "parameter approval request is missing or changed"
+        ) from exc
     if request_record.get("review_request_id") != request_id:
         raise ResumeValidationError("parameter approval request identity mismatch")
     validated_request_ref = ArtifactRef.model_validate(request_ref)
@@ -537,9 +530,13 @@ def apply_parameter_approval_decision(
     try:
         cursor = ParameterRecommendationCursor.model_validate(cursor_value)
     except ValueError as exc:
-        raise ResumeValidationError("parameter approval has no valid recommendation cursor") from exc
+        raise ResumeValidationError(
+            "parameter approval has no valid recommendation cursor"
+        ) from exc
     if cursor.status != "pending_approval" or cursor.review_request_id != request_id:
-        raise ResumeValidationError("parameter approval cursor is stale or already resolved")
+        raise ResumeValidationError(
+            "parameter approval cursor is stale or already resolved"
+        )
     if cursor.recommendation_hash != interrupt.get("recommendation_hash"):
         raise ResumeValidationError("parameter approval recommendation hash mismatch")
     manifest_ref_value = payload.get("recommendation_manifest_ref")
@@ -547,13 +544,17 @@ def apply_parameter_approval_decision(
         manifest_ref = ArtifactRef.model_validate(manifest_ref_value)
         bundle = load_recommendation_bundle(state, manifest_ref)
     except (ValueError, ParameterPersistenceError) as exc:
-        raise ResumeValidationError("parameter recommendation manifest is invalid") from exc
+        raise ResumeValidationError(
+            "parameter recommendation manifest is invalid"
+        ) from exc
     if (
         manifest_ref != cursor.manifest_ref
         or manifest_ref.sha256 != payload.get("recommendation_manifest_hash")
         or manifest_ref.sha256 != interrupt.get("recommendation_hash")
     ):
-        raise ResumeValidationError("parameter recommendation manifest binding mismatch")
+        raise ResumeValidationError(
+            "parameter recommendation manifest binding mismatch"
+        )
 
     attempts = _validate_parameter_attempt_chain(
         state,
@@ -601,7 +602,9 @@ def apply_parameter_approval_decision(
             artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
         )
     except (OSError, ValueError, ReviewPersistenceError) as exc:
-        raise ResumeValidationError("parameter approval decision could not be persisted") from exc
+        raise ResumeValidationError(
+            "parameter approval decision could not be persisted"
+        ) from exc
     Ledger(absolute_data_dir(state)).record_review_decision(
         state["session_id"],
         "assembly",
@@ -681,7 +684,9 @@ def execution_retry_gate(state: TopLevelState) -> dict:
     """Prepare a ref-only retry cursor after command execution failure."""
 
     assembly_out = _assembly_output(state)
-    if assembly_out.get("status") != "failed" or not assembly_out.get("parameter_attempts"):
+    if assembly_out.get("status") != "failed" or not assembly_out.get(
+        "parameter_attempts"
+    ):
         return {}
     attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
     attempts = _validate_parameter_attempt_chain(
@@ -840,17 +845,9 @@ def hydrate_parameter_attempt(
     hydrated: dict[str, Any] = {
         **attempt.model_dump(mode="json"),
         "catalog_snapshot": basis.get("catalog_snapshot"),
-        "recommended_params": dict(recommendation.get("params") or {}),
-        "baseline_params": dict(recommendation.get("baseline_params") or {}),
-        "effective_params": dict(recommendation.get("effective_params") or {}),
-        "execution_params": dict(
-            recommendation.get("execution_params")
-            or recommendation.get("params")
-            or {}
-        ),
-        "selected_case_ids": list(
-            recommendation.get("used_literature_case_ids") or []
-        ),
+        "parameters": dict(recommendation.get("parameters") or {}),
+        "recommended_params": dict(recommendation.get("parameters") or {}),
+        "selected_case_ids": list(recommendation.get("used_literature_case_ids") or []),
     }
     if attempt.command_ref is not None:
         command = read_json_artifact(state, attempt.command_ref)
@@ -1039,7 +1036,10 @@ def _fail_update(state: TopLevelState, reason: str) -> dict:
 
 
 def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
-    if assembly_out.get("status") == "selected" and assembly_out.get("execution_mode") != "local":
+    if (
+        assembly_out.get("status") == "selected"
+        and assembly_out.get("execution_mode") != "local"
+    ):
         return None
     primary = assembly_out.get("primary_method")
     if isinstance(primary, str):
@@ -1067,7 +1067,9 @@ def _previous_parameter_attempt(
     attempt_id: int,
 ) -> dict[str, Any]:
     attempts = [
-        item for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)
+        item
+        for item in assembly_out.get("parameter_attempts") or []
+        if isinstance(item, dict)
     ]
     if not attempts:
         return {}
@@ -1098,15 +1100,16 @@ def _parameter_recommendation_config(
     return {
         "max_execution_retries": int(config.get("max_execution_retries", 1)),
         "max_review_retries": int(config.get("max_review_retries", 2)),
-        "allow_model_unavailable_defaults": bool(
-            config.get("allow_model_unavailable_defaults", False)
-        ),
     }
 
 
 def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
-    complete = _float_or_none(_first_metric(metrics, "busco_complete", "busco_complete_ratio"))
-    duplicate = _float_or_none(_first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio"))
+    complete = _float_or_none(
+        _first_metric(metrics, "busco_complete", "busco_complete_ratio")
+    )
+    duplicate = _float_or_none(
+        _first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
+    )
     size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
     n50 = _float_or_none(_first_metric(metrics, "contig_n50", "n50"))
     contig_count = _float_or_none(metrics.get("contig_count"))
@@ -1121,13 +1124,28 @@ def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
     if passed:
         failure_mode = None
         suggestions: dict[str, str] = {}
-    elif normalized_duplicate is not None and normalized_duplicate >= 0.15 and size_ratio is not None and size_ratio >= 1.20:
+    elif (
+        normalized_duplicate is not None
+        and normalized_duplicate >= 0.15
+        and size_ratio is not None
+        and size_ratio >= 1.20
+    ):
         failure_mode = "under_purged"
         suggestions = {"purge_level": "consider increasing"}
-    elif normalized_complete is not None and normalized_complete <= 0.90 and size_ratio is not None and size_ratio <= 0.80:
+    elif (
+        normalized_complete is not None
+        and normalized_complete <= 0.90
+        and size_ratio is not None
+        and size_ratio <= 0.80
+    ):
         failure_mode = "over_purged"
         suggestions = {"purge_level": "consider decreasing"}
-    elif n50 is not None and contig_count is not None and n50 < 1_000_000 and contig_count > 500:
+    elif (
+        n50 is not None
+        and contig_count is not None
+        and n50 < 1_000_000
+        and contig_count > 500
+    ):
         failure_mode = "fragmented"
         suggestions = {"overlap_parameters": "consider less aggressive filtering"}
     elif normalized_complete is not None and normalized_complete <= 0.90:

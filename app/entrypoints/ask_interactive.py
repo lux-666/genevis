@@ -1350,11 +1350,11 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
     shared_defaults = dict(req.choices.get("shared_defaults", {}))
     stage_defaults = dict(req.choices.get("stage_defaults", {}))
     params: dict[str, dict[str, Any]] = {}
-    stage_params: dict[str, dict[str, Any]] = {}
+    stage_params: dict[str, dict[str, Any]] = stage_defaults
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
     print("  Press Enter to accept [default], or type a new value.\n")
-    handled = set()
+    handled: set[str] = set()
     for field in req.required_fields:
         if field in handled:
             continue

@@ -41,7 +41,15 @@ from app.stages.assembly_review.notebook import (
     render_statistics_figures,
     write_notebook,
 )
-from app.stages.base import absolute_data_dir, is_fail_status, resolve_run_ref, session_paths, stage_artifacts_dir, stage_work_dir
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    is_fail_status,
+    resolve_run_ref,
+    session_paths,
+    stage_artifacts_dir,
+    stage_work_dir,
+)
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
@@ -646,14 +654,10 @@ def human_review_gate(state: TopLevelState) -> dict:
         recommendation = recommend_review_decision(
             session_id=state["session_id"],
             stage="assembly_review",
-            request=payload,
+            review_request_id=persisted_request.review_request_id,
+            request_ref=persisted_request.request_ref,
+            request_hash=persisted_request.request_hash,
             data_dir=data_dir,
-        )
-        recommendation = recommendation.model_copy(
-            update={
-                "review_request_id": persisted_request.review_request_id,
-                "review_request_hash": persisted_request.request_hash,
-            }
         )
         from app.control.lifecycle import resume_review_state
 
@@ -706,7 +710,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     evidence_notes = list(ar_out.get("evidence_notes") or [])
 
     final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
-    trace = [*state.get("route_trace", []), "assembly_review_stage"]
+    trace = append_route_trace(state, "assembly_review_stage")
     next_stage = next_stage_name(
         "assembly_review",
         state.get("requested_stages"),

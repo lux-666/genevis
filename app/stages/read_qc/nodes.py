@@ -8,7 +8,12 @@ from typing import Any
 from app.graph.routing import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import load_assets_from_registry, stage_output, update_stage_output
+from app.stages.base import (
+    append_route_trace,
+    load_assets_from_registry,
+    stage_output,
+    update_stage_output,
+)
 from app.stages.read_qc.constants import (
     LENGTH_FILTER_DECISIONS,
     LENGTH_FILTER_METHOD_NAME,
@@ -160,7 +165,7 @@ def commit_read_qc(state: TopLevelState) -> dict:
     return {
         "current_stage": next_stage_name("read_qc"),
         "supervision_state": "running_stage",
-        "route_trace": [*state.get("route_trace", []), "read_qc_stage"],
+        "route_trace": append_route_trace(state, "read_qc_stage"),
         "stage_outputs": outputs,
     }
 

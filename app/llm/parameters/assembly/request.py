@@ -1,7 +1,7 @@
-"""Build the immutable basis and strict DTO for parameter recommendation.
+"""Build the strict Assembly parameter-recommendation model DTO.
 
-The full input profile and knowledge basis are audit facts.  The request DTO is
-the smaller, explicit semantic surface shown to the model.  This module builds
+The stage owns the full input profile and immutable knowledge basis.  This LLM
+boundary owns only the smaller semantic surface shown to the model.  It builds
 that DTO directly; it never creates a richer prompt envelope and then projects
 it a second time.
 """
@@ -10,18 +10,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from app.domains.assembly.case_selector import select_evidence_cases
-from app.domains.assembly.method_guidance import load_method_guidance
-from app.domains.assembly.parameter_recommendation import (
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
 from app.domains.assembly.profile_evidence import build_profile_evidence
-from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog
-from app.stages.assembly.parameter_profile import ParameterPromptTask, build_prompt_profile
+from app.stages.assembly.parameters.profile import ParameterPromptTask, build_prompt_profile
 
 
 _PARAMETER_SPEC_FIELDS = (
@@ -29,7 +27,6 @@ _PARAMETER_SPEC_FIELDS = (
     "allowed_values",
     "min",
     "max",
-    "default",
     "description",
     "notes",
 )
@@ -87,46 +84,25 @@ _AUDIT_PREFIXES = ("artifact", "session", "storage")
 _OMIT = object()
 
 
-def build_parameter_basis_snapshot(
-    *,
-    method_id: str,
-    catalog: MethodParameterCatalog,
-    full_profile: dict[str, Any],
-    knowledge_pack_id: str = "parameter_recommender",
-    session_id: str | None = None,
-    recommendation_id: int | None = None,
-    knowledge_root: Path | None = None,
-) -> dict[str, Any]:
-    """Select and return the full immutable basis for an initial recommendation."""
+class AssemblyParameterRequestDTO(BaseModel):
+    """Validated top-level contract for one Assembly model request.
 
-    if method_id != catalog.method_id:
-        raise ValueError(
-            f"parameter basis method {method_id!r} does not match catalog {catalog.method_id!r}"
-        )
-    prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
-    knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
-    literature_cases, literature_selection = select_evidence_cases(
-        knowledge_pack["cases"],
-        method_id=method_id,
-        task="recommend_initial",
-        prompt_profile=prompt_profile,
-        strategy=knowledge_pack.get("strategies"),
-        source_root=knowledge_pack.get("pack_root"),
-        query_id=(
-            f"{session_id}:parameter_attempt_{recommendation_id}"
-            if session_id is not None and recommendation_id is not None
-            else None
-        ),
-    )
-    return {
-        "schema_version": 2,
-        "method_id": catalog.method_id,
-        "catalog_snapshot": catalog.model_dump(mode="json"),
-        "rules": dict(knowledge_pack.get("rules") or {}),
-        "literature_selection": dict(literature_selection),
-        "literature_cases": list(literature_cases),
-        "method_guidance": _method_guidance(method_id),
-    }
+    Nested biological evidence keeps its existing domain-owned shape.  This
+    model owns the model-visible top-level surface and rejects accidental audit
+    fields before prompt rendering.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recommendation_contract: Literal["parameter_recommendation_v1"]
+    method_id: str = Field(min_length=1)
+    task: ParameterPromptTask
+    observations: list[dict[str, Any]]
+    adjustable_parameters: dict[str, dict[str, Any]]
+    method_guidance: list[dict[str, Any]] | None = None
+    literature_selection: dict[str, Any] | None = None
+    literature_cases: list[dict[str, Any]] | None = None
+    retry_context: dict[str, Any] | None = None
 
 
 def build_parameter_request_dto(
@@ -148,29 +124,20 @@ def build_parameter_request_dto(
 
     prompt_profile = build_prompt_profile(full_profile, task)
     observations, _ = build_profile_evidence(prompt_profile)
-    readonly_params, adjustable_params = _partition_model_catalog(catalog)
-    baseline_params = _baseline_params(
-        task=task,
-        adjustable_params=adjustable_params,
-        prompt_profile=prompt_profile,
-    )
+    adjustable_parameters = _model_adjustable_parameters(catalog)
 
     request: dict[str, Any] = {
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": task,
         "observations": _model_observations(observations),
-        "readonly_params": readonly_params,
-        "adjustable_params": adjustable_params,
+        "adjustable_parameters": adjustable_parameters,
     }
-    _add_visible(request, "rules", basis_snapshot.get("rules"))
-    _add_visible(request, "recommendation_policy", _recommendation_policy())
     _add_visible(
         request,
         "method_guidance",
         _model_method_guidance(basis_snapshot.get("method_guidance")),
     )
-    _add_visible(request, "baseline_params", baseline_params)
     _add_visible(
         request,
         "literature_selection",
@@ -193,39 +160,22 @@ def build_parameter_request_dto(
             _model_retry_context(_build_retry_context(prompt_profile, task=task)),
             already_projected=True,
         )
-    return request
+    return AssemblyParameterRequestDTO.model_validate(request).model_dump(
+        mode="json",
+        exclude_none=True,
+    )
 
 
-def previous_execution_overrides(
-    full_profile: Mapping[str, Any],
-    *,
-    task: ParameterPromptTask,
-) -> dict[str, Any]:
-    """Return retry execution values needed for normalization, not model input."""
-
-    if task == "recommend_initial":
-        return {}
-    previous = full_profile.get("previous_attempt")
-    if not isinstance(previous, Mapping):
-        return {}
-    execution_params = previous.get("execution_params")
-    return dict(execution_params) if isinstance(execution_params, Mapping) else {}
-
-
-def _partition_model_catalog(
+def _model_adjustable_parameters(
     catalog: MethodParameterCatalog,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    readonly_params: dict[str, Any] = {}
-    adjustable_params: dict[str, Any] = {}
+) -> dict[str, Any]:
+    adjustable_parameters: dict[str, Any] = {}
     for key, spec in catalog.parameters.items():
-        if spec.level not in {1, 2}:
-            continue
-        model_spec = _model_parameter_spec(spec.model_dump(mode="json"))
-        if spec.level == 1:
-            readonly_params[key] = model_spec
-        else:
-            adjustable_params[key] = model_spec
-    return readonly_params, adjustable_params
+        if spec.level == 2:
+            adjustable_parameters[key] = _model_parameter_spec(
+                spec.model_dump(mode="json")
+            )
+    return adjustable_parameters
 
 
 def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -237,52 +187,6 @@ def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         if child is not _OMIT:
             projected[field] = child
     return projected
-
-
-def _method_guidance(method_id: str) -> list[dict[str, Any]]:
-    if method_id not in {"hifiasm", "hifiasm_ont"}:
-        return []
-    return load_method_guidance().model_cards_for_method(method_id)
-
-
-def _recommendation_policy() -> dict[str, Any]:
-    return {
-        "output": "parameter_patch mapping each changed L2 parameter directly to its value",
-        "literature_role": (
-            "optional analog and numeric anchor; assess applicability instead of copying"
-        ),
-        "guidance_role": "mechanistic relationships, not executable rules or fixed values",
-        "returned_evidence_references": (
-            "not requested; evidence remains in the prompt artifact"
-        ),
-        "human_review": "every proposed parameter patch is reviewed before execution",
-        "case_required": False,
-        "unmentioned_parameters": (
-            "retain previous effective value on retry; otherwise use catalog/tool default"
-        ),
-    }
-
-
-def _baseline_params(
-    *,
-    task: ParameterPromptTask,
-    adjustable_params: dict[str, Any],
-    prompt_profile: dict[str, Any],
-) -> dict[str, Any]:
-    if task != "recommend_initial":
-        previous_profile = prompt_profile.get("previous_attempt") or {}
-        previous = previous_profile.get("effective_params") or previous_profile.get("params")
-        if isinstance(previous, dict):
-            return {
-                parameter: previous[parameter]
-                for parameter in adjustable_params
-                if parameter in previous
-            }
-    return {
-        parameter: spec["default"]
-        for parameter, spec in adjustable_params.items()
-        if isinstance(spec, dict) and spec.get("default") is not None
-    }
 
 
 def _build_retry_context(profile: dict[str, Any], *, task: str) -> dict[str, Any]:

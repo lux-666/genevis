@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,15 +11,16 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
-    apply_review_gate_timeout,
     apply_review_gate_decision,
+    apply_review_gate_timeout,
     find_review_gate,
     get_review_gate,
     registered_review_stage_label,
 )
-from app.review.records import counts_by_origin, decision_records
 from app.review.persistence import ReviewPersistenceError, load_review_request
+from app.review.records import counts_by_origin, decision_records
 from app.schemas.artifacts import ArtifactRef
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import TopLevelState
 from app.storage.paths import SessionPaths
 
@@ -77,7 +77,9 @@ def inspect_state(
     }
     if request_error:
         summary["review_request_verification_error"] = request_error
-    timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
+    timeout = _blocked_timeout_status(
+        active_interrupt, blocked_timeout_seconds, now=now
+    )
     if timeout:
         summary["blocked_timeout"] = timeout
     return summary
@@ -116,12 +118,17 @@ def inspect_session(
     latest_decision_artifact = _artifact_for_ref(artifacts, latest_decision_ref)
     if latest_decision_artifact is None and latest_decision_ref:
         latest_decision_artifact = {"path_ref": latest_decision_ref}
-    latest_function_bundle = _latest_artifact(artifacts, lambda a: a.get("artifact_type") == "function_annotation.bundle")
+    latest_function_bundle = _latest_artifact(
+        artifacts, lambda a: a.get("artifact_type") == "function_annotation.bundle"
+    )
     current_status_path = paths.report_path("current_status.json")
     session_summary_path = paths.report_path("session_summary.json")
-    latest_operator_report_payload = _read_json_path(current_status_path)
-    latest_operator_report = str(current_status_path) if current_status_path.exists() else None
-    latest_final_report = str(session_summary_path) if session_summary_path.exists() else None
+    latest_operator_report = (
+        str(current_status_path) if current_status_path.exists() else None
+    )
+    latest_final_report = (
+        str(session_summary_path) if session_summary_path.exists() else None
+    )
 
     supervision_state = "unknown"
     if latest_unresolved_review_request and (
@@ -132,7 +139,10 @@ def inspect_session(
         supervision_state = "blocked_human"
     elif latest_terminal:
         supervision_state = _terminal_supervision_state(latest_terminal.get("outcome"))
-    elif latest_review_lifecycle_event and latest_review_lifecycle_event.get("event_type") == "review_decision":
+    elif (
+        latest_review_lifecycle_event
+        and latest_review_lifecycle_event.get("event_type") == "review_decision"
+    ):
         supervision_state = "review_decision_recorded"
     elif session:
         supervision_state = "running"
@@ -153,7 +163,9 @@ def inspect_session(
                     or ""
                 ),
                 expected_request_hash=(
-                    _event_ref(latest_unresolved_review_request, "review_request_artifact_ref")
+                    _event_ref(
+                        latest_unresolved_review_request, "review_request_artifact_ref"
+                    )
                     or {}
                 ).get("sha256"),
             )
@@ -171,19 +183,13 @@ def inspect_session(
         str(event.get("route_node") or event.get("stage"))
         for event in events
         if event.get("event_type") == "stage_entered" and event.get("stage")
-    ]
+    ][-ROUTE_TRACE_LIMIT:]
     last_error = _latest_error(events)
     latest_failed_report = (
-        latest_operator_report
-        if isinstance(latest_operator_report_payload, dict)
-        and latest_operator_report_payload.get("supervision_state") == "failed_terminal"
-        else None
+        latest_operator_report if supervision_state == "failed_terminal" else None
     )
     latest_blocked_report = (
-        latest_operator_report
-        if isinstance(latest_operator_report_payload, dict)
-        and latest_operator_report_payload.get("supervision_state") == "blocked_human"
-        else None
+        latest_operator_report if supervision_state == "blocked_human" else None
     )
 
     summary: dict[str, Any] = {
@@ -211,7 +217,8 @@ def inspect_session(
         "latest_operator_report": latest_operator_report,
         "latest_failed_operator_report": latest_failed_report,
         "latest_blocked_operator_report": latest_blocked_report,
-        "latest_operator_report_payload": latest_operator_report_payload,
+        # Reports are optional, derived views. Their contents are never lifecycle truth.
+        "latest_operator_report_payload": None,
         "latest_final_report": latest_final_report,
         "latest_function_annotation_bundle": latest_function_bundle,
         "latest_relevant_artifacts": _latest_relevant_artifacts(artifacts),
@@ -248,7 +255,9 @@ def resume_review_state(
         blocked_timeout_seconds,
     )
 
-    timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
+    timeout = _blocked_timeout_status(
+        active_interrupt, blocked_timeout_seconds, now=now
+    )
     if timeout and timeout.get("expired"):
         timeout = _with_timeout_source(timeout, timeout_source)
         return _timeout_failed_update(state, request, timeout)
@@ -256,7 +265,9 @@ def resume_review_state(
     try:
         return apply_review_gate_decision(state, request)
     except KeyError as exc:
-        raise ResumeValidationError(f"Unsupported resume stage: {request.stage}") from exc
+        raise ResumeValidationError(
+            f"Unsupported resume stage: {request.stage}"
+        ) from exc
 
 
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
@@ -266,12 +277,16 @@ def reject_unsupported_lifecycle_operation(operation: str) -> None:
         )
 
 
-def _validate_common_resume_state(state: TopLevelState, request: ResumeReviewRequest) -> None:
+def _validate_common_resume_state(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> None:
     _active_interrupt, request_record = _validated_resume_context(state, request)
     _ensure_decision_allowed_by_request(request_record, request)
 
 
-def _validate_resume_identity(state: TopLevelState, request: ResumeReviewRequest) -> dict[str, Any]:
+def _validate_resume_identity(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict[str, Any]:
     active_interrupt, _request_record = _validated_resume_context(state, request)
     return active_interrupt
 
@@ -288,14 +303,21 @@ def _validated_resume_context(
     if not active_interrupt:
         raise ResumeValidationError("resume requires an active_interrupt")
     if active_interrupt.get("stage") != request.stage:
-        raise ResumeValidationError("resume stage does not match active_interrupt.stage")
+        raise ResumeValidationError(
+            "resume stage does not match active_interrupt.stage"
+        )
     active_gate_id = active_interrupt.get("gate_id")
-    if active_gate_id == "parameter_approval" and request.gate_id != "parameter_approval":
+    if (
+        active_gate_id == "parameter_approval"
+        and request.gate_id != "parameter_approval"
+    ):
         raise ResumeValidationError(
             "parameter approval resume requires explicit gate_id=parameter_approval"
         )
     if request.gate_id and active_gate_id and request.gate_id != active_gate_id:
-        raise ResumeValidationError("resume gate_id does not match active_interrupt.gate_id")
+        raise ResumeValidationError(
+            "resume gate_id does not match active_interrupt.gate_id"
+        )
     interrupt_request_id = active_interrupt.get("review_request_id")
     interrupt_request_hash = active_interrupt.get("request_hash")
     interrupt_request_ref = active_interrupt.get("request_ref")
@@ -310,8 +332,7 @@ def _validated_resume_context(
     ]
     if missing:
         raise ResumeValidationError(
-            "v2 resume requires compact request identity fields: "
-            + ", ".join(missing)
+            "v2 resume requires compact request identity fields: " + ", ".join(missing)
         )
     if request.review_request_id is None or request.review_request_hash is None:
         raise ResumeValidationError(
@@ -356,7 +377,9 @@ def _load_verified_interrupt_request(
             session_id=str(session_id),
         )
     except ReviewPersistenceError as exc:
-        raise ResumeValidationError(f"review request verification failed: {exc}") from exc
+        raise ResumeValidationError(
+            f"review request verification failed: {exc}"
+        ) from exc
 
     request_id = str(active_interrupt.get("review_request_id") or "")
     if record.get("review_request_id") != request_id:
@@ -436,7 +459,9 @@ def _resolve_blocked_timeout_seconds(
     return blocked_timeout_seconds, source
 
 
-def _review_policy_outcome_timeout_seconds(request_record: dict[str, Any]) -> float | None:
+def _review_policy_outcome_timeout_seconds(
+    request_record: dict[str, Any],
+) -> float | None:
     payload = request_record.get("payload") or {}
     if not isinstance(payload, dict):
         return None
@@ -449,18 +474,24 @@ def _review_policy_outcome_timeout_seconds(request_record: dict[str, Any]) -> fl
     return timeout
 
 
-def _with_timeout_source(timeout: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+def _with_timeout_source(
+    timeout: dict[str, Any], source: dict[str, Any]
+) -> dict[str, Any]:
     if not source:
         return timeout
     return {**timeout, **source}
 
 
-def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+def _timeout_failed_update(
+    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
+) -> dict[str, Any]:
     """Handle timeout through the review-gate registry, then fall back to stop."""
     try:
         timeout_update = apply_review_gate_timeout(state, request, timeout)
     except KeyError as exc:
-        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
+        raise ResumeValidationError(
+            f"Unsupported timeout stage: {request.stage}"
+        ) from exc
     if timeout_update is not None:
         return timeout_update
 
@@ -475,7 +506,9 @@ def _timeout_failed_update(state: TopLevelState, request: ResumeReviewRequest, t
     try:
         update = apply_review_gate_decision(state, timeout_request)
     except KeyError as exc:
-        raise ResumeValidationError(f"Unsupported timeout stage: {request.stage}") from exc
+        raise ResumeValidationError(
+            f"Unsupported timeout stage: {request.stage}"
+        ) from exc
     return {**update, "last_error": f"{request.stage} blocked timeout expired"}
 
 
@@ -497,7 +530,9 @@ def terminal_failure_update(
     return update
 
 
-def timeout_terminal_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+def timeout_terminal_update(
+    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
+) -> dict[str, Any]:
     return terminal_failure_update(
         state,
         request.stage,
@@ -522,7 +557,11 @@ def _latest_artifact_refs(state: dict[str, Any]) -> dict[str, Any]:
     for stage, output in (state.get("stage_outputs") or {}).items():
         if not isinstance(output, dict):
             continue
-        stage_refs = {key: value for key, value in output.items() if key.endswith("_ref") or key.endswith("_artifact_ref")}
+        stage_refs = {
+            key: value
+            for key, value in output.items()
+            if key.endswith("_ref") or key.endswith("_artifact_ref")
+        }
         if stage_refs:
             refs[stage] = stage_refs
     return refs
@@ -555,7 +594,9 @@ def _decision_requirements_from_state(
     return _decision_requirements(context)
 
 
-def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str, Any] | None:
+def _decision_requirements(
+    active_interrupt: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if not active_interrupt:
         return None
     stage = active_interrupt.get("stage")
@@ -568,13 +609,23 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
             active_interrupt,
             {
                 "stage": stage,
-                "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+                "gate_id": active_interrupt.get("gate_id")
+                or (gate.gate_id if gate else None),
                 "decisions_allowed": decisions_allowed or [],
-                "candidate_ids": [candidate.get("candidate_id") for candidate in active_interrupt.get("candidates", [])],
-                "candidate_final_assembly_refs": _candidate_final_assembly_refs(active_interrupt.get("candidates", [])),
-                "candidate_report_refs": _candidate_report_refs(active_interrupt.get("signals", [])),
+                "candidate_ids": [
+                    candidate.get("candidate_id")
+                    for candidate in active_interrupt.get("candidates", [])
+                ],
+                "candidate_final_assembly_refs": _candidate_final_assembly_refs(
+                    active_interrupt.get("candidates", [])
+                ),
+                "candidate_report_refs": _candidate_report_refs(
+                    active_interrupt.get("signals", [])
+                ),
                 "report_refs": dict(active_interrupt.get("report_refs") or {}),
-                "candidate_comparison_context": dict(active_interrupt.get("candidate_comparison_context") or {}),
+                "candidate_comparison_context": dict(
+                    active_interrupt.get("candidate_comparison_context") or {}
+                ),
                 "requires_structured_resume": True,
             },
         )
@@ -583,15 +634,20 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
             active_interrupt,
             {
                 "stage": stage,
-                "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+                "gate_id": active_interrupt.get("gate_id")
+                or (gate.gate_id if gate else None),
                 "decisions_allowed": decisions_allowed or [],
                 "candidate_methods": _candidate_methods(active_interrupt),
                 "executed_candidate_methods": [
                     name
-                    for name, candidate in dict(active_interrupt.get("method_candidates") or {}).items()
+                    for name, candidate in dict(
+                        active_interrupt.get("method_candidates") or {}
+                    ).items()
                     if candidate.get("status") == "executed"
                 ],
-                "method_candidates": dict(active_interrupt.get("method_candidates") or {}),
+                "method_candidates": dict(
+                    active_interrupt.get("method_candidates") or {}
+                ),
                 "requires_structured_resume": True,
             },
         )
@@ -612,7 +668,9 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
                 "uncertainty_notes": list(
                     active_interrupt.get("uncertainty_notes") or []
                 ),
-                "available_routes": list(active_interrupt.get("available_routes") or []),
+                "available_routes": list(
+                    active_interrupt.get("available_routes") or []
+                ),
                 "available_read_types": list(
                     active_interrupt.get("available_read_types") or []
                 ),
@@ -626,7 +684,8 @@ def _decision_requirements(active_interrupt: dict[str, Any] | None) -> dict[str,
         active_interrupt,
         {
             "stage": stage,
-            "gate_id": active_interrupt.get("gate_id") or (gate.gate_id if gate else None),
+            "gate_id": active_interrupt.get("gate_id")
+            or (gate.gate_id if gate else None),
             "decisions_allowed": decisions_allowed or [],
             "candidate_ids": _candidate_ids(active_interrupt),
             "candidate_methods": _candidate_methods(active_interrupt),
@@ -735,13 +794,19 @@ def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
             "gate_id": gate.related_parameter_gate[1],
         }
     if gate.parameter_recommendation_notes:
-        proposal["parameter_recommendation_notes"] = list(gate.parameter_recommendation_notes)
+        proposal["parameter_recommendation_notes"] = list(
+            gate.parameter_recommendation_notes
+        )
     return proposal
 
 
-def _with_review_policy_requirements(active_interrupt: dict[str, Any], requirements: dict[str, Any]) -> dict[str, Any]:
+def _with_review_policy_requirements(
+    active_interrupt: dict[str, Any], requirements: dict[str, Any]
+) -> dict[str, Any]:
     enriched = dict(requirements)
-    gate = find_review_gate(active_interrupt.get("stage"), active_interrupt.get("gate_id"))
+    gate = find_review_gate(
+        active_interrupt.get("stage"), active_interrupt.get("gate_id")
+    )
     if gate is not None:
         enriched["runtime_proposal"] = _runtime_proposal_requirements(gate)
     resume_metadata = _parameter_approval_resume_metadata(active_interrupt)
@@ -776,11 +841,19 @@ def _blocked_timeout_status(
         return None
     blocked_at_raw = active_interrupt.get("blocked_at")
     if not blocked_at_raw:
-        return {"configured_seconds": blocked_timeout_seconds, "expired": False, "reason": "blocked_at_missing"}
+        return {
+            "configured_seconds": blocked_timeout_seconds,
+            "expired": False,
+            "reason": "blocked_at_missing",
+        }
     try:
         blocked_at = datetime.fromisoformat(str(blocked_at_raw))
     except ValueError:
-        return {"configured_seconds": blocked_timeout_seconds, "expired": False, "reason": "blocked_at_invalid"}
+        return {
+            "configured_seconds": blocked_timeout_seconds,
+            "expired": False,
+            "reason": "blocked_at_invalid",
+        }
     if blocked_at.tzinfo is None:
         blocked_at = blocked_at.replace(tzinfo=timezone.utc)
     current = now or datetime.now(timezone.utc)
@@ -801,11 +874,19 @@ def _durable_blocked_timeout_status(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     active_interrupt = {"blocked_at": review_request_event.get("timestamp")}
-    timeout = _blocked_timeout_status(active_interrupt, blocked_timeout_seconds, now=now)
-    return timeout or {"configured_seconds": blocked_timeout_seconds, "expired": False, "reason": "timestamp_missing"}
+    timeout = _blocked_timeout_status(
+        active_interrupt, blocked_timeout_seconds, now=now
+    )
+    return timeout or {
+        "configured_seconds": blocked_timeout_seconds,
+        "expired": False,
+        "reason": "timestamp_missing",
+    }
 
 
-def _latest_review_lifecycle_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _latest_review_lifecycle_event(
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     for event in reversed(events):
         if event.get("event_type") in {"review_requested", "review_decision"}:
             return event
@@ -829,14 +910,18 @@ def _latest_unresolved_review_request(
     return None
 
 
-def _latest_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
+def _latest_event(
+    events: list[dict[str, Any]], event_type: str
+) -> dict[str, Any] | None:
     for event in reversed(events):
         if event.get("event_type") == event_type:
             return event
     return None
 
 
-def _latest_artifact(artifacts: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
+def _latest_artifact(
+    artifacts: list[dict[str, Any]], predicate
+) -> dict[str, Any] | None:
     for artifact in reversed(artifacts):
         if predicate(artifact):
             return artifact
@@ -888,16 +973,6 @@ def _latest_relevant_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str
     return list(reversed(relevant))
 
 
-def _read_json_path(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _terminal_supervision_state(outcome: Any) -> str:
     normalized = str(outcome or "unknown")
     if normalized in {"completed", "succeeded", "success"}:
@@ -931,7 +1006,8 @@ def _durable_interrupt_projection(
         return None
     projected = {
         "stage": request.get("stage"),
-        "review_request_id": request.get("review_request_id") or request.get("subject_id"),
+        "review_request_id": request.get("review_request_id")
+        or request.get("subject_id"),
         "reason": request.get("reason"),
         "review_request_artifact_ref": request.get("review_request_artifact_ref"),
         "auto_decidable": request.get("auto_decidable"),
@@ -945,7 +1021,9 @@ def _durable_interrupt_projection(
     return {key: value for key, value in projected.items() if value is not None}
 
 
-def build_next_action(summary: dict[str, Any], *, data_dir: str | Path = "data") -> dict[str, Any]:
+def build_next_action(
+    summary: dict[str, Any], *, data_dir: str | Path = "data"
+) -> dict[str, Any]:
     if summary.get("error"):
         return {
             "kind": "inspect_unavailable",
@@ -1009,7 +1087,9 @@ def build_result_next_action(result: dict[str, Any]) -> dict[str, Any]:
             "decision_requirements": requirements,
             "durable_resume_available": checkpoint != "memory",
         }
-        return _review_gate_next_action(summary, data_dir=result.get("data_dir", "data"))
+        return _review_gate_next_action(
+            summary, data_dir=result.get("data_dir", "data")
+        )
     if supervision == "failed_terminal":
         missing_input = _result_missing_input(result)
         if missing_input:
@@ -1057,7 +1137,9 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     if requirements.get("report_refs"):
         guidance["report_refs"] = dict(requirements.get("report_refs") or {})
     if requirements.get("candidate_comparison_context"):
-        guidance["candidate_comparison_context"] = dict(requirements.get("candidate_comparison_context") or {})
+        guidance["candidate_comparison_context"] = dict(
+            requirements.get("candidate_comparison_context") or {}
+        )
     template: dict[str, Any] = {
         "session_id": summary.get("session_id"),
         "stage": stage,
@@ -1084,27 +1166,39 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
             selected_candidate = candidate_ids[0] if candidate_ids else "<candidate_id>"
             template["candidate_id"] = selected_candidate
             if "final_assembly_ref" in gate.required_resume_fields or candidate_refs:
-                template["final_assembly_ref"] = candidate_refs.get(selected_candidate, "<final_assembly_ref>")
+                template["final_assembly_ref"] = candidate_refs.get(
+                    selected_candidate, "<final_assembly_ref>"
+                )
             template["rejected_candidates"] = []
     if requirements.get("candidate_methods"):
         candidate_methods = list(requirements.get("candidate_methods") or [])
         guidance["candidate_methods"] = candidate_methods
-        template["method_name"] = candidate_methods[0] if candidate_methods else "<method_name>"
+        template["method_name"] = (
+            candidate_methods[0] if candidate_methods else "<method_name>"
+        )
     return template
 
 
 def _preferred_template_decision(gate, decisions_allowed: list[str]) -> str:
     if gate.template_preferred_decision in decisions_allowed:
         return str(gate.template_preferred_decision)
-    return decisions_allowed[0] if decisions_allowed else (gate.template_preferred_decision or gate.decisions_allowed[0])
+    return (
+        decisions_allowed[0]
+        if decisions_allowed
+        else (gate.template_preferred_decision or gate.decisions_allowed[0])
+    )
 
 
-def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -> dict[str, Any]:
+def _review_gate_next_action(
+    summary: dict[str, Any], *, data_dir: str | Path
+) -> dict[str, Any]:
     session_id = summary.get("session_id")
     requirements = summary.get("decision_requirements") or {}
     stage = requirements.get("stage", "review")
     abs_data_dir = str(Path(data_dir).expanduser().resolve(strict=False))
-    template_hint = str(Path(abs_data_dir) / "decisions" / f"{session_id}_{stage}_decision.json")
+    template_hint = str(
+        Path(abs_data_dir) / "decisions" / f"{session_id}_{stage}_decision.json"
+    )
     command = (
         "gene-agent inspect "
         f"--session-id {session_id} --data-dir {abs_data_dir} "
@@ -1129,7 +1223,9 @@ def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -
     ]
     gate = find_review_gate(stage, requirements.get("gate_id"))
     if gate is not None:
-        fields.extend(field for field in gate.required_resume_fields if field not in fields)
+        fields.extend(
+            field for field in gate.required_resume_fields if field not in fields
+        )
     return {
         "kind": "review_decision_required",
         "summary": resume_summary,
@@ -1145,7 +1241,9 @@ def _review_gate_next_action(summary: dict[str, Any], *, data_dir: str | Path) -
             summary.get("latest_review_request_artifact"),
             requirements.get("request_ref"),
             requirements.get("report_refs"),
-            _candidate_comparison_relevant_refs(requirements.get("candidate_comparison_context")),
+            _candidate_comparison_relevant_refs(
+                requirements.get("candidate_comparison_context")
+            ),
         ),
     }
 
@@ -1275,8 +1373,14 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
         or summary.get("latest_terminal_event")
         or {}
     )
-    last_error = str(payload.get("last_error") or summary.get("last_error") or "unknown failure")
-    stage = payload.get("current_stage") or payload.get("stage") or summary.get("current_stage")
+    last_error = str(
+        payload.get("last_error") or summary.get("last_error") or "unknown failure"
+    )
+    stage = (
+        payload.get("current_stage")
+        or payload.get("stage")
+        or summary.get("current_stage")
+    )
     missing_input = _report_missing_input(payload)
     if missing_input:
         return _missing_input_next_action(missing_input)
@@ -1332,6 +1436,7 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
         ),
     }
 
+
 def _is_function_protein_artifact_error(last_error: str) -> bool:
     return any(
         marker in last_error
@@ -1347,9 +1452,7 @@ def _candidate_comparison_relevant_refs(context: Any) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
     return {
-        key: context[key]
-        for key in ("candidate_comparison_ref",)
-        if context.get(key)
+        key: context[key] for key in ("candidate_comparison_ref",) if context.get(key)
     }
 
 
@@ -1402,7 +1505,9 @@ def _decision_requirements_from_artifact(
             }
         )
     except Exception as exc:
-        raise ResumeValidationError("review request artifact index ref is invalid") from exc
+        raise ResumeValidationError(
+            "review request artifact index ref is invalid"
+        ) from exc
     if expected_request_hash and ref.sha256 != expected_request_hash:
         raise ResumeValidationError(
             "ledger review request hash does not match the artifact index"
@@ -1414,7 +1519,9 @@ def _decision_requirements_from_artifact(
             session_id=paths.session_id,
         )
     except ReviewPersistenceError as exc:
-        raise ResumeValidationError(f"review request verification failed: {exc}") from exc
+        raise ResumeValidationError(
+            f"review request verification failed: {exc}"
+        ) from exc
     if record.get("review_request_id") != expected_request_id:
         raise ResumeValidationError(
             "ledger review_request_id does not match the request artifact"

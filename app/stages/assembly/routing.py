@@ -68,7 +68,10 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
         return "block"
     if status in {"parameter_retry_stopped", "parameter_retry_expert_review"}:
         return "fail"
-    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {"parameter_validation_failed", "parameter_retry_validation_failed", "parameter_recommendation_failed"}:
+    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {
+        "parameter_response_invalid",
+        "parameter_recommendation_failed",
+    }:
         return "fail"
     return "plan"
 

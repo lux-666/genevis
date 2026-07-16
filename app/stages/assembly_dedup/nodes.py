@@ -15,7 +15,14 @@ from app.graph.routing import next_stage_name
 from app.schemas.artifacts import ASSEMBLY_CANDIDATE_BUNDLE, ASSEMBLY_DRAFT_ASSEMBLY, ArtifactMeta, AssemblyCandidateBundle
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
 
@@ -301,7 +308,7 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
     return {
         "current_stage": next_stage_name("assembly_dedup"),
         "supervision_state": "running_stage",
-        "route_trace": [*state.get("route_trace", []), "assembly_dedup_stage"],
+        "route_trace": append_route_trace(state, "assembly_dedup_stage"),
         "stage_outputs": outputs,
     }
 

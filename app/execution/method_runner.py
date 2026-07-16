@@ -18,10 +18,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.control.ledger import Ledger
-from app.execution.results import ExecutionResult
+from app.execution.artifacts import register_artifact_records
 from app.execution.env_dispatch import attach_conda_fields
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
+from app.execution.results import ExecutionResult
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.publish import publish_execution_logs
 
@@ -95,14 +97,40 @@ def run_frozen_attempt(
     ledger.create_session(attempt.session_id, input_manifest_ref)
     ledger.record_attempt_started(attempt.session_id, attempt)
 
-    result = publish_execution_logs(data_dir, attempt, (runner or LocalRunner()).run(attempt))
+    result = publish_execution_logs(
+        data_dir, attempt, (runner or LocalRunner()).run(attempt)
+    )
+    register_artifact_records(
+        data_dir,
+        attempt.session_id,
+        [
+            ArtifactMeta.from_file(
+                path,
+                stage=attempt.stage,
+                method_name=attempt.method_name,
+                artifact_type=artifact_type,
+                metadata={"attempt_id": attempt.attempt_id},
+            )
+            for path, artifact_type in (
+                (result.stdout_path, "command.stdout"),
+                (result.stderr_path, "command.stderr"),
+            )
+        ],
+    )
     if not result.success:
         if cleanup_outputs:
             for path in attempt.expected_outputs:
                 if path.exists() and path.is_file():
                     path.unlink()
-        stderr = result.stderr_path.read_text(encoding="utf-8") if result.stderr_path.exists() else ""
-        error = stderr.strip() or f"{fail_label} failed with return code {result.return_code}"
+        stderr = (
+            result.stderr_path.read_text(encoding="utf-8")
+            if result.stderr_path.exists()
+            else ""
+        )
+        error = (
+            stderr.strip()
+            or f"{fail_label} failed with return code {result.return_code}"
+        )
         ledger.record_attempt_failed(
             attempt.session_id,
             attempt,

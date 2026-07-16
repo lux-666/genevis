@@ -14,7 +14,7 @@ Architecture v2 contract is `docs/architecture/data-v2.md`.
 2. Keep stage boundaries stable and move method choice inside each stage.
 3. Store large biological files, logs, scripts, and metric tables outside graph state.
 4. Let descriptors and review rules express method compatibility.
-5. Generate frozen attempt scripts in stage nodes (via the shared `execution/method_runner` helpers) only after descriptor context and validation.
+5. Generate frozen attempt scripts in stage nodes (via the shared `execution/method_runner` helpers) only after a parsed recommendation and required human approval.
 6. Put human-in-the-loop gates at review boundaries, especially assembly evaluation and Hi-C review.
 7. Use one shared parameter-recommendation persistence contract after method
    selection; Assembly, Hi-C, and T2T must not invent separate audit layouts.
@@ -39,7 +39,13 @@ START
     -> END
 ```
 
-`genome_survey` and `hic_scaffolding` are domain stages but must be skippable by planner policy. Genome survey runs when raw/clean short or long DNA reads are registered; assembly requires either an explicit user genome size or a survey-derived genome size. Hi-C scaffolding runs only when Hi-C assets exist and the user requests chromosome-level assembly.
+`genome_survey` and `hic_scaffolding` are domain stages but may be bypassed by
+the parent route derived from the requested stage set and method-selection
+facts. Genome survey runs when raw/clean short or long DNA reads are registered;
+assembly requires either an explicit user genome size or a survey-derived
+genome size. Hi-C scaffolding runs only when Hi-C assets exist and the user
+requests chromosome-level assembly. Parameter recommenders do not make any of
+these routing decisions.
 
 The parent graph must stay thin. It should route by `current_stage`, call a
 compiled stage subgraph, then return to `route_controller`. It should not inspect
@@ -52,6 +58,7 @@ metrics.
 app/
   graph/       parent graph, route controller, checkpoint factory
   stages/      domain subgraphs and method-family routes
+  llm/         stage-specific request DTOs, prompt rendering, model adapters
   schemas/     state, asset, plan, descriptor, artifact contracts
   execution/   local subprocess runner + shared freeze/run helpers (no in-agent remote execution)
   review/      rule checks and interrupt-backed human gates
@@ -64,7 +71,8 @@ Module ownership:
 | Module | Owns | Must Not Own |
 |---|---|---|
 | `graph/` | Parent LangGraph wiring, routing, checkpoint factory | Tool execution, biological method choice |
-| `stages/` | Stage subgraphs, stage planners, method-family routing | Package-level script generation internals |
+| `stages/` | Stage subgraphs, method selection/routing, parameter profiles and immutable recommendation bases | Provider prompt rendering or package-level script generation internals |
+| `llm/parameters/<stage>/` | Stage-specific strict request DTOs, deterministic message rendering, model invocation, and response-shape parsing | Full audit profiles, persistence, biological/catalog validation, approval, or execution |
 | `schemas/` | Cross-module contracts | Side effects |
 | `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), collecting declared outputs | In-agent remote orchestration (intentionally unsupported; see `docs/deployment/mac_dev_server_pull.md`) |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
@@ -90,8 +98,9 @@ notebook bodies.
 
 Data-specific ownership, path, checkpoint-size, parameter-recommendation,
 attempt, review, report, and retention rules are normative in
-`docs/architecture/data-v2.md`. Current code may lag that accepted design until
-the v2 cutover is complete.
+`docs/architecture/data-v2.md`. The v2 cutover is complete; any remaining
+implementation gap must be listed explicitly in that specification's
+conformance table rather than hidden behind a compatibility period.
 
 State categories:
 
@@ -131,13 +140,14 @@ execution lifecycle.
 When adding a real method:
 
 1. Add or update asset and method descriptors.
-2. Add a focused test for planner behavior.
+2. Add a focused test for method-selection behavior and, when present,
+   parameter-recommender behavior as separate contracts.
 3. Add a `StagePlan` path before execution.
 4. If the method uses parameter recommendation, persist the exact profile,
-   model request/response, validation, and approval through the shared Data v2
+   model request/response, response-parse result, and approval through the shared Data v2
    contract. The recommender does not select the method or workflow route.
-5. Generate or template a `FrozenAttemptSpec` only after required validation
-   and approval.
+5. Generate or template a `FrozenAttemptSpec` only after successful response
+   parsing and approval.
 6. Run through a runner boundary.
 7. Collect artifacts.
 8. Review outputs.

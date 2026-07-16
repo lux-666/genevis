@@ -13,18 +13,29 @@ from unittest.mock import patch
 from app.control.lifecycle import ResumeValidationError
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest
+from app.schemas.artifacts import (
+    ArtifactRef,
+    ParameterAttempt,
+    ParameterRecommendationCursor,
+)
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.hic_scaffolding.builder import build_stage
-from app.stages.hic_scaffolding.nodes import apply_hic_scaffolding_resume_decision
-from app.stages.hic_scaffolding.parameter_catalog import (
+from app.stages.hic_scaffolding.method_application.autohic import (
+    freeze_autohic_attempt,
+)
+from app.stages.hic_scaffolding.nodes import (
+    apply_hic_scaffolding_resume_decision,
+    resolve_hic_inputs,
+)
+from app.stages.hic_scaffolding.parameters.catalog import (
     load_autohic_parameter_catalog,
 )
-from app.stages.hic_scaffolding.parameter_nodes import (
+from app.stages.hic_scaffolding.parameters.workflow import (
     apply_autohic_parameter_approval_decision,
+    recommend_autohic_parameters,
 )
 from tests.data_v2 import v2_run_dir
-
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 
@@ -32,8 +43,10 @@ AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 class _FakeModel:
     def __init__(self, payload: dict):
         self.payload = payload
+        self.messages: list[dict[str, str]] | None = None
 
-    def invoke(self, _messages):
+    def invoke(self, messages):
+        self.messages = messages
         return SimpleNamespace(content=json.dumps(self.payload))
 
 
@@ -257,12 +270,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
     ) -> dict:
         model = _FakeModel(
             {
-                "parameter_patch": {"restriction_enzyme": enzyme},
+                "parameters": {"restriction_enzyme": enzyme},
                 "summary": "Library metadata supports this enzyme.",
             }
         )
         with patch(
-            "app.llm.autohic_parameter_prompts.build_chat_model",
+            "app.llm.parameters.hic.recommender.build_chat_model",
             return_value=model,
         ):
             return build_stage().invoke(state)
@@ -313,9 +326,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 tmpdir,
                 str(self._write_registry(tmpdir, assets=[])),
             )
-            state["stage_outputs"] = {
-                "hic_scaffolding": {"execution_mode": "local"}
-            }
+            state["stage_outputs"] = {"hic_scaffolding": {"execution_mode": "local"}}
             result = build_stage().invoke(state)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
@@ -347,7 +358,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             result = self._run_to_parameter_gate(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(result["active_interrupt"]["gate_id"], "parameter_approval")
+            self.assertEqual(
+                result["active_interrupt"]["gate_id"], "parameter_approval"
+            )
             self.assertNotIn("mode", result["stage_outputs"]["hic_scaffolding"])
 
     def test_llm_directly_recommends_only_enzyme_and_always_blocks_approval(self):
@@ -358,7 +371,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(hic["status"], "blocked_human")
-            self.assertEqual(result["active_interrupt"]["gate_id"], "parameter_approval")
+            self.assertEqual(
+                result["active_interrupt"]["gate_id"], "parameter_approval"
+            )
             self.assertFalse(hic["parameter_attempts"])
             recommendation_path = (
                 Path(result["data_dir"])
@@ -368,14 +383,107 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 / "000"
                 / "recommendation.json"
             )
-            recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))[
-                "recommendation"
-            ]
+            recommendation = json.loads(
+                recommendation_path.read_text(encoding="utf-8")
+            )["recommendation"]
             self.assertEqual(
-                recommendation["parameter_patch"],
+                recommendation["parameters"],
                 {"restriction_enzyme": "MboI"},
             )
+            self.assertNotIn("params", recommendation)
             self.assertNotIn("confidence", json.dumps(recommendation))
+
+    def test_unknown_enzyme_string_still_reaches_human_approval(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            result = self._run_to_parameter_gate(
+                self._configured_state(tmpdir, assembly, reads),
+                enzyme="definitely-not-an-enzyme",
+            )
+
+            self.assertEqual(
+                result["stage_outputs"]["hic_scaffolding"]["status"],
+                "blocked_human",
+            )
+            request_ref = result["active_interrupt"]["request_ref"]
+            request = json.loads(
+                (Path(result["data_dir"]) / request_ref["path_ref"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                request["payload"]["parameters"],
+                {"restriction_enzyme": "definitely-not-an-enzyme"},
+            )
+
+    def test_model_request_is_exact_and_excludes_run_locators_and_raw_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            registry_path = Path(state["asset_registry_ref"])
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            for asset in registry["assets"]:
+                if asset["asset_type"] == "hic_reads_registered":
+                    asset["metadata"]["arbitrary_raw_metadata"] = "must-not-leak"
+            registry_path.write_text(json.dumps(registry), encoding="utf-8")
+            model = _FakeModel(
+                {
+                    "parameters": {"restriction_enzyme": "MboI"},
+                    "summary": "Use the supplied library facts.",
+                }
+            )
+            with patch(
+                "app.llm.parameters.hic.recommender.build_chat_model",
+                return_value=model,
+            ):
+                result = build_stage().invoke(state)
+
+            request_path = (
+                Path(result["data_dir"])
+                / "artifacts"
+                / "hic_scaffolding"
+                / "parameter_recommendations"
+                / "000"
+                / "model_request.json"
+            )
+            persisted = json.loads(request_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["messages"], model.messages)
+            self.assertNotIn("request_id", persisted)
+            rendered = "\n".join(
+                message["content"] for message in persisted["messages"]
+            )
+            self.assertIn('"library_protocols"', rendered)
+            request_dto = json.loads(persisted["messages"][1]["content"])
+            self.assertEqual(
+                request_dto["input_facts"]["provided_restriction_enzyme"],
+                "HindIII",
+            )
+            self.assertEqual(
+                persisted["messages"][1]["content"],
+                json.dumps(
+                    request_dto,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            for forbidden in (
+                "session_id",
+                "pre_hic_assembly_ref",
+                "hic_read_refs",
+                "hic_read_paths",
+                "hic_library_metadata",
+                "asset_id",
+                "arbitrary_raw_metadata",
+                "must-not-leak",
+                str(assembly),
+                *(str(read) for read in reads),
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            profile_path = request_path.with_name("input_profile.json")
+            full_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertNotIn("session_id", full_profile)
+            self.assertIn("arbitrary_raw_metadata", json.dumps(full_profile))
 
     def test_invalid_llm_shape_fails_without_an_approval_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -383,13 +491,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             state = self._configured_state(tmpdir, assembly, reads)
             model = _FakeModel(
                 {
-                    "parameter_patch": {"restriction_enzyme": "MboI"},
+                    "parameters": {"restriction_enzyme": "MboI"},
                     "confidence": 0.9,
                     "alternatives": ["DpnII"],
                 }
             )
             with patch(
-                "app.llm.autohic_parameter_prompts.build_chat_model",
+                "app.llm.parameters.hic.recommender.build_chat_model",
                 return_value=model,
             ):
                 result = build_stage().invoke(state)
@@ -397,6 +505,55 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 result["stage_outputs"]["hic_scaffolding"]["failure_kind"],
                 "parameter_recommendation",
+            )
+
+    def test_stale_checkpoint_reuses_persisted_autohic_response(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            resolved = resolve_hic_inputs(state)
+            resolved_state = {**state, "stage_outputs": resolved["stage_outputs"]}
+            with patch(
+                "app.llm.parameters.hic.recommender.build_chat_model",
+                return_value=_FakeModel(
+                    {
+                        "parameters": {"restriction_enzyme": "MboI"},
+                        "summary": "Use the completed response.",
+                    }
+                ),
+            ):
+                first = recommend_autohic_parameters(resolved_state)
+
+            with patch(
+                "app.llm.parameters.hic.recommender.build_chat_model",
+                side_effect=AssertionError(
+                    "the model must not be called during recovery"
+                ),
+            ):
+                replay = recommend_autohic_parameters(resolved_state)
+
+            first_cursor = ParameterRecommendationCursor.model_validate(
+                first["stage_outputs"]["hic_scaffolding"][
+                    "current_parameter_recommendation"
+                ]
+            )
+            replay_cursor = ParameterRecommendationCursor.model_validate(
+                replay["stage_outputs"]["hic_scaffolding"][
+                    "current_parameter_recommendation"
+                ]
+            )
+            self.assertEqual(
+                replay["stage_outputs"]["hic_scaffolding"]["status"],
+                "blocked_human",
+            )
+            self.assertEqual(replay_cursor.manifest_ref, first_cursor.manifest_ref)
+            self.assertEqual(
+                replay_cursor.review_request_ref,
+                first_cursor.review_request_ref,
+            )
+            self.assertEqual(
+                replay_cursor.review_request_id,
+                first_cursor.review_request_id,
             )
 
     def test_parameter_approval_requires_hash_bound_metadata(self):
@@ -468,6 +625,85 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             ):
                 self._approve_parameters(blocked)
 
+    def test_freeze_checkpoint_contains_only_refs_and_compact_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads),
+                    enzyme="MboI",
+                )
+            )
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                update = freeze_autohic_attempt(approved)
+                replay_update = freeze_autohic_attempt(approved)
+            frozen_state = {**approved, **update}
+            hic = frozen_state["stage_outputs"]["hic_scaffolding"]
+
+            self.assertEqual(hic["status"], "autohic_frozen")
+            command_cursor = ArtifactRef.model_validate(hic["autohic_frozen_attempt"])
+            replay_cursor = ArtifactRef.model_validate(
+                replay_update["stage_outputs"]["hic_scaffolding"][
+                    "autohic_frozen_attempt"
+                ]
+            )
+            self.assertEqual(replay_cursor, command_cursor)
+            self.assertEqual(
+                set(hic["autohic_frozen_attempt"]),
+                {
+                    "schema_version",
+                    "artifact_id",
+                    "path_ref",
+                    "sha256",
+                    "size_bytes",
+                    "artifact_type",
+                },
+            )
+            attempt = ParameterAttempt.model_validate(hic["parameter_attempts"][0])
+            self.assertEqual(attempt.status, "frozen")
+            self.assertEqual(attempt.command_ref, command_cursor)
+            self.assertIsNotNone(attempt.frozen_parameters_ref)
+
+            command = json.loads(
+                (Path(frozen_state["data_dir"]) / command_cursor.path_ref).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                command["frozen_parameters_ref"]["path_ref"],
+                attempt.frozen_parameters_ref.path_ref,
+            )
+            self.assertEqual(
+                command["frozen_attempt"]["script_path"],
+                str(
+                    Path(frozen_state["data_dir"])
+                    / "work"
+                    / "hic_scaffolding"
+                    / "autohic"
+                    / "run_autohic.sh"
+                ),
+            )
+            for ref_name in ("config_ref", "script_ref"):
+                ref = ArtifactRef.model_validate(command[ref_name])
+                self.assertTrue(
+                    (Path(frozen_state["data_dir"]) / ref.path_ref).is_file()
+                )
+
+            frozen_parameters = json.loads(
+                (
+                    Path(frozen_state["data_dir"])
+                    / attempt.frozen_parameters_ref.path_ref
+                ).read_text(encoding="utf-8")
+            )["parameters"]
+            self.assertEqual(frozen_parameters["restriction_enzyme"], "MboI")
+            self.assertEqual(frozen_parameters["threads"], 2)
+            self.assertEqual(frozen_parameters["python_command"], "python")
+
     def test_approved_autohic_runs_then_blocks_at_separate_adoption_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
@@ -488,10 +724,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             frozen_attempt = approved["stage_outputs"]["hic_scaffolding"][
                 "parameter_attempts"
             ][0]
-            self.assertEqual(frozen_attempt["status"], "frozen")
+            self.assertEqual(frozen_attempt["status"], "recommended")
+            self.assertIsNone(frozen_attempt["frozen_parameters_ref"])
             self.assertEqual(
-                frozen_attempt["frozen_parameters_ref"]["path_ref"],
-                "artifacts/hic_scaffolding/attempts/000/frozen_parameters.json",
+                approved["stage_outputs"]["hic_scaffolding"]["autohic_parameters"][
+                    "restriction_enzyme"
+                ],
+                "HindIII",
             )
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
                 result = build_stage().invoke(approved)
@@ -504,10 +743,25 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             executed_attempt = hic["parameter_attempts"][0]
             self.assertEqual(executed_attempt["status"], "executed")
             self.assertEqual(
+                executed_attempt["frozen_parameters_ref"]["path_ref"],
+                "artifacts/hic_scaffolding/attempts/000/frozen_parameters.json",
+            )
+            self.assertEqual(
+                executed_attempt["command_ref"]["path_ref"],
+                "artifacts/hic_scaffolding/attempts/000/command.json",
+            )
+            self.assertEqual(
                 executed_attempt["execution_ref"]["path_ref"],
                 "artifacts/hic_scaffolding/attempts/000/execution.json",
             )
-            for key in ("scaffold_fasta", "contact_map", "assembly_file", "html_report"):
+            self.assertIsNone(hic.get("autohic_frozen_attempt"))
+            self.assertIsNone(hic.get("autohic_execution_result"))
+            for key in (
+                "scaffold_fasta",
+                "contact_map",
+                "assembly_file",
+                "html_report",
+            ):
                 self.assertTrue(Path(candidate[key]).is_file(), key)
 
             config = (
@@ -523,6 +777,47 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 f"CHR_PRETRAINED_MODEL={chromosome_model.resolve()}",
                 config,
             )
+
+            command = json.loads(
+                (
+                    Path(result["data_dir"])
+                    / executed_attempt["command_ref"]["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            for ref_name in ("config_ref", "script_ref"):
+                ref = ArtifactRef.model_validate(command[ref_name])
+                self.assertTrue((Path(result["data_dir"]) / ref.path_ref).is_file())
+            review_bundle = json.loads(
+                Path(candidate["review_bundle_ref"]).read_text(encoding="utf-8")
+            )
+            self.assertNotIn("attempt_metadata", review_bundle)
+            self.assertNotIn("stdout_path", review_bundle)
+            self.assertNotIn("stderr_path", review_bundle)
+            self.assertEqual(
+                review_bundle["execution_ref"]["path_ref"],
+                executed_attempt["execution_ref"]["path_ref"],
+            )
+            execution_record = json.loads(
+                (
+                    Path(result["data_dir"])
+                    / executed_attempt["execution_ref"]["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertIn("stdout_path", execution_record["result"])
+            self.assertIn("stderr_path", execution_record["result"])
+            self.assertIn("stdout_ref", execution_record["result"])
+            self.assertIn("stderr_ref", execution_record["result"])
+            self.assertNotIn("output_paths", execution_record["result"])
+            artifact_types = {
+                json.loads(line)["artifact_type"]
+                for line in (
+                    Path(result["data_dir"]) / "artifacts" / "index.jsonl"
+                )
+                .read_text(encoding="utf-8")
+                .splitlines()
+            }
+            self.assertIn("command.stdout", artifact_types)
+            self.assertIn("command.stderr", artifact_types)
 
             interrupt = result["active_interrupt"]
             adopted = apply_hic_scaffolding_resume_decision(
@@ -594,7 +889,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 str(assembly),
             )
 
-    def test_missing_models_after_approval_is_requirements_block_not_execution_failure(self):
+    def test_missing_models_after_approval_is_requirements_block_not_execution_failure(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
             chromosome_model.unlink()

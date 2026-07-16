@@ -10,8 +10,6 @@ from pathlib import Path
 from app.control.ledger import Ledger
 from app.control.lifecycle import inspect_session
 from app.execution.artifacts import append_artifact_records, read_artifact_records
-from app.review.base import ReviewPayload
-from app.review.persistence import persist_review_request
 from app.reports.trace_writer import (
     SESSION_SUMMARY_JSON_FILENAME,
     SESSION_SUMMARY_MARKDOWN_FILENAME,
@@ -24,7 +22,10 @@ from app.reports.trace_writer import (
     build_session_trace,
     write_session_trace,
 )
+from app.review.base import ReviewPayload
+from app.review.persistence import persist_review_request
 from app.schemas.artifacts import ArtifactMeta
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
@@ -102,6 +103,25 @@ def _stage(trace: dict, name: str) -> dict:
 
 
 class SessionSummaryBuildTests(unittest.TestCase):
+    def test_inspect_route_trace_keeps_only_latest_sixteen_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            for index in range(ROUTE_TRACE_LIMIT + 4):
+                ledger.record_stage_entered(
+                    "s1",
+                    f"stage_{index}",
+                    route_node=f"route_{index}",
+                    idempotency_key=f"route-test-{index}",
+                )
+
+            summary = inspect_session("s1", paths.run_dir)
+
+            self.assertEqual(
+                summary["route_trace"],
+                [f"route_{index}" for index in range(4, ROUTE_TRACE_LIMIT + 4)],
+            )
+
     def test_attempt_and_request_bound_decision_are_reconstructed(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
@@ -147,10 +167,14 @@ class SessionSummaryBuildTests(unittest.TestCase):
             trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(_stage(trace, "read_qc")["status"], STAGE_STATUS_EXECUTED)
-            self.assertEqual(_stage(trace, "inventory")["status"], STAGE_STATUS_NO_EVIDENCE)
+            self.assertEqual(
+                _stage(trace, "inventory")["status"], STAGE_STATUS_NO_EVIDENCE
+            )
             self.assertEqual(trace["decisions"][0]["review_request_id"], "review_001")
             self.assertEqual(trace["decisions_by_origin"]["human"], 1)
-            self.assertEqual(_stage(trace, "read_qc")["methods"][0]["outcome"], "succeeded")
+            self.assertEqual(
+                _stage(trace, "read_qc")["methods"][0]["outcome"], "succeeded"
+            )
 
     def test_candidate_evidence_without_attempt_is_planned_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +211,10 @@ class SessionSummaryBuildTests(unittest.TestCase):
 
             self.assertEqual(_stage(trace, "assembly")["status"], STAGE_STATUS_FAILED)
             self.assertEqual(trace["supervision_state"], "failed_terminal")
-            self.assertEqual(trace["final_or_current_stage"], {"stage": "assembly", "source": "ledger"})
+            self.assertEqual(
+                trace["final_or_current_stage"],
+                {"stage": "assembly", "source": "ledger"},
+            )
             self.assertEqual(trace["failures"][0]["error"], "tool boom")
             self.assertNotIn("conda.cli.main_run", trace["failures"][0]["error"])
             self.assertFalse(paths.report_path("current_status.json").exists())
@@ -223,8 +250,12 @@ class SessionSummaryBuildTests(unittest.TestCase):
             summary = inspect_session("s1", paths.run_dir)
 
             self.assertEqual(trace["supervision_state"], "blocked_human")
-            self.assertEqual(_stage(trace, "assembly_review")["status"], STAGE_STATUS_BLOCKED_HUMAN)
-            self.assertEqual(trace["blocked"]["decisions_allowed"], ["accept", "reject"])
+            self.assertEqual(
+                _stage(trace, "assembly_review")["status"], STAGE_STATUS_BLOCKED_HUMAN
+            )
+            self.assertEqual(
+                trace["blocked"]["decisions_allowed"], ["accept", "reject"]
+            )
             self.assertEqual(
                 summary["active_interrupt"]["review_request_id"],
                 persisted.review_request_id,
@@ -245,8 +276,13 @@ class SessionSummaryBuildTests(unittest.TestCase):
                 [event["event_type"] for event in trace["route"]],
                 ["stage_entered", "stage_completed", "stage_skipped"],
             )
-            self.assertEqual(_stage(trace, "genome_survey")["status"], STAGE_STATUS_SKIPPED)
-            self.assertEqual(_stage(trace, "genome_survey")["lifecycle"]["skip_reason"], "not_requested")
+            self.assertEqual(
+                _stage(trace, "genome_survey")["status"], STAGE_STATUS_SKIPPED
+            )
+            self.assertEqual(
+                _stage(trace, "genome_survey")["lifecycle"]["skip_reason"],
+                "not_requested",
+            )
             self.assertNotIn("route", {gap["field"] for gap in trace["gaps"]})
 
     def test_multiple_requests_in_one_stage_resolve_by_request_id(self):
@@ -300,24 +336,33 @@ class SessionSummaryWriteTests(unittest.TestCase):
 
             result = write_session_trace(paths.run_dir, "s1")
 
-            self.assertEqual(Path(result["json_ref"]), paths.report_path(SESSION_SUMMARY_JSON_FILENAME))
+            self.assertEqual(
+                Path(result["json_ref"]),
+                paths.report_path(SESSION_SUMMARY_JSON_FILENAME),
+            )
             self.assertEqual(
                 Path(result["markdown_ref"]),
                 paths.report_path(SESSION_SUMMARY_MARKDOWN_FILENAME),
             )
             self.assertIn("# Session Summary: s1", result["markdown"])
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
-            self.assertEqual(read_artifact_records(paths.run_dir, "s1"), before_artifacts)
+            self.assertEqual(
+                read_artifact_records(paths.run_dir, "s1"), before_artifacts
+            )
 
     def test_regeneration_overwrites_fixed_views_and_updates_watermark(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = _run(tmp)
             ledger = Ledger(paths.run_dir)
             first = write_session_trace(paths.run_dir, "s1")
-            first_payload = json.loads(Path(first["json_ref"]).read_text(encoding="utf-8"))
+            first_payload = json.loads(
+                Path(first["json_ref"]).read_text(encoding="utf-8")
+            )
             ledger.record_stage_entered("s1", "read_qc")
             second = write_session_trace(paths.run_dir, "s1")
-            second_payload = json.loads(Path(second["json_ref"]).read_text(encoding="utf-8"))
+            second_payload = json.loads(
+                Path(second["json_ref"]).read_text(encoding="utf-8")
+            )
 
             self.assertEqual(first["json_ref"], second["json_ref"])
             self.assertEqual(len(list(paths.reports_dir.iterdir())), 2)

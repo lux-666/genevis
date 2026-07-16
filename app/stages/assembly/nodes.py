@@ -39,7 +39,14 @@ from app.stages.assembly.decision import (
     make_assembly_decision,
 )
 from app.knowledge.packs import load_knowledge_pack
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
     ASSEMBLY_ROUTE_DECISION,
@@ -61,7 +68,7 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import TopLevelState
-from app.stages.assembly.parameter_nodes import (
+from app.stages.assembly.parameters.workflow import (
     _seal_parameter_attempt,
     _validate_parameter_attempt_chain,
     apply_parameter_approval_decision,
@@ -806,7 +813,7 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
     ]
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly"] = {key: assembly_out[key] for key in committed_keys if key in assembly_out}
-    trace = [*state.get("route_trace", []), "assembly_stage"]
+    trace = append_route_trace(state, "assembly_stage")
     return {
         "current_stage": next_stage_name("assembly"),
         "supervision_state": "running_stage",

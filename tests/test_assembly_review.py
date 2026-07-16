@@ -941,11 +941,28 @@ class AssemblyReviewStageTests(unittest.TestCase):
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
             state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
             with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=True), \
-                 patch("app.stages.assembly_review.nodes.recommend_review_decision", side_effect=ValueError("bad llm")):
+                 patch(
+                     "app.stages.assembly_review.nodes.recommend_review_decision",
+                     side_effect=ValueError("bad llm"),
+                 ) as mock_recommend:
                 result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNotNone(result.get("active_interrupt"))
+            recommend_kwargs = mock_recommend.call_args.kwargs
+            self.assertNotIn("request", recommend_kwargs)
+            self.assertEqual(
+                recommend_kwargs["review_request_id"],
+                result["active_interrupt"]["review_request_id"],
+            )
+            self.assertEqual(
+                recommend_kwargs["request_hash"],
+                result["active_interrupt"]["request_hash"],
+            )
+            self.assertEqual(
+                recommend_kwargs["request_ref"].model_dump(mode="json"),
+                result["active_interrupt"]["request_ref"],
+            )
             events = [json.loads(line) for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()]
             self.assertIn("auto_recommendation_failed", [event["event_type"] for event in events])
 
@@ -1388,7 +1405,7 @@ class AssemblyRerunTests(unittest.TestCase):
             state,
             stage="assembly_review",
             gate_id="assembly_review",
-            reason=payload["reason"],
+            reason=current["reason"],
             payload=payload,
             method_name="assembly_review.contract",
             artifact_type="assembly_review.request",
@@ -1399,13 +1416,13 @@ class AssemblyRerunTests(unittest.TestCase):
             "active_interrupt": persisted.compact_interrupt(
                 stage="assembly_review",
                 gate_id="assembly_review",
-                reason=payload["reason"],
+                reason=current["reason"],
             ),
         }
         Ledger(state["data_dir"]).record_review_requested(
             state["session_id"],
             "assembly_review",
-            reason=payload["reason"],
+            reason=current["reason"],
             candidates=payload.get("candidates") or [],
             review_request_artifact_ref=persisted.request_ref.model_dump(mode="json"),
             review_request_id=persisted.review_request_id,

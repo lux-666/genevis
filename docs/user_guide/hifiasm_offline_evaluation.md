@@ -85,21 +85,20 @@ candidate EvidenceCase, or promote runtime history into the knowledge pack.
 
 Execution and review retries have separate counters and limits. Execution
 failure with remaining execution budget does not pass through a failure
-classifier or repairability gate; it proceeds to recommendation and automatic
-validation. Review retry remains owned by the review stage and uses its own
+classifier or repairability gate; it proceeds to recommendation and response
+shape parsing. Review retry remains owned by the review stage and uses its own
 directional diagnosis and budget.
 
 ## Human parameter approval
 
-Initial and retry candidates share the same gate after automatic recommendation
-and parameter validation:
+Initial and retry candidates share the same gate after response parsing:
 
 ```yaml
 gate_id: parameter_approval
 decisions_allowed: [approve_parameters, reject_parameters]
 ```
 
-`approve_parameters` freezes the exact validated candidate and routes it to
+`approve_parameters` freezes the exact parsed candidate and routes it to
 execution. `reject_parameters` terminates without execution; for a retry it
 also appends no attempt and consumes no execution or review retry budget. TUI
 presentation is not part of Phase 11; future UI code may consume this generic

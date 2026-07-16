@@ -31,7 +31,7 @@ from app.stages.assembly.method_application.lifecycle import (
     update_current_parameter_attempt,
     write_parameter_attempt_json_artifact,
 )
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
 
@@ -53,7 +53,6 @@ def build_hifiasm_ont_graph():
     return build_method_graph(LIFECYCLE, freeze_hifiasm_ont_attempt, collect_hifiasm_ont_artifacts)
 
 
-# APPEND_MARKER
 
 
 def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:

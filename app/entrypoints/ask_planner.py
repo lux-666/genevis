@@ -649,8 +649,8 @@ def _runtime_decision_points(stages: list[str]) -> list[dict[str, Any]]:
 def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
     """Expose catalog L2 fields as deferred, never as planning-time decisions."""
 
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.hic_scaffolding.parameter_catalog import (
+    from app.stages.assembly.parameters.catalog import load_parameter_catalog
+    from app.stages.hic_scaffolding.parameters.catalog import (
         load_autohic_parameter_catalog,
     )
 

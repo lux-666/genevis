@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,22 +12,27 @@ from langgraph.graph import END, START, StateGraph
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import durable_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
+    HIC_PARAMETER_EXECUTION,
     HIC_QC_REPORT,
     HIC_REVIEW_BUNDLE,
     HIC_SCAFFOLDED_ASSEMBLY,
-    HIC_PARAMETER_EXECUTION,
     ArtifactMeta,
+    ArtifactRef,
     ParameterAttempt,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
-from app.stages.hic_scaffolding.parameter_persistence import (
+from app.stages.hic_scaffolding.parameters.storage import (
+    AUTOHIC_PARAMETER_COMMAND,
     AutoHiCParameterPersistenceError,
+    read_autohic_parameter_artifact,
     write_autohic_parameter_artifact,
 )
+from app.storage.paths import SessionPaths
 
 
 @dataclass(frozen=True)
@@ -55,12 +61,20 @@ def build_method_graph(
     graph.add_edge(START, "freeze")
     graph.add_conditional_edges(
         "freeze",
-        lambda state: "run" if hic_output(state).get("status") == lifecycle.frozen_status else "done",
+        lambda state: (
+            "run"
+            if hic_output(state).get("status") == lifecycle.frozen_status
+            else "done"
+        ),
         {"run": "run", "done": "done"},
     )
     graph.add_conditional_edges(
         "run",
-        lambda state: "collect" if hic_output(state).get("status") == lifecycle.ran_status else "done",
+        lambda state: (
+            "collect"
+            if hic_output(state).get("status") == lifecycle.ran_status
+            else "done"
+        ),
         {"collect": "collect", "done": "done"},
     )
     graph.add_edge("collect", "done")
@@ -81,7 +95,20 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
     output = hic_output(state)
     if output.get("status") != lifecycle.frozen_status:
         return {}
-    attempt = FrozenAttemptSpec.model_validate(output[lifecycle.frozen_attempt_key])
+    try:
+        attempt = _load_frozen_attempt(
+            state,
+            output.get(lifecycle.frozen_attempt_key),
+        )
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "execution_evidence",
+                "reason": f"AutoHiC frozen command is unavailable: {exc}",
+            },
+        )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=absolute_data_dir(state),
@@ -89,11 +116,11 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
         fail_label=lifecycle.name,
         cleanup_outputs=False,
     )
-    result = outcome.result.model_dump(mode="json")
+    result = durable_execution_result(state, outcome.result)
     if not outcome.success:
         result["error"] = outcome.error
     try:
-        parameter_attempts = _record_parameter_execution(
+        parameter_attempts, execution_ref = _record_parameter_execution(
             state,
             output,
             lifecycle=lifecycle,
@@ -113,7 +140,12 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
         state,
         {
             "status": lifecycle.ran_status,
-            lifecycle.execution_result_key: result,
+            lifecycle.execution_result_key: {
+                "execution_ref": execution_ref.model_dump(mode="json"),
+                "success": bool(result.get("success")),
+                "return_code": result.get("return_code"),
+                "error": _bounded_text(result.get("error")),
+            },
             "parameter_attempts": parameter_attempts,
         },
     )
@@ -126,7 +158,7 @@ def _record_parameter_execution(
     lifecycle: HiCMethodLifecycle,
     result: dict[str, Any],
     succeeded: bool,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], ArtifactRef]:
     """Attach immutable execution evidence to the approved parameter attempt."""
 
     current_id = int(output.get("current_parameter_attempt_id") or 0)
@@ -166,12 +198,13 @@ def _record_parameter_execution(
             "execution_ref": execution_ref.model_dump(mode="json"),
         }
     ).model_dump(mode="json")
-    return [
+    updated_attempts = [
         updated
         if isinstance(item, dict) and item.get("attempt_id") == current_id
         else ParameterAttempt.model_validate(item).model_dump(mode="json")
         for item in attempts
     ]
+    return updated_attempts, execution_ref
 
 
 def collect_method_artifacts(
@@ -186,8 +219,25 @@ def collect_method_artifacts(
     if output.get("status") != lifecycle.ran_status:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[lifecycle.frozen_attempt_key])
-    result = dict(output.get(lifecycle.execution_result_key) or {})
+    try:
+        attempt = _load_frozen_attempt(
+            state,
+            output.get(lifecycle.frozen_attempt_key),
+        )
+        execution_ref, result = _load_execution_result(
+            state,
+            output,
+            lifecycle=lifecycle,
+        )
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "execution_evidence",
+                "reason": f"AutoHiC execution evidence is unavailable: {exc}",
+            },
+        )
     data_dir = absolute_data_dir(state)
     artifact_dir = Path(str(attempt.metadata["artifact_dir"]))
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -197,8 +247,12 @@ def collect_method_artifacts(
     if result.get("success"):
         scaffold_fasta = Path(str(attempt.metadata["scaffold_fasta"]))
         if not scaffold_fasta.exists():
-            reason = f"expected {lifecycle.name} scaffold assembly missing: {scaffold_fasta}"
-            Ledger(data_dir).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=reason)
+            reason = (
+                f"expected {lifecycle.name} scaffold assembly missing: {scaffold_fasta}"
+            )
+            Ledger(data_dir).record_attempt_failed(
+                attempt.session_id, attempt, return_code=0, error=reason
+            )
             result = {**result, "success": False, "error": reason}
         else:
             artifacts.append(
@@ -207,7 +261,10 @@ def collect_method_artifacts(
                     stage="hic_scaffolding",
                     method_name=lifecycle.method_name,
                     artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
-                    metadata={"attempt_id": attempt.attempt_id, "review_required": True},
+                    metadata={
+                        "attempt_id": attempt.attempt_id,
+                        "review_required": True,
+                    },
                 )
             )
 
@@ -221,7 +278,10 @@ def collect_method_artifacts(
                         stage="hic_scaffolding",
                         method_name=lifecycle.method_name,
                         artifact_type=artifact_type,
-                        metadata={"attempt_id": attempt.attempt_id, "review_required": True},
+                        metadata={
+                            "attempt_id": attempt.attempt_id,
+                            "review_required": True,
+                        },
                     )
                 )
 
@@ -233,17 +293,23 @@ def collect_method_artifacts(
                     "method_name": lifecycle.method_name,
                     "status": f"{lifecycle.name}_executed_review_required",
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
-                    "final_assembly_for_annotation": output.get("final_assembly_for_annotation"),
-                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
+                    "final_assembly_for_annotation": output.get(
+                        "final_assembly_for_annotation"
+                    ),
+                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get(
+                        "scaffold_fasta"
+                    ),
                     "contact_map_ref": attempt.metadata.get("contact_map"),
                     "assembly_file_ref": attempt.metadata.get("assembly_file"),
                     "html_report_ref": attempt.metadata.get("html_report"),
-                    "stdout_path": result.get("stdout_path"),
-                    "stderr_path": result.get("stderr_path"),
                     "review_required": True,
+                    "execution_ref": execution_ref.model_dump(mode="json"),
+                    "execution_summary": _execution_summary(result),
                     "execution_metadata": execution_metadata or {},
-                    "attempt_metadata": attempt.metadata,
-                    "notes": ["geneagent_review_required_before_promotion", "pre_hic_assembly_preserved_as_annotation_fallback"],
+                    "notes": [
+                        "geneagent_review_required_before_promotion",
+                        "pre_hic_assembly_preserved_as_annotation_fallback",
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -258,10 +324,16 @@ def collect_method_artifacts(
                     "method_name": lifecycle.method_name,
                     "status": "available",
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
-                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get("scaffold_fasta"),
-                    "return_code": result.get("return_code"),
+                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get(
+                        "scaffold_fasta"
+                    ),
+                    "execution_ref": execution_ref.model_dump(mode="json"),
+                    "execution_summary": _execution_summary(result),
                     "execution_metadata": execution_metadata or {},
-                    "notes": ["qc_thresholds_not_applied", "geneagent_review_required_before_promotion"],
+                    "notes": [
+                        "qc_thresholds_not_applied",
+                        "geneagent_review_required_before_promotion",
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -275,18 +347,30 @@ def collect_method_artifacts(
                     stage="hic_scaffolding",
                     method_name=lifecycle.method_name,
                     artifact_type=HIC_REVIEW_BUNDLE,
-                    metadata={"attempt_id": attempt.attempt_id, "review_required": True},
+                    metadata={
+                        "attempt_id": attempt.attempt_id,
+                        "review_required": True,
+                    },
                 ),
                 ArtifactMeta.from_file(
                     qc_report_ref,
                     stage="hic_scaffolding",
                     method_name=lifecycle.method_name,
                     artifact_type=HIC_QC_REPORT,
-                    metadata={"attempt_id": attempt.attempt_id, "review_required": True},
+                    metadata={
+                        "attempt_id": attempt.attempt_id,
+                        "review_required": True,
+                    },
                 ),
             ]
         )
-        notes = unique_refs([*notes, f"{lifecycle.name}_executed", "geneagent_review_required_before_promotion"])
+        notes = unique_refs(
+            [
+                *notes,
+                f"{lifecycle.name}_executed",
+                "geneagent_review_required_before_promotion",
+            ]
+        )
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {
             "status": "executed",
@@ -299,7 +383,9 @@ def collect_method_artifacts(
         }
         update = {
             "status": "autohic_review_ready",
-            "chromosome_scaffolded_assembly_candidate_ref": str(attempt.metadata["scaffold_fasta"]),
+            "chromosome_scaffolded_assembly_candidate_ref": str(
+                attempt.metadata["scaffold_fasta"]
+            ),
             "hic_review_bundle_ref": str(review_bundle_ref),
             "hic_qc_report_ref": str(qc_report_ref),
             "selected_method_name": lifecycle.method_name,
@@ -309,7 +395,10 @@ def collect_method_artifacts(
     else:
         notes = unique_refs([*notes, f"{lifecycle.name}_execution_failed"])
         candidates = dict(output.get("method_candidates") or {})
-        candidates[lifecycle.method_name] = {"status": "failed", "error": result.get("error")}
+        candidates[lifecycle.method_name] = {
+            "status": "failed",
+            "error": result.get("error"),
+        }
         update = {
             "status": "failed",
             "failure_kind": "execution",
@@ -328,7 +417,9 @@ def collect_method_artifacts(
                     path,
                     stage="hic_scaffolding",
                     method_name=lifecycle.method_name,
-                    artifact_type="command.stdout" if path_key == "stdout_path" else "command.stderr",
+                    artifact_type="command.stdout"
+                    if path_key == "stdout_path"
+                    else "command.stderr",
                     metadata={"attempt_id": attempt.attempt_id},
                 )
             )
@@ -338,15 +429,24 @@ def collect_method_artifacts(
         payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
         ledger = Ledger(data_dir)
         if result.get("success"):
-            ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=payloads)
+            ledger.record_attempt_succeeded(
+                attempt.session_id, attempt, artifacts=payloads
+            )
         for artifact in payloads:
-            ledger.record_artifact_registered(attempt.session_id, artifact, attempt_id=attempt.attempt_id)
+            ledger.record_artifact_registered(
+                attempt.session_id, artifact, attempt_id=attempt.attempt_id
+            )
 
     return update_hic_output(
         state,
         {
             **update,
-            "artifact_refs": unique_refs([*list(output.get("artifact_refs") or []), *[str(a.file_path) for a in artifacts]]),
+            "artifact_refs": unique_refs(
+                [
+                    *list(output.get("artifact_refs") or []),
+                    *[str(a.file_path) for a in artifacts],
+                ]
+            ),
             lifecycle.frozen_attempt_key: None,
             lifecycle.execution_result_key: None,
         },
@@ -355,3 +455,80 @@ def collect_method_artifacts(
 
 def unique_refs(refs: list[str]) -> list[str]:
     return list(dict.fromkeys(refs))
+
+
+def _load_frozen_attempt(
+    state: TopLevelState,
+    value: Any,
+) -> FrozenAttemptSpec:
+    command_ref = ArtifactRef.model_validate(value)
+    command = read_autohic_parameter_artifact(
+        state,
+        command_ref,
+        expected_type=AUTOHIC_PARAMETER_COMMAND,
+    )
+    frozen_attempt = command.get("frozen_attempt")
+    if not isinstance(frozen_attempt, dict):
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC command artifact has no frozen attempt"
+        )
+    frozen_attempt = dict(frozen_attempt)
+    if "created_at" not in frozen_attempt:
+        command_path = SessionPaths.from_run_dir(absolute_data_dir(state)).resolve_ref(
+            command_ref.path_ref
+        )
+        frozen_attempt["created_at"] = datetime.fromtimestamp(
+            command_path.stat().st_mtime,
+            tz=timezone.utc,
+        )
+    return FrozenAttemptSpec.model_validate(frozen_attempt)
+
+
+def _load_execution_result(
+    state: TopLevelState,
+    output: dict[str, Any],
+    *,
+    lifecycle: HiCMethodLifecycle,
+) -> tuple[ArtifactRef, dict[str, Any]]:
+    cursor = output.get(lifecycle.execution_result_key)
+    if not isinstance(cursor, dict):
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC execution checkpoint has no compact cursor"
+        )
+    execution_ref = ArtifactRef.model_validate(cursor.get("execution_ref"))
+    current_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempts = [
+        ParameterAttempt.model_validate(item)
+        for item in (output.get("parameter_attempts") or [])
+        if isinstance(item, dict) and item.get("attempt_id") == current_id
+    ]
+    if len(attempts) != 1 or attempts[0].execution_ref != execution_ref:
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC execution ref is not bound to the current parameter attempt"
+        )
+    record = read_autohic_parameter_artifact(
+        state,
+        execution_ref,
+        expected_type=HIC_PARAMETER_EXECUTION,
+    )
+    result = record.get("result")
+    if not isinstance(result, dict):
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC execution artifact has no result object"
+        )
+    return execution_ref, dict(result)
+
+
+def _execution_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "success": bool(result.get("success")),
+        "return_code": result.get("return_code"),
+        "error": _bounded_text(result.get("error")),
+    }
+
+
+def _bounded_text(value: Any, *, limit: int = 2048) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"

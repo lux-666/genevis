@@ -17,7 +17,12 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_artifacts_dir, stage_output, update_stage_output
+from app.stages.base import (
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    update_stage_output,
+)
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -551,7 +556,7 @@ def commit_genome_survey(state: TopLevelState) -> dict:
     ]
     outputs = dict(state.get("stage_outputs") or {})
     outputs["genome_survey"] = {key: survey_out[key] for key in committed_keys if key in survey_out}
-    trace = [*state.get("route_trace", []), "genome_survey_stage"]
+    trace = append_route_trace(state, "genome_survey_stage")
     return {
         "current_stage": next_stage_name("genome_survey"),
         "supervision_state": "running_stage",

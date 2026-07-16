@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from app.domains.assembly.parameter_recommendation import (
+from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.llm.assembly_parameter_prompts import render_assembly_parameter_messages
+from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 
 
 def _request_dto(method_id: str = "hifiasm") -> dict:
@@ -23,8 +23,6 @@ def _request_dto(method_id: str = "hifiasm") -> dict:
                 "value": 0.01,
             }
         ],
-        "rules": {"rules": []},
-        "recommendation_policy": {"output": "sparse_parameter_patch"},
         "method_guidance": [
             {
                 "guidance_id": "g1",
@@ -35,15 +33,12 @@ def _request_dto(method_id: str = "hifiasm") -> dict:
                 "caveats": [],
             }
         ],
-        "readonly_params": {"threads": {"value_type": "int", "default": 32}},
-        "adjustable_params": {
+        "adjustable_parameters": {
             "purge_level": {
                 "value_type": "int",
                 "allowed_values": [0, 1, 2, 3],
-                "default": 2,
             }
         },
-        "baseline_params": {"purge_level": 2},
         "literature_selection": {
             "selected_case_ids": ["paper.1"],
             "selected_count": 1,
@@ -74,6 +69,11 @@ def test_renderer_serializes_the_direct_dto_without_a_second_projection() -> Non
     rendered_request = json.loads(messages[1]["content"])
 
     assert rendered_request == request
+    assert messages[1]["content"] == json.dumps(
+        request,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     assert rendered_request["literature_cases"][0]["case_id"] == "paper.1"
 
 
@@ -84,10 +84,11 @@ def test_prompt_is_one_system_user_pair_without_response_example(method_id: str)
     assert [message["role"] for message in messages] == ["system", "user"]
     model_payload = json.loads(messages[1]["content"])
     assert model_payload["recommendation_contract"] == PARAMETER_RECOMMENDATION_CONTRACT
-    assert model_payload["baseline_params"] == {"purge_level": 2}
+    assert "baseline_params" not in model_payload
+    assert "rules" not in model_payload
     assert messages[1]["content"].count("Reported parameter rationale.") == 1
     assert "Representative" not in json.dumps(messages)
-    assert "mapping each changed L2 parameter name directly to its proposed value" in messages[0]["content"]
+    assert "entire set of parameters" in messages[0]["content"]
     assert "Do not return observation IDs" in messages[0]["content"]
 
 
@@ -98,7 +99,7 @@ def test_retry_context_is_rendered_exactly_from_the_strict_dto() -> None:
         "task": request["task"],
         "previous_attempt": {
             "execution_status": "failed",
-            "execution_params": {"purge_level": 1},
+            "parameters": {"purge_level": 1},
         },
         "assembly_review": {},
         "signal_ids": ["execution.status"],

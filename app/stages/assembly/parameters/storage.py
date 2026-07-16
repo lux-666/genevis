@@ -17,7 +17,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
-    ASSEMBLY_PARAMETER_VALIDATION,
+    ASSEMBLY_PARAMETER_RESPONSE_PARSE,
     ArtifactRef,
 )
 from app.schemas.state import TopLevelState
@@ -25,6 +25,7 @@ from app.storage.parameter_evidence import (
     ParameterEvidenceError,
     publish_parameter_json,
     read_parameter_json,
+    recover_parameter_json,
 )
 
 
@@ -38,7 +39,7 @@ _RECOMMENDATION_REF_TYPES = {
     "model_request_ref": ASSEMBLY_PARAMETER_MODEL_REQUEST,
     "model_response_ref": ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     "recommendation_ref": ASSEMBLY_PARAMETER_RECOMMENDATION,
-    "validation_ref": ASSEMBLY_PARAMETER_VALIDATION,
+    "response_parse_ref": ASSEMBLY_PARAMETER_RESPONSE_PARSE,
 }
 
 
@@ -99,6 +100,30 @@ def read_json_artifact(
             state,
             artifact_ref,
             expected_type=expected_type,
+        )
+    except ParameterEvidenceError as exc:
+        raise ParameterPersistenceError(str(exc)) from exc
+
+
+def recover_recommendation_json_artifact(
+    state: TopLevelState,
+    recommendation_id: int,
+    filename: str,
+    *,
+    expected_type: str,
+    method_name: str,
+) -> tuple[ArtifactRef, dict[str, Any]] | None:
+    """Recover an already-published recommendation transform by logical path."""
+
+    try:
+        return recover_parameter_json(
+            state,
+            stage="assembly",
+            scope="recommendation",
+            identifier=recommendation_id,
+            filename=filename,
+            expected_type=expected_type,
+            method_name=method_name,
         )
     except ParameterEvidenceError as exc:
         raise ParameterPersistenceError(str(exc)) from exc

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import TopLevelState
 from app.storage.paths import SessionPaths
 
@@ -31,7 +32,9 @@ def session_paths(state: TopLevelState) -> SessionPaths:
     or appending the session identifier below an already session-scoped path.
     """
 
-    return SessionPaths.from_run_dir(absolute_data_dir(state))
+    paths = SessionPaths.from_run_dir(absolute_data_dir(state))
+    paths.require_session_id(state["session_id"])
+    return paths
 
 
 def stage_artifacts_dir(state: TopLevelState, stage: str, *parts: str) -> Path:
@@ -61,6 +64,7 @@ def resolve_run_ref(state: TopLevelState, path_ref: str | Path) -> Path:
 # Stage output read/write helpers
 # ============================================================================
 
+
 def stage_output(state: TopLevelState, stage_name: str) -> dict[str, Any]:
     """Return a mutable copy of a stage's slot in stage_outputs."""
     return dict((state.get("stage_outputs") or {}).get(stage_name, {}))
@@ -73,6 +77,12 @@ def update_stage_output(
     outputs = dict(state.get("stage_outputs") or {})
     outputs[stage_name] = {**stage_output(state, stage_name), **payload}
     return {"stage_outputs": outputs}
+
+
+def append_route_trace(state: TopLevelState, *items: str) -> list[str]:
+    """Append route items while retaining only the newest bounded history."""
+
+    return [*list(state.get("route_trace") or []), *items][-ROUTE_TRACE_LIMIT:]
 
 
 # ============================================================================
@@ -95,6 +105,7 @@ def is_fail_status(status: Any, extra: frozenset[str] = frozenset()) -> bool:
 # ============================================================================
 # Universal Resource Resolution System
 # ============================================================================
+
 
 @dataclass
 class ResourceSpec:
@@ -232,6 +243,7 @@ def resolve_stage_resource(
 
     # 3. Auto-fallback: check all stages in reverse STAGE_ORDER
     from app.stages import STAGE_ORDER
+
     for stage in reversed(STAGE_ORDER):
         if stage in resource_spec.prefer_stages:
             continue  # Already checked
@@ -352,10 +364,7 @@ def load_assets_from_registry(
     try:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
         assets = registry.get("assets", [])
-        return [
-            asset for asset in assets
-            if asset.get("asset_type") in asset_types
-        ]
+        return [asset for asset in assets if asset.get("asset_type") in asset_types]
     except (OSError, json.JSONDecodeError):
         return []
 
@@ -363,6 +372,7 @@ def load_assets_from_registry(
 # ============================================================================
 # Backward Compatibility Wrappers
 # ============================================================================
+
 
 def resolve_current_assembly(
     state: TopLevelState,
@@ -381,8 +391,14 @@ def resolve_current_assembly(
         prefer_stages=prefer_stages or [],
         output_keys={
             "t2t": ["final_assembly_for_annotation"],
-            "hic_scaffolding": ["final_assembly_for_annotation", "chromosome_scaffolded_assembly_candidate_ref"],
-            "assembly_review": ["final_assembly_for_scaffolding_or_annotation", "final_assembly_ref"],
+            "hic_scaffolding": [
+                "final_assembly_for_annotation",
+                "chromosome_scaffolded_assembly_candidate_ref",
+            ],
+            "assembly_review": [
+                "final_assembly_for_scaffolding_or_annotation",
+                "final_assembly_ref",
+            ],
         },
         asset_types=["assembly_fasta_registered"],
     )

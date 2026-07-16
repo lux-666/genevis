@@ -12,10 +12,13 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.review.gates import find_review_gate, registered_review_stage_label
 from app.storage.paths import SessionPaths, locate_session_data_dir
+
+if TYPE_CHECKING:
+    from app.review.base import ResumeReviewRequest
 
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
 
@@ -223,7 +226,6 @@ def _render_generic_gate(requirements: dict) -> None:
         for cid in candidate_ids:
             print(f"  - {cid}")
     methods = requirements.get("candidate_methods") or []
-    executed = requirements.get("executed_candidate_methods") or []
     if methods:
         print("\ncandidate_methods:")
         for method in methods:
@@ -926,9 +928,7 @@ def _brief_parameter_approval(
     recommendation = _load_ref_payload(source.get("recommendation_ref"), data_dir)
     parsed = recommendation.get("recommendation") if isinstance(recommendation, dict) else None
     if isinstance(parsed, dict):
-        proposal["recommended_params"] = dict(
-            parsed.get("execution_params") or parsed.get("params") or {}
-        )
+        proposal["recommended_params"] = dict(parsed.get("parameters") or {})
 
     manifest = _load_ref_payload(source.get("recommendation_manifest_ref"), data_dir)
     manifest_refs = manifest.get("refs") if isinstance(manifest, dict) else None
