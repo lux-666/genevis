@@ -10,17 +10,17 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import read_artifact_records
+from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
+from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.repeat_annotation.builder import build_stage
 from app.stages.repeat_annotation.nodes import (
+    _parse_tbl_repeat_percentage,
     apply_mask_review_decision,
     block_mask_review,
-    _parse_tbl_repeat_percentage,
 )
-from app.review.base import ResumeReviewRequest
-from app.review.persistence import load_review_request
 from tests.data_v2 import v2_run_dir
 
 
@@ -263,7 +263,8 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             events = [json.loads(line) for line in (Path(state["data_dir"]) / "ledger" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
             event_types = [event["event_type"] for event in events]
             self.assertIn("attempt_failed", event_types)
-            self.assertIn("artifact_registered", event_types)
+            self.assertEqual(artifact_types.count("command.stdout"), 1)
+            self.assertEqual(artifact_types.count("command.stderr"), 1)
 
     def test_de_novo_strategy_plans_candidates_without_default_choice(self):
         with tempfile.TemporaryDirectory() as tmpdir:

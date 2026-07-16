@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import load_execution_evidence, persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -81,24 +82,29 @@ def run_method_attempt(
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=attempt.method_name,
     )
-    result = outcome.result.model_dump(mode="json")
+    result_ref = persist_execution_result(
+        state,
+        stage="genome_survey",
+        method_name=attempt.method_name,
+        result=outcome.result,
+        error=outcome.error,
+    ).model_dump(mode="json")
     if not outcome.success:
         return update_genome_survey_output(
             state,
-            {"status": "failed", "reason": outcome.error, execution_result_key: result},
+            {"status": "failed", "reason": outcome.error, execution_result_key: result_ref},
         )
     return update_genome_survey_output(
         state,
-        {"status": ran_status, execution_result_key: result},
+        {"status": ran_status, execution_result_key: result_ref},
     )
 
 
 def attempt_artifacts(
     attempt: FrozenAttemptSpec,
-    execution_result: dict[str, Any],
     artifact_types_by_path: dict[str, str],
 ) -> list[ArtifactMeta]:
-    """Build artifact metadata for expected outputs and captured command logs."""
+    """Build artifact metadata for expected biological outputs."""
     artifacts: list[ArtifactMeta] = []
     for path in attempt.expected_outputs:
         if not path.exists():
@@ -112,21 +118,23 @@ def attempt_artifacts(
                 metadata={"attempt_id": attempt.attempt_id},
             )
         )
-    for path, artifact_type in [
-        (Path(execution_result["stdout_path"]), "command.stdout"),
-        (Path(execution_result["stderr_path"]), "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="genome_survey",
-                    method_name=attempt.method_name,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
     return artifacts
+
+
+def validate_attempt_execution(
+    state: TopLevelState,
+    attempt: FrozenAttemptSpec,
+    value: dict[str, Any],
+) -> None:
+    """Fail closed unless a checkpoint ref matches this frozen attempt."""
+
+    load_execution_evidence(
+        state,
+        value,
+        expected_stage="genome_survey",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=attempt.method_name,
+    )
 
 
 def record_attempt_success(

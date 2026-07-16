@@ -15,6 +15,13 @@ from app.execution.artifacts import (
     register_artifact_records,
     resolve_artifact_ref,
 )
+from app.execution.evidence import (
+    ExecutionEvidence,
+    execution_log_paths,
+    load_execution_evidence,
+    persist_execution_result,
+    validate_execution_evidence,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.execution.results import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
@@ -349,6 +356,58 @@ class ImmutablePublishTests(unittest.TestCase):
             )
             self.assertNotIn("s1", outcome.result.stdout_path.relative_to(paths.run_dir).parts)
             self.assertFalse(stdout.exists())
+
+            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            execution_ref = persist_execution_result(
+                state,
+                stage="read_qc",
+                method_name=attempt.method_name,
+                result=outcome.result,
+            )
+            record_path = resolve_artifact_ref(paths.run_dir, "s1", execution_ref)
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            durable = record["result"]
+            self.assertEqual(
+                set(durable),
+                {
+                    "attempt_id",
+                    "success",
+                    "return_code",
+                    "status",
+                    "status_detail",
+                    "error",
+                    "stdout_ref",
+                    "stderr_ref",
+                },
+            )
+            with self.assertRaises(ValueError):
+                ExecutionEvidence.model_validate(
+                    {**durable, "stderr_path": str(outcome.result.stderr_path)}
+                )
+            tampered_stdout = {
+                **durable["stdout_ref"],
+                "sha256": "0" * 64,
+            }
+            with self.assertRaises(DataLayoutError):
+                validate_execution_evidence(
+                    state,
+                    {**durable, "stdout_ref": tampered_stdout},
+                )
+            loaded = load_execution_evidence(
+                state,
+                execution_ref,
+                expected_stage="read_qc",
+                expected_attempt_id=attempt.attempt_id,
+                expected_method_name=attempt.method_name,
+            )
+            _, loaded_stderr = execution_log_paths(state, loaded)
+            self.assertEqual(loaded_stderr.read_text(encoding="utf-8"), "first stderr\n")
+            types = [
+                record["artifact_type"]
+                for record in read_artifact_records(paths.run_dir, "s1")
+            ]
+            self.assertEqual(types.count("command.stdout"), 1)
+            self.assertEqual(types.count("command.stderr"), 1)
 
 
 if __name__ == "__main__":

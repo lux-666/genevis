@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from app.execution.artifacts import read_artifact_records, resolve_artifact_ref
-from app.execution.evidence import load_execution_result, load_frozen_attempt
+from app.execution.evidence import load_execution_evidence, load_frozen_attempt
 from app.schemas.state import initial_state
 from app.stages.function_annotation.nodes import (
     collect_diamond_artifacts,
@@ -238,7 +238,7 @@ class DiamondRunTests(unittest.TestCase):
             result = run_diamond_attempt(frozen_state)
             func_out = result["stage_outputs"]["function_annotation"]
             self.assertEqual(func_out["status"], "diamond_ran")
-            execution = load_execution_result(
+            execution = load_execution_evidence(
                 frozen_state,
                 func_out["diamond_execution_ref"],
                 expected_stage="function_annotation",
@@ -246,7 +246,8 @@ class DiamondRunTests(unittest.TestCase):
                 expected_method_name="function_annotation.candidate.diamond",
             )
             self.assertTrue(execution.success)
-            self.assertEqual(execution.output_paths, [])
+            self.assertEqual(execution.stdout_ref.artifact_type, "command.stdout")
+            self.assertEqual(execution.stderr_ref.artifact_type, "command.stderr")
             artifact_types = {
                 record["artifact_type"]
                 for record in read_artifact_records(state["data_dir"], "s1")

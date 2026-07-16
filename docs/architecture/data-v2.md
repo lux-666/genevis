@@ -416,27 +416,38 @@ An execution attempt exists only after response parsing and required approval
 have succeeded.
 
 ```text
-artifacts/<stage>/attempts/<attempt_id>/
-├── frozen_parameters.json
-├── command.json
-├── run.sh                       # or another exact executed script
-├── execution.json
-├── stdout.log
-├── stderr.log
-├── outputs/
-├── review.json                  # when the attempt reaches stage review
-└── attempt_manifest.json        # written once when sealed
+artifacts/<stage>/
+├── attempts/<attempt_id>/
+│   ├── frozen_parameters.json
+│   ├── command.json
+│   ├── run.sh                   # or another exact executed script
+│   ├── execution.json
+│   ├── outputs/
+│   ├── review.json              # when the attempt reaches stage review
+│   └── attempt_manifest.json    # written once when sealed
+└── logs/
+    ├── <runner_attempt>.<invocation>.stdout.log
+    └── <runner_attempt>.<invocation>.stderr.log
 ```
 
 The structured command and executed script are both retained when the runner
 executes the script: one expresses command semantics; the other proves the
 exact bytes executed.
 
-`execution.json` owns return code, start/end time, terminal status, environment
-provenance ref, and indexed stdout/stderr refs. Outputs are not named there
-until collect has published them; their refs are owned by the collected
+`execution.json` owns the canonical process outcome defined by
+[`execution-evidence.md`](execution-evidence.md): attempt identity, success,
+return code, terminal status and detail, a bounded error summary, and indexed
+stdout/stderr refs. It never owns `stdout_path`, `stderr_path`, or
+`output_paths`. Runtime `ExecutionResult` paths end at the publish boundary and
+must not be serialized into an artifact or checkpoint.
+
+The shared runner publishes and indexes stdout/stderr exactly once, before the
+stage persists execution evidence. Collect resolves those refs only when log
+bytes are needed and never registers command logs again. Business outputs are
+not named in execution evidence; their refs are owned by collected
 candidate/output records and the sealed attempt manifest. Checkpoint and ledger
-do not embed execution results or log tails.
+do not embed execution results or log tails: they carry only the execution
+artifact ref or a bounded list of refs for a multi-command method.
 
 `attempt_manifest.json` is written once when the attempt reaches its sealed
 lifecycle boundary. It includes:

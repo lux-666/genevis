@@ -9,7 +9,6 @@ import re
 import shlex
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -17,22 +16,23 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence, persist_execution_result
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     T2T_ASSEMBLY_TELOMERE_SCAN,
-    T2TReviewDecisionArtifact,
     T2T_EXTENSION_CANDIDATES,
     T2T_FINISHING_REPORT,
-    T2T_PATCHED_ASSEMBLY,
     T2T_PATCH_RECORDS,
+    T2T_PATCHED_ASSEMBLY,
     T2T_READS_TELOMERE_SCAN,
     T2T_STATUS_SUMMARY,
     T2T_TELOMERIC_READS,
     ArtifactMeta,
     T2TFinishingBundle,
+    T2TReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
@@ -306,10 +306,16 @@ def run_t2t_alignment(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label="t2t minimap2",
     )
-    result = outcome.result.model_dump(mode="json")
+    result_ref = persist_execution_result(
+        state,
+        stage="t2t",
+        method_name=T2T_ALIGNMENT_METHOD,
+        result=outcome.result,
+        error=outcome.error,
+    ).model_dump(mode="json")
     if not outcome.success:
-        return _fail(state, outcome.error)
-    return _update(state, {"status": "alignment_ran", "alignment_result": result})
+        return _update(state, {"status": "failed", "reason": outcome.error, "alignment_result": result_ref})
+    return _update(state, {"status": "alignment_ran", "alignment_result": result_ref})
 
 
 def build_t2t_candidates(state: TopLevelState) -> dict:
@@ -319,6 +325,14 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         return {}
     if out.get("status") == "candidates_built":
         return {}
+    attempt = FrozenAttemptSpec.model_validate(out["alignment_attempt"])
+    load_execution_evidence(
+        state,
+        out["alignment_result"],
+        expected_stage="t2t",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=T2T_ALIGNMENT_METHOD,
+    )
     candidates_path = Path(out["out_dir"]) / "telomere_extension_candidates.tsv"
     try:
         assembly_ends = {row["sequence"]: row for row in _read_tsv(Path(out["assembly_telomere_scan_ref"]))}

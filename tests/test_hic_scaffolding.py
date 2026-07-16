@@ -803,8 +803,8 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     / executed_attempt["execution_ref"]["path_ref"]
                 ).read_text(encoding="utf-8")
             )
-            self.assertIn("stdout_path", execution_record["result"])
-            self.assertIn("stderr_path", execution_record["result"])
+            self.assertNotIn("stdout_path", execution_record["result"])
+            self.assertNotIn("stderr_path", execution_record["result"])
             self.assertIn("stdout_ref", execution_record["result"])
             self.assertIn("stderr_ref", execution_record["result"])
             self.assertNotIn("output_paths", execution_record["result"])

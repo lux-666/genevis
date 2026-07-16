@@ -5,15 +5,18 @@ from __future__ import annotations
 import json
 import re
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.execution.artifacts import (
     artifact_ref_for_path,
     publish_artifact_record,
     resolve_artifact_ref,
 )
-from app.execution.results import ExecutionResult
+from app.execution.results import ExecutionResult, ExecutionStatus
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
@@ -27,28 +30,87 @@ def execution_result_artifact_type(stage: str) -> str:
     return f"{stage}.execution_result"
 
 
-def durable_execution_result(
+class ExecutionEvidence(BaseModel):
+    """Canonical path-free process outcome stored in durable evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt_id: str = Field(min_length=1)
+    success: bool
+    return_code: int
+    status: ExecutionStatus
+    status_detail: str = ""
+    error: str = Field(default="", max_length=2048)
+    stdout_ref: ArtifactRef
+    stderr_ref: ArtifactRef
+
+
+def build_execution_evidence(
     state: Mapping[str, Any],
     result: ExecutionResult,
-) -> dict[str, Any]:
-    """Serialize process facts with indexed logs and no mutable outputs."""
+    *,
+    error: str = "",
+) -> ExecutionEvidence:
+    """Convert one runtime result to the strict, indexed durable contract."""
 
     session_id = str(state.get("session_id") or "")
     data_dir = state.get("data_dir", "")
-    payload = result.model_dump(mode="json", exclude={"output_paths"})
-    payload["stdout_ref"] = artifact_ref_for_path(
-        data_dir,
-        session_id,
-        result.stdout_path,
-        expected_type="command.stdout",
-    ).model_dump(mode="json")
-    payload["stderr_ref"] = artifact_ref_for_path(
-        data_dir,
-        session_id,
-        result.stderr_path,
-        expected_type="command.stderr",
-    ).model_dump(mode="json")
-    return payload
+    return ExecutionEvidence(
+        attempt_id=result.attempt_id,
+        success=result.success,
+        return_code=result.return_code,
+        status=result.status,
+        status_detail=result.status_detail,
+        error=_bounded_error(error),
+        stdout_ref=artifact_ref_for_path(
+            data_dir,
+            session_id,
+            result.stdout_path,
+            expected_type="command.stdout",
+        ),
+        stderr_ref=artifact_ref_for_path(
+            data_dir,
+            session_id,
+            result.stderr_path,
+            expected_type="command.stderr",
+        ),
+    )
+
+
+def validate_execution_evidence(
+    state: Mapping[str, Any],
+    value: ExecutionEvidence | Mapping[str, Any],
+    *,
+    expected_attempt_id: str | None = None,
+) -> ExecutionEvidence:
+    """Validate the strict result body and both indexed log references."""
+
+    evidence = (
+        value
+        if isinstance(value, ExecutionEvidence)
+        else ExecutionEvidence.model_validate(value)
+    )
+    if expected_attempt_id is not None and evidence.attempt_id != expected_attempt_id:
+        raise DataLayoutError("execution evidence does not match the frozen attempt")
+    execution_log_paths(state, evidence)
+    return evidence
+
+
+def execution_log_paths(
+    state: Mapping[str, Any],
+    evidence: ExecutionEvidence,
+) -> tuple[Path, Path]:
+    """Resolve and integrity-check the durable stdout/stderr references."""
+
+    session_id = str(state.get("session_id") or "")
+    data_dir = state.get("data_dir", "")
+    if evidence.stdout_ref.artifact_type != "command.stdout":
+        raise DataLayoutError("execution stdout ref has the wrong artifact type")
+    if evidence.stderr_ref.artifact_type != "command.stderr":
+        raise DataLayoutError("execution stderr ref has the wrong artifact type")
+    stdout_path = resolve_artifact_ref(data_dir, session_id, evidence.stdout_ref)
+    stderr_path = resolve_artifact_ref(data_dir, session_id, evidence.stderr_ref)
+    return stdout_path, stderr_path
 
 
 def persist_frozen_attempt(
@@ -114,6 +176,7 @@ def persist_execution_result(
     stage: str,
     method_name: str,
     result: ExecutionResult,
+    error: str = "",
 ) -> ArtifactRef:
     """Persist one structured process result and return its compact ref."""
 
@@ -123,7 +186,11 @@ def persist_execution_result(
         "stage": stage,
         "method_name": method_name,
         "attempt_id": result.attempt_id,
-        "result": durable_execution_result(state, result),
+        "result": build_execution_evidence(
+            state,
+            result,
+            error=error,
+        ).model_dump(mode="json"),
     }
     return _persist_record(
         state,
@@ -136,15 +203,15 @@ def persist_execution_result(
     )
 
 
-def load_execution_result(
+def load_execution_evidence(
     state: Mapping[str, Any],
     value: ArtifactRef | Mapping[str, Any],
     *,
     expected_stage: str,
     expected_attempt_id: str | None = None,
     expected_method_name: str | None = None,
-) -> ExecutionResult:
-    """Integrity-check and hydrate one process result from its artifact ref."""
+) -> ExecutionEvidence:
+    """Integrity-check and load one path-free process result artifact."""
 
     payload = _load_record(
         state,
@@ -153,20 +220,26 @@ def load_execution_result(
     )
     if payload.get("record_type") != "execution_result":
         raise DataLayoutError("execution evidence has the wrong record type")
-    result = ExecutionResult.model_validate(payload.get("result"))
+    result = validate_execution_evidence(
+        state,
+        payload.get("result") or {},
+        expected_attempt_id=expected_attempt_id,
+    )
     if (
         result.attempt_id != payload.get("attempt_id")
         or payload.get("stage") != expected_stage
     ):
         raise DataLayoutError("execution evidence identity mismatch")
-    if expected_attempt_id is not None and result.attempt_id != expected_attempt_id:
-        raise DataLayoutError("execution evidence does not match the frozen attempt")
     if (
         expected_method_name is not None
         and payload.get("method_name") != expected_method_name
     ):
         raise DataLayoutError("execution evidence has the wrong method identity")
     return result
+
+
+def _bounded_error(value: str, *, limit: int = 2048) -> str:
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def _persist_record(

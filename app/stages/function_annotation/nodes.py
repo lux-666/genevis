@@ -16,7 +16,7 @@ from app.execution.artifacts import (
 )
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
-    load_execution_result,
+    load_execution_evidence,
     load_frozen_attempt,
     persist_execution_result,
     persist_frozen_attempt,
@@ -298,6 +298,7 @@ def _run_func_method_attempt(
         stage="function_annotation",
         method_name=attempt.method_name,
         result=outcome.result,
+        error=outcome.error,
     )
     if not outcome.success:
         return _update_function_output(
@@ -327,7 +328,7 @@ def _collect_func_method_artifacts(
         expected_stage="function_annotation",
         expected_method_name=method_name,
     )
-    load_execution_result(
+    load_execution_evidence(
         state,
         function_out[f"{cfg['suffix']}_execution_ref"],
         expected_stage="function_annotation",
@@ -599,7 +600,7 @@ def _function_method_results(
             )
             execution_ref = function_out.get("diamond_execution_ref")
             if execution_ref:
-                load_execution_result(
+                load_execution_evidence(
                     state,
                     execution_ref,
                     expected_stage="function_annotation",

@@ -9,10 +9,16 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
-from app.schemas.artifacts import ASSEMBLY_CANDIDATE_BUNDLE, ASSEMBLY_DRAFT_ASSEMBLY, ArtifactMeta, AssemblyCandidateBundle
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_DRAFT_ASSEMBLY,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+)
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import (
@@ -201,16 +207,32 @@ def run_purge_dups(state: TopLevelState) -> dict:
         fail_label="assembly_dedup purge_dups",
         cleanup_outputs=False,
     )
-    result = outcome.result.model_dump(mode="json")
+    result_ref = persist_execution_result(
+        state,
+        stage="assembly_dedup",
+        method_name=ASSEMBLY_DEDUP_METHOD,
+        result=outcome.result,
+        error=outcome.error,
+    ).model_dump(mode="json")
     if not outcome.success:
-        return _update_output(state, {"status": "failed", "reason": outcome.error, "execution_result": result})
-    return _update_output(state, {"status": "dedup_ran", "execution_result": result, "frozen_attempt": attempt.model_dump(mode="json")})
+        return _update_output(state, {"status": "failed", "reason": outcome.error, "execution_result": result_ref})
+    return _update_output(state, {"status": "dedup_ran", "execution_result": result_ref, "frozen_attempt": attempt.model_dump(mode="json")})
 
 
 def commit_assembly_dedup(state: TopLevelState) -> dict:
     dedup_out = _output(state)
     if dedup_out.get("status") not in {"dedup_ran", "skipped"}:
         return {}
+
+    if dedup_out.get("status") == "dedup_ran":
+        attempt = FrozenAttemptSpec.model_validate(dedup_out["frozen_attempt"])
+        load_execution_evidence(
+            state,
+            dedup_out["execution_result"],
+            expected_stage="assembly_dedup",
+            expected_attempt_id=attempt.attempt_id,
+            expected_method_name=ASSEMBLY_DEDUP_METHOD,
+        )
 
     input_assembly_ref = dedup_out.get("input_assembly_ref")
     output_assembly_ref = dedup_out.get("output_assembly_ref") or input_assembly_ref

@@ -8,8 +8,13 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import load_execution_evidence
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import READ_QC_LONG_READ_STATS, READ_QC_LONG_READ_SUMMARY, ArtifactMeta
+from app.schemas.artifacts import (
+    READ_QC_LONG_READ_STATS,
+    READ_QC_LONG_READ_SUMMARY,
+    ArtifactMeta,
+)
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.read_qc.constants import METHOD_NAME
@@ -80,7 +85,13 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
 
     attempt = FrozenAttemptSpec.model_validate(output["frozen_attempt"])
     stats_path = Path(output["stats_output_path"])
-    result = output["execution_result"]
+    load_execution_evidence(
+        state,
+        output["execution_result"],
+        expected_stage="read_qc",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=METHOD_NAME,
+    )
     if not stats_path.exists():
         reason = f"expected SeqKit stats output missing: {stats_path}"
         Ledger(state.get("data_dir", "data")).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=reason)
@@ -99,11 +110,6 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
     artifacts.append(ArtifactMeta.from_file(summary_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_SUMMARY,
                                              metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"),
                                                        "input_asset_refs": output.get("input_asset_refs") or [], "format": "json", "tool": "seqkit"}))
-    for value, artifact_type in [(result["stdout_path"], "command.stdout"), (result["stderr_path"], "command.stderr")]:
-        path = Path(value)
-        if path.exists():
-            artifacts.append(ArtifactMeta.from_file(path, stage="read_qc", method_name=METHOD_NAME, artifact_type=artifact_type,
-                                                    metadata={"attempt_id": attempt.attempt_id}))
     append_artifact_records(state.get("data_dir", "data"), attempt.session_id, artifacts)
     ledger = Ledger(state.get("data_dir", "data"))
     payloads = [artifact.model_dump(mode="json") for artifact in artifacts]

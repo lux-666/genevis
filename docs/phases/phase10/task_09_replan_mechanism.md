@@ -25,7 +25,7 @@ Existing method lifecycle:
 freeze -> run -> collect
 ```
 
-On run failure, `run_frozen_attempt()` already records stdout/stderr paths and an error. Add a gate after the method subgraph:
+On run failure, `run_frozen_attempt()` already publishes and indexes stdout/stderr and records an error. Add a gate after the method subgraph:
 
 ```text
 hifiasm_ont
@@ -38,7 +38,7 @@ hifiasm_ont
 Retry gate behavior:
 
 1. Detect `status: failed` from assembly method execution.
-2. Find previous attempt's stdout/stderr paths.
+2. Resolve the previous attempt's indexed stdout/stderr refs when log bytes are required.
 3. Read last 100 lines, preferring stderr, then stdout.
 4. Append `failure_log_tail` to the previous attempt.
 5. If retry count < max, set retry context:

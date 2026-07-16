@@ -6,7 +6,8 @@ This document is the system-level architecture. For operational handoff, read
 `docs/handoff.md`. For coordinator rules, read `docs/governance.md`. For
 stage-by-stage inputs and outputs, read `docs/stage_contracts.md`. Accepted
 cross-cutting specifications live under `docs/architecture/`; the accepted Data
-Architecture v2 contract is `docs/architecture/data-v2.md`.
+Architecture v2 contract is `docs/architecture/data-v2.md`, and the runtime to
+durable process boundary is `docs/architecture/execution-evidence.md`.
 
 ## Principles
 
@@ -20,6 +21,8 @@ Architecture v2 contract is `docs/architecture/data-v2.md`.
    selection; Assembly, Hi-C, and T2T must not invent separate audit layouts.
 8. Treat each session run directory as the data-ownership boundary and keep
    checkpoints ref-only and bounded.
+9. Keep local process paths inside runtime `ExecutionResult`; persist only the
+   canonical, index-backed `ExecutionEvidence` body.
 
 ## Parent Flow
 
@@ -107,7 +110,8 @@ State categories:
 | Category | Stored In | Examples |
 |---|---|---|
 | Control recovery facts | LangGraph checkpoint | `current_stage`, compact interrupt ref, current recommendation/attempt cursors |
-| Business execution facts | Ledger | stage transitions, attempts, statuses, review events, terminal event |
+| Business execution summaries | Ledger | stage transitions, attempt status, review events, terminal event |
+| Structured process outcomes | Immutable artifacts | return code, status, bounded error, indexed stdout/stderr refs |
 | External world facts | Artifact registry | file path, hash, size, artifact type |
 | Method capability facts | Descriptors | inputs, outputs, resources, review rules |
 | Operator views | Reports | current status and derived session summary |

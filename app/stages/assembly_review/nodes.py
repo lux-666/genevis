@@ -14,7 +14,6 @@ import logging
 import os
 import re
 import shlex
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -25,17 +24,45 @@ logger = logging.getLogger(__name__)
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records, read_artifact_records
+from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence, persist_execution_result
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.storage.publish import shell_publish_file
+from app.reference.ncbi_metazoa import (
+    build_related_species_evidence_pack as _build_related_species_evidence_pack,
+)
+from app.reference.ncbi_metazoa import (
+    build_related_species_statistics_pack as _build_related_species_statistics_pack,
+)
+from app.reference.ncbi_metazoa import species_name_from_metadata
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
-from app.reference.ncbi_metazoa import build_related_species_evidence_pack as _build_related_species_evidence_pack
-from app.reference.ncbi_metazoa import build_related_species_statistics_pack as _build_related_species_statistics_pack
-from app.reference.ncbi_metazoa import species_name_from_metadata
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_CANDIDATE_COMPARISON,
+    ASSEMBLY_REVIEW_ACTION,
+    ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
+    ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    ASSEMBLY_REVIEW_PACKET,
+    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
+    ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+    AssemblyEvalBundle,
+    AssemblyEvalSignal,
+    AssemblyReviewActionArtifact,
+    ReviewDecisionArtifact,
+)
+from app.schemas.plan import AssemblyReviewPlan
+from app.schemas.state import TopLevelState
+from app.stages.assembly_review.method_application.lifecycle import (
+    read_eval_bundle as _read_eval_bundle,
+)
+from app.stages.assembly_review.method_application.lifecycle import (
+    write_json_artifact as _write_json_artifact,
+)
 from app.stages.assembly_review.notebook import (
     build_assembly_review_notebook,
     render_statistics_figures,
@@ -50,28 +77,7 @@ from app.stages.base import (
     stage_artifacts_dir,
     stage_work_dir,
 )
-from app.schemas.artifacts import (
-    ASSEMBLY_CANDIDATE_BUNDLE,
-    ASSEMBLY_CANDIDATE_COMPARISON,
-    ASSEMBLY_REVIEW_ACTION,
-    ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
-    ASSEMBLY_REVIEW_EVAL_BUNDLE,
-    ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
-    ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
-    ASSEMBLY_REVIEW_PACKET,
-    ArtifactMeta,
-    AssemblyCandidateBundle,
-    AssemblyEvalBundle,
-    AssemblyEvalSignal,
-    AssemblyReviewActionArtifact,
-    ReviewDecisionArtifact,
-)
-from app.schemas.plan import AssemblyReviewPlan
-from app.schemas.state import TopLevelState
-from app.stages.assembly_review.method_application.lifecycle import (
-    read_eval_bundle as _read_eval_bundle,
-    write_json_artifact as _write_json_artifact,
-)
+from app.storage.publish import shell_publish_file
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
@@ -268,7 +274,9 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
         ar_out["metrics"] = metrics
         stage_outputs["assembly_review"] = ar_out
 
-    from app.stages.assembly.nodes import parameter_quality_gate as assembly_parameter_quality_gate
+    from app.stages.assembly.nodes import (
+        parameter_quality_gate as assembly_parameter_quality_gate,
+    )
 
     gate_update = assembly_parameter_quality_gate({**state, "stage_outputs": stage_outputs})
     updated_outputs = dict(gate_update.get("stage_outputs") or stage_outputs)
@@ -1202,6 +1210,20 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         ledger=ledger,
     )
     result = outcome.result
+    execution_ref = persist_execution_result(
+        state,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        result=result,
+        error=outcome.error,
+    )
+    execution = load_execution_evidence(
+        state,
+        execution_ref,
+        expected_stage="assembly",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=FLYE_METHOD,
+    )
 
     if not outcome.success:
         ledger.record_event(session_id, "rerun_failed", {
@@ -1226,16 +1248,6 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id, "rerun_index": rerun_index},
         )
     ]
-    for path, artifact_type in [
-        (result.stdout_path, "command.stdout"),
-        (result.stderr_path, "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(ArtifactMeta.from_file(
-                path, stage="assembly", method_name=FLYE_METHOD, artifact_type=artifact_type,
-                metadata={"attempt_id": attempt.attempt_id, "rerun_index": rerun_index},
-            ))
-
     append_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [a.model_dump(mode="json") for a in artifacts]
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
@@ -1251,7 +1263,10 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         input_type=str(input_type),
         genome_size_prior=assembly_out.get("genome_size_prior"),
         expected_outputs={"draft_assembly_fasta": str(draft_assembly)},
-        logs={"stdout": str(result.stdout_path), "stderr": str(result.stderr_path)},
+        logs={
+            "stdout": execution.stdout_ref.path_ref,
+            "stderr": execution.stderr_ref.path_ref,
+        },
         metadata={
             "execution_enabled": True,
             "attempt_id": attempt.attempt_id,
@@ -1263,6 +1278,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "rerun_index": rerun_index,
             "source_candidate_id": request.candidate_id,
             "rerun_reason": request.metadata.get("rerun_reason"),
+            "execution_ref": execution_ref.model_dump(mode="json"),
         },
     )
     candidate_dir.mkdir(parents=True, exist_ok=True)

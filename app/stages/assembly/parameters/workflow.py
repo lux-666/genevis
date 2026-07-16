@@ -15,6 +15,7 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
+from app.execution.evidence import validate_execution_evidence
 from app.llm.parameters.assembly.prompt import (
     parameter_prompt_bundle_hash,
     parameter_prompt_bundle_name,
@@ -864,7 +865,17 @@ def hydrate_parameter_attempt(
             attempt.execution_ref,
             expected_type=ASSEMBLY_PARAMETER_EXECUTION,
         )
-        hydrated["execution_result"] = dict(execution.get("result") or {})
+        if (
+            execution.get("attempt_id") != attempt.attempt_id
+            or execution.get("method_id") != attempt.method_id
+        ):
+            raise ParameterPersistenceError(
+                "execution evidence is not bound to the parameter attempt"
+            )
+        hydrated["execution_result"] = validate_execution_evidence(
+            state,
+            execution.get("result") or {},
+        ).model_dump(mode="json")
     if attempt.review_ref is not None:
         review = read_json_artifact(state, attempt.review_ref)
         hydrated["review_failure"] = dict(review.get("diagnosis") or {})

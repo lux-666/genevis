@@ -18,7 +18,10 @@ from pydantic import ValidationError
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import durable_execution_result
+from app.execution.evidence import (
+    build_execution_evidence,
+    validate_execution_evidence,
+)
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
@@ -273,7 +276,11 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=lifecycle.name,
     )
-    result = durable_execution_result(state, outcome.result)
+    result = build_execution_evidence(
+        state,
+        outcome.result,
+        error=outcome.error,
+    )
     execution_ref = write_attempt_json_artifact(
         state,
         int(output.get("current_parameter_attempt_id") or 0),
@@ -282,7 +289,7 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
             "schema_version": 2,
             "attempt_id": int(output.get("current_parameter_attempt_id") or 0),
             "method_id": lifecycle.method_name,
-            "result": result,
+            "result": result.model_dump(mode="json"),
         },
         artifact_type=ASSEMBLY_PARAMETER_EXECUTION,
         method_name=lifecycle.method_name,
@@ -334,7 +341,17 @@ def collect_method_artifacts(
         output[lifecycle.execution_result_key],
         expected_type=ASSEMBLY_PARAMETER_EXECUTION,
     )
-    result = dict(execution_payload.get("result") or {})
+    if (
+        execution_payload.get("attempt_id")
+        != int(output.get("current_parameter_attempt_id") or 0)
+        or execution_payload.get("method_id") != lifecycle.method_name
+    ):
+        raise ParameterPersistenceError("execution evidence has the wrong method identity")
+    result = validate_execution_evidence(
+        state,
+        execution_payload.get("result") or {},
+        expected_attempt_id=attempt.attempt_id,
+    )
     draft_assembly = Path(output[lifecycle.draft_assembly_key])
     if not draft_assembly.exists():
         reason = f"expected {lifecycle.name} draft assembly missing: {draft_assembly}"
@@ -355,11 +372,7 @@ def collect_method_artifacts(
             },
         )
     ]
-    for path, artifact_type in [
-        (Path(result["stdout_path"]), "command.stdout"),
-        (Path(result["stderr_path"]), "command.stderr"),
-        *extra_artifacts,
-    ]:
+    for path, artifact_type in extra_artifacts:
         if path.exists():
             artifacts.append(
                 ArtifactMeta.from_file(
@@ -388,8 +401,8 @@ def collect_method_artifacts(
     }
     bundle_data["logs"] = {
         **dict(bundle_data.get("logs") or {}),
-        "stdout": str(result["stdout_path"]),
-        "stderr": str(result["stderr_path"]),
+        "stdout": result.stdout_ref.path_ref,
+        "stderr": result.stderr_ref.path_ref,
         **bundle_logs,
     }
     bundle_data["metadata"] = {

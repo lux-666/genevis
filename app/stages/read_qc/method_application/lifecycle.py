@@ -10,6 +10,7 @@ from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.manifest import _detect_format
@@ -92,10 +93,16 @@ def run_method_attempt(state: TopLevelState, lifecycle: ReadQCMethodLifecycle) -
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=lifecycle.name,
     )
-    result = outcome.result.model_dump(mode="json")
+    result_ref = persist_execution_result(
+        state,
+        stage="read_qc",
+        method_name=attempt.method_name,
+        result=outcome.result,
+        error=outcome.error,
+    ).model_dump(mode="json")
     if not outcome.success:
-        return update_read_qc_output(state, {"status": "failed", "reason": outcome.error, lifecycle.execution_result_key: result})
-    return update_read_qc_output(state, {"status": lifecycle.ran_status, lifecycle.execution_result_key: result})
+        return update_read_qc_output(state, {"status": "failed", "reason": outcome.error, lifecycle.execution_result_key: result_ref})
+    return update_read_qc_output(state, {"status": lifecycle.ran_status, lifecycle.execution_result_key: result_ref})
 
 
 def read_paths_from_output(output: dict[str, Any], plural_key: str, single_key: str) -> list[Path]:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from app.execution.evidence import (
+    ExecutionEvidence,
     execution_result_artifact_type,
     frozen_attempt_artifact_type,
-    load_execution_result,
+    load_execution_evidence,
     load_frozen_attempt,
     persist_execution_result,
     persist_frozen_attempt,
@@ -16,7 +17,6 @@ from app.execution.results import ExecutionResult
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.paths import DataLayoutError
-
 
 GENE_ATTEMPT_ARTIFACT_TYPE = frozen_attempt_artifact_type("gene_annotation")
 GENE_EXECUTION_ARTIFACT_TYPE = execution_result_artifact_type("gene_annotation")
@@ -50,12 +50,14 @@ def persist_gene_execution(
     *,
     method_name: str,
     result: ExecutionResult,
+    error: str = "",
 ) -> ArtifactRef:
     return persist_execution_result(
         state,
         stage="gene_annotation",
         method_name=method_name,
         result=result,
+        error=error,
     )
 
 
@@ -65,8 +67,8 @@ def load_gene_execution(
     *,
     expected_attempt_id: str | None = None,
     expected_method_name: str | None = None,
-) -> ExecutionResult:
-    return load_execution_result(
+) -> ExecutionEvidence:
+    return load_execution_evidence(
         state,
         value,
         expected_stage="gene_annotation",

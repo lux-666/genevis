@@ -89,9 +89,10 @@ def run_frozen_attempt(
     On failure, optionally removes partial expected outputs (``cleanup_outputs``)
     and records an ``attempt_failed`` ledger event. The caller maps the returned
     outcome onto its own stage status and any stage-specific post-processing
-    (e.g. log-artifact registration or rerun events). Pass ``ledger`` to reuse a
+    (for example rerun events). Pass ``ledger`` to reuse a
     caller-owned ledger, or ``runner`` to substitute the executor (defaults to
-    ``LocalRunner``).
+    ``LocalRunner``). Command logs are published and indexed here; stage collect
+    paths register only their business outputs.
     """
     ledger = ledger or Ledger(data_dir)
     ledger.create_session(attempt.session_id, input_manifest_ref)

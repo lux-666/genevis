@@ -12,7 +12,11 @@ from langgraph.graph import END, START, StateGraph
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import durable_execution_result
+from app.execution.evidence import (
+    ExecutionEvidence,
+    build_execution_evidence,
+    validate_execution_evidence,
+)
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     HIC_PARAMETER_EXECUTION,
@@ -116,9 +120,11 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
         fail_label=lifecycle.name,
         cleanup_outputs=False,
     )
-    result = durable_execution_result(state, outcome.result)
-    if not outcome.success:
-        result["error"] = outcome.error
+    result = build_execution_evidence(
+        state,
+        outcome.result,
+        error=outcome.error,
+    )
     try:
         parameter_attempts, execution_ref = _record_parameter_execution(
             state,
@@ -142,9 +148,9 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
             "status": lifecycle.ran_status,
             lifecycle.execution_result_key: {
                 "execution_ref": execution_ref.model_dump(mode="json"),
-                "success": bool(result.get("success")),
-                "return_code": result.get("return_code"),
-                "error": _bounded_text(result.get("error")),
+                "success": result.success,
+                "return_code": result.return_code,
+                "error": _bounded_text(result.error),
             },
             "parameter_attempts": parameter_attempts,
         },
@@ -156,7 +162,7 @@ def _record_parameter_execution(
     output: dict[str, Any],
     *,
     lifecycle: HiCMethodLifecycle,
-    result: dict[str, Any],
+    result: ExecutionEvidence,
     succeeded: bool,
 ) -> tuple[list[dict[str, Any]], ArtifactRef]:
     """Attach immutable execution evidence to the approved parameter attempt."""
@@ -185,7 +191,7 @@ def _record_parameter_execution(
             "schema_version": 2,
             "attempt_id": current_id,
             "method_id": lifecycle.method_name,
-            "result": result,
+            "result": result.model_dump(mode="json"),
         },
         artifact_type=HIC_PARAMETER_EXECUTION,
         method_name=lifecycle.method_name,
@@ -214,7 +220,7 @@ def collect_method_artifacts(
     extra_artifacts: list[tuple[str, str]] = (),
     execution_metadata: dict[str, Any] | None = None,
 ) -> dict:
-    """Register a Hi-C candidate, logs, review bundle, and fallback state."""
+    """Register a Hi-C candidate, review bundle, and fallback state."""
     output = hic_output(state)
     if output.get("status") != lifecycle.ran_status:
         return {}
@@ -224,10 +230,11 @@ def collect_method_artifacts(
             state,
             output.get(lifecycle.frozen_attempt_key),
         )
-        execution_ref, result = _load_execution_result(
+        execution_ref, result = _load_execution_evidence(
             state,
             output,
             lifecycle=lifecycle,
+            expected_attempt_id=attempt.attempt_id,
         )
     except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
         return update_hic_output(
@@ -244,7 +251,9 @@ def collect_method_artifacts(
     artifacts: list[ArtifactMeta] = []
     notes = list(output.get("notes") or [])
 
-    if result.get("success"):
+    execution_succeeded = result.success
+    execution_error = result.error
+    if execution_succeeded:
         scaffold_fasta = Path(str(attempt.metadata["scaffold_fasta"]))
         if not scaffold_fasta.exists():
             reason = (
@@ -253,7 +262,8 @@ def collect_method_artifacts(
             Ledger(data_dir).record_attempt_failed(
                 attempt.session_id, attempt, return_code=0, error=reason
             )
-            result = {**result, "success": False, "error": reason}
+            execution_succeeded = False
+            execution_error = reason
         else:
             artifacts.append(
                 ArtifactMeta.from_file(
@@ -268,7 +278,7 @@ def collect_method_artifacts(
                 )
             )
 
-    if result.get("success"):
+    if execution_succeeded:
         for key, artifact_type in extra_artifacts:
             path_value = attempt.metadata.get(key)
             if path_value and Path(str(path_value)).exists():
@@ -397,38 +407,23 @@ def collect_method_artifacts(
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {
             "status": "failed",
-            "error": result.get("error"),
+            "error": execution_error,
         }
         update = {
             "status": "failed",
             "failure_kind": "execution",
-            "reason": result.get("error") or f"{lifecycle.name} execution failed",
+            "reason": execution_error or f"{lifecycle.name} execution failed",
             "selected_method_name": lifecycle.method_name,
             "notes": notes,
-            f"{lifecycle.name}_error": result.get("error"),
+            f"{lifecycle.name}_error": execution_error,
             "method_candidates": candidates,
         }
-
-    for path_key in ("stdout_path", "stderr_path"):
-        path = Path(str(result.get(path_key, "")))
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="hic_scaffolding",
-                    method_name=lifecycle.method_name,
-                    artifact_type="command.stdout"
-                    if path_key == "stdout_path"
-                    else "command.stderr",
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
 
     if artifacts:
         append_artifact_records(data_dir, attempt.session_id, artifacts)
         payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
         ledger = Ledger(data_dir)
-        if result.get("success"):
+        if execution_succeeded:
             ledger.record_attempt_succeeded(
                 attempt.session_id, attempt, artifacts=payloads
             )
@@ -484,12 +479,13 @@ def _load_frozen_attempt(
     return FrozenAttemptSpec.model_validate(frozen_attempt)
 
 
-def _load_execution_result(
+def _load_execution_evidence(
     state: TopLevelState,
     output: dict[str, Any],
     *,
     lifecycle: HiCMethodLifecycle,
-) -> tuple[ArtifactRef, dict[str, Any]]:
+    expected_attempt_id: str,
+) -> tuple[ArtifactRef, ExecutionEvidence]:
     cursor = output.get(lifecycle.execution_result_key)
     if not isinstance(cursor, dict):
         raise AutoHiCParameterPersistenceError(
@@ -511,19 +507,26 @@ def _load_execution_result(
         execution_ref,
         expected_type=HIC_PARAMETER_EXECUTION,
     )
-    result = record.get("result")
-    if not isinstance(result, dict):
+    if (
+        record.get("attempt_id") != current_id
+        or record.get("method_id") != lifecycle.method_name
+    ):
         raise AutoHiCParameterPersistenceError(
-            "AutoHiC execution artifact has no result object"
+            "AutoHiC execution artifact has the wrong method identity"
         )
-    return execution_ref, dict(result)
+    result = validate_execution_evidence(
+        state,
+        record.get("result") or {},
+        expected_attempt_id=expected_attempt_id,
+    )
+    return execution_ref, result
 
 
-def _execution_summary(result: dict[str, Any]) -> dict[str, Any]:
+def _execution_summary(result: ExecutionEvidence) -> dict[str, Any]:
     return {
-        "success": bool(result.get("success")),
-        "return_code": result.get("return_code"),
-        "error": _bounded_text(result.get("error")),
+        "success": result.success,
+        "return_code": result.return_code,
+        "error": _bounded_text(result.error),
     }
 
 

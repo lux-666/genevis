@@ -18,8 +18,14 @@ from langgraph.graph import END, START, StateGraph
 
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
-from app.schemas.artifacts import ASSEMBLY_REVIEW_EVAL_BUNDLE, ArtifactMeta, AssemblyEvalBundle, AssemblyEvalSignal
+from app.schemas.artifacts import (
+    ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    ArtifactMeta,
+    AssemblyEvalBundle,
+    AssemblyEvalSignal,
+)
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
@@ -111,10 +117,15 @@ def run_attempts(state: TopLevelState, *, frozen_status: str, attempts_key: str,
             fail_label=fail_label,
             cleanup_outputs=False,
         )
-        result = outcome.result.model_dump(mode="json")
-        if not outcome.success:
-            result["error"] = outcome.error
-        results.append(result)
+        results.append(
+            persist_execution_result(
+                state,
+                stage="assembly_review",
+                method_name=attempt.method_name,
+                result=outcome.result,
+                error=outcome.error,
+            ).model_dump(mode="json")
+        )
     return update_review_output(state, {"status": ran_status, results_key: results})
 
 

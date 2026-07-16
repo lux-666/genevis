@@ -8,12 +8,22 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import execution_log_paths, load_execution_evidence
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import READ_QC_FILTERED_LONG_READS, READ_QC_LONG_READ_STATS, READ_QC_LONG_READ_SUMMARY, ArtifactMeta
+from app.schemas.artifacts import (
+    READ_QC_FILTERED_LONG_READS,
+    READ_QC_LONG_READ_STATS,
+    READ_QC_LONG_READ_SUMMARY,
+    ArtifactMeta,
+)
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
-from app.stages.read_qc.constants import LENGTH_FILTER_DECISIONS, LENGTH_FILTER_METHOD_NAME, METHOD_NAME
+from app.stages.read_qc.constants import (
+    LENGTH_FILTER_DECISIONS,
+    LENGTH_FILTER_METHOD_NAME,
+    METHOD_NAME,
+)
 from app.stages.read_qc.method_application.lifecycle import (
     ReadQCMethodLifecycle,
     build_method_graph,
@@ -76,13 +86,20 @@ def collect_length_filter_artifacts(state: TopLevelState) -> dict:
     if output.get("status") != LIFECYCLE.ran_status:
         return {}
     attempt = FrozenAttemptSpec.model_validate(output[LIFECYCLE.frozen_attempt_key])
-    result = output[LIFECYCLE.execution_result_key]
+    result = load_execution_evidence(
+        state,
+        output[LIFECYCLE.execution_result_key],
+        expected_stage="read_qc",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=LENGTH_FILTER_METHOD_NAME,
+    )
     paths = [Path(path) for path in attempt.metadata["filtered_long_reads_paths"]]
     stats_path = Path(attempt.metadata["post_filter_stats_path"])
     missing = [str(path) for path in attempt.expected_outputs if not path.exists()]
     if missing:
-        stdout = Path(result["stdout_path"]).read_text(encoding="utf-8") if Path(result["stdout_path"]).exists() else ""
-        stderr = Path(result["stderr_path"]).read_text(encoding="utf-8") if Path(result["stderr_path"]).exists() else ""
+        stdout_path, stderr_path = execution_log_paths(state, result)
+        stdout = stdout_path.read_text(encoding="utf-8")
+        stderr = stderr_path.read_text(encoding="utf-8")
         reason = f"seqkit seq expected outputs missing: {missing}"
         detail = "\n".join(part for part in [reason, stdout.strip(), stderr.strip()] if part)
         Ledger(state.get("data_dir", "data")).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=detail)
@@ -97,10 +114,6 @@ def collect_length_filter_artifacts(state: TopLevelState) -> dict:
     summary_path.write_text(json.dumps({"session_id": attempt.session_id, "method_name": METHOD_NAME, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "raw_long_reads_path": output.get("raw_long_reads_path"), "raw_long_reads_paths": output.get("raw_long_reads_paths") or [], "filtered_long_reads_path": str(paths[0]), "filtered_long_reads_paths": [str(path) for path in paths], "thresholds": {"min_len": min_len}, "read_set": "post_filter", "summary": summary}, indent=2), encoding="utf-8")
     artifacts.append(ArtifactMeta.from_file(summary_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_SUMMARY,
                                             metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "read_set": "post_filter", "format": "json", "thresholds": {"min_len": min_len}, "tool": "seqkit"}))
-    for value, artifact_type in [(result["stdout_path"], "command.stdout"), (result["stderr_path"], "command.stderr")]:
-        path = Path(value)
-        if path.exists():
-            artifacts.append(ArtifactMeta.from_file(path, stage="read_qc", method_name=LENGTH_FILTER_METHOD_NAME, artifact_type=artifact_type, metadata={"attempt_id": attempt.attempt_id}))
     data_dir = state.get("data_dir", "data")
     append_artifact_records(data_dir, attempt.session_id, artifacts)
     ledger = Ledger(data_dir)

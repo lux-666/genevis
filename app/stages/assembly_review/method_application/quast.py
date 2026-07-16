@@ -9,6 +9,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.evidence import load_execution_evidence
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
@@ -18,7 +19,6 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.stages.assembly_review.method_application.lifecycle import (
     absolute_review_data_dir,
     build_method_graph,
@@ -35,6 +35,7 @@ from app.stages.assembly_review.method_application.lifecycle import (
     update_review_output,
     update_signal,
 )
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 
 QUAST_METHOD = "assembly_review.eval.quast"
 FROZEN_STATUS = "quast_frozen"
@@ -122,14 +123,20 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
     session_id = state["session_id"]
     artifact_refs = list(output.get("artifact_refs") or [])
     ledger = Ledger(data_dir)
-    for result in output.get(RESULTS_KEY, []):
-        attempt = attempts[result["attempt_id"]]
+    for result_ref in output.get(RESULTS_KEY, []):
+        result = load_execution_evidence(
+            state,
+            result_ref,
+            expected_stage="assembly_review",
+            expected_method_name=QUAST_METHOD,
+        )
+        attempt = attempts[result.attempt_id]
         candidate_id = str(attempt.metadata.get("candidate_id"))
         artifacts: list[ArtifactMeta] = []
         metric_refs: list[str] = []
         notes = ["thresholds_not_applied_without_human_approval"]
         metadata: dict[str, Any] = {"attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "quast_output_dir": attempt.metadata.get("quast_output_dir")}
-        if result.get("success"):
+        if result.success:
             report_tsv = Path(attempt.metadata["report_tsv"])
             artifacts.append(ArtifactMeta.from_file(report_tsv, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
             metric_refs.append(str(report_tsv))
@@ -142,7 +149,6 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             summary_path.write_text(json.dumps({"session_id": session_id, "method_name": QUAST_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "report_tsv_ref": str(report_tsv), "metrics": metrics, "notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
             artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
             metric_refs.append(str(summary_path))
-            register_command_logs(artifacts, result, attempt, candidate_id)
             append_artifact_records(data_dir, session_id, artifacts)
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
@@ -152,15 +158,8 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             metadata.update({"metrics": metrics, "quast_summary_ref": str(summary_path)})
             signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="available", metric_refs=metric_refs, notes=[*notes, "quast_executed"], metadata=metadata)
         else:
-            register_command_logs(artifacts, result, attempt, candidate_id)
-            if artifacts:
-                append_artifact_records(data_dir, session_id, artifacts)
-                payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-                for artifact in payloads:
-                    ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
-                artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
-            metadata.update({"return_code": result.get("return_code"), "error": result.get("error")})
-            signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[str(artifact.file_path) for artifact in artifacts], notes=["quast_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
+            metadata.update({"return_code": result.return_code, "error": result.error})
+            signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[], notes=["quast_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
     update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": unique_refs(artifact_refs)}, status="evaluating")
     outputs = update["stage_outputs"]
     outputs["assembly_review"] = {**outputs["assembly_review"], ATTEMPTS_KEY: [], RESULTS_KEY: []}
@@ -173,13 +172,6 @@ def quast_threads(output: dict[str, Any]) -> tuple[int, str | None]:
     except (TypeError, ValueError):
         return 0, "assembly_review.quast_parameters.threads must be a positive integer"
     return (threads, None) if threads > 0 else (0, "assembly_review.quast_parameters.threads must be a positive integer")
-
-
-def register_command_logs(artifacts: list[ArtifactMeta], result: dict[str, Any], attempt: FrozenAttemptSpec, candidate_id: str) -> None:
-    for value, artifact_type in [(result["stdout_path"], "command.stdout"), (result["stderr_path"], "command.stderr")]:
-        path = Path(value)
-        if path.exists():
-            artifacts.append(ArtifactMeta.from_file(path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=artifact_type, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
 
 
 def parse_quast_report_tsv(path: Path) -> dict[str, Any]:

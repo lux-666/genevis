@@ -14,7 +14,15 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from app.execution.artifacts import read_artifact_records
+from app.control.lifecycle import resume_review_state
+from app.execution.artifacts import (
+    publish_artifact_record,
+    read_artifact_records,
+    resolve_artifact_ref,
+)
+from app.execution.evidence import ExecutionEvidence
+from app.review.base import ResumeReviewRequest
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
@@ -25,15 +33,13 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_RECOMMENDATION,
     ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
     ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+    ArtifactMeta,
     ParameterAttempt,
     ParameterRecommendationCursor,
     file_sha256,
 )
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
-from app.control.lifecycle import resume_review_state
-from app.review.base import ResumeReviewRequest
-from app.review.persistence import persist_review_decision, persist_review_request
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
     build_command,
@@ -42,23 +48,15 @@ from app.stages.assembly.command_builder import (
 )
 from app.stages.assembly.constants import FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.hifiasm import freeze_hifiasm_attempt
-from app.stages.assembly.method_application.hifiasm_ont import freeze_hifiasm_ont_attempt
+from app.stages.assembly.method_application.hifiasm_ont import (
+    freeze_hifiasm_ont_attempt,
+)
 from app.stages.assembly.method_application.nextdenovo import freeze_nextdenovo_attempt
 from app.stages.assembly.nodes import (
     execution_retry_gate,
     parameter_quality_gate,
     recommend_assembly_parameters,
-    _seal_parameter_attempt,
 )
-from app.stages.assembly.parameters.workflow import hydrate_parameter_attempt
-from app.stages.assembly.parameters.storage import (
-    load_recommendation_bundle,
-    read_json_artifact,
-    write_attempt_json_artifact,
-    write_recommendation_json_artifact,
-)
-from app.stages.assembly.routing import route_after_method_subgraph
-from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
 from app.stages.assembly.parameters.catalog import (
     lint_parameter_catalogs,
     load_parameter_catalog,
@@ -67,6 +65,17 @@ from app.stages.assembly.parameters.catalog import (
 from app.stages.assembly.parameters.profile import (
     build_full_parameter_profile,
     build_prompt_profile,
+)
+from app.stages.assembly.parameters.storage import (
+    load_recommendation_bundle,
+    read_json_artifact,
+    write_attempt_json_artifact,
+    write_recommendation_json_artifact,
+)
+from app.stages.assembly.parameters.workflow import hydrate_parameter_attempt
+from app.stages.assembly.routing import route_after_method_subgraph
+from app.stages.assembly_review.builder import (
+    build_stage as build_assembly_review_stage,
 )
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -142,6 +151,7 @@ def _persist_parameter_attempt(
     task: str = "recommend_initial",
     previous_attempt: dict | None = None,
     execution_result: dict | None = None,
+    execution_stderr: str = "",
 ) -> dict:
     """Publish a minimal valid recommendation bundle and return its compact cursor."""
 
@@ -256,6 +266,51 @@ def _persist_parameter_attempt(
     )
     execution_ref = None
     if execution_result is not None:
+        paths = SessionPaths.from_run_dir(state["data_dir"])
+        log_dir = paths.work_path("assembly", "parameter_test_logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stdout_source = log_dir / f"attempt_{attempt_id}.stdout.log"
+        stderr_source = log_dir / f"attempt_{attempt_id}.stderr.log"
+        stdout_source.write_text("", encoding="utf-8")
+        stderr_source.write_text(execution_stderr, encoding="utf-8")
+        stdout_ref = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                stdout_source,
+                stage="assembly",
+                method_name=method_id,
+                artifact_type="command.stdout",
+                metadata={"attempt_id": attempt_id},
+            ),
+            destination=paths.artifact_path(
+                "assembly", "logs", f"parameter_attempt_{attempt_id}.stdout.log"
+            ),
+        ).ref
+        stderr_ref = publish_artifact_record(
+            state["data_dir"],
+            state["session_id"],
+            ArtifactMeta.from_file(
+                stderr_source,
+                stage="assembly",
+                method_name=method_id,
+                artifact_type="command.stderr",
+                metadata={"attempt_id": attempt_id},
+            ),
+            destination=paths.artifact_path(
+                "assembly", "logs", f"parameter_attempt_{attempt_id}.stderr.log"
+            ),
+        ).ref
+        durable_result = ExecutionEvidence(
+            attempt_id=f"{state['session_id']}:assembly:parameter-{attempt_id}",
+            success=bool(execution_result.get("success", False)),
+            return_code=int(execution_result.get("return_code", 1)),
+            status=execution_result.get("status", "failed"),
+            status_detail=str(execution_result.get("status_detail", "")),
+            error=str(execution_result.get("error", "")),
+            stdout_ref=stdout_ref,
+            stderr_ref=stderr_ref,
+        )
         execution_ref = write_attempt_json_artifact(
             state,
             attempt_id,
@@ -264,7 +319,7 @@ def _persist_parameter_attempt(
                 "schema_version": 2,
                 "attempt_id": attempt_id,
                 "method_id": method_id,
-                "result": execution_result,
+                "result": durable_result.model_dump(mode="json"),
             },
             artifact_type=ASSEMBLY_PARAMETER_EXECUTION,
             method_name=method_id,
@@ -1133,14 +1188,14 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
     def test_execution_retry_gate_keeps_stderr_in_execution_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            stderr = Path(tmpdir) / "stderr.log"
-            stderr.write_text("\n".join(f"line {idx}" for idx in range(150)), encoding="utf-8")
+            stderr_text = "\n".join(f"line {idx}" for idx in range(150))
             state = _v2_state(tmpdir)
             attempt = _persist_parameter_attempt(
                 state,
                 method_id="assembly.candidate.hifiasm_ont",
                 status="execution_failed",
-                execution_result={"return_code": 1, "stderr_path": str(stderr)},
+                execution_result={"return_code": 1},
+                execution_stderr=stderr_text,
             )
             state["stage_outputs"] = {
                 "assembly": {
@@ -1162,8 +1217,13 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
             self.assertNotIn("execution_failure_log_tail", assembly)
-            self.assertEqual(execution["result"]["stderr_path"], str(stderr))
-            self.assertIn("line 149", stderr.read_text(encoding="utf-8"))
+            self.assertNotIn("stderr_path", execution["result"])
+            stderr_path = resolve_artifact_ref(
+                state["data_dir"],
+                state["session_id"],
+                execution["result"]["stderr_ref"],
+            )
+            self.assertIn("line 149", stderr_path.read_text(encoding="utf-8"))
             self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
 
     def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(self):
@@ -1173,14 +1233,13 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             "assembly.candidate.hifiasm_ont",
         ):
             with self.subTest(method_id=method_id), tempfile.TemporaryDirectory() as tmpdir:
-                stderr = Path(tmpdir) / "stderr.log"
-                stderr.write_text("invalid parameter purge_level", encoding="utf-8")
                 state = _v2_state(tmpdir)
                 attempt = _persist_parameter_attempt(
                     state,
                     method_id=method_id,
                     status="execution_failed",
-                    execution_result={"return_code": 2, "stderr_path": str(stderr)},
+                    execution_result={"return_code": 2},
+                    execution_stderr="invalid parameter purge_level",
                 )
                 state["stage_outputs"] = {
                     "assembly": {
@@ -1199,8 +1258,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
     def test_execution_retry_gate_emits_no_candidate_and_binds_sealed_request(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            stderr = Path(tmpdir) / "stderr.log"
-            stderr.write_text("invalid parameter purge_level", encoding="utf-8")
             state = _v2_state(tmpdir)
             attempt = _persist_parameter_attempt(
                 state,
@@ -1211,8 +1268,8 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                     "return_code": 2,
                     "status": "failed",
                     "status_detail": "",
-                    "stderr_path": str(stderr),
                 },
+                execution_stderr="invalid parameter purge_level",
             )
             state["stage_outputs"] = {
                 "assembly": {

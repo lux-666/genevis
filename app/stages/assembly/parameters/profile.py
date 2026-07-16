@@ -295,8 +295,8 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             ),
             "execution_status": _first_path(previous_attempt, "execution_result.status"),
             "execution_status_detail": _first_path(previous_attempt, "execution_result.status_detail"),
-            "stderr_ref": _first_path(previous_attempt, "stderr_ref", "execution_result.stderr_path"),
-            "stdout_ref": _first_path(previous_attempt, "stdout_ref", "execution_result.stdout_path"),
+            "stderr_ref": _first_path(previous_attempt, "stderr_ref", "execution_result.stderr_ref"),
+            "stdout_ref": _first_path(previous_attempt, "stdout_ref", "execution_result.stdout_ref"),
             "resource_facts": _first_path(
                 previous_attempt,
                 "resource_facts",

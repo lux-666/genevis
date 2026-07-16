@@ -10,26 +10,26 @@ Assembly review is the main human gate.  These tests verify that:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
-import ast
+import shutil
 import tempfile
 import unittest
-import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+from app.review.persistence import load_review_request, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_REVIEW_PACKET,
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.state import initial_state
 from app.stages.assembly_review.builder import build_stage
 from app.stages.assembly_review.method_application.busco import build_busco_graph
 from app.stages.assembly_review.method_application.quast import build_quast_graph
-from app.schemas.state import initial_state
-from app.review.persistence import load_review_request, persist_review_request
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -695,7 +695,6 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_failed", event_types)
-            self.assertIn("artifact_registered", event_types)
             self.assertIn("review_requested", event_types)
             artifact_events = [
                 json.loads(line)
@@ -704,6 +703,14 @@ class AssemblyReviewStageTests(unittest.TestCase):
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
+            self.assertEqual(
+                sum(event["artifact_type"] == "command.stdout" for event in artifact_events),
+                1,
+            )
+            self.assertEqual(
+                sum(event["artifact_type"] == "command.stderr" for event in artifact_events),
+                1,
+            )
 
     def test_local_quast_missing_draft_marks_signal_missing_without_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1047,8 +1054,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
             mock_rec.assert_not_called()
 
     def test_auto_resume_validation_failure_falls_back_to_blocked_human(self):
-        from app.review.base import ResumeReviewRequest
         from app.control.lifecycle import ResumeValidationError
+        from app.review.base import ResumeReviewRequest
 
         with tempfile.TemporaryDirectory() as tmpdir:
             candidate_ref = self._write_candidate_bundle(
@@ -1145,8 +1152,11 @@ class AssemblyReviewStageTests(unittest.TestCase):
         # non-existent nested location. The script must embed absolute paths.
         import os
         from unittest.mock import patch
+
         from app.execution.env_resolver import EnvSpec
-        from app.stages.assembly_review.method_application.quast import freeze_quast_attempts
+        from app.stages.assembly_review.method_application.quast import (
+            freeze_quast_attempts,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1780,8 +1790,8 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_generates_candidate_comparison_artifact(self):
         """After rerun re-enters assembly_review, comparison artifact is generated for 2+ candidates."""
-        from app.review.base import ResumeReviewRequest
         from app.control.lifecycle import resume_review_state
+        from app.review.base import ResumeReviewRequest
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = self._fake_flye_bin(tmpdir)

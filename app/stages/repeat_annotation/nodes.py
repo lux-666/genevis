@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import shlex
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,20 +12,12 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_execution_evidence, persist_execution_result
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.storage.publish import shell_publish_file
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
-from app.stages.base import (
-    absolute_data_dir,
-    append_route_trace,
-    stage_artifacts_dir,
-    stage_output,
-    stage_work_dir,
-    update_stage_output,
-)
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
     REPEAT_ANNOTATION_GFF3,
@@ -39,6 +30,15 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
+from app.stages.base import (
+    absolute_data_dir,
+    append_route_trace,
+    stage_artifacts_dir,
+    stage_output,
+    stage_work_dir,
+    update_stage_output,
+)
+from app.storage.publish import shell_publish_file
 
 REPEAT_LIBRARY_CANDIDATES: list[str] = []
 REPEAT_HELPER_METHODS: list[str] = []
@@ -332,19 +332,23 @@ def run_repeatmasker_attempt(state: TopLevelState) -> dict:
         fail_label="RepeatMasker",
         cleanup_outputs=False,
     )
-    result_payload = outcome.result.model_dump(mode="json")
+    result_ref = persist_execution_result(
+        state,
+        stage="repeat_annotation",
+        method_name=REPEAT_MASKING_METHOD,
+        result=outcome.result,
+        error=outcome.error,
+    ).model_dump(mode="json")
     if not outcome.success:
-        _register_repeatmasker_log_artifacts(state, attempt, result_payload)
-        result_payload["error"] = outcome.error
         return _update_repeat_output(
             state,
             {
                 "status": "failed",
                 "reason": outcome.error,
-                "repeatmasker_execution_result": result_payload,
+                "repeatmasker_execution_result": result_ref,
             },
         )
-    return _update_repeat_output(state, {"status": "repeatmasker_ran", "repeatmasker_execution_result": result_payload})
+    return _update_repeat_output(state, {"status": "repeatmasker_ran", "repeatmasker_execution_result": result_ref})
 
 
 def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
@@ -354,7 +358,13 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
-    result = dict(repeat_out.get("repeatmasker_execution_result") or {})
+    load_execution_evidence(
+        state,
+        repeat_out.get("repeatmasker_execution_result") or {},
+        expected_stage="repeat_annotation",
+        expected_attempt_id=attempt.attempt_id,
+        expected_method_name=REPEAT_MASKING_METHOD,
+    )
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     artifacts: list[ArtifactMeta] = []
@@ -382,21 +392,6 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
                 metadata={"attempt_id": attempt.attempt_id},
             )
         )
-    for path, artifact_type in [
-        (Path(result["stdout_path"]), "command.stdout"),
-        (Path(result["stderr_path"]), "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="repeat_annotation",
-                    method_name=REPEAT_MASKING_METHOD,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
-
     append_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
@@ -683,38 +678,6 @@ def fail_repeat_annotation(state: TopLevelState) -> dict:
         "supervision_state": "failed_terminal",
         "last_error": repeat_out.get("reason", default_reason),
     }
-
-
-def _register_repeatmasker_log_artifacts(
-    state: TopLevelState,
-    attempt: FrozenAttemptSpec,
-    result: dict[str, Any],
-) -> list[str]:
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    artifacts: list[ArtifactMeta] = []
-    for path, artifact_type in [
-        (Path(result["stdout_path"]), "command.stdout"),
-        (Path(result["stderr_path"]), "command.stderr"),
-    ]:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage="repeat_annotation",
-                    method_name=REPEAT_MASKING_METHOD,
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt.attempt_id},
-                )
-            )
-    if not artifacts:
-        return []
-    append_artifact_records(data_dir, session_id, artifacts)
-    ledger = Ledger(data_dir)
-    artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-    for artifact in artifact_payloads:
-        ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
-    return [str(artifact.file_path) for artifact in artifacts]
 
 
 def _local_repeatmasker_enabled(repeat_out: dict[str, Any]) -> bool:

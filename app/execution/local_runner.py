@@ -95,19 +95,4 @@ class LocalRunner:
                 )
             )
 
-        for path, artifact_type in [
-            (result.stdout_path, "command.stdout"),
-            (result.stderr_path, "command.stderr"),
-        ]:
-            if path.exists():
-                artifacts.append(
-                    ArtifactMeta.from_file(
-                        path,
-                        stage=spec.stage,
-                        method_name=spec.method_name,
-                        artifact_type=artifact_type,
-                        metadata={"attempt_id": spec.attempt_id},
-                    )
-                )
-
         return CollectResult(attempt_id=spec.attempt_id, artifacts=artifacts)

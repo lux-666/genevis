@@ -25,7 +25,7 @@ Already useful:
 
 - `app/stages/assembly/builder.py` has a LangGraph assembly subgraph.
 - Each executable assembly method already follows `freeze -> run -> collect`.
-- `run_frozen_attempt()` already records stdout/stderr paths and ledger attempt events.
+- `run_frozen_attempt()` publishes and indexes stdout/stderr and records ledger attempt events.
 - `read_qc` can provide read summary facts such as total bases, N50, and quality fields.
 - `genome_survey` can provide `genome_size_prior`, heterozygosity, and repeat fraction.
 - `assembly_review` already evaluates candidates through QUAST/BUSCO-style signals and has rerun infrastructure.
@@ -121,7 +121,7 @@ genome_survey (EXISTS) ─────────┘        |
                                           |  merges l0_fixed + l1_readonly + validated l2_recommended into argv
                                           v
                                       executor / method lifecycle (EXISTS)
-                                          |  freeze -> run -> collect; stdout/stderr already recorded
+                                          |  freeze -> run -> collect; stdout/stderr already indexed
                                           |  FAIL: last 100 log lines
                                           |        └──────────────> parameter_recommender retry (NEW)
                                           v
@@ -186,11 +186,10 @@ validation:
   valid: true
 argv: ["hifiasm", "--ont", "-o", "...", "-t", "32", "--hg-size", "1g", "-l", "1", "reads.fq"]
 frozen_attempt_ref: {}
-execution_result:
-  return_code: 1
-  stdout_path: data/logs/...
-  stderr_path: data/logs/...
-failure_log_tail: "last 100 lines"
+execution_ref:
+  artifact_type: assembly.execution_result
+  path_ref: artifacts/assembly/attempts/0/execution.json
+  sha256: "..."
 quality_gate:
   passed: false
   failure_mode: under_purged

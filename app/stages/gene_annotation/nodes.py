@@ -1429,6 +1429,7 @@ def _run_gene_method_attempt(
         state,
         method_name=attempt.method_name,
         result=outcome.result,
+        error=outcome.error,
     )
     if not outcome.success:
         return _update_gene_output(
@@ -1844,6 +1845,7 @@ def run_evm_attempt(state: TopLevelState) -> dict:
         state,
         method_name=attempt.method_name,
         result=outcome.result,
+        error=outcome.error,
     )
     if not outcome.success:
         return _update_gene_output(
@@ -2081,6 +2083,7 @@ def run_gene_busco_attempt(state: TopLevelState) -> dict:
         state,
         method_name=attempt.method_name,
         result=outcome.result,
+        error=outcome.error,
     )
     if not outcome.success:
         return _update_gene_output(

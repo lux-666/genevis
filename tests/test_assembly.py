@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import tempfile
 import unittest
-import inspect
 from pathlib import Path
 from unittest.mock import patch
 
-from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
-from app.schemas.state import initial_state
 from app.control.lifecycle import resume_review_state
+from app.execution.artifacts import resolve_artifact_ref
 from app.review.base import ResumeReviewRequest
+from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.shared_parameters import (
+    PLATFORM_TO_SHARED_READ_TYPE,
+    SHARED_TO_METHOD_READ_TYPE,
+)
+from app.schemas.state import initial_state
 from app.stages.assembly.builder import build_stage
 from app.stages.assembly.method_application import flye as flye_graph
 from app.stages.assembly.method_application import hifiasm as hifiasm_graph
@@ -807,7 +811,12 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
-            self.assertIn("fake flye failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            stderr_path = resolve_artifact_ref(
+                result["data_dir"], result["session_id"], execution["stderr_ref"]
+            )
+            self.assertIn("fake flye failed", stderr_path.read_text(encoding="utf-8"))
+            self.assertNotIn("stdout_path", execution)
+            self.assertNotIn("stderr_path", execution)
             self.assertNotIn("output_paths", execution)
             self.assertIn("stdout_ref", execution)
             self.assertIn("stderr_ref", execution)
@@ -981,7 +990,12 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
-            self.assertIn("fake hifiasm failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            stderr_path = resolve_artifact_ref(
+                result["data_dir"], result["session_id"], execution["stderr_ref"]
+            )
+            self.assertIn("fake hifiasm failed", stderr_path.read_text(encoding="utf-8"))
+            self.assertNotIn("stdout_path", execution)
+            self.assertNotIn("stderr_path", execution)
             self.assertNotIn("output_paths", execution)
             self.assertIn("stdout_ref", execution)
             self.assertIn("stderr_ref", execution)

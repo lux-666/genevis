@@ -18,6 +18,7 @@ from app.stages.genome_survey.method_application.lifecycle import (
     record_attempt_success,
     run_method_attempt,
     update_genome_survey_output,
+    validate_attempt_execution,
 )
 
 METHOD_NAME = "genome_survey.model.genomescope2"
@@ -113,15 +114,15 @@ def run_genomescope2_attempt(state: TopLevelState) -> dict:
 
 
 def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
-    """Collect GenomeScope2 summary and command logs."""
+    """Collect the GenomeScope2 summary output."""
     output = genome_survey_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
 
     attempt = FrozenAttemptSpec.model_validate(output[FROZEN_ATTEMPT_KEY])
+    validate_attempt_execution(state, attempt, output[EXECUTION_RESULT_KEY])
     artifacts = attempt_artifacts(
         attempt,
-        output[EXECUTION_RESULT_KEY],
         {str(Path(output["genomescope2_summary_path"])): GENOME_SURVEY_MODEL_SUMMARY},
     )
     record_attempt_success(state, attempt, artifacts)
