@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -38,7 +39,13 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
-from app.storage.paths import SessionPaths, default_data_root, locate_session_data_dir
+from app.storage.paths import (
+    SessionPaths,
+    default_data_root,
+    ensure_data_layout,
+    ensure_run_layout,
+    locate_session_data_dir,
+)
 
 
 _LOCAL_EXEC_STAGE_CHOICES = list(get_args(LocalExecStage))
@@ -294,13 +301,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
-        help="Validate envs.yaml and conform external software packages",
+        help="Initialize and validate project configuration, then check external packages",
     )
     bootstrap_parser.add_argument(
         "--apply",
         action="store_true",
         default=False,
-        help="Apply conformance actions (create symlinks). Without this flag, only validation is performed.",
+        help="Apply planned project configuration and package conformance actions.",
     )
     bootstrap_parser.add_argument(
         "--config",
@@ -447,12 +454,13 @@ def _run_session(args: argparse.Namespace) -> int:
     )
     run_dir = paths.run_dir
     request = request.model_copy(update={"data_dir": str(run_dir)})
-    Ledger(request.data_dir).create_session(request.session_id, str(manifest_path))
+    manifest_ref = paths.to_ref(paths.manifest_path)
+    Ledger(request.data_dir).create_session(request.session_id, manifest_ref)
 
     requested_stages = list(run_config.requested_stages) if run_config and run_config.requested_stages else None
     state = initial_state(
         session_id=request.session_id,
-        input_manifest_ref=str(manifest_path),
+        input_manifest_ref=manifest_ref,
         data_dir=request.data_dir,
         requested_stages=requested_stages,
     )
@@ -522,9 +530,6 @@ def _run_session(args: argparse.Namespace) -> int:
         stage_outputs["assembly_review"] = review_out
     if run_config and run_config.hic_scaffolding:
         hic_out = dict(stage_outputs.get("hic_scaffolding") or {})
-        requested_methods = run_config.hic_scaffolding.methods or [run_config.hic_scaffolding.method]
-        hic_out["selected_methods"] = ["hic_scaffolding.candidate.autohic" for _method in requested_methods]
-        hic_out["primary_method"] = hic_out["selected_methods"][0]
         if run_config.hic_scaffolding.autohic_parameters:
             hic_out["autohic_parameters"] = run_config.hic_scaffolding.autohic_parameters.model_dump(
                 exclude_none=True
@@ -575,18 +580,17 @@ def _run_session(args: argparse.Namespace) -> int:
             **latest_state,
             "session_id": request.session_id,
             "data_dir": request.data_dir,
-            "input_manifest_ref": str(manifest_path),
+            "input_manifest_ref": manifest_ref,
             "supervision_state": "failed_terminal",
             "last_error": error,
             "checkpoint_persistence": backend,
         }
-        Ledger(request.data_dir).record_event(
+        Ledger(request.data_dir).record_session_terminal(
             request.session_id,
-            "run_failed",
-            {
-                "current_stage": failure_result.get("current_stage"),
-                "error": error,
-            },
+            outcome="failed",
+            stage=failure_result.get("current_stage"),
+            error=error,
+            idempotency_key="session-terminal:failed",
         )
         from app.reports.review_report import write_operator_report
 
@@ -631,6 +635,11 @@ def _run_session(args: argparse.Namespace) -> int:
         run_config_ref = Path(run_config_path).expanduser().resolve(strict=False)
         print(f"run_config_ref: {run_config_ref}")
 
+    if supervision in {"completed", "failed_terminal"}:
+        from app.reports.review_report import write_final_review_report
+
+        write_final_review_report(request.data_dir, request.session_id)
+
     if supervision == "failed_terminal":
         print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
         return 1
@@ -645,15 +654,8 @@ def _materialize_run_layout(
     run_config_path: Path | None,
 ) -> None:
     """Create the per-session storage contract before stage execution starts."""
-    for directory in (
-        paths.run_dir,
-        paths.control_dir,
-        paths.artifacts_dir,
-        paths.work_dir,
-        paths.ledger_dir,
-        paths.checkpoints_dir,
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
+    ensure_data_layout(paths.data_root)
+    ensure_run_layout(paths)
     shutil.copy2(manifest_path, paths.manifest_path)
     if run_config_path is not None:
         shutil.copy2(run_config_path, paths.run_config_path)
@@ -672,7 +674,10 @@ def _interactive_gate_loop(
         ResumeValidationError,
         resume_review_state,
     )
-    from app.entrypoints.review_interactive import collect_gate_decision, persist_decision_artifact
+    from app.entrypoints.review_interactive import (
+        applied_decision_artifact_path,
+        collect_gate_decision,
+    )
     from app.review.annotation_intake import collect_annotation_intake_selection, persist_annotation_intake_plan
 
     ledger = Ledger(data_dir)
@@ -727,14 +732,14 @@ def _interactive_gate_loop(
             print(f"error: resume rejected: {exc}", file=sys.stderr)
             break
 
-        decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+        decision_path = applied_decision_artifact_path(request, data_dir)
         print(f"decision_artifact: {decision_path}")
         if intake is not None:
             print(f"annotation_intake_plan: {intake.artifact_ref}")
 
         resume_payload = {
             "source": "interactive_gate",
-            "decision_artifact_ref": str(decision_path),
+            "decision_artifact_ref": SessionPaths.from_run_dir(data_dir).to_ref(decision_path),
             "decision": {"stage": request.stage, "gate_id": request.gate_id, "decision": request.decision},
         }
         ledger.record_event(session_id, "resume_started", resume_payload)
@@ -915,16 +920,13 @@ def generate_session_id(data_dir: str | Path | None = None, *, now: datetime | N
     root = Path(data_dir or default_data_root())
     pattern = re.compile(rf"^gene-{date}-(\d{{6}})$")
     max_index = 0
-    session_roots = [root / "runs", root / "ledger"]
-    for session_root in session_roots:
-        if not session_root.exists():
-            continue
+    session_root = root / "runs"
+    if session_root.exists():
         for child in session_root.iterdir():
-            if not child.is_dir():
-                continue
-            match = pattern.match(child.name)
-            if match:
-                max_index = max(max_index, int(match.group(1)))
+            if child.is_dir():
+                match = pattern.match(child.name)
+                if match:
+                    max_index = max(max_index, int(match.group(1)))
     return f"gene-{date}-{max_index + 1:06d}"
 
 
@@ -934,9 +936,10 @@ def _run_inspect(args: argparse.Namespace) -> int:
     filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
     if filters is None:
         return 1
-    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    data_root = _resolve_data_dir(args.data_dir)
+    data_dir = locate_session_data_dir(data_root, args.session_id)
     if data_dir is None:
-        data_dir = Path(_resolve_data_dir(args.data_dir))
+        data_dir = SessionPaths(data_root, args.session_id).run_dir
     summary = inspect_session(args.session_id, data_dir)
     template_path = getattr(args, "write_decision_template", None)
     if template_path:
@@ -1047,8 +1050,8 @@ def _filter_review_decisions(decisions: list[dict], filters: dict[str, str]) -> 
     return [decision for decision in decisions if decision.get("decided_by") == decided_by]
 
 
-def _load_dotenv_without_override() -> None:
-    for path in _candidate_dotenv_paths():
+def _load_dotenv_without_override(paths: list[Path] | None = None) -> None:
+    for path in paths if paths is not None else _candidate_dotenv_paths():
         if not path.exists():
             continue
         for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -1110,9 +1113,10 @@ def _run_resume(args: argparse.Namespace) -> int:
 
     from app.graph.checkpointer import checkpoint_db_path
 
-    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    data_root = _resolve_data_dir(args.data_dir)
+    data_dir = locate_session_data_dir(data_root, args.session_id)
     if data_dir is None:
-        data_dir = Path(_resolve_data_dir(args.data_dir))
+        data_dir = SessionPaths(data_root, args.session_id).run_dir
     db_path = checkpoint_db_path(data_dir)
     if not db_path.exists():
         print(
@@ -1233,6 +1237,11 @@ def _run_resume(args: argparse.Namespace) -> int:
         },
     )
 
+    if supervision in {"completed", "failed_terminal"}:
+        from app.reports.review_report import write_final_review_report
+
+        write_final_review_report(data_dir, args.session_id)
+
     print(f"session_id: {args.session_id}")
     print(f"current_stage: {current_stage}")
     print(f"supervision_state: {supervision}")
@@ -1257,9 +1266,10 @@ def _run_review(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    data_dir = locate_session_data_dir(_resolve_data_dir(args.data_dir), args.session_id)
+    data_root = _resolve_data_dir(args.data_dir)
+    data_dir = locate_session_data_dir(data_root, args.session_id)
     if data_dir is None:
-        data_dir = Path(_resolve_data_dir(args.data_dir))
+        data_dir = SessionPaths(data_root, args.session_id).run_dir
     return run_interactive_review(
         args.session_id,
         str(data_dir),
@@ -1275,9 +1285,13 @@ def _run_tui(args: argparse.Namespace) -> int:
 
 
 def _run_bootstrap(args: argparse.Namespace) -> int:
-    """Validate envs.yaml and optionally conform external packages."""
+    """Initialize project config, then validate and conform packages."""
     from app.execution import env_resolver
     from app.execution.package_bootstrap import conform_juicer, preflight_all, verify_envs_yaml
+    from app.execution.project_bootstrap import (
+        apply_project_bootstrap_plan,
+        collect_project_bootstrap_plan,
+    )
 
     # Determine config path
     if args.config:
@@ -1285,8 +1299,47 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     else:
         config_path = Path("config/envs.yaml")
 
-    # Step 1: Verify envs.yaml exists and is properly configured
     print(f"Checking configuration: {config_path}")
+    existing_issues = verify_envs_yaml(config_path) if config_path.exists() else []
+    interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    needs_initialization = (
+        not config_path.exists()
+        or interactive
+        or any("placeholder" in issue for issue in existing_issues)
+    )
+    if needs_initialization:
+        try:
+            init_plan = collect_project_bootstrap_plan(
+                config_path,
+                prompt=input,
+                secret_prompt=getpass.getpass,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"\n❌ Failed to inspect project configuration: {exc}", file=sys.stderr)
+            return 1
+
+        if init_plan.changes:
+            print("\nProject configuration plan:")
+            for change in init_plan.changes:
+                print(f"  - {change.file}: {change.field} = {change.display_value()}")
+        if init_plan.unresolved_fields:
+            print("\n❌ Missing project configuration values:")
+            for field in init_plan.unresolved_fields:
+                print(f"  - {field}")
+            return 1
+        if init_plan.has_changes:
+            if not args.apply:
+                print("\nRun with --apply to write these project configuration changes")
+                return 0
+            try:
+                apply_project_bootstrap_plan(init_plan)
+                _load_dotenv_without_override([init_plan.dotenv_path])
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                print(f"\n❌ Failed to initialize project configuration: {exc}", file=sys.stderr)
+                return 1
+            print("✓ Project configuration initialized")
+
+    # Verify with the same EnvResolver used by stage execution.
     issues = verify_envs_yaml(config_path)
     if issues:
         print("\n❌ Configuration issues found:")

@@ -11,12 +11,14 @@ from unittest.mock import patch
 
 from app.control.lifecycle import resume_review_state
 from app.review.base import ResumeReviewRequest
+from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
 from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import build_t2t_candidates, scan_read_telomeres
+from tests.data_v2 import v2_run_dir
 
 
 class T2TDescriptorTests(unittest.TestCase):
@@ -35,7 +37,7 @@ class T2TDescriptorTests(unittest.TestCase):
 
 class T2TStageTests(unittest.TestCase):
     def _state(self, tmpdir: str, assembly: Path, reads: Path | None = None):
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(tmpdir, "s1")))
         state["current_stage"] = "t2t"
         assets = []
         if reads:
@@ -174,7 +176,7 @@ class T2TStageTests(unittest.TestCase):
                 "chr1:right\tchr1\tright\tr1\tright\t+\t60\t1000\t0\t24\t0\t1000\tr1,r2\tproposed\tconservative_multi_read_support\n"
             )
             candidates.write_text(original, encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(tmpdir, "s1")))
             state["stage_outputs"] = {
                 "t2t": {
                     "status": "candidates_built",
@@ -206,11 +208,17 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(result["stage_outputs"]["t2t"]["status"], "blocked_human")
             self.assertEqual(result["active_interrupt"]["stage"], "t2t")
             self.assertEqual(result["active_interrupt"]["gate_id"], "t2t_review")
+            request_payload = load_review_request(
+                result["data_dir"], result["active_interrupt"]["request_ref"]
+            )["payload"]
             self.assertEqual(
-                result["active_interrupt"]["decisions_allowed"],
+                request_payload["decisions_allowed"],
                 ["accept_selected_candidates", "continue_without_patch", "stop_pipeline"],
             )
-            self.assertEqual([candidate["candidate_id"] for candidate in result["active_interrupt"]["candidates"]], ["chr1:right"])
+            self.assertEqual(
+                [candidate["candidate_id"] for candidate in request_payload["candidates"]],
+                ["chr1:right"],
+            )
 
     def test_manual_review_without_proposed_candidates_does_not_block(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -245,6 +253,8 @@ class T2TStageTests(unittest.TestCase):
                 gate_id="t2t_review",
                 decision="accept_selected_candidates",
                 candidate_ids=["chr1:right"],
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
             resumed = resume_review_state(blocked, request)
@@ -273,6 +283,8 @@ class T2TStageTests(unittest.TestCase):
                 stage="t2t",
                 gate_id="t2t_review",
                 decision="continue_without_patch",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
             resumed = resume_review_state(blocked, request)
@@ -298,6 +310,8 @@ class T2TStageTests(unittest.TestCase):
                 stage="t2t",
                 gate_id="t2t_review",
                 decision="stop_pipeline",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
             stopped = resume_review_state(blocked, request)

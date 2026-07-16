@@ -14,7 +14,6 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
-from app.reports.review_report import write_final_review_report
 from app.schemas.artifacts import (
     ArtifactMeta,
     FunctionAnnotationBundle,
@@ -24,7 +23,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_output, update_stage_output
+from app.stages.base import stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 
 FUNCTION_CANDIDATE_METHODS = [
     "function_annotation.candidate.diamond",
@@ -88,7 +87,7 @@ def plan_function_methods(state: TopLevelState) -> dict:
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    work_dir = data_dir / "work" / "function_annotation" / session_id
+    work_dir = stage_work_dir(state, "function_annotation")
     expected_outputs = {
         "gene_function_tsv": str(work_dir / "gene_function.tsv"),
         "go_annotation_table": str(work_dir / "go_annotations.tsv"),
@@ -130,7 +129,7 @@ def validate_database_provenance(state: TopLevelState) -> dict:
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "function_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "function_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     plan = FunctionAnnotationPlan(
         session_id=session_id,
@@ -204,8 +203,8 @@ def _freeze_func_method_attempt(
     if blocked is not None:
         return _update_function_output(state, blocked)
 
-    working_dir = data_dir / "work" / "function_annotation" / session_id / cfg["suffix"]
-    artifact_dir = data_dir / "artifacts" / "function_annotation" / session_id / cfg["suffix"]
+    working_dir = stage_work_dir(state, "function_annotation", cfg["suffix"])
+    artifact_dir = stage_artifacts_dir(state, "function_annotation", cfg["suffix"])
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -337,12 +336,12 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    working_dir = data_dir / "work" / "function_annotation" / session_id / "diamond"
+    working_dir = stage_work_dir(state, "function_annotation", "diamond")
     database_is_index = database_source.suffix.lower() == ".dmnd"
     dmnd_index = database_source if database_is_index else working_dir / "reference.dmnd"
 
     cfg = FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD]
-    artifact_dir = data_dir / "artifacts" / "function_annotation" / session_id / cfg["suffix"]
+    artifact_dir = stage_artifacts_dir(state, "function_annotation", cfg["suffix"])
     output_tsv = artifact_dir / f"{cfg['suffix']}_hits.tsv"
 
     threads = function_out.get("diamond_parameters", {}).get("threads", 4)
@@ -401,7 +400,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     function_out = _function_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "function_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "function_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = function_out.get("expected_outputs", {})
     diamond_hits_ref = function_out.get("diamond_hits_ref")
@@ -453,8 +452,6 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     )
     append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
-    final_report_ref = write_final_review_report(data_dir, session_id)
-
     outputs = dict(state.get("stage_outputs") or {})
     outputs["function_annotation"] = {
         **function_out,
@@ -467,8 +464,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
         "annotated_gene_models_gff3_ref": materialized_annotated_gff,
         "method_results": [result.model_dump(mode="json") for result in method_results],
         "bundle_artifact_ref": str(bundle_ref),
-        "final_review_report_artifact_ref": final_report_ref,
-        "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path), final_report_ref],
+        "artifact_refs": [*function_out.get("artifact_refs", []), str(artifact.file_path)],
     }
     return {
         "stage_outputs": outputs,

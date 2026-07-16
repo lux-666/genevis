@@ -61,4 +61,12 @@ def test_lifecycle_literals_and_interrupt_contract_are_bounded() -> None:
     hints = get_type_hints(ActiveInterrupt)
     assert hints["stage"] is DomainStage
     assert ActiveInterrupt.__required_keys__ == {"stage"}
-    assert {"gate_id", "reason", "decisions_allowed", "blocked_at"} <= ActiveInterrupt.__optional_keys__
+    assert {
+        "gate_id",
+        "reason",
+        "blocked_at",
+        "review_request_id",
+        "request_ref",
+        "request_hash",
+    } <= ActiveInterrupt.__optional_keys__
+    assert "decisions_allowed" not in ActiveInterrupt.__optional_keys__

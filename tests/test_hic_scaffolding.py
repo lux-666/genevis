@@ -1,4 +1,4 @@
-"""Tests for the AutoHiC-only Hi-C scaffolding stage."""
+"""Tests for the selected, AutoHiC-only Hi-C scaffolding stage."""
 
 from __future__ import annotations
 
@@ -7,48 +7,79 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.control.lifecycle import ResumeValidationError
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.hic_scaffolding.builder import build_stage
 from app.stages.hic_scaffolding.nodes import apply_hic_scaffolding_resume_decision
+from app.stages.hic_scaffolding.parameter_catalog import (
+    load_autohic_parameter_catalog,
+)
+from app.stages.hic_scaffolding.parameter_nodes import (
+    apply_autohic_parameter_approval_decision,
+)
+from tests.data_v2 import v2_run_dir
 
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 
 
+class _FakeModel:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def invoke(self, _messages):
+        return SimpleNamespace(content=json.dumps(self.payload))
+
+
 class HiCScaffoldingDescriptorTests(unittest.TestCase):
-    def test_descriptor_registry_exposes_only_autohic_for_hic_scaffolding(self):
+    def test_registry_and_catalog_expose_only_autohic(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
 
         self.assertEqual(registry.by_stage["hic_scaffolding"], [AUTOHIC_METHOD])
-        self.assertIn("autohic", registry.packages)
-        self.assertIn("juicer", registry.packages)
-        self.assertIn("3ddna", registry.packages)
-        self.assertEqual(registry.methods[AUTOHIC_METHOD].package_ref, "autohic")
+        self.assertEqual(registry.methods[AUTOHIC_METHOD].parameter_catalog, "autohic")
         self.assertFalse(any("yahs" in method.lower() for method in registry.methods))
+        catalog = load_autohic_parameter_catalog()
+        self.assertEqual(
+            {
+                name
+                for name, specification in catalog.parameters.items()
+                if specification.level == 2
+            },
+            {"restriction_enzyme"},
+        )
 
 
 class HiCScaffoldingStageTests(unittest.TestCase):
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
-        path.write_text(json.dumps({"session_id": "s1", "assets": assets}, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps({"session_id": "s1", "assets": assets}, indent=2),
+            encoding="utf-8",
+        )
         return path
 
-    def _state(self, tmpdir: str, registry_ref: str | None):
+    def _state(self, tmpdir: str, registry_ref: str | None) -> dict:
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "hic_scaffolding"
         state["asset_registry_ref"] = registry_ref
         return state
 
-    def _inputs(self, tmpdir: str, *, read_count: int = 2) -> tuple[Path, list[Path], Path, Path]:
+    def _inputs(
+        self,
+        tmpdir: str,
+        *,
+        read_count: int = 2,
+    ) -> tuple[Path, list[Path], Path, Path]:
         root = Path(tmpdir)
         assembly = root / "adopted_contigs.fasta"
         assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -64,7 +95,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         chromosome_model.write_text("chromosome model\n", encoding="utf-8")
         return assembly, reads, error_model, chromosome_model
 
-    def _registry_for_inputs(self, tmpdir: str, assembly: Path, reads: list[Path]) -> Path:
+    def _registry_for_inputs(
+        self,
+        tmpdir: str,
+        assembly: Path,
+        reads: list[Path],
+        *,
+        library_metadata: dict | None = None,
+    ) -> Path:
         assets = [
             {
                 "asset_id": "s1:assembly_fasta_registered:adopted",
@@ -77,6 +115,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "asset_id": f"s1:hic_reads_registered:{path.name}",
                 "asset_type": "hic_reads_registered",
                 "path": str(path),
+                "metadata": library_metadata or {},
             }
             for path in reads
         )
@@ -87,22 +126,31 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         tmpdir: str,
         assembly: Path,
         reads: list[Path],
-        error_model: Path,
-        chromosome_model: Path,
+        *,
+        target_level: str = "chromosome",
     ) -> dict:
-        state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
-        state["execution_mode"] = "local"
+        state = self._state(
+            tmpdir,
+            str(
+                self._registry_for_inputs(
+                    tmpdir,
+                    assembly,
+                    reads,
+                    library_metadata={"library_protocol": "in_situ_hic"},
+                )
+            ),
+        )
         state["stage_outputs"] = {
-            "inventory": {"target_assembly_level": "chromosome"},
-            "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
+            "inventory": {"target_assembly_level": target_level},
+            "assembly_review": {
+                "status": "completed",
+                "final_assembly_ref": str(assembly),
+            },
             "hic_scaffolding": {
                 "execution_mode": "local",
-                "selected_methods": [AUTOHIC_METHOD],
-                "primary_method": AUTOHIC_METHOD,
+                # This is evidence for the LLM, not an approved parameter.
                 "autohic_parameters": {
-                    "restriction_enzyme": "MboI",
-                    "error_model_ref": str(error_model),
-                    "chromosome_model_ref": str(chromosome_model),
+                    "restriction_enzyme": "HindIII",
                     "threads": 2,
                     "python_command": "python",
                 },
@@ -110,13 +158,24 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         }
         return state
 
-    def _fake_autohic_environment(self, tmpdir: str, *, fail: bool = False) -> Path:
+    def _fake_autohic_environment(
+        self,
+        tmpdir: str,
+        error_model: Path,
+        chromosome_model: Path,
+        *,
+        fail: bool = False,
+    ) -> Path:
         root = Path(tmpdir)
         autohic_root = root / "AutoHiC"
         (autohic_root / "src" / "common").mkdir(parents=True)
         (autohic_root / "src" / "models" / "cfgs").mkdir(parents=True)
-        (autohic_root / "src" / "common" / "run.sh").write_text("# fake pipeline\n", encoding="utf-8")
-        (autohic_root / "src" / "models" / "cfgs" / "error_model.py").write_text("# fake model cfg\n", encoding="utf-8")
+        (autohic_root / "src" / "common" / "run.sh").write_text(
+            "# fake pipeline\n", encoding="utf-8"
+        )
+        (autohic_root / "src" / "models" / "cfgs" / "error_model.py").write_text(
+            "# fake model cfg\n", encoding="utf-8"
+        )
         entry = autohic_root / "autohic.py"
         entry.write_text(
             "import pathlib, sys\n"
@@ -173,6 +232,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "  autohic:\n"
             f"    install_root: {autohic_root}\n"
             "    canary_paths: [autohic.py, src/common/run.sh, src/models/cfgs/error_model.py]\n"
+            "    models:\n"
+            f"      error: {error_model}\n"
+            f"      chromosome: {chromosome_model}\n"
             "  juicer:\n"
             f"    install_root: {juicer_root}\n"
             "    canary_paths: [CPU/juicer.sh, CPU/common/chimeric_blacklist.awk, misc/generate_site_positions.py, scripts/common/juicer_tools.jar]\n"
@@ -187,180 +249,403 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         )
         return envs_yaml
 
-    def test_graph_contains_only_autohic_method_node(self):
+    def _run_to_parameter_gate(
+        self,
+        state: dict,
+        *,
+        enzyme: str = "MboI",
+    ) -> dict:
+        model = _FakeModel(
+            {
+                "parameter_patch": {"restriction_enzyme": enzyme},
+                "summary": "Library metadata supports this enzyme.",
+            }
+        )
+        with patch(
+            "app.llm.autohic_parameter_prompts.build_chat_model",
+            return_value=model,
+        ):
+            return build_stage().invoke(state)
+
+    def _approve_parameters(self, blocked: dict) -> dict:
+        interrupt = blocked["active_interrupt"]
+        bindings = {
+            key: interrupt.get(key)
+            for key in (
+                "attempt_id",
+                "task",
+                "previous_attempt_id",
+                "recommendation_hash",
+            )
+        }
+        update = apply_autohic_parameter_approval_decision(
+            blocked,
+            ResumeReviewRequest(
+                session_id="s1",
+                stage="hic_scaffolding",
+                gate_id="parameter_approval",
+                decision="approve_parameters",
+                notes=["approved AutoHiC enzyme"],
+                metadata=bindings,
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
+            ),
+        )
+        return {**blocked, **update}
+
+    def test_graph_has_direct_autohic_without_selection_or_skip_nodes(self):
         nodes = set(build_stage().get_graph().nodes)
         self.assertIn("autohic", nodes)
-        self.assertNotIn("yahs", nodes)
-        self.assertNotIn("juicer_3ddna", nodes)
+        self.assertIn("recommend_autohic_parameters", nodes)
+        self.assertIn("chromosome_assembly_review", nodes)
+        for removed in (
+            "select_hic_mode",
+            "write_hic_skip",
+            "plan_hic_scaffold",
+            "yahs",
+            "juicer_3ddna",
+        ):
+            self.assertNotIn(removed, nodes)
 
-    def test_missing_final_assembly_ref_fails_terminally(self):
+    def test_selected_stage_missing_assembly_blocks_requirements(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            registry = self._write_registry(tmpdir, assets=[])
-            result = build_stage().invoke(self._state(tmpdir, str(registry)))
-            self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("final_assembly_ref", result["last_error"])
-
-    def test_registered_assembly_is_used_when_review_output_is_absent(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads, _, _ = self._inputs(tmpdir)
-            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
-            state["stage_outputs"] = {"inventory": {"target_assembly_level": "chromosome"}}
+            state = self._state(
+                tmpdir,
+                str(self._write_registry(tmpdir, assets=[])),
+            )
+            state["stage_outputs"] = {
+                "hic_scaffolding": {"execution_mode": "local"}
+            }
             result = build_stage().invoke(state)
-            self.assertEqual(result["stage_outputs"]["hic_scaffolding"]["pre_hic_assembly_ref"], str(assembly))
 
-    def test_no_hic_reads_skips_and_continues_with_contig_assembly(self):
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertIn("pre_hic_assembly_ref", hic["missing_requirements"])
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+
+    def test_selected_stage_missing_reads_blocks_instead_of_skipping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, _, _, _ = self._inputs(tmpdir, read_count=0)
-            registry = self._registry_for_inputs(tmpdir, assembly, [])
-            state = self._state(tmpdir, str(registry))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-            }
+            state = self._configured_state(tmpdir, assembly, [])
             result = build_stage().invoke(state)
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["current_stage"], next_stage_name("hic_scaffolding"))
-            self.assertEqual(hic["mode"], "skipped_no_hic")
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
 
-    def test_hic_present_but_not_chromosome_level_skips(self):
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertIn("paired hic_read_paths (R1/R2)", hic["missing_requirements"])
+            self.assertNotIn("mode", hic)
+            self.assertNotIn("skip_record_ref", hic)
+
+    def test_target_level_does_not_create_a_stage_local_skip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, _, _ = self._inputs(tmpdir)
-            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "contig"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-            }
-            result = build_stage().invoke(state)
-            self.assertEqual(result["stage_outputs"]["hic_scaffolding"]["mode"], "skipped_not_chromosome_level")
+            state = self._configured_state(
+                tmpdir,
+                assembly,
+                reads,
+                target_level="contig",
+            )
+            result = self._run_to_parameter_gate(state)
 
-    def test_chromosome_request_plans_only_autohic_and_blocks_review(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads, _, _ = self._inputs(tmpdir)
-            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-            }
-            result = build_stage().invoke(state)
-            hic = result["stage_outputs"]["hic_scaffolding"]
             self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertEqual(hic["candidate_methods"], [AUTOHIC_METHOD])
-            plan = json.loads(Path(hic["scaffold_plan_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(plan["candidate_methods"], [AUTOHIC_METHOD])
+            self.assertEqual(result["active_interrupt"]["gate_id"], "parameter_approval")
+            self.assertNotIn("mode", result["stage_outputs"]["hic_scaffolding"])
+
+    def test_llm_directly_recommends_only_enzyme_and_always_blocks_approval(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            result = self._run_to_parameter_gate(state, enzyme="MboI")
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "blocked_human")
+            self.assertEqual(result["active_interrupt"]["gate_id"], "parameter_approval")
+            self.assertFalse(hic["parameter_attempts"])
+            recommendation_path = (
+                Path(result["data_dir"])
+                / "artifacts"
+                / "hic_scaffolding"
+                / "parameter_recommendations"
+                / "000"
+                / "recommendation.json"
+            )
+            recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))[
+                "recommendation"
+            ]
             self.assertEqual(
-                set(plan["expected_outputs"]),
-                {"hic_qc_report", "chromosome_scaffolded_assembly", "contact_map", "assembly_file", "html_report"},
+                recommendation["parameter_patch"],
+                {"restriction_enzyme": "MboI"},
+            )
+            self.assertNotIn("confidence", json.dumps(recommendation))
+
+    def test_invalid_llm_shape_fails_without_an_approval_gate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            model = _FakeModel(
+                {
+                    "parameter_patch": {"restriction_enzyme": "MboI"},
+                    "confidence": 0.9,
+                    "alternatives": ["DpnII"],
+                }
+            )
+            with patch(
+                "app.llm.autohic_parameter_prompts.build_chat_model",
+                return_value=model,
+            ):
+                result = build_stage().invoke(state)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(
+                result["stage_outputs"]["hic_scaffolding"]["failure_kind"],
+                "parameter_recommendation",
             )
 
-    def test_local_autohic_registers_four_outputs_then_blocks_geneagent_review(self):
+    def test_parameter_approval_requires_hash_bound_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            blocked = self._run_to_parameter_gate(
+                self._configured_state(tmpdir, assembly, reads)
+            )
+            interrupt = blocked["active_interrupt"]
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "metadata missing bindings",
+            ):
+                apply_autohic_parameter_approval_decision(
+                    blocked,
+                    ResumeReviewRequest(
+                        session_id="s1",
+                        stage="hic_scaffolding",
+                        gate_id="parameter_approval",
+                        decision="approve_parameters",
+                        review_request_id=interrupt["review_request_id"],
+                        review_request_hash=interrupt["request_hash"],
+                    ),
+                )
+
+    def test_parameter_approval_fails_closed_when_manifest_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            blocked = self._run_to_parameter_gate(
+                self._configured_state(tmpdir, assembly, reads)
+            )
+            cursor = blocked["stage_outputs"]["hic_scaffolding"][
+                "current_parameter_recommendation"
+            ]
+            manifest = Path(blocked["data_dir"]) / cursor["manifest_ref"]["path_ref"]
+            manifest.unlink()
+
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "recommendation evidence is missing or changed",
+            ):
+                self._approve_parameters(blocked)
+
+    def test_parameter_approval_fails_closed_when_recommendation_is_tampered(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            blocked = self._run_to_parameter_gate(
+                self._configured_state(tmpdir, assembly, reads)
+            )
+            cursor = blocked["stage_outputs"]["hic_scaffolding"][
+                "current_parameter_recommendation"
+            ]
+            manifest_path = (
+                Path(blocked["data_dir"]) / cursor["manifest_ref"]["path_ref"]
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            recommendation_path = (
+                Path(blocked["data_dir"])
+                / manifest["refs"]["recommendation_ref"]["path_ref"]
+            )
+            recommendation_path.write_text(
+                recommendation_path.read_text(encoding="utf-8") + " ",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ResumeValidationError,
+                "recommendation evidence is missing or changed",
+            ):
+                self._approve_parameters(blocked)
+
+    def test_approved_autohic_runs_then_blocks_at_separate_adoption_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
-            envs_yaml = self._fake_autohic_environment(tmpdir)
-            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            blocked = self._run_to_parameter_gate(
+                self._configured_state(tmpdir, assembly, reads),
+                enzyme="MboI",
+            )
+            approved = self._approve_parameters(blocked)
+            self.assertEqual(
+                approved["stage_outputs"]["hic_scaffolding"]["status"],
+                "parameters_approved",
+            )
+            frozen_attempt = approved["stage_outputs"]["hic_scaffolding"][
+                "parameter_attempts"
+            ][0]
+            self.assertEqual(frozen_attempt["status"], "frozen")
+            self.assertEqual(
+                frozen_attempt["frozen_parameters_ref"]["path_ref"],
+                "artifacts/hic_scaffolding/attempts/000/frozen_parameters.json",
+            )
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
+                result = build_stage().invoke(approved)
 
             hic = result["stage_outputs"]["hic_scaffolding"]
             candidate = hic["method_candidates"][AUTOHIC_METHOD]
-            self.assertEqual(result["current_stage"], "hic_scaffolding")
             self.assertEqual(result["supervision_state"], "blocked_human")
+            self.assertEqual(result["active_interrupt"]["gate_id"], "hic_scaffolding")
             self.assertEqual(candidate["status"], "executed")
-            for key in ["scaffold_fasta", "contact_map", "assembly_file", "html_report"]:
+            executed_attempt = hic["parameter_attempts"][0]
+            self.assertEqual(executed_attempt["status"], "executed")
+            self.assertEqual(
+                executed_attempt["execution_ref"]["path_ref"],
+                "artifacts/hic_scaffolding/attempts/000/execution.json",
+            )
+            for key in ("scaffold_fasta", "contact_map", "assembly_file", "html_report"):
                 self.assertTrue(Path(candidate[key]).is_file(), key)
-            self.assertEqual(Path(candidate["scaffold_fasta"]).read_text(), ">chr1\nACGTACGT\n")
-            self.assertIn("AutoHiC report", Path(candidate["html_report"]).read_text())
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
 
-            config = Path(tmpdir) / "work" / "hic_scaffolding" / "s1" / "autohic" / "cfg-autohic.txt"
-            config_text = config.read_text(encoding="utf-8")
-            self.assertIn("REFERENCE_GENOME=", config_text)
-            self.assertIn("ENZYME=MboI", config_text)
-            self.assertIn(f"ERROR_PRETRAINED_MODEL={error_model.resolve()}", config_text)
-            self.assertIn(f"CHR_PRETRAINED_MODEL={chromosome_model.resolve()}", config_text)
-            self.assertNotIn(f"REFERENCE_GENOME={assembly}", config_text)
+            config = (
+                Path(result["data_dir"])
+                / "work"
+                / "hic_scaffolding"
+                / "autohic"
+                / "cfg-autohic.txt"
+            ).read_text(encoding="utf-8")
+            self.assertIn("ENZYME=MboI", config)
+            self.assertIn(f"ERROR_PRETRAINED_MODEL={error_model.resolve()}", config)
+            self.assertIn(
+                f"CHR_PRETRAINED_MODEL={chromosome_model.resolve()}",
+                config,
+            )
 
-            artifact_types = {
-                json.loads(line)["artifact_type"]
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
-            }
-            self.assertIn("hic_scaffolding.chromosome_scaffolded_assembly", artifact_types)
-            self.assertIn("hic_scaffolding.contact_map", artifact_types)
-            self.assertIn("hic_scaffolding.assembly", artifact_types)
-            self.assertIn("hic_scaffolding.html_report", artifact_types)
-
+            interrupt = result["active_interrupt"]
             adopted = apply_hic_scaffolding_resume_decision(
                 result,
                 ResumeReviewRequest(
                     session_id="s1",
                     stage="hic_scaffolding",
+                    gate_id="hic_scaffolding",
                     decision="accept_candidate",
-                    method_name=AUTOHIC_METHOD,
-                    notes=["GeneAgent review accepted AutoHiC chromosome assembly"],
+                    notes=["accepted AutoHiC chromosome assembly"],
+                    review_request_id=interrupt["review_request_id"],
+                    review_request_hash=interrupt["request_hash"],
                 ),
             )
-            adopted_hic = adopted["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(adopted["current_stage"], next_stage_name("hic_scaffolding"))
-            self.assertEqual(adopted_hic["final_assembly_for_downstream"], candidate["scaffold_fasta"])
+            self.assertEqual(
+                adopted["current_stage"],
+                next_stage_name("hic_scaffolding"),
+            )
+            self.assertEqual(
+                adopted["stage_outputs"]["hic_scaffolding"][
+                    "final_assembly_for_downstream"
+                ],
+                candidate["scaffold_fasta"],
+            )
+            decision_ref = adopted["stage_outputs"]["hic_scaffolding"][
+                "review_decision_artifact_ref"
+            ]
+            decision_record = json.loads(
+                (Path(result["data_dir"]) / decision_ref["path_ref"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                decision_record["request_ref"]["sha256"],
+                interrupt["request_hash"],
+            )
 
-    def test_local_autohic_requires_both_pretrained_models(self):
+    def test_final_review_can_keep_prior_assembly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads)
+                )
+            )
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(approved)
+            interrupt = result["active_interrupt"]
+            kept = apply_hic_scaffolding_resume_decision(
+                result,
+                ResumeReviewRequest(
+                    session_id="s1",
+                    stage="hic_scaffolding",
+                    gate_id="hic_scaffolding",
+                    decision="keep_prior_assembly",
+                    review_request_id=interrupt["review_request_id"],
+                    review_request_hash=interrupt["request_hash"],
+                ),
+            )
+            self.assertEqual(
+                kept["stage_outputs"]["hic_scaffolding"][
+                    "final_assembly_for_downstream"
+                ],
+                str(assembly),
+            )
+
+    def test_missing_models_after_approval_is_requirements_block_not_execution_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
             chromosome_model.unlink()
-            envs_yaml = self._fake_autohic_environment(tmpdir)
-            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads)
+                )
+            )
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
+                result = build_stage().invoke(approved)
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertIn("autohic_parameters.chromosome_model_ref", hic["missing_params"])
-            self.assertIsNone(hic.get("autohic_frozen_attempt"))
+            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertIn("chromosome", hic["reason"])
+            self.assertNotIn("method_candidates", hic)
 
-    def test_local_autohic_requires_paired_reads(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir, read_count=1)
-            envs_yaml = self._fake_autohic_environment(tmpdir)
-            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-            self.assertIn("paired hic_read_paths (R1/R2)", result["stage_outputs"]["hic_scaffolding"]["missing_params"])
-
-    def test_local_autohic_rejects_invalid_error_threshold_without_crashing(self):
+    def test_autohic_execution_failure_is_terminal_and_not_an_adoption_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
-            envs_yaml = self._fake_autohic_environment(tmpdir)
-            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
-            state["stage_outputs"]["hic_scaffolding"]["autohic_parameters"]["error_filter_score"] = "invalid"
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+                fail=True,
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads)
+                )
+            )
             with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
-            invalid = result["stage_outputs"]["hic_scaffolding"]["invalid_params"]
-            self.assertEqual(invalid[0]["param"], "autohic_parameters.error_filter_score")
-
-    def test_local_autohic_failure_preserves_contig_fallback_and_logs(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
-            envs_yaml = self._fake_autohic_environment(tmpdir, fail=True)
-            state = self._configured_state(tmpdir, assembly, reads, error_model, chromosome_model)
-            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
-                result = build_stage().invoke(state)
+                result = build_stage().invoke(approved)
             hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(hic["method_candidates"][AUTOHIC_METHOD]["status"], "failed")
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(hic["failure_kind"], "execution")
             self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
-            self.assertIn("autohic_execution_failed", hic["notes"])
-            self.assertTrue(hic["autohic_error"])
-
-    def test_local_mode_without_explicit_method_remains_planning_only(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            assembly, reads, _, _ = self._inputs(tmpdir)
-            state = self._state(tmpdir, str(self._registry_for_inputs(tmpdir, assembly, reads)))
-            state["execution_mode"] = "local"
-            state["stage_outputs"] = {
-                "inventory": {"target_assembly_level": "chromosome"},
-                "assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)},
-            }
-            result = build_stage().invoke(state)
-            hic = result["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertIsNone(hic.get("autohic_frozen_attempt"))
+            self.assertEqual(
+                hic["parameter_attempts"][0]["status"],
+                "execution_failed",
+            )
+            self.assertIsNotNone(hic["parameter_attempts"][0]["execution_ref"])
+            self.assertNotIn(
+                "annotation_continues_on_pre_hic_assembly_fallback",
+                hic.get("notes") or [],
+            )
+            self.assertIsNone(result.get("active_interrupt"))
 
 
 if __name__ == "__main__":

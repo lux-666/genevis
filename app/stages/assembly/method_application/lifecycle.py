@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
@@ -21,15 +22,22 @@ from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
+    ASSEMBLY_PARAMETER_EXECUTION,
+    ASSEMBLY_PARAMETER_FROZEN_ATTEMPT,
     ArtifactRef,
     ArtifactMeta,
     AssemblyCandidateBundle,
     ParameterAttempt,
-    file_sha256,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.assembly.parameter_persistence import (
+    ParameterPersistenceError,
+    load_recommendation_bundle,
+    read_json_artifact,
+    write_attempt_json_artifact,
+)
+from app.storage.publish import publish_file
 
 
 @dataclass(frozen=True)
@@ -97,26 +105,15 @@ def write_parameter_attempt_json_artifact(
     artifact_type: str,
     method_name: str,
 ) -> ArtifactRef:
-    """Write an attempt-scoped assembly parameter artifact and register it."""
+    """Publish an attempt-scoped JSON artifact through the v2 boundary."""
 
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    path = artifact_dir / filename
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        path,
-        stage="assembly",
+    return write_attempt_json_artifact(
+        state,
+        attempt_id,
+        filename,
+        payload,
+        artifact_type=artifact_type,
         method_name=method_name,
-        artifact_type=artifact_type,
-        metadata={"attempt_id": attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    return ArtifactRef(
-        path_ref=f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}",
-        sha256=file_sha256(path),
-        artifact_type=artifact_type,
     )
 
 
@@ -145,6 +142,29 @@ def current_parameter_attempt(
     return None, f"{label} requires a typed current ParameterAttempt with attempt_id={attempt_id}"
 
 
+def current_recommended_parameters(
+    state: TopLevelState,
+    output: dict[str, Any],
+    *,
+    method_id: str,
+    label: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Load current execution parameters without embedding them in state."""
+
+    attempt, error = current_parameter_attempt(output, method_id=method_id, label=label)
+    if error:
+        return {}, error
+    assert attempt is not None
+    try:
+        bundle = load_recommendation_bundle(state, attempt.recommendation_manifest_ref)
+    except ParameterPersistenceError as exc:
+        return {}, f"{label} recommendation evidence is invalid: {exc}"
+    recommendation = dict(bundle["recommendation"].get("recommendation") or {})
+    return dict(
+        recommendation.get("execution_params") or recommendation.get("params") or {}
+    ), None
+
+
 def update_current_parameter_attempt(
     output: dict[str, Any],
     *,
@@ -160,7 +180,20 @@ def update_current_parameter_attempt(
     assert attempt is not None
     if attempt.seal_hash:
         return [], f"{label} current parameter attempt is sealed and cannot be mutated"
-    for field in ("execution_result", "review_outcome", "review_failure"):
+    allowed = {
+        "status",
+        "frozen_parameters_ref",
+        "command_ref",
+        "execution_ref",
+        "review_ref",
+    }
+    unexpected = set(updates) - allowed
+    if unexpected:
+        return [], (
+            f"{label} attempted to embed non-cursor fields in ParameterAttempt: "
+            + ", ".join(sorted(unexpected))
+        )
+    for field in allowed - {"status"}:
         if field not in updates or getattr(attempt, field) is None:
             continue
         if getattr(attempt, field) != updates[field]:
@@ -177,13 +210,46 @@ def update_current_parameter_attempt(
     return attempts, None
 
 
+def persist_frozen_attempt(
+    state: TopLevelState,
+    attempt_id: int,
+    attempt: FrozenAttemptSpec,
+    *,
+    method_name: str,
+) -> ArtifactRef:
+    """Persist the runner input so checkpoints carry only its verified ref."""
+
+    return write_attempt_json_artifact(
+        state,
+        attempt_id,
+        "frozen_attempt.json",
+        {"schema_version": 2, "attempt": attempt.model_dump(mode="json")},
+        artifact_type=ASSEMBLY_PARAMETER_FROZEN_ATTEMPT,
+        method_name=method_name,
+    )
+
+
+def load_frozen_attempt(
+    state: TopLevelState,
+    value: ArtifactRef | dict[str, Any],
+) -> FrozenAttemptSpec:
+    """Verify and load one persisted runner input."""
+
+    payload = read_json_artifact(
+        state,
+        value,
+        expected_type=ASSEMBLY_PARAMETER_FROZEN_ATTEMPT,
+    )
+    return FrozenAttemptSpec.model_validate(payload["attempt"])
+
+
 def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict:
     """Execute the frozen attempt and persist a method-namespaced result."""
     output = assembly_output(state)
     if output.get("status") != lifecycle.frozen_status:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[lifecycle.frozen_attempt_key])
+    attempt = load_frozen_attempt(state, output[lifecycle.frozen_attempt_key])
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
@@ -191,13 +257,26 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         fail_label=lifecycle.name,
     )
     result = outcome.result.model_dump(mode="json")
+    execution_ref = write_attempt_json_artifact(
+        state,
+        int(output.get("current_parameter_attempt_id") or 0),
+        "execution.json",
+        {
+            "schema_version": 2,
+            "attempt_id": int(output.get("current_parameter_attempt_id") or 0),
+            "method_id": lifecycle.method_name,
+            "result": result,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_EXECUTION,
+        method_name=lifecycle.method_name,
+    )
 
     parameter_attempts, attempt_error = update_current_parameter_attempt(
         output,
         method_id=lifecycle.method_name,
         label=lifecycle.name,
         status="execution_failed" if not outcome.success else "executed",
-        execution_result=result,
+        execution_ref=execution_ref.model_dump(mode="json"),
     )
     if attempt_error:
         return fail_update(state, attempt_error)
@@ -206,12 +285,15 @@ def run_method_attempt(state: TopLevelState, lifecycle: MethodLifecycle) -> dict
         updates = {
             "status": "failed",
             "reason": outcome.error,
-            lifecycle.execution_result_key: result,
+            lifecycle.execution_result_key: execution_ref.model_dump(mode="json"),
         }
         updates["parameter_attempts"] = parameter_attempts
         return update_assembly_output(state, updates)
 
-    updates = {"status": lifecycle.ran_status, lifecycle.execution_result_key: result}
+    updates = {
+        "status": lifecycle.ran_status,
+        lifecycle.execution_result_key: execution_ref.model_dump(mode="json"),
+    }
     updates["parameter_attempts"] = parameter_attempts
     return update_assembly_output(state, updates)
 
@@ -229,8 +311,13 @@ def collect_method_artifacts(
     if output.get("status") != lifecycle.ran_status:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[lifecycle.frozen_attempt_key])
-    result = output[lifecycle.execution_result_key]
+    attempt = load_frozen_attempt(state, output[lifecycle.frozen_attempt_key])
+    execution_payload = read_json_artifact(
+        state,
+        output[lifecycle.execution_result_key],
+        expected_type=ASSEMBLY_PARAMETER_EXECUTION,
+    )
+    result = dict(execution_payload.get("result") or {})
     draft_assembly = Path(output[lifecycle.draft_assembly_key])
     if not draft_assembly.exists():
         reason = f"expected {lifecycle.name} draft assembly missing: {draft_assembly}"
@@ -290,10 +377,25 @@ def collect_method_artifacts(
         **bundle_metadata,
     }
     bundle = AssemblyCandidateBundle.model_validate(bundle_data)
-    bundle_path.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    executed_bundle_path = bundle_path.with_name(
+        bundle_path.name.replace(".planned.json", ".executed.json")
+    )
+    if executed_bundle_path == bundle_path:
+        executed_bundle_path = bundle_path.with_name(f"{bundle_path.stem}.executed.json")
+    temporary_bundle = Path(attempt.working_dir) / (
+        f".{executed_bundle_path.name}.{uuid4().hex}.tmp"
+    )
+    temporary_bundle.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    try:
+        publish_file(temporary_bundle, executed_bundle_path)
+    finally:
+        temporary_bundle.unlink(missing_ok=True)
     artifacts.append(
         ArtifactMeta.from_file(
-            bundle_path,
+            executed_bundle_path,
             stage="assembly",
             method_name=lifecycle.method_name,
             artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
@@ -314,7 +416,7 @@ def collect_method_artifacts(
         "status": "executed",
         "method_name": lifecycle.method_name,
         "draft_assembly_ref": str(draft_assembly),
-        "candidate_ref": str(bundle_path),
+        "candidate_ref": str(executed_bundle_path),
     }
     return update_assembly_output(
         state,
@@ -322,9 +424,9 @@ def collect_method_artifacts(
             "status": "draft_ready",
             "draft_assembly_ref": str(draft_assembly),
             "candidate_assembly_refs": [str(draft_assembly)],
-            "executed_candidate_refs": [str(bundle_path)],
+            "executed_candidate_refs": [str(executed_bundle_path)],
             "artifact_refs": unique_refs([*list(output.get("artifact_refs") or []), *[str(item.file_path) for item in artifacts]]),
-            "candidate_artifact_refs": unique_refs([*list(output.get("candidate_artifact_refs") or []), str(bundle_path)]),
+            "candidate_artifact_refs": unique_refs([*list(output.get("candidate_artifact_refs") or []), str(executed_bundle_path)]),
             "substeps": substeps,
         },
     )

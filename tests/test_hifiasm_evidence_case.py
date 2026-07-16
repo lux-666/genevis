@@ -893,7 +893,7 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     assert "evidence_spans" not in payload["literature_cases"][0]
 
 
-def test_hifiasm_selection_is_embedded_once_in_attempt_prompt_artifact(tmp_path):
+def test_hifiasm_selection_is_embedded_once_in_pure_prompt_context(tmp_path):
     from app.stages.assembly.parameter_catalog import load_parameter_catalog
     from app.stages.assembly.prompt_payload import build_prompt_payload
 
@@ -909,7 +909,6 @@ def test_hifiasm_selection_is_embedded_once_in_attempt_prompt_artifact(tmp_path)
         {"cases": [case]},
         enable_hifiasm_numeric=True,
     )
-    data_dir = tmp_path / "data"
     payload = build_prompt_payload(
         method_id="hifiasm",
         catalog=load_parameter_catalog("hifiasm"),
@@ -923,10 +922,8 @@ def test_hifiasm_selection_is_embedded_once_in_attempt_prompt_artifact(tmp_path)
         },
         task="recommend_initial",
         knowledge_root=tmp_path,
-        write_artifacts=True,
         session_id="session_a",
         attempt_id=2,
-        data_dir=data_dir,
     )
 
     retrieval = payload["literature_selection"]
@@ -937,16 +934,13 @@ def test_hifiasm_selection_is_embedded_once_in_attempt_prompt_artifact(tmp_path)
     assert retrieval["query_id"] == "session_a:parameter_attempt_2"
     assert "retrieval_query_ref" not in payload
     assert "retrieval_trace_ref" not in payload
-
-    prompt_path = data_dir / payload["prompt_payload_ref"].removeprefix("data/")
-    prompt_artifact = json.loads(prompt_path.read_text(encoding="utf-8"))
-    assert prompt_artifact["literature_selection"]["selected_case_ids"] == ["case_001"]
-    assert [case["case_id"] for case in prompt_artifact["literature_cases"]] == ["case_001"]
-    artifact_text = prompt_path.read_text(encoding="utf-8")
-    assert "methods_path" not in artifact_text
-    assert "evidence_spans" not in artifact_text
-    assert "Study body" not in artifact_text
-    assert "Methods." not in artifact_text
+    assert [case["case_id"] for case in payload["literature_cases"]] == ["case_001"]
+    context_text = json.dumps(payload, ensure_ascii=False)
+    assert context_text.count('"case_id": "case_001"') == 1
+    assert "methods_path" not in context_text
+    assert "evidence_spans" not in context_text
+    assert "Study body" not in context_text
+    assert "Methods." not in context_text
 
 
 def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):

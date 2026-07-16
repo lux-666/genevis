@@ -1,34 +1,109 @@
-"""Regression coverage for the forward-only session storage layout."""
+"""Regression coverage for the forward-only Data Architecture v2 storage layer."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records, read_artifact_records
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.execution.results import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
-from app.storage.paths import SessionPaths, locate_session_data_dir
+from app.storage.paths import (
+    DataLayoutError,
+    SessionPaths,
+    ensure_data_layout,
+    ensure_run_layout,
+    locate_session_data_dir,
+)
 
 
 class SessionPathsTests(unittest.TestCase):
-    def test_new_session_paths_are_contained_under_runs_session(self):
+    def test_run_paths_and_fixed_files_have_one_session_component(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")
 
-        self.assertEqual(paths.run_dir, Path("/tmp/gene-agent-data/runs/s1").resolve(strict=False))
+        self.assertEqual(paths.run_dir, Path("/tmp/gene-agent-data/runs/s1").resolve())
         self.assertEqual(paths.control_dir, paths.run_dir / "control")
         self.assertEqual(paths.artifacts_dir, paths.run_dir / "artifacts")
+        self.assertEqual(paths.reports_dir, paths.run_dir / "reports")
         self.assertEqual(paths.work_dir, paths.run_dir / "work")
-        self.assertEqual(paths.manifest_path, paths.control_dir / "manifest.yaml")
+        self.assertEqual(paths.artifact_index_path, paths.artifacts_dir / "index.jsonl")
+        self.assertEqual(paths.ledger_events_path, paths.ledger_dir / "events.jsonl")
+        self.assertEqual(paths.checkpoint_db_path, paths.checkpoints_dir / "checkpoints.sqlite")
+        self.assertEqual(
+            paths.artifact_path("assembly", "outputs", "draft.fa"),
+            paths.artifacts_dir / "assembly" / "outputs" / "draft.fa",
+        )
+        self.assertNotIn(
+            "s1",
+            paths.artifact_path("assembly", "outputs").relative_to(paths.run_dir).parts,
+        )
 
-    def test_new_layout_uses_one_ledger_and_artifact_index_per_run(self):
+    def test_from_run_dir_is_strict_and_validates_session_id(self):
+        paths = SessionPaths("/tmp/gene-agent-data", "s1")
+
+        self.assertEqual(SessionPaths.from_run_dir(paths.run_dir), paths)
+        with self.assertRaises(DataLayoutError):
+            SessionPaths.from_run_dir("/tmp/not-a-run-root")
+        with self.assertRaises(DataLayoutError):
+            paths.require_session_id("s2")
+        with self.assertRaises(DataLayoutError):
+            SessionPaths("/tmp/gene-agent-data", "../escape")
+
+    def test_refs_are_normalized_and_contained_by_run_root(self):
+        paths = SessionPaths("/tmp/gene-agent-data", "s1")
+        artifact = paths.artifact_path("assembly", "outputs", "draft.fa")
+
+        self.assertEqual(paths.to_ref(artifact), "artifacts/assembly/outputs/draft.fa")
+        self.assertEqual(paths.resolve_ref("artifacts/assembly/outputs/draft.fa"), artifact)
+        for invalid in ("/tmp/escape", "../escape", "artifacts/../control/run.json", ""):
+            with self.subTest(invalid=invalid), self.assertRaises(DataLayoutError):
+                paths.resolve_ref(invalid)
+        with self.assertRaises(DataLayoutError):
+            paths.to_ref("/tmp/outside-run")
+
+    def test_layout_marker_is_v2_and_rejects_flat_runtime_roots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = ensure_data_layout(tmpdir)
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), {"schema_version": 2})
+            self.assertEqual(ensure_data_layout(tmpdir), marker)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "artifacts").mkdir()
+            with self.assertRaises(DataLayoutError):
+                ensure_data_layout(tmpdir)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "runs" / "old-session").mkdir(parents=True)
+            with self.assertRaises(DataLayoutError):
+                ensure_data_layout(tmpdir)
+
+    def test_locate_only_discovers_marked_v2_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy = Path(tmpdir) / "ledger" / "old-session"
+            legacy.mkdir(parents=True)
+            self.assertIsNone(locate_session_data_dir(tmpdir, "old-session"))
+
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
-            payload = paths.artifacts_dir / "inventory" / "s1" / "registry.json"
+            ensure_run_layout(paths)
+            self.assertEqual(locate_session_data_dir(tmpdir, "s1"), paths.run_dir)
+            self.assertEqual(locate_session_data_dir(paths.run_dir, "s1"), paths.run_dir)
+
+
+class ArtifactIndexV2Tests(unittest.TestCase):
+    def _paths(self, tmpdir: str, session_id: str = "s1") -> SessionPaths:
+        paths = SessionPaths(tmpdir, session_id)
+        ensure_run_layout(paths)
+        return paths
+
+    def test_index_contains_canonical_ref_metadata_not_absolute_file_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            payload = paths.artifact_path("inventory", "registry.json")
             payload.parent.mkdir(parents=True)
             payload.write_text("{}", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
@@ -36,25 +111,28 @@ class SessionPathsTests(unittest.TestCase):
                 stage="inventory",
                 method_name="inventory.register_assets",
                 artifact_type="asset_registry",
+                metadata={"attempt_id": "inventory-0", "business_status": "must-not-be-indexed"},
             )
 
-            append_artifact_records(paths.run_dir, "s1", [artifact])
-            ledger = Ledger(paths.run_dir)
-            ledger.create_session("s1", "manifest.yaml")
-            ledger.record_artifact_registered("s1", artifact.model_dump(mode="json"))
+            refs = append_artifact_records(paths.run_dir, "s1", [artifact])
+            records = read_artifact_records(paths.run_dir, "s1")
 
-            self.assertTrue((paths.artifacts_dir / "artifacts.jsonl").exists())
-            self.assertTrue((paths.ledger_dir / "session.json").exists())
-            self.assertFalse((paths.artifacts_dir / "s1" / "artifacts.jsonl").exists())
-            self.assertEqual(read_artifact_records(paths.run_dir, "s1")[0]["file_path"], str(payload))
-            event = ledger.read_events("s1")[0]
-            self.assertEqual(event["artifact"]["file_path"], str(payload))
-            self.assertNotIn("file_hash", event["artifact"])
+            self.assertEqual(len(refs), 1)
+            self.assertEqual(refs[0].path_ref, "artifacts/inventory/registry.json")
+            self.assertEqual(records[0]["artifact_id"], refs[0].artifact_id)
+            self.assertEqual(records[0]["schema_version"], 2)
+            self.assertEqual(records[0]["sha256"], refs[0].sha256)
+            self.assertEqual(records[0]["size_bytes"], 2)
+            self.assertEqual(records[0]["attempt_id"], "inventory-0")
+            self.assertNotIn("file_path", records[0])
+            self.assertNotIn("file_hash", records[0])
+            self.assertNotIn("metadata", records[0])
+            self.assertNotIn("business_status", records[0])
 
-    def test_work_backed_artifact_replay_reuses_identical_snapshot(self):
+    def test_work_product_is_published_without_repeating_session_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = SessionPaths(tmpdir, "s1")
-            source = paths.work_dir / "assembly" / "s1" / "flye" / "log"
+            paths = self._paths(tmpdir)
+            source = paths.work_path("assembly", "flye", "log")
             source.parent.mkdir(parents=True)
             source.write_text("assembly completed\n", encoding="utf-8")
             artifact = ArtifactMeta.from_file(
@@ -64,51 +142,98 @@ class SessionPathsTests(unittest.TestCase):
                 artifact_type="command.stdout",
             )
 
-            append_artifact_records(paths.run_dir, "s1", [artifact])
+            [artifact_ref] = append_artifact_records(paths.run_dir, "s1", [artifact])
 
-            published = Path(artifact.file_path)
-            self.assertTrue(published.is_relative_to(paths.artifacts_dir))
+            published = paths.resolve_ref(artifact_ref.path_ref)
+            self.assertEqual(published, paths.artifact_path("assembly", "outputs", "flye", "log"))
             self.assertFalse(source.exists())
-            self.assertEqual(published.read_text(encoding="utf-8"), "assembly completed\n")
-            source.write_text("assembly completed\n", encoding="utf-8")
-            retry_artifact = ArtifactMeta.from_file(
-                source,
-                stage="assembly",
-                method_name="assembly.candidate.flye",
-                artifact_type="command.stdout",
-            )
-            append_artifact_records(paths.run_dir, "s1", [retry_artifact])
-            self.assertFalse(source.exists())
-            self.assertEqual(retry_artifact.file_path, published)
-            self.assertEqual(published.read_text(encoding="utf-8"), "assembly completed\n")
-            records = read_artifact_records(paths.run_dir, "s1")
-            self.assertEqual(len(records), 1)
-            self.assertEqual(records[0]["file_path"], str(published))
+            self.assertNotIn("s1", published.relative_to(paths.run_dir).parts)
+            self.assertEqual(artifact.file_path, published)
+            self.assertEqual(artifact.artifact_id, artifact_ref.artifact_id)
 
-    def test_work_backed_artifact_replay_rejects_different_snapshot(self):
+    def test_identical_replay_reuses_ref_and_conflicting_bytes_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = SessionPaths(tmpdir, "s1")
-            source = paths.work_dir / "assembly" / "s1" / "flye" / "log"
+            paths = self._paths(tmpdir)
+            source = paths.work_path("assembly", "flye", "log")
             source.parent.mkdir(parents=True)
             source.write_text("first output\n", encoding="utf-8")
-            artifact = ArtifactMeta.from_file(
+            first = ArtifactMeta.from_file(
                 source,
                 stage="assembly",
                 method_name="assembly.candidate.flye",
                 artifact_type="command.stdout",
             )
-            append_artifact_records(paths.run_dir, "s1", [artifact])
+            [first_ref] = append_artifact_records(paths.run_dir, "s1", [first])
+
+            source.write_text("first output\n", encoding="utf-8")
+            replay = ArtifactMeta.from_file(
+                source,
+                stage="assembly",
+                method_name="assembly.candidate.flye",
+                artifact_type="command.stdout",
+            )
+            [replay_ref] = append_artifact_records(paths.run_dir, "s1", [replay])
+            self.assertEqual(replay_ref, first_ref)
+            self.assertEqual(len(read_artifact_records(paths.run_dir, "s1")), 1)
 
             source.write_text("different output\n", encoding="utf-8")
-            retry_artifact = ArtifactMeta.from_file(
+            conflict = ArtifactMeta.from_file(
                 source,
                 stage="assembly",
                 method_name="assembly.candidate.flye",
                 artifact_type="command.stdout",
             )
             with self.assertRaises(FileExistsError):
-                append_artifact_records(paths.run_dir, "s1", [retry_artifact])
+                append_artifact_records(paths.run_dir, "s1", [conflict])
 
+    def test_registration_rejects_external_reports_and_repeated_session_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            external = Path(tmpdir) / "external.txt"
+            external.write_text("external", encoding="utf-8")
+            external_meta = ArtifactMeta.from_file(
+                external,
+                stage="assembly",
+                method_name="assembly.test",
+                artifact_type="test.external",
+            )
+            with self.assertRaises(DataLayoutError):
+                append_artifact_records(paths.run_dir, "s1", [external_meta])
+
+            report = paths.report_path("session_summary.json")
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text("{}", encoding="utf-8")
+            report_meta = ArtifactMeta.from_file(
+                report,
+                stage="reports",
+                method_name="reports.summary",
+                artifact_type="report",
+            )
+            with self.assertRaises(DataLayoutError):
+                append_artifact_records(paths.run_dir, "s1", [report_meta])
+
+            repeated = paths.artifact_path("assembly", "s1", "draft.fa")
+            repeated.parent.mkdir(parents=True)
+            repeated.write_text(">draft\nA\n", encoding="utf-8")
+            repeated_meta = ArtifactMeta.from_file(
+                repeated,
+                stage="assembly",
+                method_name="assembly.test",
+                artifact_type="assembly.draft",
+            )
+            with self.assertRaises(DataLayoutError):
+                append_artifact_records(paths.run_dir, "s1", [repeated_meta])
+
+    def test_flat_root_and_mismatched_session_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(DataLayoutError):
+                read_artifact_records(tmpdir, "s1")
+            paths = self._paths(tmpdir)
+            with self.assertRaises(DataLayoutError):
+                read_artifact_records(paths.run_dir, "s2")
+
+
+class ImmutablePublishTests(unittest.TestCase):
     def test_shell_publish_replay_reuses_identical_snapshot(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "work-output"
@@ -124,10 +249,11 @@ class SessionPathsTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertEqual(destination.read_text(encoding="utf-8"), "first output\n")
 
-    def test_runner_returns_published_log_paths_before_collectors_build_state(self):
+    def test_runner_publishes_logs_before_collectors_build_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = SessionPaths(tmpdir, "s1")
-            work = paths.work_dir / "read_qc" / "s1" / "seqkit_stats"
+            ensure_run_layout(paths)
+            work = paths.work_path("read_qc", "seqkit_stats")
             work.mkdir(parents=True)
             stdout = work / "log"
             stderr = work / "err"
@@ -163,14 +289,13 @@ class SessionPathsTests(unittest.TestCase):
             )
 
             self.assertTrue(outcome.success)
-            self.assertTrue(outcome.result.stdout_path.is_relative_to(paths.artifacts_dir))
+            self.assertEqual(
+                outcome.result.stdout_path.parent,
+                paths.artifact_path("read_qc", "logs"),
+            )
+            self.assertNotIn("s1", outcome.result.stdout_path.relative_to(paths.run_dir).parts)
             self.assertFalse(stdout.exists())
-            self.assertEqual(outcome.result.stdout_path.read_text(encoding="utf-8"), "first stdout\n")
 
-    def test_existing_flat_session_remains_discoverable(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            legacy = Path(tmpdir) / "ledger" / "old-session"
-            legacy.mkdir(parents=True)
 
-            self.assertEqual(locate_session_data_dir(tmpdir, "old-session"), Path(tmpdir).resolve())
-            self.assertIsNone(locate_session_data_dir(tmpdir, "new-session"))
+if __name__ == "__main__":
+    unittest.main()

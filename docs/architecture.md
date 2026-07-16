@@ -4,7 +4,9 @@ Gene Agent follows the BioAgent V2 pattern from the reference `rna_agent` projec
 
 This document is the system-level architecture. For operational handoff, read
 `docs/handoff.md`. For coordinator rules, read `docs/governance.md`. For
-stage-by-stage inputs and outputs, read `docs/stage_contracts.md`.
+stage-by-stage inputs and outputs, read `docs/stage_contracts.md`. Accepted
+cross-cutting specifications live under `docs/architecture/`; the accepted Data
+Architecture v2 contract is `docs/architecture/data-v2.md`.
 
 ## Principles
 
@@ -14,6 +16,10 @@ stage-by-stage inputs and outputs, read `docs/stage_contracts.md`.
 4. Let descriptors and review rules express method compatibility.
 5. Generate frozen attempt scripts in stage nodes (via the shared `execution/method_runner` helpers) only after descriptor context and validation.
 6. Put human-in-the-loop gates at review boundaries, especially assembly evaluation and Hi-C review.
+7. Use one shared parameter-recommendation persistence contract after method
+   selection; Assembly, Hi-C, and T2T must not invent separate audit layouts.
+8. Treat each session run directory as the data-ownership boundary and keep
+   checkpoints ref-only and bounded.
 
 ## Parent Flow
 
@@ -26,6 +32,7 @@ START
     -> assembly_stage
     -> assembly_review_stage
     -> hic_scaffolding_stage
+    -> t2t_stage
     -> repeat_annotation_stage
     -> gene_annotation_stage
     -> function_annotation_stage
@@ -75,16 +82,26 @@ contract and `scripts/server_*.sh` for the helper scripts.
 
 ## State Contract
 
-`TopLevelState` stays small. It stores session IDs, current stage, manifest reference, registry reference, stage plan reference, interrupt metadata, route trace, and skip reasons. It must not store FASTQ/FASTA contents, command logs, generated script bodies, full metric tables, or notebook bodies.
+`TopLevelState` stays small. It stores session IDs, current stage, compact
+control cursors, and verified references. It must not store FASTQ/FASTA
+contents, parameter catalogs, model payloads, candidate/signal tables, command
+logs, generated script bodies, execution results, full metric tables, or
+notebook bodies.
+
+Data-specific ownership, path, checkpoint-size, parameter-recommendation,
+attempt, review, report, and retention rules are normative in
+`docs/architecture/data-v2.md`. Current code may lag that accepted design until
+the v2 cutover is complete.
 
 State categories:
 
 | Category | Stored In | Examples |
 |---|---|---|
-| Control recovery facts | LangGraph checkpoint | `current_stage`, `active_interrupt`, `route_trace` |
-| Business execution facts | Ledger | attempts, statuses, review events |
+| Control recovery facts | LangGraph checkpoint | `current_stage`, compact interrupt ref, current recommendation/attempt cursors |
+| Business execution facts | Ledger | stage transitions, attempts, statuses, review events, terminal event |
 | External world facts | Artifact registry | file path, hash, size, artifact type |
 | Method capability facts | Descriptors | inputs, outputs, resources, review rules |
+| Operator views | Reports | current status and derived session summary |
 
 Do not collapse these categories. Most long-running workflow failures become
 hard to resume when these facts are mixed.
@@ -104,7 +121,7 @@ The method family subgraph owns package-specific logic. For example, `assembly` 
 ## Current Implementation Status
 
 The top-level graph contains real inventory, read-QC, assembly, review, Hi-C,
-repeat, gene-annotation, and function-annotation stages. Methods remain
+T2T, repeat, gene-annotation, and function-annotation stages. Methods remain
 individually scoped: unsupported methods are represented as planning contracts,
 while supported methods freeze an auditable command and run through the shared
 execution lifecycle.
@@ -116,11 +133,15 @@ When adding a real method:
 1. Add or update asset and method descriptors.
 2. Add a focused test for planner behavior.
 3. Add a `StagePlan` path before execution.
-4. Generate or template a `FrozenAttemptSpec`.
-5. Run through a runner boundary.
-6. Collect artifacts.
-7. Review outputs.
-8. Commit compact references to state and ledger.
+4. If the method uses parameter recommendation, persist the exact profile,
+   model request/response, validation, and approval through the shared Data v2
+   contract. The recommender does not select the method or workflow route.
+5. Generate or template a `FrozenAttemptSpec` only after required validation
+   and approval.
+6. Run through a runner boundary.
+7. Collect artifacts.
+8. Review outputs.
+9. Commit compact references to state and bounded causal events to the ledger.
 
 Skipping these steps is allowed only for temporary local experiments outside the
 main graph.

@@ -102,17 +102,18 @@ print('Genome survey schema changes: consistent ✓')
 python3 -c "
 # Verify Hi-C schemas are self-consistent
 from app.schemas.run_config import (
-    HiCScaffoldingRunConfig, HiCScaffoldingPlanCandidate,
-    AutoHiCRunParameters, HiCMethod,
+    HiCScaffoldingRunConfig, AutoHiCRunParameters,
 )
 from app.schemas.artifacts import HiCScaffoldDecisionArtifact
-import typing
 
-# AutoHiC is the only stage-level Hi-C method.
-methods = typing.get_args(HiCMethod)
-assert methods == ('autohic',), f'unexpected HiCMethod values: {methods}'
+# The stage is a fixed AutoHiC pipeline, so the run config has no method selector.
+assert 'methods' not in HiCScaffoldingRunConfig.model_fields
+assert 'method' not in HiCScaffoldingRunConfig.model_fields
+assert 'error_model_ref' not in AutoHiCRunParameters.model_fields
+assert 'chromosome_model_ref' not in AutoHiCRunParameters.model_fields
 
 # Decision artifact should accept accept_candidate
+import typing
 dec_hints = typing.get_type_hints(HiCScaffoldDecisionArtifact)
 dec_str = str(dec_hints.get('decision', ''))
 assert 'accept_candidate' in dec_str, f'accept_candidate not in decision type: {dec_str}'

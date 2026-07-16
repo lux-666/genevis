@@ -1,0 +1,13 @@
+method_id: autohic
+tool: AutoHiC
+read_type: hic
+description: "AutoHiC restriction-enzyme recommendation surface. Runtime and model paths are resolved outside the LLM recommendation."
+
+parameters:
+  restriction_enzyme:
+    cli: null
+    level: 2
+    source: parameter_recommender
+    value_type: string
+    description: "Restriction enzyme used to prepare the selected Hi-C library."
+    notes: "The LLM proposes this value and every proposal requires human approval."

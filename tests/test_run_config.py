@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.schemas.run_config import HiCScaffoldingPlanCandidate, RunConfig, load_run_config
+from app.schemas.run_config import RunConfig, load_run_config
 
 
 class RunConfigSchemaTests(unittest.TestCase):
@@ -762,20 +762,19 @@ class RunConfigSchemaTests(unittest.TestCase):
             {
                 "local_exec": ["hic_scaffolding"],
                 "hic_scaffolding": {
-                    "method": "autohic",
                     "autohic_parameters": {
                         "restriction_enzyme": "MboI",
-                        "error_model_ref": "/models/error_model.pth",
-                        "chromosome_model_ref": "/models/chr_model.pth",
                         "threads": 40,
                         "debris_adjust": True,
                     },
                 },
             }
         )
-
-        self.assertEqual(config.hic_scaffolding.method, "autohic")
         assert config.hic_scaffolding.autohic_parameters is not None
+        self.assertEqual(
+            config.hic_scaffolding.autohic_parameters.restriction_enzyme,
+            "MboI",
+        )
         self.assertEqual(config.hic_scaffolding.autohic_parameters.threads, 40)
         self.assertTrue(config.hic_scaffolding.autohic_parameters.debris_adjust)
 
@@ -786,8 +785,6 @@ class RunConfigSchemaTests(unittest.TestCase):
                     "hic_scaffolding": {
                         "autohic_parameters": {
                             "restriction_enzyme": "DpnII",
-                            "error_model_ref": "/models/error_model.pth",
-                            "chromosome_model_ref": "/models/chr_model.pth",
                             "error_min_len": 20_000,
                             "error_max_len": 10_000,
                         }
@@ -795,33 +792,27 @@ class RunConfigSchemaTests(unittest.TestCase):
                 }
             )
 
-    def test_hic_plan_candidate_allows_missing_execution_inputs(self):
-        candidate = HiCScaffoldingPlanCandidate(
-            method="autohic",
+    def test_local_hic_execution_needs_no_method_or_enzyme_choice(self):
+        config = RunConfig.model_validate(
+            {
+                "local_exec": ["hic_scaffolding"],
+                "hic_scaffolding": {},
+            }
         )
 
-        self.assertEqual(candidate.status, "needs_clarification")
-        self.assertEqual(
-            candidate.missing_fields,
-            [
-                "autohic_parameters.restriction_enzyme",
-                "autohic_parameters.error_model_ref",
-                "autohic_parameters.chromosome_model_ref",
-            ],
-        )
+        self.assertIsNotNone(config.hic_scaffolding)
+        self.assertIsNone(config.hic_scaffolding.autohic_parameters)
 
-    def test_local_hic_execution_rejects_incomplete_candidate(self):
-        with self.assertRaises(ValidationError) as ctx:
+    def test_hic_run_config_rejects_removed_method_selection_fields(self):
+        with self.assertRaises(ValidationError):
             RunConfig.model_validate(
                 {
-                    "local_exec": ["hic_scaffolding"],
                     "hic_scaffolding": {
                         "method": "autohic",
-                    },
+                        "methods": ["autohic"],
+                    }
                 }
             )
-
-        self.assertIn("not execution-ready", str(ctx.exception))
 
 
 class RunConfigLoaderTests(unittest.TestCase):

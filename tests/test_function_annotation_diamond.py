@@ -14,6 +14,7 @@ from app.stages.function_annotation.nodes import (
     freeze_diamond_attempt,
     run_diamond_attempt,
 )
+from tests.data_v2 import v2_run_dir
 
 
 def _fake_diamond_bin(tmpdir: str, *, fail: bool = False) -> str:
@@ -50,8 +51,8 @@ def _provenance_state(tmpdir: str, **func_updates):
     proteins_ref = str(proteins)
     state = initial_state(
         session_id="s1",
-        input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-        data_dir=tmpdir,
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(v2_run_dir(tmpdir, "s1")),
     )
     state["current_stage"] = "function_annotation"
     state["stage_outputs"] = {
@@ -101,8 +102,8 @@ class DiamondFreezeTests(unittest.TestCase):
             proteins.write_text(">p1\nMKT\n", encoding="utf-8")
             state = initial_state(
                 session_id="s1",
-                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(v2_run_dir(tmpdir, "s1")),
             )
             state["current_stage"] = "function_annotation"
             state["stage_outputs"] = {

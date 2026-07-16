@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
 from app.control.ledger import Ledger
+from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
 from app.domains.genome_size import resolve_genome_size
-from app.domains.assembly.parameter_recommendation import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
-)
 from app.domains.assembly.selection import (
     AssemblySelection,
     compatible_methods,
@@ -30,7 +27,6 @@ from app.graph.routing import next_stage_name
 from app.stages.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
-    ASSEMBLY_COMPATIBILITY_CANDIDATES as ASSEMBLY_COMPATIBILITY_CANDIDATES,
     FLYE_METHOD,
     FLYE_READ_TYPE_FLAGS as FLYE_READ_TYPE_FLAGS,
     GENOME_SIZE_REQUIRED,
@@ -43,35 +39,38 @@ from app.stages.assembly.decision import (
     make_assembly_decision,
 )
 from app.knowledge.packs import load_knowledge_pack
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 from app.schemas.artifacts import (
     ASSEMBLY_INPUT_PROFILE,
-    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
-    ASSEMBLY_PARAMETER_INPUT_PROFILE,
-    ASSEMBLY_PARAMETER_LLM_RESPONSE,
-    ASSEMBLY_PARAMETER_PROMPT_PAYLOAD,
-    ASSEMBLY_PARAMETER_REVIEW_FAILURE,
-    ASSEMBLY_PARAMETER_RECOMMENDATION,
-    ASSEMBLY_PARAMETER_VALIDATION,
     ASSEMBLY_ROUTE_DECISION,
     ASSEMBLY_CANDIDATE_BUNDLE,
-    ArtifactRef,
     ArtifactMeta,
     AssemblyCandidateBundle,
     AssemblyInputProfile,
-    ParameterAttempt,
     AssemblyRouteDecision,
-    file_sha256,
 )
-from app.review.base import ResumeReviewRequest
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_decision,
+    persist_review_request,
+)
+from app.review.policy import evaluate
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
 from app.schemas.state import TopLevelState
-from app.stages.assembly.parameter_catalog import load_parameter_catalog
-from app.stages.assembly.parameter_profile import build_full_parameter_profile, flatten_profile_facts
-from app.stages.assembly.parameter_validation import validate_recommended_parameters
-from app.stages.assembly.prompt_payload import build_prompt_payload
+from app.stages.assembly.parameter_nodes import (
+    _seal_parameter_attempt,
+    _validate_parameter_attempt_chain,
+    apply_parameter_approval_decision,
+    build_parameter_attempt_timeline,
+    execution_retry_gate,
+    parameter_quality_gate,
+    recommend_assembly_parameters,
+)
+from app.storage.publish import publish_file
 
 ROUTE_DECISION_MAP = {
     "select_cyclone": "cyclone",
@@ -91,15 +90,6 @@ def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> di
 
 def _fail_update(state: TopLevelState, reason: str) -> dict:
     return _update_assembly_output(state, {"status": "failed", "reason": reason})
-
-
-def _resolve_data_path_ref(data_dir: Path, path_ref: str) -> Path:
-    path = Path(path_ref)
-    if path.is_absolute():
-        return path
-    if path_ref.startswith("data/"):
-        return data_dir / path_ref.removeprefix("data/")
-    return path
 
 
 def enter_assembly(state: TopLevelState) -> dict:
@@ -321,6 +311,30 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
     if request.stage != "assembly":
         raise ResumeValidationError("assembly selection resume requires stage assembly")
     if request.decision == "stop_human_review":
+        review_request_id, review_request_hash = _route_review_binding(state, request)
+        decision_ref = persist_review_decision(
+            state["data_dir"],
+            session_id=state["session_id"],
+            review_request_id=review_request_id,
+            stage="assembly",
+            gate_id="route_selection",
+            decision=request,
+            request_hash=review_request_hash,
+            method_name="assembly.route_selector",
+            artifact_type=ASSEMBLY_ROUTE_DECISION,
+        )
+        Ledger(state["data_dir"]).record_review_decision(
+            state["session_id"],
+            "assembly",
+            gate_id="route_selection",
+            decision=request.decision,
+            notes=list(request.notes),
+            artifact_ref=decision_ref.model_dump(mode="json"),
+            metadata=request.metadata,
+            decided_by=request.decided_by,
+            rationale_artifact_ref=request.rationale_artifact_ref,
+            review_request_id=review_request_id,
+        )
         return {
             "current_stage": "assembly",
             "supervision_state": "failed_terminal",
@@ -360,12 +374,30 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
             "read_type_source": read_type_source,
         },
     )
-    decision_ref = _write_assembly_json_artifact(
-        state,
-        "route_decision.json",
-        decision.model_dump(mode="json"),
-        artifact_type=ASSEMBLY_ROUTE_DECISION,
+    review_request_id, review_request_hash = _route_review_binding(state, request)
+    decision_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=review_request_id,
+        stage="assembly",
+        gate_id="route_selection",
+        decision=decision,
+        request_hash=review_request_hash,
         method_name="assembly.route_selector",
+        artifact_type=ASSEMBLY_ROUTE_DECISION,
+    )
+    Ledger(state["data_dir"]).record_review_decision(
+        state["session_id"],
+        "assembly",
+        gate_id="route_selection",
+        decision=request.decision,
+        method_name=method,
+        notes=list(request.notes),
+        artifact_ref=decision_ref.model_dump(mode="json"),
+        metadata=request.metadata,
+        decided_by=decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+        review_request_id=review_request_id,
     )
 
     outputs = dict(state.get("stage_outputs") or {})
@@ -373,7 +405,7 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
         **assembly_out,
         "status": "route_selected",
         "route_decision": decision.model_dump(mode="json"),
-        "route_decision_ref": decision_ref,
+        "route_decision_ref": decision_ref.model_dump(mode="json"),
         "assembly_selection": selection.model_dump(mode="json"),
         "selected_route": selected_route,
         "method_decision": _resolve_method_decision(
@@ -389,211 +421,31 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
     }
 
 
-def apply_parameter_approval_decision(
-    state: TopLevelState, request: ResumeReviewRequest
-) -> dict[str, Any]:
-    """Apply one exactly-bound human decision to a validated recommendation."""
-
-    if request.stage != "assembly":
-        raise ResumeValidationError("parameter approval resume requires stage assembly")
-    if request.gate_id != "parameter_approval":
-        raise ResumeValidationError(
-            "parameter approval resume requires explicit gate_id=parameter_approval"
-        )
-    assembly_out = _assembly_output(state)
-    interrupt = state.get("active_interrupt") or assembly_out.get("active_interrupt")
-    if not isinstance(interrupt, dict) or interrupt.get("gate_id") != "parameter_approval":
-        raise ResumeValidationError("no unresolved parameter_approval gate")
-    if request.gate_id != interrupt.get("gate_id"):
-        raise ResumeValidationError("parameter approval gate_id does not match active interrupt")
-    allowed = list(interrupt.get("decisions_allowed") or [])
-    if request.decision not in allowed or request.decision not in {
-        "approve_parameters", "reject_parameters"
-    }:
-        raise ResumeValidationError("unsupported parameter approval decision")
-
-    required = ("attempt_id", "task", "previous_attempt_id", "recommendation_hash")
-    missing = [key for key in required if key not in request.metadata]
-    if missing:
-        raise ResumeValidationError(
-            f"parameter approval metadata missing required bindings: {missing}"
-        )
-    for key in required:
-        if request.metadata.get(key) != interrupt.get(key):
-            raise ResumeValidationError(f"stale parameter approval binding: {key}")
-
-    pending = assembly_out.get("pending_parameter_recommendation")
-    if not isinstance(pending, dict):
-        raise ResumeValidationError("active parameter approval has no pending recommendation")
-    if pending.get("attempt_id") != interrupt.get("attempt_id"):
-        raise ResumeValidationError("pending recommendation attempt does not match interrupt")
-    if pending.get("parameter_recommendation_hash") != interrupt.get("recommendation_hash"):
-        raise ResumeValidationError("pending recommendation hash does not match interrupt")
-    try:
-        pending_attempt = ParameterAttempt.model_validate(pending).model_dump(mode="json")
-    except ValueError as exc:
-        raise ResumeValidationError("pending parameter recommendation is invalid") from exc
-    recommendation_ref = pending.get("parameter_recommendation_ref") or {}
-    if recommendation_ref.get("sha256") != interrupt.get("recommendation_hash"):
-        raise ResumeValidationError("immutable recommendation artifact hash mismatch")
-    recommendation_path = _resolve_data_path_ref(
-        absolute_data_dir(state), str(recommendation_ref.get("path_ref") or "")
-    )
-    if not recommendation_path.exists() or file_sha256(recommendation_path) != interrupt.get("recommendation_hash"):
-        raise ResumeValidationError("immutable recommendation artifact is missing or changed")
-    try:
-        recommendation_payload = json.loads(recommendation_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ResumeValidationError("immutable recommendation artifact is unreadable") from exc
-    artifact_attempt = recommendation_payload.get("attempt") if isinstance(recommendation_payload, dict) else None
-    if not isinstance(artifact_attempt, dict):
-        raise ResumeValidationError("immutable recommendation artifact has no attempt proposal")
-    try:
-        artifact_attempt = ParameterAttempt.model_validate(artifact_attempt).model_dump(mode="json")
-    except ValueError as exc:
-        raise ResumeValidationError("immutable recommendation artifact attempt is invalid") from exc
-    artifact_semantic = _canonical_parameter_proposal(artifact_attempt)
-    pending_semantic = _canonical_parameter_proposal(pending_attempt)
-    if artifact_semantic != pending_semantic:
-        raise ResumeValidationError("pending recommendation differs semantically from artifact")
-    proposal_semantic_hash = _parameter_proposal_semantic_hash(artifact_semantic)
-    if interrupt.get("proposal_semantic_hash") != proposal_semantic_hash:
-        raise ResumeValidationError("parameter approval proposal semantic hash mismatch")
-
-    try:
-        attempts = _validate_parameter_attempt_chain(
-            assembly_out.get("parameter_attempts") or []
-        )
-    except (ValueError, TypeError) as exc:
-        raise ResumeValidationError("parameter approval attempt chain is invalid or mutated") from exc
-    attempt_id = int(interrupt["attempt_id"])
-    previous_id = interrupt.get("previous_attempt_id")
-    if any(item.get("attempt_id") == attempt_id for item in attempts):
-        raise ResumeValidationError("parameter approval gate was already resolved")
-    if attempt_id == 0:
-        if attempts or previous_id is not None:
-            raise ResumeValidationError("initial parameter approval chain head changed")
-    else:
-        if not attempts or attempts[-1].get("attempt_id") != previous_id or attempt_id != int(previous_id) + 1:
-            raise ResumeValidationError("parameter approval attempt chain head changed")
-        previous = attempts[-1]
-        if not previous.get("seal_hash"):
-            raise ResumeValidationError("parameter retry previous attempt is not sealed")
-        if pending.get("previous_attempt_seal_hash") != previous.get("seal_hash"):
-            raise ResumeValidationError("parameter retry previous attempt seal changed")
-        initial = attempts[0]
-        if pending.get("inherited_initial_attempt_id") != initial.get("attempt_id"):
-            raise ResumeValidationError("parameter retry initial attempt binding changed")
-        if pending.get("inherited_initial_snapshot_ref") != _attempt_snapshot_ref(initial):
-            raise ResumeValidationError("parameter retry initial snapshot changed")
-        if pending.get("recommendation_contract") != initial.get("recommendation_contract"):
-            raise ResumeValidationError("parameter retry initial contract changed")
-        if pending.get("catalog_snapshot") != initial.get("catalog_snapshot"):
-            raise ResumeValidationError("parameter retry catalog snapshot changed")
-        if pending.get("inherited_profile_ref") != initial.get("input_profile_ref"):
-            raise ResumeValidationError("parameter retry inherited profile changed")
-
-    decision_ref = _write_attempt_json_artifact(
-        state,
-        attempt_id,
-        "parameter_approval_decision.json",
-        {
-            "session_id": state["session_id"],
-            "stage": "assembly",
-            "gate_id": "parameter_approval",
-            "decision": request.decision,
-            "metadata": {key: request.metadata[key] for key in required},
-            "decided_by": request.decided_by,
-            "notes": list(request.notes),
-        },
-        artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
-        method_name="assembly.parameter_approval",
-    )
-    Ledger(absolute_data_dir(state)).record_review_decision(
-        state["session_id"],
-        "assembly",
-        gate_id="parameter_approval",
-        decision=request.decision,
-        notes=list(request.notes),
-        artifact_ref=decision_ref.path_ref,
-        metadata={key: request.metadata[key] for key in required},
-        decided_by=request.decided_by,
-    )
-    outputs = dict(state.get("stage_outputs") or {})
-    if request.decision == "reject_parameters":
-        rejected_output = {
-            **assembly_out,
-            "status": "parameter_recommendation_rejected_by_human",
-            "reason": "parameter_recommendation_rejected_by_human",
-            "active_interrupt": None,
-            "pending_parameter_recommendation": None,
-            "parameter_rejection": {
-                "attempt_id": attempt_id,
-                "task": interrupt.get("task"),
-                "previous_attempt_id": previous_id,
-                "recommendation_ref": recommendation_ref,
-                "recommendation_hash": interrupt.get("recommendation_hash"),
-                "decision_ref": decision_ref.model_dump(mode="json"),
-                "decision": request.decision,
-            },
-        }
-        rejected_output["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
-            rejected_output,
-            status="parameter_recommendation_rejected_by_human",
-            reason="parameter_recommendation_rejected_by_human",
-        )
-        outputs["assembly"] = rejected_output
-        return {
-            "current_stage": "assembly",
-            "supervision_state": "failed_terminal",
-            "active_interrupt": None,
-            "last_error": "parameter_recommendation_rejected_by_human",
-            "stage_outputs": outputs,
-        }
-
-    approved = {
-        **pending,
-        "status": "recommended",
-        "parameter_approval_decision_ref": decision_ref.model_dump(mode="json"),
-        "parameter_approval_recommendation_hash": interrupt.get("recommendation_hash"),
-    }
-    # Validate the final appended representation before changing any counter.
-    approved = ParameterAttempt.model_validate(approved).model_dump(mode="json")
-    attempts.append(approved)
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    if interrupt.get("task") == "retry_after_execution_failure":
-        retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
-    elif interrupt.get("task") == "retry_after_review_failure":
-        retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
-    outputs["assembly"] = {
-        **assembly_out,
-        "status": "parameters_approved",
-        "current_parameter_attempt_id": attempt_id,
-        "parameter_attempts": attempts,
-        "retry_counts": retry_counts,
-        "active_interrupt": None,
-        "pending_parameter_recommendation": None,
-        "proposed_parameter_attempt_id": None,
-    }
-    return {
-        "current_stage": "assembly",
-        "supervision_state": "running_stage",
-        "active_interrupt": None,
-        "stage_outputs": outputs,
-    }
+def _route_review_binding(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+) -> tuple[str, str]:
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("assembly route decision is missing review request binding")
+    return str(review_request_id), str(review_request_hash)
 
 
 def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
     """Commit the current assembly recommendation after a configured timeout."""
     active_interrupt = state.get("active_interrupt") or {}
-    selection_payload = active_interrupt.get("recommended_assembly_selection")
-    if not isinstance(selection_payload, dict) and active_interrupt.get("recommended_route") in ROUTE_VALUES:
-        selection = _selection_from_route(
-            str(active_interrupt.get("recommended_route")),
-            source="recommendation",
-            rationale=str(active_interrupt.get("recommendation_reasoning") or "timeout committed legacy recommendation"),
+    try:
+        request_record = load_review_request(
+            state["data_dir"],
+            active_interrupt.get("request_ref") or {},
+            session_id=state["session_id"],
         )
-        selection_payload = selection.model_dump(mode="json") if selection else None
+    except (KeyError, ReviewPersistenceError, ValueError):
+        return _timeout_stop_update(state, request, timeout)
+    request_payload = request_record.get("payload") or {}
+    selection_payload = request_payload.get("recommended_assembly_selection")
     if not isinstance(selection_payload, dict):
         return _timeout_stop_update(state, request, timeout)
     try:
@@ -751,342 +603,24 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
     )
 
 
-def recommend_assembly_parameters(state: TopLevelState) -> dict:
-    """Recommend and validate L2 parameters for the selected assembly method."""
-
-    assembly_out = _assembly_output(state)
-    if assembly_out.get("status") not in {
-        "selected",
-        "retry_parameters_after_execution_failure",
-        "retry_parameters_after_review_failure",
-    }:
-        return {}
-
-    method_name = _selected_parameter_method(assembly_out)
-    if method_name is None:
-        return {}
-    task = _parameter_prompt_task(assembly_out)
-    initial_snapshot = next(
-        (
-            dict(item) for item in assembly_out.get("parameter_attempts") or []
-            if isinstance(item, dict) and item.get("attempt_id") == 0
-        ),
-        {},
-    )
-    try:
-        if task == "recommend_initial":
-            catalog = load_parameter_catalog(method_name)
-        else:
-            from app.schemas.parameter_catalog import MethodParameterCatalog
-            catalog = MethodParameterCatalog.model_validate(initial_snapshot["catalog_snapshot"])
-            if catalog.method_id != method_name.rsplit(".", 1)[-1]:
-                return _retry_transition_failure(state, "policy_snapshot_hash_mismatch")
-    except (KeyError, FileNotFoundError, ValueError) as exc:
-        reason = "policy_snapshot_mismatch" if task != "recommend_initial" else f"Assembly parameter catalog is not usable: {exc}"
-        return _fail_update(state, reason) if task == "recommend_initial" else _retry_transition_failure(state, reason)
-
-    l2_keys = [key for key, spec in catalog.parameters.items() if spec.level == 2]
-    if not l2_keys:
-        return _fail_update(state, f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}")
-
-    attempt_id = int(
-        assembly_out.get("proposed_parameter_attempt_id")
-        if assembly_out.get("proposed_parameter_attempt_id") is not None
-        else assembly_out.get("current_parameter_attempt_id")
-        or len(assembly_out.get("parameter_attempts") or [])
-    )
-    previous_attempt = _previous_parameter_attempt(assembly_out, attempt_id)
-    attempts_before = [
-        dict(item) for item in assembly_out.get("parameter_attempts") or []
-        if isinstance(item, dict)
-    ]
-    initial_attempt = next(
-        (item for item in attempts_before if item.get("attempt_id") == 0), {}
-    )
-    if task != "recommend_initial":
-        if not previous_attempt or previous_attempt.get("attempt_id") != attempt_id - 1:
-            return _retry_transition_failure(state, "missing_failure_signal")
-        if not previous_attempt.get("seal_hash"):
-            return _retry_transition_failure(state, "unsealed_previous_attempt")
-        retry_request = dict(assembly_out.get("parameter_retry_request") or {})
-        if retry_request.get("previous_attempt_id") != previous_attempt.get("attempt_id"):
-            return _retry_transition_failure(state, "missing_failure_signal")
-        if retry_request.get("previous_attempt_seal_hash") != previous_attempt.get("seal_hash"):
-            return _retry_transition_failure(state, "previous_attempt_seal_hash_mismatch")
-    full_profile = build_full_parameter_profile(
-        state,
-        assembly_out=assembly_out,
-        previous_attempt=previous_attempt,
-        assembly_review=assembly_out.get("review_failure"),
-    )
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-
-    try:
-        prompt_payload = build_prompt_payload(
-            method_id=catalog.method_id,
-            catalog=catalog,
-            full_profile=full_profile,
-            task=task,
-            write_artifacts=True,
-            session_id=session_id,
-            attempt_id=attempt_id,
-            data_dir=data_dir,
-            initial_attempt_snapshot=initial_attempt,
-        )
-    except Exception as exc:
-        return _fail_update(state, f"Assembly parameter prompt payload failed: {exc}")
-
-    # Append replay inputs to the artifact index.
-    replay_artifacts = []
-    profile_ref = prompt_payload.get("input_profile_ref")
-    prompt_ref = prompt_payload.get("prompt_payload_ref")
-    literature_selection = prompt_payload.get("literature_selection") or {}
-    artifact_specs = (
-        (profile_ref, ASSEMBLY_PARAMETER_INPUT_PROFILE),
-        (prompt_ref, ASSEMBLY_PARAMETER_PROMPT_PAYLOAD),
-    )
-    resolved_paths: dict[str, Path] = {}
-    for ref, artifact_type in artifact_specs:
-        if not ref:
-            continue
-        artifact_path = _resolve_data_path_ref(data_dir, str(ref))
-        if artifact_path and artifact_path.exists():
-            resolved_paths[artifact_type] = artifact_path
-            replay_artifacts.append(
-                ArtifactMeta.from_file(
-                    artifact_path,
-                    stage="assembly",
-                    method_name="assembly.parameter_recommender",
-                    artifact_type=artifact_type,
-                    metadata={"attempt_id": attempt_id},
-                )
-            )
-    if replay_artifacts:
-        append_artifact_records(data_dir, session_id, replay_artifacts)
-    prompt_path = resolved_paths.get(ASSEMBLY_PARAMETER_PROMPT_PAYLOAD)
-
-    decision = make_assembly_decision(
-        AssemblyDecisionRequest(
-            kind="parameter_recommendation",
-            session_id=session_id,
-            prompt_payload=prompt_payload,
-            allow_default_on_error=bool(
-                _parameter_recommendation_config(state, assembly_out).get("allow_model_unavailable_defaults", False)
-            ),
-        )
-    )
-    llm_response_ref = _write_attempt_json_artifact(
-        state,
-        attempt_id,
-        "llm_response.json",
-        {
-            "raw_response": decision.raw_response,
-            "parsed": decision.parsed,
-            "valid": decision.valid,
-            "error": decision.error,
-            "model_id": decision.model_id,
-        },
-        artifact_type=ASSEMBLY_PARAMETER_LLM_RESPONSE,
-        method_name="assembly.parameter_recommender",
-    )
-
-    recommended_params = dict((decision.parsed or {}).get("params") or {}) if decision.valid else {}
-    if decision.valid:
-        validation = validate_recommended_parameters(
-            method_id=catalog.method_id,
-            catalog=catalog,
-            recommended_params=recommended_params,
-            readonly_facts=flatten_profile_facts(full_profile),
-            rules=prompt_payload.get("rules") or {},
-            full_profile=full_profile,
-        )
-    else:
-        validation = {
-            "valid": False,
-            "method_id": catalog.method_id,
-            "violations": [
-                {
-                    "param": None,
-                    "value": decision.raw_response,
-                    "reason": decision.error or "parameter recommendation failed",
-                    "severity": "critical",
-                }
-            ],
-            "warnings": [],
-        }
-    validation_ref = _write_attempt_json_artifact(
-        state,
-        attempt_id,
-        "validation.json",
-        validation,
-        artifact_type=ASSEMBLY_PARAMETER_VALIDATION,
-        method_name="assembly.parameter_validator",
-    )
-
-    parsed = decision.parsed or {}
-    selected_case_ids = list(parsed.get("used_literature_case_ids") or [])
-    baseline_params = dict(parsed.get("baseline_params") or {})
-    effective_params = dict(parsed.get("effective_params") or baseline_params)
-    execution_params = dict(parsed.get("execution_params") or recommended_params)
-    proposed_parameter_changes = {
-        key: {"from": baseline_params.get(key), "to": value}
-        for key, value in recommended_params.items()
-        if baseline_params.get(key) != value
-    }
-    attempt = ParameterAttempt(
-        attempt_id=attempt_id,
-        method_id=method_name,
-        status="recommended" if validation.get("valid") else "validation_failed",
-        task=task,
-        input_profile_ref=ArtifactRef(
-            path_ref=str(prompt_payload["input_profile_ref"]),
-            sha256=str(prompt_payload["input_profile_hash"]),
-            artifact_type="assembly.parameter.input_profile",
-        ),
-        prompt_payload_ref=ArtifactRef(
-            path_ref=str(prompt_payload["prompt_payload_ref"]),
-            sha256=(
-                file_sha256(prompt_path)
-                if prompt_path and prompt_path.exists()
-                else str(prompt_payload["prompt_payload_hash"])
-            ),
-            artifact_type="assembly.parameter.prompt_payload",
-        ),
-        retrieval_backend=(
-            literature_selection.get("retrieval_backend")
-            if literature_selection.get("retrieval_backend")
-            else None
-        ),
-        retrieval_query_id=literature_selection.get("query_id"),
-        retrieval_candidate_case_ids=list(
-            literature_selection.get("candidate_case_ids") or []
-        ),
-        retrieval_eligible_case_count=literature_selection.get("eligible_case_count"),
-        retrieval_warning=literature_selection.get("warning"),
-        llm_response_ref=llm_response_ref,
-        validation_ref=validation_ref,
-        catalog_ref=f"descriptors/knowledge_packs/assembly/methods/{catalog.method_id}/params.yaml",
-        catalog_snapshot=catalog.model_dump(mode="json"),
-        knowledge_pack_ref="descriptors/knowledge_packs/assembly/parameter_recommender",
-        selected_case_ids=selected_case_ids,
-        recommended_params=recommended_params,
-        baseline_params=baseline_params,
-        effective_params=effective_params,
-        execution_params=execution_params,
-        parameter_reasoning=dict(parsed.get("parameter_reasoning") or {}),
-        sample_diagnosis=dict(parsed.get("sample_diagnosis") or {}),
-        proposed_parameter_changes=proposed_parameter_changes,
-        recommendation_summary=parsed.get("summary"),
-        validation=validation,
-        reasoning=parsed.get("reasoning"),
-        previous_attempt_id=previous_attempt.get("attempt_id") if previous_attempt else None,
-        failure_signature=(
-            dict((prompt_payload.get("retry_context") or {}))
-            if task != "recommend_initial"
-            else None
-        ),
-        failure_log_tail=assembly_out.get("execution_failure_log_tail"),
-        review_failure=assembly_out.get("review_failure"),
-        attempt_kind="initial" if task == "recommend_initial" else "retry",
-        retry_origin=(
-            "assembly_execution" if task == "retry_after_execution_failure"
-            else "assembly_review" if task == "retry_after_review_failure" else None
-        ),
-        recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
-        inherited_initial_attempt_id=0 if task != "recommend_initial" else None,
-        inherited_initial_snapshot_ref=(
-            _attempt_snapshot_ref(initial_attempt) if task != "recommend_initial" else None
-        ),
-        inherited_profile_ref=(
-            initial_attempt.get("input_profile_ref") if task != "recommend_initial" else None
-        ),
-        previous_attempt_seal_hash=(
-            previous_attempt.get("seal_hash") if task != "recommend_initial" else None
-        ),
-    )
-    retry_disposition = parsed.get("retry_disposition")
-    if validation.get("valid") and retry_disposition == "stop":
-        status = "parameter_retry_stopped"
-    elif validation.get("valid") and retry_disposition == "expert_review":
-        status = "parameter_retry_expert_review"
-    else:
-        status = "blocked_human" if validation.get("valid") else "parameter_retry_validation_failed" if task != "recommend_initial" else "parameter_validation_failed"
-    attempt_payload = attempt.model_dump(mode="json")
-    recommendation_ref = _write_attempt_json_artifact(
-        state,
-        attempt_id,
-        "validated_recommendation.json",
-        {"attempt": attempt_payload, "validation": validation},
-        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION,
-        method_name="assembly.parameter_recommender",
-    )
-    attempt_payload["parameter_recommendation_ref"] = recommendation_ref.model_dump(mode="json")
-    attempt_payload["parameter_recommendation_hash"] = recommendation_ref.sha256
-    update = {
-        "status": status,
-        "proposed_parameter_attempt_id": attempt_id,
-    }
-    if not validation.get("valid"):
-        update["reason"] = "Assembly parameter recommendation failed validation"
-        update["failed_parameter_recommendation"] = attempt_payload
-    elif retry_disposition == "stop":
-        update["reason"] = parsed.get("summary") or "Parameter retry stopped by evidence assessment"
-    elif retry_disposition == "expert_review":
-        update["reason"] = parsed.get("summary") or "Parameter retry requires expert review"
-    else:
-        parameter_diff = proposed_parameter_changes
-        interrupt = _parameter_approval_interrupt(
-            attempt=attempt_payload,
-            recommendation_ref=recommendation_ref,
-            parameter_diff=parameter_diff,
-        )
-        request_ref = _write_attempt_json_artifact(
-            state,
-            attempt_id,
-            "parameter_approval_request.json",
-            interrupt,
-            artifact_type="assembly.parameter_approval.request",
-            method_name="assembly.parameter_approval",
-        )
-        interrupt["review_request_artifact_ref"] = request_ref.model_dump(mode="json")
-        Ledger(data_dir).record_review_requested(
-            session_id,
-            "assembly",
-            reason="assembly_parameter_approval_required",
-            candidates=[
-                {
-                    "attempt_id": attempt_id,
-                    "task": task,
-                    "previous_attempt_id": attempt.previous_attempt_id,
-                    "recommendation_hash": recommendation_ref.sha256,
-                }
-            ],
-            review_request_artifact_ref=request_ref.path_ref,
-            auto_decidable=False,
-            pending_human_confirmation=True,
-        )
-        update.update(
-            {
-                "block_reason": "assembly_parameter_approval_required",
-                "active_interrupt": interrupt,
-                "pending_parameter_recommendation": attempt_payload,
-            }
-        )
-    return _update_assembly_output(state, update)
-
-
 def plan_candidate_attempts(state: TopLevelState) -> dict:
     """Write candidate bundles and select the optional local Flye route."""
     assembly_out = _assembly_output(state)
     if assembly_out.get("status") not in {"selected", "parameters_recommended", "parameters_approved"}:
         return {}
 
-    data_dir = Path(state.get("data_dir", "data"))
+    data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     parameter_attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
-    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
-    candidate_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "candidates"
+    attempt_scope = f"{parameter_attempt_id:03d}"
+    attempt_label = f"parameter_attempt_{parameter_attempt_id}"
+    candidate_dir = stage_artifacts_dir(
+        state,
+        "assembly",
+        "attempts",
+        attempt_scope,
+        "candidates",
+    )
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
     local_flye = assembly_out.get("execution_mode") == "local" and assembly_out.get("primary_method") == FLYE_METHOD
@@ -1108,16 +642,23 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
     selection = _selection_from_output(assembly_out)
     for method_name in assembly_out["selected_methods"]:
         short_name = method_name.rsplit(".", 1)[-1]
-        fasta_path = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / short_name / "draft_assembly.fasta"
+        fasta_path = stage_artifacts_dir(
+            state,
+            "assembly",
+            "attempts",
+            attempt_scope,
+            "outputs",
+            short_name,
+        ) / "draft_assembly.fasta"
         if method_name == NEXTDENOVO_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "nextdenovo" / "run.cfg"
+            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "nextdenovo") / "run.cfg"
         elif method_name == HIFIASM_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "hifiasm" / "run_hifiasm.sh"
+            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm") / "run_hifiasm.sh"
         elif method_name == HIFIASM_ONT_METHOD:
-            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / "hifiasm_ont" / "run_hifiasm_ont.sh"
+            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm_ont") / "run_hifiasm_ont.sh"
         else:
-            log_path = data_dir / "work" / "assembly" / session_id / attempt_scope / short_name / "flye_out" / "flye.log"
-        bundle_path = candidate_dir / f"{short_name}_candidate.json"
+            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, short_name, "flye_out") / "flye.log"
+        bundle_path = candidate_dir / f"{short_name}_candidate.planned.json"
         execution_enabled = (
             (local_flye and method_name == FLYE_METHOD)
             or (local_nextdenovo and method_name == NEXTDENOVO_METHOD)
@@ -1127,7 +668,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         method_graph_requested = execution_enabled
         bundle = AssemblyCandidateBundle(
             session_id=session_id,
-            candidate_id=f"{session_id}:{method_name}:{attempt_scope}",
+            candidate_id=f"{session_id}:{method_name}:{attempt_label}",
             method_name=method_name,
             status="planned",
             input_ref=assembly_out["input_ref"],
@@ -1145,10 +686,21 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
                 "draft_assembly_ref_status": "pending_execution" if execution_enabled else "planned_path_not_materialized",
             },
         )
-        bundle_path.write_text(
+        temporary = stage_work_dir(
+            state,
+            "assembly",
+            "candidate_planning",
+            f".{bundle_path.name}.{uuid4().hex}.tmp",
+        )
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
             json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            publish_file(temporary, bundle_path)
+        finally:
+            temporary.unlink(missing_ok=True)
         candidate_refs.append(str(bundle_path))
         artifact = ArtifactMeta.from_file(
             bundle_path,
@@ -1214,158 +766,6 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
                     "method_name": HIFIASM_ONT_METHOD,
                     "skip_reason": None if local_hifiasm_ont else "local_execution_not_enabled",
                 },
-            },
-        },
-    )
-
-
-def execution_retry_gate(state: TopLevelState) -> dict:
-    """Prepare a new parameter attempt after command execution failure."""
-
-    assembly_out = _assembly_output(state)
-    if assembly_out.get("status") != "failed" or not assembly_out.get("parameter_attempts"):
-        return {}
-    attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
-    attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
-    previous = next((item for item in attempts if item.get("attempt_id") == attempt_id), attempts[-1] if attempts else {})
-    execution_result = dict(previous.get("execution_result") or {})
-    if not execution_result:
-        return {}
-    failure_log_tail = _failure_log_tail(execution_result)
-    if failure_log_tail:
-        previous["failure_log_tail"] = failure_log_tail
-        previous["stderr_tail"] = _tail_from_path(execution_result.get("stderr_path"))
-        previous["stdout_tail"] = _tail_from_path(execution_result.get("stdout_path"))
-    previous = _seal_parameter_attempt(previous)
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    used = int(retry_counts.get("execution", 0))
-    max_retries = _parameter_recommendation_config(state, assembly_out).get("max_execution_retries", 1)
-    updated_attempts = [previous if item.get("attempt_id") == attempt_id else item for item in attempts]
-    if used >= int(max_retries):
-        exhausted = {
-            "status": "execution_parameter_retries_exhausted",
-            "reason": "execution_retry_budget_exhausted",
-            "parameter_attempts": updated_attempts,
-            "execution_failure_log_tail": failure_log_tail,
-        }
-        exhausted["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
-            {**assembly_out, **exhausted},
-            status="execution_parameter_retries_exhausted",
-            reason="execution_retry_budget_exhausted",
-        )
-        return _update_assembly_output(
-            state,
-            exhausted,
-        )
-    return _update_assembly_output(
-        state,
-        {
-            "status": "retry_parameters_after_execution_failure",
-            "proposed_parameter_attempt_id": attempt_id + 1,
-            "previous_parameter_attempt": previous,
-            "parameter_attempts": updated_attempts,
-            "retry_counts": retry_counts,
-            "execution_failure_log_tail": failure_log_tail,
-            "parameter_retry_request": {
-                "origin": "assembly_execution",
-                "previous_attempt_id": attempt_id,
-                "previous_attempt_seal_hash": previous["seal_hash"],
-                "execution_result": execution_result,
-            },
-        },
-    )
-
-
-def parameter_quality_gate(state: TopLevelState) -> dict:
-    """Classify review metrics and prepare a quality-replan attempt if needed."""
-
-    assembly_out = _assembly_output(state)
-    review_out = (state.get("stage_outputs") or {}).get("assembly_review") or {}
-    metrics = dict(review_out.get("metrics") or review_out.get("summary") or assembly_out.get("review_metrics") or {})
-    diagnosis = _review_failure_diagnosis(metrics)
-    if diagnosis["passed"]:
-        current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
-        completed = _previous_parameter_attempt(assembly_out, current_id + 1)
-        completed = {**completed, "review_outcome": diagnosis}
-        completed = _seal_parameter_attempt(completed)
-        attempts = [
-            completed if item.get("attempt_id") == current_id else item
-            for item in assembly_out.get("parameter_attempts") or []
-            if isinstance(item, dict)
-        ]
-        passed = {
-            "status": "parameter_quality_passed",
-            "quality_gate": diagnosis,
-            "parameter_attempts": attempts,
-        }
-        passed["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
-            {**assembly_out, **passed}, status="assembly_succeeded", reason="completed"
-        )
-        return _update_assembly_output(
-            state,
-            passed,
-        )
-    current_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
-    previous = _previous_parameter_attempt(assembly_out, current_id + 1)
-    review_failure_ref = _write_attempt_json_artifact(
-        state,
-        current_id,
-        "review_failure.json",
-        {
-            "attempt_id": current_id,
-            "next_attempt_id": current_id + 1,
-            "diagnosis": diagnosis,
-            "review_metrics": metrics,
-        },
-        artifact_type=ASSEMBLY_PARAMETER_REVIEW_FAILURE,
-        method_name="assembly.parameter_quality_gate",
-    )
-    previous = {
-        **previous,
-        "review_failure": diagnosis,
-        "review_outcome": diagnosis,
-        "review_failure_ref": review_failure_ref.model_dump(mode="json"),
-    }
-    previous = _seal_parameter_attempt(previous)
-    attempts = [dict(item) for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
-    updated_attempts = [previous if item.get("attempt_id") == current_id else item for item in attempts]
-    if previous and not any(item.get("attempt_id") == current_id for item in updated_attempts):
-        updated_attempts.append(previous)
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    used = int(retry_counts.get("review", 0))
-    max_retries = _parameter_recommendation_config(state, assembly_out).get("max_review_retries", 2)
-    if used >= int(max_retries):
-        exhausted = {
-            "status": "review_parameter_retries_exhausted",
-            "quality_gate": diagnosis,
-            "review_failure": diagnosis,
-            "parameter_attempts": updated_attempts,
-            "reason": "review_retry_budget_exhausted",
-        }
-        exhausted["parameter_attempt_timeline"] = build_parameter_attempt_timeline(
-            {**assembly_out, **exhausted},
-            status="review_parameter_retries_exhausted",
-            reason="review_retry_budget_exhausted",
-        )
-        return _update_assembly_output(
-            state,
-            exhausted,
-        )
-    return _update_assembly_output(
-        state,
-        {
-            "status": "retry_parameters_after_review_failure",
-            "proposed_parameter_attempt_id": current_id + 1,
-            "previous_parameter_attempt": previous,
-            "parameter_attempts": updated_attempts,
-            "retry_counts": retry_counts,
-            "review_failure": diagnosis,
-            "quality_gate": diagnosis,
-            "parameter_retry_request": {
-                "origin": "assembly_review",
-                "previous_attempt_id": current_id,
-                "previous_attempt_seal_hash": previous["seal_hash"],
-                "review_failure": diagnosis,
             },
         },
     )
@@ -1437,20 +837,26 @@ def block_assembly_for_human(state: TopLevelState) -> dict:
     reason = assembly_out.get("block_reason", "assembly decision required")
     interrupt = dict(assembly_out.get("active_interrupt") or {})
     if interrupt:
+        outputs = dict(state.get("stage_outputs") or {})
+        compact_output = dict(assembly_out)
+        compact_output.pop("active_interrupt", None)
+        outputs["assembly"] = compact_output
         return {
             "current_stage": "assembly",
             "supervision_state": "blocked_human",
             "active_interrupt": interrupt,
+            "stage_outputs": outputs,
         }
+    persisted = _block_for_route_review(state, reason)
+    outputs = dict(persisted.get("stage_outputs") or state.get("stage_outputs") or {})
+    persisted_output = dict(outputs.get("assembly") or {})
+    interrupt = dict(persisted_output.pop("active_interrupt", None) or {})
+    outputs["assembly"] = persisted_output
     return {
         "current_stage": "assembly",
         "supervision_state": "blocked_human",
-        "active_interrupt": {
-            "stage": "assembly",
-            "reason": reason,
-            "candidate_methods": assembly_out.get("candidate_methods", []),
-            "rejected_candidates": assembly_out.get("rejected_candidates", {}),
-        },
+        "active_interrupt": interrupt,
+        "stage_outputs": outputs,
     }
 
 
@@ -1459,10 +865,6 @@ def _block_for_human(state: TopLevelState, reason: str) -> dict:
 
 
 def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
-    from datetime import datetime, timezone
-    from app.review.base import ReviewPayload
-    from app.review.policy import evaluate
-
     assembly_out = _assembly_output(state)
     profile = dict(assembly_out.get("input_profile") or {})
     recommended_selection = dict(assembly_out.get("recommended_assembly_selection") or {})
@@ -1485,11 +887,8 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
     # Evaluate policy
     outcome = evaluate("assembly", payload, assembly_out.get("review_policy"))
 
-    interrupt = {
-        "stage": "assembly",
-        "gate_id": "route_selection",
-        "reason": reason,
-        "decisions_allowed": ["select_cyclone", "select_ont", "select_hifi", "stop_human_review"],
+    request_payload = {
+        **payload.model_dump(mode="json"),
         "recommended_route": profile.get("recommended_route"),
         "recommended_assembly_selection": recommended_selection,
         "recommendation_reasoning": profile.get("recommendation_reasoning"),
@@ -1499,10 +898,35 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
         "compatible_methods": {
             read_type: compatible_methods(read_type) for read_type in ["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
         },
-        "blocked_at": datetime.now(timezone.utc).isoformat(),
         "review_policy": assembly_out.get("review_policy") or {"mode": outcome.mode},
         "review_policy_outcome": outcome.model_dump(mode="json"),
     }
+    persisted_request = persist_review_request(
+        state,
+        stage="assembly",
+        gate_id="route_selection",
+        reason=reason,
+        payload=request_payload,
+        method_name="assembly.route_selector",
+        artifact_type="assembly.route_selection.request",
+    )
+    Ledger(state["data_dir"]).record_review_requested(
+        state["session_id"],
+        "assembly",
+        reason=reason,
+        candidates=payload.candidates,
+        signals=[signal.model_dump(mode="json") for signal in payload.signals],
+        review_request_artifact_ref=persisted_request.request_ref.model_dump(mode="json"),
+        auto_decidable=False,
+        policy_mode=outcome.mode,
+        pending_human_confirmation=True,
+        review_request_id=persisted_request.review_request_id,
+    )
+    interrupt = persisted_request.compact_interrupt(
+        stage="assembly",
+        gate_id="route_selection",
+        reason=reason,
+    )
 
     return _update_assembly_output(
         state,
@@ -1651,423 +1075,43 @@ def _write_assembly_json_artifact(
     *,
     artifact_type: str,
     method_name: str,
-) -> str:
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    path = artifact_dir / filename
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        path,
-        stage="assembly",
-        method_name=method_name,
-        artifact_type=artifact_type,
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    return str(path)
-
-
-def _write_attempt_json_artifact(
-    state: TopLevelState,
-    attempt_id: int,
-    filename: str,
-    payload: dict[str, Any],
-    *,
-    artifact_type: str,
-    method_name: str,
-) -> ArtifactRef:
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{attempt_id}"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    path = artifact_dir / filename
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
-    if path.exists():
-        if path.read_text(encoding="utf-8") != serialized:
-            raise ResumeValidationError(
-                f"immutable parameter-attempt artifact already exists with different content: {path}"
-            )
-    else:
-        path.write_text(serialized, encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        path,
-        stage="assembly",
-        method_name=method_name,
-        artifact_type=artifact_type,
-        metadata={"attempt_id": attempt_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    return ArtifactRef(
-        path_ref=f"data/artifacts/assembly/{session_id}/parameter_attempt_{attempt_id}/{filename}",
-        sha256=file_sha256(path),
-        artifact_type=artifact_type,
-    )
-
-
-def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
-    if (
-        assembly_out.get("status") == "selected"
-        and assembly_out.get("execution_mode") != "local"
-    ):
-        return None
-    primary = assembly_out.get("primary_method")
-    if isinstance(primary, str):
-        return str(primary)
-    selection = _selection_from_output(assembly_out)
-    if selection:
-        return selection.primary_method
-    return None
-
-
-def _parameter_prompt_task(assembly_out: dict[str, Any]) -> str:
-    status = assembly_out.get("status")
-    if status == "retry_parameters_after_execution_failure":
-        return "retry_after_execution_failure"
-    if status == "retry_parameters_after_review_failure":
-        return "retry_after_review_failure"
-    return "recommend_initial"
-
-
-def _previous_parameter_attempt(assembly_out: dict[str, Any], attempt_id: int) -> dict[str, Any]:
-    explicit = assembly_out.get("previous_parameter_attempt")
-    if isinstance(explicit, dict):
-        return explicit
-    attempts = [item for item in assembly_out.get("parameter_attempts") or [] if isinstance(item, dict)]
-    if not attempts:
-        return {}
-    return next((item for item in attempts if item.get("attempt_id") == attempt_id - 1), attempts[-1])
-
-
-def _parameter_approval_interrupt(
-    *,
-    attempt: dict[str, Any],
-    recommendation_ref: ArtifactRef,
-    parameter_diff: dict[str, Any],
 ) -> dict[str, Any]:
-    failure_facts: dict[str, Any] = {}
-    if attempt.get("failure_signature"):
-        failure_facts["signals"] = attempt["failure_signature"]
-    if attempt.get("failure_log_tail"):
-        failure_facts["failure_log_tail"] = attempt["failure_log_tail"]
-    if attempt.get("review_failure"):
-        failure_facts["review_failure"] = attempt["review_failure"]
-    return {
-        "stage": "assembly",
-        "gate_id": "parameter_approval",
-        "reason": "assembly_parameter_approval_required",
-        "attempt_id": attempt["attempt_id"],
-        "task": attempt.get("task"),
-        "previous_attempt_id": attempt.get("previous_attempt_id"),
-        "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-        "recommendation_hash": recommendation_ref.sha256,
-        "proposal_semantic_hash": _parameter_proposal_semantic_hash(attempt),
-        "parameter_diff": parameter_diff,
-        "rationale": attempt.get("recommendation_summary") or attempt.get("reasoning"),
-        "failure_facts": failure_facts,
-        "evidence_refs": {
-            key: attempt.get(key)
-            for key in (
-                "input_profile_ref",
-                "prompt_payload_ref",
-                "catalog_ref",
-                "knowledge_pack_ref",
-                "inherited_initial_snapshot_ref",
-            )
-            if attempt.get(key) is not None
-        },
-        "decisions_allowed": ["approve_parameters", "reject_parameters"],
-        "auto_decidable": False,
-    }
-
-
-_PARAMETER_PROPOSAL_POST_WRITE_FIELDS = {
-    "parameter_recommendation_ref",
-    "parameter_recommendation_hash",
-    "parameter_approval_decision_ref",
-    "parameter_approval_recommendation_hash",
-    "sealed_at",
-    "seal_hash",
-}
-
-
-def _canonical_parameter_proposal(attempt: dict[str, Any]) -> dict[str, Any]:
-    """Return every proposal semantic that approval will append or later freeze."""
-
-    normalized = ParameterAttempt.model_validate(attempt).model_dump(mode="json")
-    return {
-        key: value
-        for key, value in normalized.items()
-        if key not in _PARAMETER_PROPOSAL_POST_WRITE_FIELDS
-    }
-
-
-def _parameter_proposal_semantic_hash(attempt: dict[str, Any]) -> str:
-    canonical = _canonical_parameter_proposal(attempt)
-    return sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-
-
-def _seal_parameter_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
-    value = dict(attempt)
-    semantic = {key: item for key, item in value.items() if key not in {"sealed_at", "seal_hash"}}
-    digest = sha256(
-        json.dumps(semantic, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-    if value.get("seal_hash"):
-        if value["seal_hash"] != digest:
-            raise ValueError("sealed parameter attempt was mutated")
-        return value
-    value["sealed_at"] = datetime.now(timezone.utc).isoformat()
-    value["seal_hash"] = digest
-    return value
-
-
-def _attempt_snapshot_ref(attempt: dict[str, Any]) -> str | None:
-    if not attempt:
-        return None
-    return attempt.get("seal_hash") or sha256(
-        json.dumps(attempt, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-
-
-def _retry_transition_failure(state: TopLevelState, reason: str) -> dict[str, Any]:
-    return _update_assembly_output(
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    artifact_dir = stage_artifacts_dir(state, "assembly", "control")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    content_hash = sha256(canonical).hexdigest()[:16]
+    logical = Path(filename)
+    suffix = logical.suffix or ".json"
+    path = artifact_dir / f"{logical.stem}.{content_hash}{suffix}"
+    temporary = stage_work_dir(
         state,
-        {"status": "parameter_retry_invalid_transition", "reason": reason},
+        "assembly",
+        "persistence",
+        f".{path.name}.{uuid4().hex}.tmp",
     )
-
-
-def _validate_parameter_attempt_chain(raw_attempts: list[Any]) -> list[dict[str, Any]]:
-    """Validate the complete ordered, sealed parameter-attempt history."""
-
-    attempts: list[dict[str, Any]] = []
-    for item in raw_attempts:
-        if not isinstance(item, dict):
-            raise ValueError("parameter attempt chain contains a non-mapping entry")
-        verified = _seal_parameter_attempt(dict(item))
-        attempts.append(ParameterAttempt.model_validate(verified).model_dump(mode="json"))
-    if not attempts:
-        return attempts
-
-    initial = attempts[0]
-    if initial.get("attempt_id") != 0 or initial.get("previous_attempt_id") is not None:
-        raise ValueError("parameter attempt chain must start at attempt 0")
-    if initial.get("attempt_kind") != "initial":
-        raise ValueError("parameter attempt 0 must be initial")
-    if initial.get("recommendation_contract") != PARAMETER_RECOMMENDATION_CONTRACT:
-        raise ValueError("parameter attempt 0 has no known initial contract")
-    if any(
-        initial.get(key) is not None
-        for key in (
-            "retry_origin",
-            "inherited_initial_attempt_id",
-            "inherited_initial_snapshot_ref",
-            "inherited_profile_ref",
-            "previous_attempt_seal_hash",
-        )
-    ):
-        raise ValueError("parameter attempt 0 contains retry-only links")
-
-    initial_snapshot_ref = _attempt_snapshot_ref(initial)
-    for sequence, attempt in enumerate(attempts):
-        if attempt.get("attempt_id") != sequence:
-            raise ValueError("parameter attempt IDs must match fixed list order")
-        if sequence == 0:
-            continue
-        previous = attempts[sequence - 1]
-        if attempt.get("attempt_kind") != "retry":
-            raise ValueError("non-initial parameter attempts must be retries")
-        if attempt.get("previous_attempt_id") != sequence - 1:
-            raise ValueError("parameter attempt chain has a broken previous-attempt link")
-        if attempt.get("previous_attempt_seal_hash") != previous.get("seal_hash"):
-            raise ValueError("parameter attempt chain has a broken previous-seal link")
-        if attempt.get("inherited_initial_attempt_id") != 0:
-            raise ValueError("parameter retry has a broken initial-attempt link")
-        if attempt.get("inherited_initial_snapshot_ref") != initial_snapshot_ref:
-            raise ValueError("parameter retry has a broken initial-snapshot link")
-        if attempt.get("recommendation_contract") != initial.get(
-            "recommendation_contract"
-        ):
-            raise ValueError("parameter retry initial contract drifted")
-        if attempt.get("catalog_snapshot") != initial.get("catalog_snapshot"):
-            raise ValueError("parameter retry catalog snapshot drifted")
-        if attempt.get("inherited_profile_ref") != initial.get("input_profile_ref"):
-            raise ValueError("parameter retry inherited profile drifted")
-    return attempts
-
-
-def build_parameter_attempt_timeline(
-    assembly_out: dict[str, Any], *, status: str, reason: str
-) -> dict[str, Any]:
-    """Derive a deterministic terminal timeline from the sealed attempt chain."""
-
-    attempts = _validate_parameter_attempt_chain(
-        assembly_out.get("parameter_attempts") or []
-    )
-    for sequence, attempt in enumerate(attempts):
-        if int(attempt["attempt_id"]) != sequence:
-            raise ValueError("parameter attempt timeline requires contiguous attempt IDs")
-        expected_previous = None if sequence == 0 else sequence - 1
-        if attempt.get("previous_attempt_id") != expected_previous:
-            raise ValueError("parameter attempt timeline contains a broken previous-attempt link")
-        if not attempt.get("seal_hash"):
-            raise ValueError("parameter attempt timeline requires sealed attempts")
-        if not attempt.get("parameter_approval_decision_ref"):
-            raise ValueError("parameter attempt timeline requires an approval decision ref")
-        if attempt.get("parameter_approval_recommendation_hash") != attempt.get("parameter_recommendation_hash"):
-            raise ValueError("parameter attempt timeline approval hash mismatch")
-
-    recommendation_contract = attempts[0].get("recommendation_contract") if attempts else None
-    if attempts and recommendation_contract != PARAMETER_RECOMMENDATION_CONTRACT:
-        raise ValueError("parameter attempt timeline has missing/unknown initial contract")
-    entries = []
-    for sequence, attempt in enumerate(attempts):
-        execution = attempt.get("execution_result")
-        review = attempt.get("review_outcome") or attempt.get("review_failure")
-        entries.append(
-            {
-                "sequence": sequence,
-                "attempt_id": attempt["attempt_id"],
-                "previous_attempt_id": attempt.get("previous_attempt_id"),
-                "attempt_kind": attempt.get("attempt_kind"),
-                "retry_origin": attempt.get("retry_origin"),
-                "frozen_parameters_ref": attempt.get("validation_ref"),
-                "command_ref": attempt.get("command_ref"),
-                "execution": execution,
-                "stderr_tail": attempt.get("stderr_tail"),
-                "stdout_tail": attempt.get("stdout_tail"),
-                "review": review,
-                "failure_signal_ref": attempt.get("review_failure_ref") or (
-                    attempt.get("execution_result") if execution and execution.get("status") != "succeeded" else None
-                ),
-                "parameter_delta": attempt.get("proposed_parameter_changes") or {},
-                "inherited_initial_snapshot_ref": attempt.get("inherited_initial_snapshot_ref") or attempts[0].get("seal_hash"),
-                "parameter_approval": {
-                    "decision": "approve_parameters",
-                    "decision_ref": attempt.get("parameter_approval_decision_ref"),
-                    "recommendation_ref": attempt.get("parameter_recommendation_ref"),
-                    "recommendation_hash": attempt.get("parameter_approval_recommendation_hash"),
-                },
-                "seal_hash": attempt.get("seal_hash"),
-            }
-        )
-    retry_counts = dict(assembly_out.get("retry_counts") or {})
-    terminal = {
-        "status": status,
-        "reason": reason,
-        "final_attempt_id": attempts[-1]["attempt_id"] if attempts else None,
-        "execution_retries_used": int(retry_counts.get("execution", 0)),
-        "review_retries_used": int(retry_counts.get("review", 0)),
-        "result_ref": assembly_out.get("draft_assembly_ref"),
-        "parameter_rejection": assembly_out.get("parameter_rejection"),
-    }
-    chain_hash = sha256(
-        json.dumps(
-            [(item["attempt_id"], item["seal_hash"]) for item in attempts],
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {
-        "schema_version": 1,
-        "recommendation_contract": recommendation_contract,
-        "entries": entries,
-        "terminal": terminal,
-        "source_attempt_chain_hash": chain_hash,
-    }
-
-
-def _upsert_parameter_attempt(attempts: list[Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
-    typed = [ParameterAttempt.model_validate(item).model_dump(mode="json") for item in attempts if isinstance(item, dict)]
-    return [item for item in typed if item.get("attempt_id") != attempt["attempt_id"]] + [attempt]
-
-
-def _failure_log_tail(execution_result: dict[str, Any]) -> str:
-    return _tail_from_path(execution_result.get("stderr_path")) or _tail_from_path(execution_result.get("stdout_path")) or ""
-
-
-def _tail_from_path(path_value: Any, *, line_count: int = 100) -> str:
-    if not path_value:
-        return ""
-    path = Path(str(path_value))
-    if not path.exists():
-        return ""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[-line_count:])
-
-
-def _parameter_recommendation_config(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[str, Any]:
-    config = dict(assembly_out.get("parameter_recommendation") or {})
-    shared = state.get("shared_parameters") or {}
-    if isinstance(shared, dict):
-        assembly_config = dict((shared.get("assembly") or {}).get("parameter_recommendation") or {})
-        config = {**assembly_config, **config}
-    return {
-        "max_execution_retries": int(config.get("max_execution_retries", 1)),
-        "max_review_retries": int(config.get("max_review_retries", 2)),
-        "allow_model_unavailable_defaults": bool(config.get("allow_model_unavailable_defaults", False)),
-    }
-
-
-def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:
-    complete = _float_or_none(_first_metric(metrics, "busco_complete", "busco_complete_ratio"))
-    duplicate = _float_or_none(_first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio"))
-    size_ratio = _float_or_none(metrics.get("assembly_size_ratio"))
-    n50 = _float_or_none(_first_metric(metrics, "contig_n50", "n50"))
-    contig_count = _float_or_none(metrics.get("contig_count"))
-    normalized_complete = _ratio(complete)
-    normalized_duplicate = _ratio(duplicate)
-    passed = (
-        normalized_complete is not None
-        and normalized_complete >= 0.95
-        and (normalized_duplicate is None or normalized_duplicate <= 0.10)
-        and (size_ratio is None or 0.75 <= size_ratio <= 1.25)
-    )
-    if passed:
-        failure_mode = None
-        suggestions: dict[str, str] = {}
-    elif normalized_duplicate is not None and normalized_duplicate >= 0.15 and size_ratio is not None and size_ratio >= 1.20:
-        failure_mode = "under_purged"
-        suggestions = {"purge_level": "consider increasing"}
-    elif normalized_complete is not None and normalized_complete <= 0.90 and size_ratio is not None and size_ratio <= 0.80:
-        failure_mode = "over_purged"
-        suggestions = {"purge_level": "consider decreasing"}
-    elif n50 is not None and contig_count is not None and n50 < 1_000_000 and contig_count > 500:
-        failure_mode = "fragmented"
-        suggestions = {"overlap_parameters": "consider less aggressive filtering"}
-    elif normalized_complete is not None and normalized_complete <= 0.90:
-        failure_mode = "low_completeness"
-        suggestions = {"read_filtering": "consider retaining more reads"}
-    else:
-        failure_mode = "execution_or_metrics_missing"
-        suggestions = {}
-    return {
-        "passed": passed,
-        "failure_mode": failure_mode,
-        "metrics": metrics,
-        "suggestions": suggestions,
-    }
-
-
-def _first_metric(metrics: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if metrics.get(key) is not None:
-            return metrics.get(key)
-    return None
-
-
-def _float_or_none(value: Any) -> float | None:
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _ratio(value: float | None) -> float | None:
-    if value is None:
-        return None
-    return value / 100.0 if value > 1 else value
+        publish_file(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    artifact = ArtifactMeta.from_file(
+        path,
+        stage="assembly",
+        method_name=method_name,
+        artifact_type=artifact_type,
+    )
+    refs = append_artifact_records(data_dir, session_id, [artifact])
+    if len(refs) != 1:
+        raise ResumeValidationError("assembly artifact index did not return one ref")
+    return refs[0].model_dump(mode="json")
 
 
 def _build_input_profile(

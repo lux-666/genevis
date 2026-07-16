@@ -1,6 +1,7 @@
 method_name: hic_scaffolding.candidate.autohic
 stage: hic_scaffolding
 package_ref: autohic
+parameter_catalog: autohic
 goal: "Run AutoHiC end to end: Juicer mapping, 3D-DNA scaffolding, deep-learning error correction, chromosome assignment, and report generation."
 required_inputs:
   - name: contig_assembly
@@ -34,10 +35,7 @@ resource_hints:
   gpu_required: false
   walltime_hours: 48.0
 planner:
-  required_parameters:
-    - restriction_enzyme
-    - error_model_ref
-    - chromosome_model_ref
+  required_parameters: []
   parameter_defaults:
     threads: 10
     number_of_edit_rounds: 2

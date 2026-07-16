@@ -20,64 +20,85 @@ import io
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
+from app.review.base import ReviewPayload
+from app.review.persistence import PersistedReviewRequest, persist_review_request
+from app.schemas.state import initial_state
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 
 
-def _build_blocked_state(data_dir: Path, *, session_id: str = "s1") -> tuple[dict, Path, Path]:
-    review_dir = data_dir / "artifacts" / "assembly_review" / session_id
-    review_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = review_dir / "assembly_review_request.json"
-    draft_path = data_dir / "draft.fasta"
+def _build_blocked_state(
+    run_dir: Path,
+    *,
+    session_id: str = "s1",
+) -> tuple[dict, PersistedReviewRequest, Path]:
+    paths = SessionPaths.from_run_dir(run_dir)
+    draft_path = paths.work_dir / "draft.fasta"
     draft_path.write_text(">c\nACGT\n", encoding="utf-8")
-    payload = {
-        "stage": "assembly_review",
-        "reason": "assembly_review_human_decision_required",
-        "candidates": [
-            {
-                "candidate_id": "flye",
-                "method_name": "assembly.candidate.flye",
-                "final_assembly_ref": str(draft_path),
-            }
-        ],
-        "signals": [],
-        "decisions_allowed": ["accept", "stop_human_review"],
-        "notes": [],
-        "blocked_at": datetime.now(timezone.utc).isoformat(),
-        "review_request_artifact_ref": str(request_ref),
-    }
-    request_ref.write_text(json.dumps(payload), encoding="utf-8")
-    ledger = Ledger(data_dir)
-    ledger.create_session(session_id, "manifest.yaml")
+    candidates = [
+        {
+            "candidate_id": "flye",
+            "method_name": "assembly.candidate.flye",
+            "final_assembly_ref": str(draft_path),
+        }
+    ]
+    reason = "assembly_review_human_decision_required"
+    payload = ReviewPayload(
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason=reason,
+        candidates=candidates,
+        decisions_allowed=["accept", "stop_human_review"],
+    )
+    state = initial_state(
+        session_id=session_id,
+        input_manifest_ref=paths.to_ref(paths.manifest_path),
+        data_dir=str(run_dir),
+    )
+    persisted = persist_review_request(
+        state,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason=reason,
+        payload=payload,
+        method_name="assembly_review.contract",
+        artifact_type="assembly_review.request",
+    )
+    ledger = Ledger(run_dir)
+    ledger.create_session(session_id, str(paths.manifest_path))
     ledger.record_review_requested(
         session_id,
         "assembly_review",
-        reason=payload["reason"],
-        candidates=payload["candidates"],
+        reason=reason,
+        candidates=candidates,
+        review_request_artifact_ref=persisted.request_ref,
+        review_request_id=persisted.review_request_id,
     )
-    state = {
-        "session_id": session_id,
-        "thread_id": session_id,
-        "data_dir": str(data_dir),
-        "control_state": "running",
-        "supervision_state": "blocked_human",
-        "current_stage": "assembly_review",
-        "input_manifest_ref": "manifest.yaml",
-        "active_interrupt": payload,
-        "stage_outputs": {
-            "assembly_review": {
-                "status": "blocked_human",
-                "candidates": payload["candidates"],
-                "rejected_candidates": {},
-                "review_request_artifact_ref": str(request_ref),
-            }
-        },
-    }
-    return state, request_ref, draft_path
+    state.update(
+        {
+            "supervision_state": "blocked_human",
+            "current_stage": "assembly_review",
+            "active_interrupt": persisted.compact_interrupt(
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason=reason,
+            ),
+            "stage_outputs": {
+                "assembly_review": {
+                    "status": "blocked_human",
+                    "candidates": candidates,
+                    "rejected_candidates": {},
+                    "review_request_artifact_ref": persisted.request_ref.model_dump(mode="json"),
+                }
+            },
+        }
+    )
+    return state, persisted, draft_path
 
 
 def _seed_blocked_checkpoint(data_dir: Path, state: dict) -> None:
@@ -112,17 +133,20 @@ def _capture(func, *args):
 class DurableResumeTests(unittest.TestCase):
     def test_durable_resume_assembly_review_accept_advances(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
-            state, _request_ref, draft_path = _build_blocked_state(data_dir)
-            _seed_blocked_checkpoint(data_dir, state)
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            state, persisted, draft_path = _build_blocked_state(run_dir)
+            _seed_blocked_checkpoint(run_dir, state)
 
-            decision_path = data_dir / "decision.json"
+            decision_path = run_dir / "control" / "decision.json"
             decision_path.write_text(
                 json.dumps(
                     {
                         "session_id": "s1",
                         "stage": "assembly_review",
+                        "gate_id": "assembly_review",
+                        "review_request_id": persisted.review_request_id,
+                        "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
                         "final_assembly_ref": str(draft_path),
@@ -137,7 +161,7 @@ class DurableResumeTests(unittest.TestCase):
                 argparse.Namespace(
                     session_id="s1",
                     decision_file=str(decision_path),
-                    data_dir=str(data_dir),
+                    data_dir=str(data_root),
                     checkpointer="sqlite",
                 ),
             )
@@ -155,7 +179,7 @@ class DurableResumeTests(unittest.TestCase):
             # advanced state.
             self.assertNotIn("Traceback", stderr)
 
-            ledger_events = Ledger(data_dir).read_events("s1")
+            ledger_events = Ledger(run_dir).read_events("s1")
             decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
             self.assertTrue(decision_events, "expected review_decision ledger event")
             # The accepted assembly_review decision advances downstream into the
@@ -172,13 +196,16 @@ class DurableResumeTests(unittest.TestCase):
             self.assertEqual(len(resume_started), 1)
             self.assertEqual(len(resume_completed), 1)
             self.assertEqual(resume_started[0]["source"], "cli")
-            self.assertEqual(resume_started[0]["decision_file_ref"], str(decision_path))
+            self.assertEqual(
+                resume_started[0]["decision_file_ref"],
+                SessionPaths.from_run_dir(run_dir).to_ref(decision_path),
+            )
             self.assertEqual(resume_started[0]["decision"]["stage"], "assembly_review")
             self.assertEqual(resume_started[0]["decision"]["decision"], "accept")
             # N3: resume events should record backend + data_dir so the
             # ledger trail distinguishes between sqlite and memory runs.
             self.assertEqual(resume_started[0]["checkpointer"], "sqlite")
-            self.assertEqual(Path(resume_started[0]["data_dir"]).resolve(strict=False), data_dir.resolve(strict=False))
+            self.assertEqual(Path(resume_started[0]["data_dir"]).resolve(strict=False), run_dir.resolve(strict=False))
             self.assertEqual(resume_completed[0]["checkpointer"], "sqlite")
             self.assertIn(resume_completed[0]["supervision_state"], {"running_stage", "completed", "failed_terminal", "blocked_human"})
             self.assertIn("current_stage", resume_completed[0])
@@ -187,7 +214,7 @@ class DurableResumeTests(unittest.TestCase):
             self.assertLess(event_types.index("resume_started"), event_types.index("review_decision"))
             self.assertLess(event_types.index("review_decision"), event_types.index("resume_completed"))
 
-            graph = build_graph(backend="sqlite", data_dir=str(data_dir))
+            graph = build_graph(backend="sqlite", data_dir=str(run_dir))
             snap = graph.get_state({"configurable": {"thread_id": "s1"}})
             advanced_past_assembly_review = snap.values["current_stage"] not in {"assembly_review"}
             self.assertTrue(
@@ -206,17 +233,20 @@ class DurableResumeTests(unittest.TestCase):
 
     def test_invalid_decision_leaves_blocked_state_intact(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
-            state, _request_ref, _draft_path = _build_blocked_state(data_dir)
-            _seed_blocked_checkpoint(data_dir, state)
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            state, persisted, _draft_path = _build_blocked_state(run_dir)
+            _seed_blocked_checkpoint(run_dir, state)
 
-            decision_path = data_dir / "decision.json"
+            decision_path = run_dir / "control" / "decision.json"
             decision_path.write_text(
                 json.dumps(
                     {
                         "session_id": "s1",
                         "stage": "assembly_review",
+                        "gate_id": "assembly_review",
+                        "review_request_id": persisted.review_request_id,
+                        "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "unknown_candidate",
                         "final_assembly_ref": "missing.fasta",
@@ -230,14 +260,14 @@ class DurableResumeTests(unittest.TestCase):
                 argparse.Namespace(
                     session_id="s1",
                     decision_file=str(decision_path),
-                    data_dir=str(data_dir),
+                    data_dir=str(data_root),
                     checkpointer="sqlite",
                 ),
             )
             self.assertEqual(code, 1)
             self.assertIn("resume rejected", stderr)
 
-            graph = build_graph(backend="sqlite", data_dir=str(data_dir))
+            graph = build_graph(backend="sqlite", data_dir=str(run_dir))
             snap = graph.get_state({"configurable": {"thread_id": "s1"}})
             self.assertEqual(snap.values["supervision_state"], "blocked_human")
             self.assertEqual(snap.values["current_stage"], "assembly_review")
@@ -245,7 +275,7 @@ class DurableResumeTests(unittest.TestCase):
             if hasattr(graph.checkpointer, "conn"):
                 graph.checkpointer.conn.close()
 
-            ledger_events = Ledger(data_dir).read_events("s1")
+            ledger_events = Ledger(run_dir).read_events("s1")
             decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
             self.assertEqual(decision_events, [], "no review_decision should be written for an invalid resume")
             # F3: an invalid decision should still emit resume_started +
@@ -258,21 +288,24 @@ class DurableResumeTests(unittest.TestCase):
 
     def test_resume_with_no_thread_in_checkpoint_db_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
-            state, _request_ref, draft_path = _build_blocked_state(data_dir)
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            state, persisted, draft_path = _build_blocked_state(run_dir)
             # Seed under a different thread_id so the resume target is missing.
             seeded = dict(state)
             seeded["session_id"] = "other"
             seeded["thread_id"] = "other"
-            _seed_blocked_checkpoint(data_dir, seeded)
+            _seed_blocked_checkpoint(run_dir, seeded)
 
-            decision_path = data_dir / "decision.json"
+            decision_path = run_dir / "control" / "decision.json"
             decision_path.write_text(
                 json.dumps(
                     {
                         "session_id": "s1",
                         "stage": "assembly_review",
+                        "gate_id": "assembly_review",
+                        "review_request_id": persisted.review_request_id,
+                        "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
                         "final_assembly_ref": str(draft_path),
@@ -286,7 +319,7 @@ class DurableResumeTests(unittest.TestCase):
                 argparse.Namespace(
                     session_id="s1",
                     decision_file=str(decision_path),
-                    data_dir=str(data_dir),
+                    data_dir=str(data_root),
                     checkpointer="sqlite",
                 ),
             )
@@ -300,17 +333,20 @@ class DurableResumeTests(unittest.TestCase):
         from unittest.mock import patch as _patch
 
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
-            state, _request_ref, draft_path = _build_blocked_state(data_dir)
-            _seed_blocked_checkpoint(data_dir, state)
+            data_root = Path(tmp) / "data"
+            run_dir = v2_run_dir(data_root, "s1")
+            state, persisted, draft_path = _build_blocked_state(run_dir)
+            _seed_blocked_checkpoint(run_dir, state)
 
-            decision_path = data_dir / "decision.json"
+            decision_path = run_dir / "control" / "decision.json"
             decision_path.write_text(
                 json.dumps(
                     {
                         "session_id": "s1",
                         "stage": "assembly_review",
+                        "gate_id": "assembly_review",
+                        "review_request_id": persisted.review_request_id,
+                        "review_request_hash": persisted.request_hash,
                         "decision": "accept",
                         "candidate_id": "flye",
                         "final_assembly_ref": str(draft_path),
@@ -344,7 +380,7 @@ class DurableResumeTests(unittest.TestCase):
                     argparse.Namespace(
                         session_id="s1",
                         decision_file=str(decision_path),
-                        data_dir=str(data_dir),
+                        data_dir=str(data_root),
                         checkpointer="sqlite",
                     ),
                 )
@@ -354,7 +390,7 @@ class DurableResumeTests(unittest.TestCase):
             self.assertIn("simulated graph failure", stderr)
             self.assertNotIn("Traceback", stderr)
 
-            ledger_events = Ledger(data_dir).read_events("s1")
+            ledger_events = Ledger(run_dir).read_events("s1")
             failed = [e for e in ledger_events if e["event_type"] == "resume_failed"]
             self.assertEqual(len(failed), 1)
             self.assertIn("simulated graph failure", failed[0]["error"])

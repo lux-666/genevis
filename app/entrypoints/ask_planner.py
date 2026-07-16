@@ -17,7 +17,7 @@ from app.schemas.ask_plan import (
     save_ask_plan,
 )
 from app.schemas.manifest import InputManifest
-from app.schemas.run_config import AutoHiCRunParameters, HiCScaffoldingPlanCandidate, RunConfig
+from app.schemas.run_config import AutoHiCRunParameters, RunConfig
 from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.review.gates import planned_review_gates
@@ -53,7 +53,7 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
     "genome_survey": "choose_many",
     "assembly": "choose_many",
     "assembly_review": "choose_many",
-    "hic_scaffolding": "choose_many",
+    "hic_scaffolding": "pipeline",
     "t2t": "choose_many",
     "repeat_annotation": "choose_many",
     "gene_annotation": "choose_many",
@@ -141,12 +141,9 @@ def ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
 
 
 def locate_ask_plan_path(data_dir: str | Path, session_id: str) -> Path:
-    """Find a persisted clarification plan in either supported layout."""
-    current = ask_plan_path(data_dir, session_id)
-    if current.exists():
-        return current
-    legacy = Path(data_dir) / "ask_plans" / session_id / "ask_plan.json"
-    return legacy if legacy.exists() else current
+    """Return the sole v2 location for a persisted clarification plan."""
+
+    return ask_plan_path(data_dir, session_id)
 
 
 def save_plan_to_default_path(plan: AskPlanState) -> Path:
@@ -376,36 +373,17 @@ def _build_assembly_execution_config(
 
 
 def _build_hic_scaffolding_config(plan: AskPlanState) -> dict[str, Any] | None:
-    """Build a strict execution config from only ready Hi-C plan candidates."""
-    candidates = _hic_scaffolding_plan_candidates(plan)
-    ready = [candidate for candidate in candidates if candidate.status == "ready_to_execute"]
-    if not ready:
-        return None
+    """Build AutoHiC runtime defaults; the stage LLM supplies the enzyme."""
 
-    payload: dict[str, Any] = {
-        "methods": [candidate.method for candidate in ready],
-        "method": ready[0].method,
-    }
-    candidate = ready[0]
-    if candidate.autohic_parameters:
-        payload["autohic_parameters"] = candidate.autohic_parameters.model_dump(exclude_none=True)
-    return {key: value for key, value in payload.items() if value is not None}
-
-
-def _hic_scaffolding_plan_candidates(plan: AskPlanState) -> list[HiCScaffoldingPlanCandidate]:
-    """Represent selected methods as permissive plan candidates before execution."""
-    selected = (plan.selected_methods or {}).get("hic_scaffolding")
-    methods = selected if isinstance(selected, list) else [selected] if selected else []
-    candidates: list[HiCScaffoldingPlanCandidate] = []
-    for method in methods:
-        params = dict((plan.method_parameters or {}).get(method) or {})
-        candidates.append(
-            HiCScaffoldingPlanCandidate(
-                method="autohic",
-                autohic_parameters=AutoHiCRunParameters.model_validate(params),
-            )
-        )
-    return candidates
+    method = "hic_scaffolding.candidate.autohic"
+    params = dict((plan.method_parameters or {}).get(method) or {})
+    # Older ask-plan drafts stored model paths as method parameters. Models
+    # are now resolved from packages.autohic.models in config/envs.yaml.
+    params.pop("error_model_ref", None)
+    params.pop("chromosome_model_ref", None)
+    validated = AutoHiCRunParameters.model_validate(params)
+    payload = validated.model_dump(exclude_none=True)
+    return {"autohic_parameters": payload} if payload else {}
 
 
 def write_ask_run_config(plan: AskPlanState) -> Path:
@@ -621,9 +599,6 @@ def build_run_plan_summary(plan: AskPlanState) -> dict[str, Any]:
     )
     if stage_details:
         summary["stage_plan_details"] = stage_details
-    hic_candidates = _hic_scaffolding_plan_candidates(plan)
-    if hic_candidates:
-        summary["hic_scaffolding_plan_candidates"] = [candidate.model_dump(mode="json") for candidate in hic_candidates]
     warnings = [*param_warnings, *_plan_validation_warnings(plan)]
     if warnings:
         summary["warnings"] = warnings
@@ -675,6 +650,9 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
     """Expose catalog L2 fields as deferred, never as planning-time decisions."""
 
     from app.stages.assembly.parameter_catalog import load_parameter_catalog
+    from app.stages.hic_scaffolding.parameter_catalog import (
+        load_autohic_parameter_catalog,
+    )
 
     contracts: list[dict[str, Any]] = []
     for stage, method in _iter_selected_methods(plan):
@@ -699,6 +677,43 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
         if constraints:
             contract["user_constraints"] = constraints
         contracts.append(contract)
+
+    selected_stages = set(plan.resolved_execution_order or plan.selected_stages or [])
+    if "hic_scaffolding" in selected_stages:
+        try:
+            catalog = load_autohic_parameter_catalog()
+        except (FileNotFoundError, ValueError):
+            catalog = None
+        if catalog is not None:
+            dynamic_names = [
+                name
+                for name, spec in catalog.parameters.items()
+                if spec.level == 2
+            ]
+            supplied = dict(
+                (plan.method_parameters or {}).get(
+                    "hic_scaffolding.candidate.autohic"
+                )
+                or {}
+            )
+            contract = {
+                "stage": "hic_scaffolding",
+                "method": "hic_scaffolding.candidate.autohic",
+                "status": "deferred",
+                "trigger_gate": {
+                    "stage": "hic_scaffolding",
+                    "gate_id": "parameter_approval",
+                },
+                "parameter_names": dynamic_names,
+            }
+            constraints = {
+                name: supplied[name]
+                for name in dynamic_names
+                if name in supplied
+            }
+            if constraints:
+                contract["user_constraints"] = constraints
+            contracts.append(contract)
     return contracts
 
 
@@ -1345,7 +1360,7 @@ def _plan_validation_warnings(plan: AskPlanState) -> list[str]:
     order = plan.resolved_execution_order or []
     if "hic_scaffolding" in order:
         if not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"} & asset_types:
-            warnings.append("hic_scaffolding: no Hi-C reads in manifest; stage will skip at runtime")
+            warnings.append("hic_scaffolding: no Hi-C reads in manifest; selected stage will block on missing inputs")
     assembly_available = "assembly" in order or "assembly_fasta_registered" in asset_types
     if "assembly_review" in order and not assembly_available:
         warnings.append(

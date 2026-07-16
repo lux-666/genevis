@@ -18,11 +18,15 @@ from app.stages.gene_annotation.nodes import (
     GENE_REVIEW_GATES,
     apply_candidate_evidence_review_decision,
     apply_merge_review_decision,
+    block_candidate_evidence_review,
+    block_final_gene_set_review,
+    block_merge_review,
     build_candidate_evidence_review_payload,
     build_final_gene_set_review_payload,
     build_merge_review_payload,
     _review_triggers,
 )
+from tests.data_v2 import v2_run_dir
 
 
 def _fake_gene_method_bins(tmpdir: str) -> Path:
@@ -115,8 +119,8 @@ class GeneAnnotationStageTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "gene_annotation"
         state["asset_registry_ref"] = registry_ref
@@ -214,11 +218,12 @@ class GeneAnnotationStageTests(unittest.TestCase):
             self.assertEqual(bundle["predicted_proteins_ref"], str(proteins))
             artifact_types = [
                 json.loads(line)["artifact_type"]
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text(encoding="utf-8").splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text(encoding="utf-8").splitlines()
             ]
-            self.assertIn("gene_annotation.provided_gene_models", artifact_types)
-            self.assertIn("gene_annotation.provided_predicted_proteins", artifact_types)
-            self.assertIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+            self.assertIn("gene_annotation.bundle", artifact_types)
+            self.assertNotIn("gene_annotation.provided_gene_models", artifact_types)
+            self.assertNotIn("gene_annotation.provided_predicted_proteins", artifact_types)
+            self.assertNotIn("gene_annotation.provided_transcripts_fasta", artifact_types)
 
     def test_provided_gene_annotation_without_transcripts_is_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -414,8 +419,8 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "gene_annotation"
         state["asset_registry_ref"] = registry_ref
@@ -512,6 +517,8 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 gate_id="gene_method_planning_review",
                 decision="select_methods",
                 metadata={"selected_methods": ["gene_annotation.candidate.augustus"]},
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
             update = resume_review_state(resume_state, request)
             self.assertEqual(update["stage_outputs"]["gene_annotation"]["status"], "methods_confirmed")
@@ -539,6 +546,7 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._softmasked_state(tmpdir, None)
             state["stage_outputs"]["gene_annotation"] = {
+                "status": "candidates_ready",
                 "evidence_profile": "mixed_evidence",
                 "available_evidence": ["rnaseq", "protein"],
                 "genome_input_ref": str(Path(tmpdir) / "softmasked.fa"),
@@ -552,18 +560,22 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                     "predicted_proteins": str(Path(tmpdir) / "proteins.fa"),
                     "evidence_report": str(Path(tmpdir) / "evidence_report.json"),
                 },
+                "review_policy": {"mode": "strict"},
             }
 
             payload = build_candidate_evidence_review_payload(state)
             self.assertFalse(payload.auto_decidable)
 
+            blocked = {**state, **block_candidate_evidence_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="gene_annotation",
                 gate_id="candidate_evidence_review",
                 decision="proceed_merge",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-            update = apply_candidate_evidence_review_decision(state, request)
+            update = apply_candidate_evidence_review_decision(blocked, request)
             gene = update["stage_outputs"]["gene_annotation"]
             self.assertTrue(gene["accepted_candidate_refs"])
 
@@ -609,15 +621,19 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                     "gene_annotation.candidate.miniprot": "/tmp/m.gff3",
                     "gene_annotation.candidate.augustus": "/tmp/a.gff3",
                 },
+                "review_policy": {"mode": "strict"},
             }
+            blocked = {**state, **block_candidate_evidence_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="gene_annotation",
                 gate_id="candidate_evidence_review",
                 decision="accept_candidate",
                 method_name="gene_annotation.candidate.miniprot",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-            update = apply_candidate_evidence_review_decision(state, request)
+            update = apply_candidate_evidence_review_decision(blocked, request)
             gene = update["stage_outputs"]["gene_annotation"]
             self.assertEqual(
                 list(gene["accepted_candidate_refs"].keys()),
@@ -640,19 +656,23 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                     "predicted_proteins": str(Path(tmpdir) / "proteins.fa"),
                     "evidence_report": str(Path(tmpdir) / "evidence_report.json"),
                 },
+                "review_policy": {"mode": "strict"},
             }
 
             payload = build_merge_review_payload(state)
             self.assertFalse(payload.auto_decidable)
 
+            blocked = {**state, **block_merge_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="gene_annotation",
                 gate_id="merge_review",
                 decision="adjust_weights",
                 metadata={"merge_weights": {"ab_initio": 2, "rnaseq": 8}},
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
-            update = apply_merge_review_decision(state, request)
+            update = apply_merge_review_decision(blocked, request)
             gene = update["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["merge_weights"], {"ab_initio": 2, "rnaseq": 8})
 
@@ -677,11 +697,13 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                     "predicted_proteins": str(Path(tmpdir) / "proteins.fa"),
                     "evidence_report": str(Path(tmpdir) / "evidence_report.json"),
                 },
+                "review_policy": {"mode": "strict"},
             }
 
             payload = build_final_gene_set_review_payload(state)
             self.assertTrue(payload.auto_decidable)
 
+            blocked = {**state, **block_final_gene_set_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="gene_annotation",
@@ -689,10 +711,12 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 decision="accept",
                 decided_by="auto_rule",
                 rationale_artifact_ref="rationale.json",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
             from app.stages.gene_annotation.nodes import apply_final_gene_set_review_decision
 
-            update = apply_final_gene_set_review_decision(state, request)
+            update = apply_final_gene_set_review_decision(blocked, request)
             self.assertEqual(update["stage_outputs"]["gene_annotation"]["status"], "review_passed")
             # Re-invoke the graph; routing sends review_passed → commit.
             merged = {**state, **update}
@@ -716,6 +740,8 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
                 stage="gene_annotation",
                 gate_id="gene_method_planning_review",
                 decision="accept",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
             update = resume_review_state(resume_state, request)
             self.assertEqual(update["stage_outputs"]["repeat_annotation"], repeat_before)

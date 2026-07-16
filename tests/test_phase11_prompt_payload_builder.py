@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from app.domains.assembly.parameter_recommendation import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
 from app.llm.assembly_parameter_context import build_assembly_parameter_context
-from app.schemas.artifacts import file_sha256
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.assembly.prompt_payload import (
-    _load_initial_prompt_snapshot,
     build_prompt_payload,
     generate_payload_ref,
     generate_profile_ref,
+    recommendation_basis_snapshot,
 )
 
 
@@ -102,25 +100,20 @@ def test_complete_literature_card_is_not_duplicated_in_model_dto() -> None:
         )
 
 
-def test_retry_inherits_paper_cards_and_uses_previous_effective_baseline(tmp_path: Path) -> None:
+def test_retry_inherits_paper_cards_and_uses_previous_effective_baseline() -> None:
     catalog = load_parameter_catalog("hifiasm")
     initial = build_prompt_payload(
         method_id="hifiasm",
         catalog=catalog,
         full_profile=_full_profile(),
         task="recommend_initial",
-        write_artifacts=True,
         session_id="session-1",
         attempt_id=0,
-        data_dir=tmp_path,
     )
-    initial_path = tmp_path / "artifacts/assembly/session-1/parameter_attempt_0/prompt_payload.json"
-    initial_attempt = {
-        "prompt_payload_ref": {
-            "path_ref": initial["prompt_payload_ref"],
-            "sha256": file_sha256(initial_path),
-        }
-    }
+    initial_basis = recommendation_basis_snapshot(
+        catalog=catalog,
+        prompt_payload=initial,
+    )
     previous = {
         "attempt_id": 0,
         "method_id": "hifiasm",
@@ -136,11 +129,9 @@ def test_retry_inherits_paper_cards_and_uses_previous_effective_baseline(tmp_pat
         catalog=catalog,
         full_profile=_full_profile(previous_attempt=previous),
         task="retry_after_execution_failure",
-        write_artifacts=True,
         session_id="session-1",
         attempt_id=1,
-        data_dir=tmp_path,
-        initial_attempt_snapshot=initial_attempt,
+        initial_basis_snapshot=initial_basis,
     )
 
     assert retry["literature_cases"] == initial["literature_cases"]
@@ -151,7 +142,7 @@ def test_retry_inherits_paper_cards_and_uses_previous_effective_baseline(tmp_pat
     assert retry["retry_context"]["previous_attempt"]["failure_class"] == "memory_exhausted"
 
 
-def test_hash_helpers_are_canonical_and_prompt_artifact_replays(tmp_path: Path) -> None:
+def test_hash_helpers_are_canonical_and_payload_hash_is_semantic() -> None:
     profile = _full_profile()
     assert generate_profile_ref(profile) == generate_profile_ref(json.loads(json.dumps(profile)))
 
@@ -160,27 +151,12 @@ def test_hash_helpers_are_canonical_and_prompt_artifact_replays(tmp_path: Path) 
         catalog=load_parameter_catalog("flye"),
         full_profile=profile,
         task="recommend_initial",
-        write_artifacts=True,
         session_id="session-2",
         attempt_id=0,
-        data_dir=tmp_path,
     )
     semantic = {
         key: value
         for key, value in payload.items()
-        if key not in {"prompt_payload_ref", "prompt_payload_hash"}
+        if key != "payload_hash"
     }
-    assert payload["prompt_payload_hash"] == generate_payload_ref(semantic)
-
-    path = tmp_path / "artifacts/assembly/session-2/parameter_attempt_0/prompt_payload.json"
-    loaded = _load_initial_prompt_snapshot(
-        {
-            "prompt_payload_ref": {
-                "path_ref": payload["prompt_payload_ref"],
-                "sha256": file_sha256(path),
-            }
-        },
-        data_dir=tmp_path,
-        session_id="session-2",
-    )
-    assert loaded == payload
+    assert payload["payload_hash"] == generate_payload_ref(semantic)

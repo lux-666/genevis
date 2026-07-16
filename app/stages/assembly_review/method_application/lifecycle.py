@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
@@ -20,7 +22,8 @@ from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import ASSEMBLY_REVIEW_EVAL_BUNDLE, ArtifactMeta, AssemblyEvalBundle, AssemblyEvalSignal
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.storage.publish import publish_file
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
@@ -158,10 +161,30 @@ def unique_refs(refs: list[str]) -> list[str]:
 
 def write_json_artifact(state: TopLevelState, filename: str, payload: dict[str, Any], *, artifact_type: str) -> str:
     data_dir = Path(state.get("data_dir", "data"))
-    out_dir = data_dir / "artifacts" / "assembly_review" / state["session_id"]
+    out_dir = stage_artifacts_dir(state, "assembly_review")
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / filename
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    content_hash = sha256(canonical).hexdigest()[:16]
+    logical = Path(filename)
+    suffix = logical.suffix or ".json"
+    path = out_dir / f"{logical.stem}.{content_hash}{suffix}"
+    temporary = stage_work_dir(
+        state,
+        "assembly_review",
+        "persistence",
+        f".{filename}.{uuid4().hex}.tmp",
+    )
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        publish_file(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     artifact = ArtifactMeta.from_file(path, stage="assembly_review", method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD, artifact_type=artifact_type)
     append_artifact_records(data_dir, state["session_id"], [artifact])
     return str(path)
@@ -183,7 +206,13 @@ def rewrite_eval_bundle(state: TopLevelState, output: dict[str, Any], *, status:
         missing_inputs=previous_bundle.get("missing_inputs", []),
         notes=["thresholds_not_applied_without_human_approval"],
     )
-    ref = write_json_artifact(state, f"assembly_eval_bundle.{status}.json", eval_bundle.model_dump(mode="json"), artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE)
+    payload = eval_bundle.model_dump(mode="json")
+    ref = write_json_artifact(
+        state,
+        f"assembly_eval_bundle.{status}.json",
+        payload,
+        artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE,
+    )
     return update_review_output(state, {**output, "status": status, "signals": [signal.model_dump(mode="json") for signal in eval_signals], "review_plan": review_plan, "eval_bundle_ref": ref})
 
 

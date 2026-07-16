@@ -1,9 +1,8 @@
-"""Tests for the durable session run trace."""
+"""Tests for the v2 session-summary projection."""
 
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,35 +10,90 @@ from pathlib import Path
 from app.control.ledger import Ledger
 from app.control.lifecycle import inspect_session
 from app.execution.artifacts import append_artifact_records, read_artifact_records
+from app.review.base import ReviewPayload
+from app.review.persistence import persist_review_request
 from app.reports.trace_writer import (
+    SESSION_SUMMARY_JSON_FILENAME,
+    SESSION_SUMMARY_MARKDOWN_FILENAME,
     STAGE_STATUS_BLOCKED_HUMAN,
     STAGE_STATUS_EXECUTED,
     STAGE_STATUS_FAILED,
     STAGE_STATUS_NO_EVIDENCE,
     STAGE_STATUS_PLANNED_ONLY,
-    TRACE_JSON_ARTIFACT_TYPE,
-    TRACE_MARKDOWN_ARTIFACT_TYPE,
+    STAGE_STATUS_SKIPPED,
     build_session_trace,
     write_session_trace,
 )
 from app.schemas.artifacts import ArtifactMeta
+from app.storage.paths import SessionPaths, ensure_run_layout
 
 
-def _attempt(ledger: Ledger, session_id: str, stage: str, method: str, outcome: str) -> None:
-    ledger.record_event(session_id, "attempt_started", {"attempt_id": f"{session_id}:{stage}:{method}", "stage": stage, "method_name": method})
+def _run(tmp: str, session_id: str = "s1", *, create: bool = True) -> SessionPaths:
+    paths = SessionPaths(tmp, session_id)
+    ensure_run_layout(paths)
+    if create:
+        paths.manifest_path.write_text("session_id: s1\n", encoding="utf-8")
+        Ledger(paths.run_dir).create_session(session_id, str(paths.manifest_path))
+    return paths
+
+
+def _attempt(
+    ledger: Ledger,
+    session_id: str,
+    stage: str,
+    method: str,
+    outcome: str,
+) -> None:
+    attempt_id = f"{stage}:attempt_000"
+    ledger.record_event(
+        session_id,
+        "attempt_started",
+        {"attempt_id": attempt_id, "stage": stage, "method_name": method},
+    )
     if outcome == "succeeded":
-        ledger.record_event(session_id, "attempt_succeeded", {"attempt_id": f"{session_id}:{stage}:{method}", "stage": stage, "method_name": method, "artifacts": []})
+        ledger.record_event(
+            session_id,
+            "attempt_succeeded",
+            {"attempt_id": attempt_id, "stage": stage, "method_name": method},
+        )
     elif outcome == "failed":
-        ledger.record_event(session_id, "attempt_failed", {"attempt_id": f"{session_id}:{stage}:{method}", "stage": stage, "method_name": method, "return_code": 1, "error": "tool boom\nERROR conda.cli.main_run:execute(142): failed"})
+        ledger.record_event(
+            session_id,
+            "attempt_failed",
+            {
+                "attempt_id": attempt_id,
+                "stage": stage,
+                "method_name": method,
+                "return_code": 1,
+                "error": "tool boom\nERROR conda.cli.main_run:execute(142): failed",
+            },
+        )
 
 
-def _register_artifact(tmp: str, session_id: str, *, stage: str, method: str, artifact_type: str, metadata: dict | None = None) -> Path:
-    out_dir = Path(tmp) / "artifacts" / stage / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    file_path = out_dir / f"{artifact_type.replace('.', '_')}.json"
-    file_path.write_text("{}", encoding="utf-8")
-    artifact = ArtifactMeta.from_file(file_path, stage=stage, method_name=method, artifact_type=artifact_type, metadata=metadata or {})
-    append_artifact_records(tmp, session_id, [artifact])
+def _register_artifact(
+    paths: SessionPaths,
+    *,
+    stage: str,
+    method: str,
+    artifact_type: str,
+    payload: dict | None = None,
+    metadata: dict | None = None,
+) -> Path:
+    file_path = paths.artifact_path(
+        stage,
+        "evidence",
+        f"{artifact_type.replace('.', '_')}.json",
+    )
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(json.dumps(payload or {}), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        file_path,
+        stage=stage,
+        method_name=method,
+        artifact_type=artifact_type,
+        metadata=metadata or {},
+    )
+    append_artifact_records(paths.run_dir, paths.session_id, [artifact])
     return file_path
 
 
@@ -47,325 +101,260 @@ def _stage(trace: dict, name: str) -> dict:
     return next(stage for stage in trace["stages"] if stage["stage"] == name)
 
 
-class RunTraceBuildTests(unittest.TestCase):
-    def test_executed_and_decision_stage(self):
+class SessionSummaryBuildTests(unittest.TestCase):
+    def test_attempt_and_request_bound_decision_are_reconstructed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            _attempt(ledger, "s1", "read_qc", "read_qc.long_read_stats.seqkit_stats", "succeeded")
-            _register_artifact(tmp, "s1", stage="read_qc", method="read_qc.long_read_stats.seqkit_stats", artifact_type="read_qc.long_read_stats")
-            ledger.record_review_decision("s1", "assembly_review", decision="accept", candidate_id="flye", decided_by="human", rationale_artifact_ref="rationale.json")
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.record_stage_entered("s1", "read_qc")
+            _attempt(
+                ledger,
+                "s1",
+                "read_qc",
+                "read_qc.long_read_stats.seqkit_stats",
+                "succeeded",
+            )
+            _register_artifact(
+                paths,
+                stage="read_qc",
+                method="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+            request = _register_artifact(
+                paths,
+                stage="assembly_review",
+                method="assembly_review.request",
+                artifact_type="assembly_review.request",
+                payload={"stage": "assembly_review", "decisions_allowed": ["accept"]},
+                metadata={"review_request_id": "review_001"},
+            )
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="operator_required",
+                review_request_artifact_ref=str(request),
+                review_request_id="review_001",
+            )
+            ledger.record_review_decision(
+                "s1",
+                "assembly_review",
+                decision="accept",
+                candidate_id="flye",
+                decided_by="human",
+                review_request_id="review_001",
+            )
 
-            trace = build_session_trace(tmp, "s1")
+            trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(_stage(trace, "read_qc")["status"], STAGE_STATUS_EXECUTED)
             self.assertEqual(_stage(trace, "inventory")["status"], STAGE_STATUS_NO_EVIDENCE)
-            self.assertEqual(trace["decisions"][0]["decision"], "accept")
-            self.assertEqual(trace["decisions"][0]["decided_by"], "human")
+            self.assertEqual(trace["decisions"][0]["review_request_id"], "review_001")
             self.assertEqual(trace["decisions_by_origin"]["human"], 1)
-            self.assertIn("read_qc", trace["stage_path_observed"])
             self.assertEqual(_stage(trace, "read_qc")["methods"][0]["outcome"], "succeeded")
 
-    def test_annotation_intake_artifact_survives_trace_cap_and_relevant_filters(self):
+    def test_candidate_evidence_without_attempt_is_planned_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            for index in range(6):
-                _register_artifact(
-                    tmp,
-                    "s1",
-                    stage="assembly_review",
-                    method="assembly_review.contract",
-                    artifact_type=f"assembly_review.extra_{index}",
-                )
-            intake_ref = _register_artifact(
-                tmp,
-                "s1",
-                stage="assembly_review",
-                method="annotation.intake",
-                artifact_type="annotation.intake_plan",
-            )
-
-            trace = build_session_trace(tmp, "s1")
-            assembly_review = _stage(trace, "assembly_review")
-
-            self.assertIn(
-                "annotation.intake_plan",
-                {artifact["artifact_type"] for artifact in assembly_review["artifact_refs"]},
-            )
-            self.assertIn(
-                "annotation.intake_plan",
-                {artifact["artifact_type"] for artifact in trace["open_first"]},
-            )
-            summary = inspect_session("s1", tmp)
-            self.assertIn(
-                str(intake_ref),
-                {str(artifact["file_path"]) for artifact in summary["latest_relevant_artifacts"]},
-            )
-
-    def test_planned_only_when_candidate_without_attempt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
+            paths = _run(tmp)
             _register_artifact(
-                tmp,
-                "s1",
+                paths,
                 stage="assembly",
                 method="assembly.candidate.nextdenovo",
                 artifact_type="draft_assembly.candidate",
-                metadata={"candidate_id": "s1:assembly.candidate.nextdenovo", "execution_enabled": False},
             )
 
-            trace = build_session_trace(tmp, "s1")
+            trace = build_session_trace(paths.run_dir, "s1")
 
             assembly = _stage(trace, "assembly")
             self.assertEqual(assembly["status"], STAGE_STATUS_PLANNED_ONLY)
-            self.assertEqual(assembly["candidate_methods"][0]["execution_enabled"], False)
+            self.assertEqual(
+                assembly["candidate_methods"][0]["method_name"],
+                "assembly.candidate.nextdenovo",
+            )
 
-    def test_failed_stage_surfaces_clean_error(self):
+    def test_terminal_failure_is_reconstructed_without_current_status(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            _attempt(ledger, "s1", "read_qc", "read_qc.long_read_stats.seqkit_stats", "succeeded")
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
             _attempt(ledger, "s1", "assembly", "assembly.candidate.flye", "failed")
-            from app.reports.review_report import write_operator_report
+            ledger.record_session_terminal(
+                "s1",
+                outcome="failed",
+                stage="assembly",
+                error="flye failed",
+            )
 
-            write_operator_report(tmp, "s1", {"current_stage": "assembly", "supervision_state": "failed_terminal", "last_error": "flye failed", "route_trace": ["assembly_stage"]})
-
-            trace = build_session_trace(tmp, "s1")
+            trace = build_session_trace(paths.run_dir, "s1")
 
             self.assertEqual(_stage(trace, "assembly")["status"], STAGE_STATUS_FAILED)
             self.assertEqual(trace["supervision_state"], "failed_terminal")
-            self.assertEqual(trace["final_or_current_stage"]["stage"], "assembly")
-            self.assertEqual(trace["failures"][0]["stage"], "assembly")
+            self.assertEqual(trace["final_or_current_stage"], {"stage": "assembly", "source": "ledger"})
             self.assertEqual(trace["failures"][0]["error"], "tool boom")
             self.assertNotIn("conda.cli.main_run", trace["failures"][0]["error"])
+            self.assertFalse(paths.report_path("current_status.json").exists())
 
-
-class RunTraceBlockedTests(unittest.TestCase):
-    def _seed_blocked_session(self, tmp: str) -> None:
-        ledger = Ledger(tmp)
-        ledger.create_session("s1", "manifest.yaml")
-        _attempt(ledger, "s1", "assembly", "assembly.candidate.flye", "succeeded")
-        request_dir = Path(tmp) / "artifacts" / "assembly_review" / "s1"
-        request_dir.mkdir(parents=True, exist_ok=True)
-        request_path = request_dir / "assembly_review_request.json"
-        request_path.write_text(
-            json.dumps({"stage": "assembly_review", "decisions_allowed": ["accept", "reject"], "candidates": [{"candidate_id": "flye"}]}),
-            encoding="utf-8",
-        )
-        artifact = ArtifactMeta.from_file(
-            request_path,
-            stage="assembly_review",
-            method_name="assembly_review.request",
-            artifact_type="assembly_review.request",
-            metadata={},
-        )
-        append_artifact_records(tmp, "s1", [artifact])
-        ledger.record_review_requested(
-            "s1",
-            "assembly_review",
-            reason="assembly_review_human_decision_required",
-            review_request_artifact_ref=str(request_path),
-            auto_decidable=False,
-            pending_human_confirmation=True,
-        )
-
-    def test_blocked_session_names_pending_action(self):
+    def test_blocked_request_is_loaded_from_immutable_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed_blocked_session(tmp)
+            paths = _run(tmp)
+            persisted = persist_review_request(
+                {"session_id": "s1", "data_dir": str(paths.run_dir)},
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason="assembly_review_human_decision_required",
+                payload=ReviewPayload(
+                    stage="assembly_review",
+                    gate_id="assembly_review",
+                    reason="assembly_review_human_decision_required",
+                    decisions_allowed=["accept", "reject"],
+                    candidates=[{"candidate_id": "flye"}],
+                ),
+            )
+            ledger = Ledger(paths.run_dir)
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="assembly_review_human_decision_required",
+                review_request_artifact_ref=persisted.request_ref,
+                review_request_id=persisted.review_request_id,
+                auto_decidable=False,
+                pending_human_confirmation=True,
+            )
 
-            trace = build_session_trace(tmp, "s1")
+            trace = build_session_trace(paths.run_dir, "s1")
+            summary = inspect_session("s1", paths.run_dir)
 
             self.assertEqual(trace["supervision_state"], "blocked_human")
             self.assertEqual(_stage(trace, "assembly_review")["status"], STAGE_STATUS_BLOCKED_HUMAN)
-            self.assertEqual(_stage(trace, "assembly")["status"], STAGE_STATUS_EXECUTED)
-            self.assertIsNotNone(trace["blocked"])
-            self.assertEqual(trace["blocked"]["stage"], "assembly_review")
-            self.assertIn("accept", trace["blocked"]["decisions_allowed"])
+            self.assertEqual(trace["blocked"]["decisions_allowed"], ["accept", "reject"])
+            self.assertEqual(
+                summary["active_interrupt"]["review_request_id"],
+                persisted.review_request_id,
+            )
+            self.assertIsNone(summary["latest_operator_report"])
 
-
-class RunTraceAnnotationChainTests(unittest.TestCase):
-    def _intake_plan(self, tmp: Path) -> str:
-        path = tmp / "annotation_intake_plan.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "artifact_type": "annotation.intake_plan",
-                    "recommended_plan": {},
-                    "final_plan": {},
-                    "final_requested_stages": ["gene_annotation", "function_annotation"],
-                    "changed": False,
-                }
-            ),
-            encoding="utf-8",
-        )
-        return str(path)
-
-    def test_completed_auto_chain_records_four_gate_decisions_and_intake(self):
-        from app.schemas.state import initial_state
-        from app.stages.gene_annotation.builder import build_stage
-
+    def test_explicit_route_and_skip_reason_have_no_checkpoint_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            registry = tmp_path / "registry.json"
-            registry.write_text(json.dumps({"session_id": "s1", "assets": []}), encoding="utf-8")
-            softmasked = tmp_path / "softmasked.fa"
-            softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
-            # Fake gene method binaries so augustus execution succeeds.
-            bin_dir = tmp_path / "bin"
-            bin_dir.mkdir(exist_ok=True)
-            aug = bin_dir / "augustus"
-            aug.write_text("#!/bin/sh\nprintf '##gff-version 3\\nctg1\\tAUGUSTUS\\tgene\\t1\\t500\\t.\\t+\\t.\\tID=g1\\n'\n", encoding="utf-8")
-            aug.chmod(0o755)
-            # gffread materializes proteins.fa/cds.fa from the candidate GFF.
-            gffread = bin_dir / "gffread"
-            gffread.write_text(
-                "#!/bin/sh\n"
-                "prot=\"\"; cds=\"\"\n"
-                "while [ $# -gt 0 ]; do\n"
-                "  case \"$1\" in\n"
-                "    -y) prot=\"$2\"; shift 2;;\n"
-                "    -x) cds=\"$2\"; shift 2;;\n"
-                "    -g) shift 2;;\n"
-                "    *) shift;;\n"
-                "  esac\n"
-                "done\n"
-                "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
-                "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
-                encoding="utf-8",
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.record_stage_entered("s1", "read_qc", route_node="route_controller")
+            ledger.record_stage_completed("s1", "read_qc")
+            ledger.record_stage_skipped("s1", "genome_survey", reason="not_requested")
+
+            trace = build_session_trace(paths.run_dir, "s1")
+
+            self.assertEqual(
+                [event["event_type"] for event in trace["route"]],
+                ["stage_entered", "stage_completed", "stage_skipped"],
             )
-            gffread.chmod(0o755)
-            # The annotation intake artifact is recorded at assembly_review.
-            _register_artifact(
-                tmp,
+            self.assertEqual(_stage(trace, "genome_survey")["status"], STAGE_STATUS_SKIPPED)
+            self.assertEqual(_stage(trace, "genome_survey")["lifecycle"]["skip_reason"], "not_requested")
+            self.assertNotIn("route", {gap["field"] for gap in trace["gaps"]})
+
+    def test_multiple_requests_in_one_stage_resolve_by_request_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            for request_id in ("review_001", "review_002"):
+                request = paths.artifact_path("reviews", request_id, "request.json")
+                request.parent.mkdir(parents=True, exist_ok=True)
+                request.write_text("{}", encoding="utf-8")
+                ledger.record_review_requested(
+                    "s1",
+                    "assembly_review",
+                    reason="operator_required",
+                    review_request_artifact_ref=str(request),
+                    review_request_id=request_id,
+                    auto_decidable=False,
+                    pending_human_confirmation=True,
+                )
+            ledger.record_review_decision(
                 "s1",
-                stage="assembly_review",
-                method="annotation.intake",
-                artifact_type="annotation.intake_plan",
+                "assembly_review",
+                decision="accept",
+                review_request_id="review_001",
             )
 
-            state = initial_state(session_id="s1", input_manifest_ref=str(tmp_path / "manifest.yaml"), data_dir=tmp)
-            state["current_stage"] = "gene_annotation"
-            state["asset_registry_ref"] = str(registry)
-            state["requested_stages"] = ["assembly_review", "gene_annotation", "function_annotation"]
-            state["stage_outputs"] = {
-                "assembly_review": {"annotation_intake_plan_ref": self._intake_plan(tmp_path)},
-                "repeat_annotation": {"status": "completed", "softmasked_genome_ref": str(softmasked)},
-                "gene_annotation": {
-                    "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "lineage_or_species_hints": {"augustus_species_model": "test_species"},
-                },
+            trace = build_session_trace(paths.run_dir, "s1")
+            pending = {
+                item["review_request_id"]: item["resolved"]
+                for item in trace["pending_human_confirmations"]
             }
 
-            result = build_stage().invoke(state)
-            self.assertEqual(result["current_stage"], "function_annotation")
+            self.assertEqual(pending, {"review_001": True, "review_002": False})
+            self.assertNotIn("review_requests", {gap["field"] for gap in trace["gaps"]})
 
-            trace = build_session_trace(tmp, "s1")
-            gene_decisions = [d for d in trace["decisions"] if d["stage"] == "gene_annotation"]
-            self.assertEqual(len(gene_decisions), 4)
-            for decision in gene_decisions:
-                self.assertTrue(decision["gate_id"])
-                self.assertTrue(decision["decision"])
-                self.assertTrue(decision["decided_by"])
-            assembly_review = _stage(trace, "assembly_review")
-            self.assertIn(
-                "annotation.intake_plan",
-                {artifact["artifact_type"] for artifact in assembly_review["artifact_refs"]},
+
+class SessionSummaryWriteTests(unittest.TestCase):
+    def test_write_uses_reports_only_and_has_no_audit_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            _attempt(
+                ledger,
+                "s1",
+                "read_qc",
+                "read_qc.long_read_stats.seqkit_stats",
+                "succeeded",
+            )
+            before_events = len(ledger.read_event_rows("s1"))
+            before_artifacts = read_artifact_records(paths.run_dir, "s1")
+
+            result = write_session_trace(paths.run_dir, "s1")
+
+            self.assertEqual(Path(result["json_ref"]), paths.report_path(SESSION_SUMMARY_JSON_FILENAME))
+            self.assertEqual(
+                Path(result["markdown_ref"]),
+                paths.report_path(SESSION_SUMMARY_MARKDOWN_FILENAME),
+            )
+            self.assertIn("# Session Summary: s1", result["markdown"])
+            self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
+            self.assertEqual(read_artifact_records(paths.run_dir, "s1"), before_artifacts)
+
+    def test_regeneration_overwrites_fixed_views_and_updates_watermark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            first = write_session_trace(paths.run_dir, "s1")
+            first_payload = json.loads(Path(first["json_ref"]).read_text(encoding="utf-8"))
+            ledger.record_stage_entered("s1", "read_qc")
+            second = write_session_trace(paths.run_dir, "s1")
+            second_payload = json.loads(Path(second["json_ref"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(first["json_ref"], second["json_ref"])
+            self.assertEqual(len(list(paths.reports_dir.iterdir())), 2)
+            self.assertGreater(
+                second_payload["source_watermark"]["last_ledger_sequence"],
+                first_payload["source_watermark"]["last_ledger_sequence"],
             )
 
-
-class RunTraceGapTests(unittest.TestCase):
-    def test_route_trace_and_skip_reason_are_flagged_checkpoint_only(self):
+    def test_artifact_count_does_not_inflate_across_regeneration(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Ledger(tmp).create_session("s1", "manifest.yaml")
-            trace = build_session_trace(tmp, "s1")
-            gap_fields = {gap["field"]: gap["kind"] for gap in trace["gaps"]}
-            self.assertEqual(gap_fields["route_trace"], "checkpoint_only")
-            self.assertEqual(gap_fields["skip_reasons"], "checkpoint_only")
+            paths = _run(tmp)
+            _register_artifact(
+                paths,
+                stage="read_qc",
+                method="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
 
-    def test_missing_session_reports_error_and_gap(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            trace = build_session_trace(tmp, "missing")
-            self.assertEqual(trace["error"], "session_not_found")
-            self.assertFalse(trace["session_found"])
-            self.assertIn("session", {gap["field"] for gap in trace["gaps"]})
-
-    def test_multiple_requests_per_stage_flagged_unsupported(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            ledger.record_review_requested("s1", "assembly_review", reason="first")
-            ledger.record_review_requested("s1", "assembly_review", reason="second")
-            trace = build_session_trace(tmp, "s1")
-            kinds = {gap["field"]: gap["kind"] for gap in trace["gaps"]}
-            self.assertEqual(kinds.get("review_requests"), "unsupported")
-
-
-class RunTraceWriteTests(unittest.TestCase):
-    def test_write_registers_json_and_markdown(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            _attempt(ledger, "s1", "read_qc", "read_qc.long_read_stats.seqkit_stats", "succeeded")
-
-            result = write_session_trace(tmp, "s1")
-
-            self.assertTrue(Path(result["json_ref"]).exists())
-            self.assertTrue(Path(result["markdown_ref"]).exists())
-            records = read_artifact_records(tmp, "s1")
-            types = [record["artifact_type"] for record in records]
-            self.assertIn(TRACE_JSON_ARTIFACT_TYPE, types)
-            self.assertIn(TRACE_MARKDOWN_ARTIFACT_TYPE, types)
-            self.assertIn("# Run Trace: s1", result["markdown"])
-
-    def test_regeneration_is_idempotent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            _attempt(ledger, "s1", "read_qc", "read_qc.long_read_stats.seqkit_stats", "succeeded")
-
-            write_session_trace(tmp, "s1")
-            write_session_trace(tmp, "s1")
-
-            records = read_artifact_records(tmp, "s1")
-            json_rows = [r for r in records if r["artifact_type"] == TRACE_JSON_ARTIFACT_TYPE]
-            md_rows = [r for r in records if r["artifact_type"] == TRACE_MARKDOWN_ARTIFACT_TYPE]
-            self.assertEqual(len(json_rows), 1)
-            self.assertEqual(len(md_rows), 1)
-            events = ledger.read_events("s1")
-            trace_registrations = [
-                e for e in events
-                if e.get("event_type") == "artifact_registered"
-                and (e.get("artifact") or {}).get("artifact_type", "").startswith("run_trace.")
+            counts = [
+                write_session_trace(paths.run_dir, "s1")["trace"]["artifact_count"]
+                for _ in range(3)
             ]
-            self.assertEqual(len(trace_registrations), 2)
 
-    def test_artifact_count_excludes_trace_artifacts_across_runs(self):
+            self.assertEqual(counts, [1, 1, 1])
+            self.assertEqual(len(read_artifact_records(paths.run_dir, "s1")), 1)
+
+    def test_missing_session_writes_no_report_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = Ledger(tmp)
-            ledger.create_session("s1", "manifest.yaml")
-            _attempt(ledger, "s1", "read_qc", "read_qc.long_read_stats.seqkit_stats", "succeeded")
-            _register_artifact(tmp, "s1", stage="read_qc", method="read_qc.long_read_stats.seqkit_stats", artifact_type="read_qc.long_read_stats")
+            paths = _run(tmp, "missing", create=False)
 
-            first = write_session_trace(tmp, "s1")["trace"]["artifact_count"]
-            second = write_session_trace(tmp, "s1")["trace"]["artifact_count"]
-            third = write_session_trace(tmp, "s1")["trace"]["artifact_count"]
-
-            # The one workflow artifact is counted; the trace's own json+md never inflate it.
-            self.assertEqual([first, second, third], [1, 1, 1])
-
-    def test_missing_session_writes_no_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            result = write_session_trace(tmp, "missing")
+            result = write_session_trace(paths.run_dir, "missing")
 
             self.assertIsNone(result["json_ref"])
             self.assertIsNone(result["markdown_ref"])
-            self.assertIn("# Run Trace: missing", result["markdown"])
-            self.assertFalse((Path(tmp) / "artifacts" / "run_trace").exists())
-            self.assertFalse((Path(tmp) / "ledger" / "missing").exists())
+            self.assertIn("# Session Summary: missing", result["markdown"])
+            self.assertEqual(list(paths.reports_dir.iterdir()), [])
+            self.assertFalse(paths.ledger_events_path.exists())
 
 
 if __name__ == "__main__":

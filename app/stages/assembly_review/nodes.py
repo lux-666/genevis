@@ -17,6 +17,7 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
@@ -29,6 +30,7 @@ from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.storage.publish import shell_publish_file
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.reference.ncbi_metazoa import build_related_species_evidence_pack as _build_related_species_evidence_pack
@@ -39,18 +41,16 @@ from app.stages.assembly_review.notebook import (
     render_statistics_figures,
     write_notebook,
 )
-from app.stages.base import absolute_data_dir, is_fail_status
+from app.stages.base import absolute_data_dir, is_fail_status, resolve_run_ref, session_paths, stage_artifacts_dir, stage_work_dir
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
-    ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
     ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
-    ASSEMBLY_REVIEW_REPORT,
-    ASSEMBLY_REVIEW_REPORT_DATA,
+    ASSEMBLY_REVIEW_PACKET,
     ArtifactMeta,
     AssemblyCandidateBundle,
     AssemblyEvalBundle,
@@ -428,7 +428,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    figures_dir = data_dir / "artifacts" / "assembly_review" / session_id / "figures"
+    figures_dir = stage_artifacts_dir(state, "assembly_review", "figures")
     figure_paths = render_statistics_figures(statistics_pack, figures_dir, target_metrics=target_metrics)
 
     figure_artifacts = []
@@ -445,7 +445,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     if figure_artifacts:
         append_artifact_records(data_dir, session_id, figure_artifacts)
 
-    out_dir = data_dir / "artifacts" / "assembly_review" / session_id
+    out_dir = stage_artifacts_dir(state, "assembly_review")
     statistics_pack_relpath = "related_species_statistics_pack.json"
     figures_relpaths = {name: f"figures/{Path(path).name}" for name, path in figure_paths.items()}
     evidence_pack = ar_out.get("related_species_evidence_pack", {})
@@ -564,6 +564,7 @@ def human_review_gate(state: TopLevelState) -> dict:
 
     payload = ReviewPayload(
         stage="assembly_review",
+        gate_id="assembly_review",
         reason="assembly_review_human_decision_required",
         candidates=candidates,
         signals=[ReviewSignal.model_validate(s) for s in signals],
@@ -583,12 +584,16 @@ def human_review_gate(state: TopLevelState) -> dict:
         related_species_evidence_pack=dict(ar_out.get("related_species_evidence_pack") or {}),
     )
 
-    request_ref = _write_json_artifact(
+    persisted_request = persist_review_request(
         state,
-        "assembly_review_request.json",
-        payload.model_dump(mode="json"),
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason="assembly_review_human_decision_required",
+        payload=payload,
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
         artifact_type="assembly_review.request",
     )
+    request_ref = persisted_request.request_ref
     outcome = evaluate("assembly_review", payload, ar_out.get("review_policy"))
     pending_confirmation = outcome.action == "BLOCK_PENDING_CONFIRM"
     data_dir = state.get("data_dir", "data")
@@ -599,7 +604,7 @@ def human_review_gate(state: TopLevelState) -> dict:
         reason="assembly_review_human_decision_required",
         signals=[s.model_dump(mode="json") for s in payload.signals],
         candidates=candidates,
-        review_request_artifact_ref=request_ref,
+        review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=payload.auto_decidable,
         policy_mode=outcome.mode,
         pending_human_confirmation=pending_confirmation,
@@ -609,18 +614,17 @@ def human_review_gate(state: TopLevelState) -> dict:
     outputs["assembly_review"] = {
         **ar_out,
         "status": "blocked_human",
-        "review_request_artifact_ref": request_ref,
+        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
         "review_policy_outcome": outcome.model_dump(mode="json"),
         "auto_decidable": payload.auto_decidable,
         "pending_human_confirmation": pending_confirmation,
     }
-    interrupt = payload.model_dump(mode="json")
-    interrupt["blocked_at"] = datetime.now(timezone.utc).isoformat()
-    interrupt["review_request_artifact_ref"] = request_ref
-    interrupt["review_policy"] = ar_out.get("review_policy") or {"mode": outcome.mode}
-    interrupt["pending_human_confirmation"] = pending_confirmation
     blocked_update = {
-        "active_interrupt": interrupt,
+        "active_interrupt": persisted_request.compact_interrupt(
+            stage="assembly_review",
+            gate_id="assembly_review",
+            reason="assembly_review_human_decision_required",
+        ),
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
     }
@@ -631,7 +635,7 @@ def human_review_gate(state: TopLevelState) -> dict:
             {
                 "stage": "assembly_review",
                 "max_blocked_seconds": outcome.max_blocked_seconds,
-                "review_request_artifact_ref": request_ref,
+                "review_request_artifact_ref": request_ref.model_dump(mode="json"),
                 "policy_mode": outcome.mode,
             },
         )
@@ -645,6 +649,12 @@ def human_review_gate(state: TopLevelState) -> dict:
             request=payload,
             data_dir=data_dir,
         )
+        recommendation = recommendation.model_copy(
+            update={
+                "review_request_id": persisted_request.review_request_id,
+                "review_request_hash": persisted_request.request_hash,
+            }
+        )
         from app.control.lifecycle import resume_review_state
 
         auto_update = resume_review_state({**state, **blocked_update}, recommendation)
@@ -656,7 +666,7 @@ def human_review_gate(state: TopLevelState) -> dict:
                 "stage": "assembly_review",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "review_request_artifact_ref": request_ref,
+                "review_request_artifact_ref": request_ref.model_dump(mode="json"),
                 "policy_mode": outcome.mode,
             },
         )
@@ -670,7 +680,7 @@ def human_review_gate(state: TopLevelState) -> dict:
             "candidate_id": recommendation.candidate_id,
             "decided_by": recommendation.decided_by,
             "rationale_artifact_ref": recommendation.rationale_artifact_ref,
-            "review_request_artifact_ref": request_ref,
+            "review_request_artifact_ref": request_ref.model_dump(mode="json"),
             "policy_mode": outcome.mode,
         },
     )
@@ -679,7 +689,7 @@ def human_review_gate(state: TopLevelState) -> dict:
 
 def commit_assembly_review(state: TopLevelState) -> dict:
     """Commit the assembly review decision and advance routing."""
-    from app.graph.routing import next_stage_name
+    from app.graph.routing import next_stage_name, skipped_stages_until_next
 
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
@@ -697,7 +707,16 @@ def commit_assembly_review(state: TopLevelState) -> dict:
 
     final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
     trace = [*state.get("route_trace", []), "assembly_review_stage"]
-    next_stage = next_stage_name("assembly_review")
+    next_stage = next_stage_name(
+        "assembly_review",
+        state.get("requested_stages"),
+    )
+    skip_reasons = dict(state.get("skip_reasons") or {})
+    for skipped_stage in skipped_stages_until_next(
+        "assembly_review",
+        state.get("requested_stages"),
+    ):
+        skip_reasons.setdefault(skipped_stage, "not_requested")
     decided_by = ar_out.get("decided_by", "human")
     rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
     action_metadata = {
@@ -715,18 +734,6 @@ def commit_assembly_review(state: TopLevelState) -> dict:
 
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
-    ledger.record_review_decision(
-        state["session_id"],
-        "assembly_review",
-        decision=decision,
-        candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidates,
-        notes=ar_out.get("notes", []),
-        metadata=action_metadata,
-        decided_by=decided_by,
-        rationale_artifact_ref=rationale_artifact_ref,
-    )
-
     decision_artifact = ReviewDecisionArtifact(
         session_id=state["session_id"],
         stage="assembly_review",
@@ -737,11 +744,33 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         notes=ar_out.get("notes", []),
         metadata=action_metadata,
     )
-    decision_ref = _write_json_artifact(
-        state,
-        "assembly_review_decision.json",
-        decision_artifact.model_dump(mode="json"),
+    review_request_id = ar_out.get("review_request_id")
+    review_request_hash = ar_out.get("review_request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("assembly_review decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        data_dir,
+        session_id=state["session_id"],
+        review_request_id=review_request_id,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        decision=decision_artifact,
+        request_hash=review_request_hash,
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
         artifact_type="assembly_review.decision",
+    )
+    ledger.record_review_decision(
+        state["session_id"],
+        "assembly_review",
+        decision=decision,
+        candidate_id=selected_candidate_id,
+        rejected_candidates=rejected_candidates,
+        notes=ar_out.get("notes", []),
+        artifact_ref=decision_ref.model_dump(mode="json"),
+        metadata=action_metadata,
+        decided_by=decided_by,
+        rationale_artifact_ref=rationale_artifact_ref,
+        review_request_id=review_request_id,
     )
     action_ref = None
     if selected_candidate_id and pre_action_ref and final_assembly_ref and final_for_downstream:
@@ -758,7 +787,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             evidence_refs=evidence_refs,
             evidence_notes=evidence_notes,
             notes=ar_out.get("notes", []),
-            metadata={"review_decision_artifact_ref": decision_ref},
+            metadata={"review_decision_artifact_ref": decision_ref.model_dump(mode="json")},
         )
         action_ref = _write_json_artifact(
             state,
@@ -771,6 +800,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "current_stage": next_stage,
         "supervision_state": "completed" if next_stage == "done" else "running_stage",
         "route_trace": trace,
+        "skip_reasons": skip_reasons,
     }
 
     if selected_candidate_id:
@@ -785,7 +815,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             "pre_action_assembly_ref": pre_action_ref,
             "action_type": action_type,
             "action_execution_mode": action_execution_mode,
-            "review_decision_artifact_ref": decision_ref,
+            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
             "assembly_review_action_artifact_ref": action_ref,
             "decided_by": decided_by,
             "rationale_artifact_ref": rationale_artifact_ref,
@@ -807,6 +837,11 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
     if request.stage != "assembly_review":
         raise ResumeValidationError("assembly review resume requires stage assembly_review")
     ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("assembly_review decision is missing review request binding")
     candidates = ar_out.get("candidates") or []
     candidates_by_id = {candidate.get("candidate_id"): candidate for candidate in candidates}
     allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"}
@@ -844,6 +879,8 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         "notes": request.notes,
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
+        "review_request_id": review_request_id,
+        "review_request_hash": review_request_hash,
     }
     if action_payload["action_type"] == "purge":
         stage_outputs["assembly_review"]["purged_assembly"] = action_payload["final_assembly_ref"]
@@ -913,18 +950,8 @@ def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_fina
 def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) -> dict:
     stage_outputs = dict(state.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get("assembly_review") or {})
-    ledger = Ledger(state.get("data_dir", "data"))
-    ledger.record_review_decision(
-        state["session_id"],
-        "assembly_review",
-        decision="stop_human_review",
-        candidate_id=request.candidate_id,
-        rejected_candidates=request.rejected_candidates,
-        notes=request.notes,
-        metadata=request.metadata,
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-    )
+    data_dir = state.get("data_dir", "data")
+    ledger = Ledger(data_dir)
     decision_artifact = ReviewDecisionArtifact(
         session_id=state["session_id"],
         stage="assembly_review",
@@ -935,17 +962,40 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         notes=request.notes,
         metadata=request.metadata,
     )
-    decision_ref = _write_json_artifact(
-        state,
-        "assembly_review_decision.json",
-        decision_artifact.model_dump(mode="json"),
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("assembly_review stop decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        data_dir,
+        session_id=state["session_id"],
+        review_request_id=review_request_id,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        decision=decision_artifact,
+        request_hash=review_request_hash,
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
         artifact_type="assembly_review.decision",
+    )
+    ledger.record_review_decision(
+        state["session_id"],
+        "assembly_review",
+        decision="stop_human_review",
+        candidate_id=request.candidate_id,
+        rejected_candidates=request.rejected_candidates,
+        notes=request.notes,
+        artifact_ref=decision_ref.model_dump(mode="json"),
+        metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+        review_request_id=review_request_id,
     )
     stage_outputs["assembly_review"] = {
         **ar_out,
         "status": "failed_terminal",
         "decision": "stop_human_review",
-        "review_decision_artifact_ref": decision_ref,
+        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
         "notes": request.notes,
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
@@ -993,21 +1043,48 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
     if not input_ref:
         raise ResumeValidationError("rerun requires assembly stage input_ref (no inventory rebuild)")
 
-    candidate_dir = data_dir / "artifacts" / "assembly" / session_id / "candidates"
+    candidate_dir = stage_artifacts_dir(state, "assembly", "candidates")
     read_type = params["read_type"]
     genome_size = params["estimated_genome_size"]
     threads = params["threads"]
     rerun_index, existing_bundle_ref = _next_rerun_index(
-        data_dir,
-        session_id,
+        state,
         candidate_dir,
         max_reruns=max_reruns,
         selected_rerun_indices=selected_rerun_indices,
     )
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("assembly_review rerun is missing review request binding")
+    review_decision_ref = persist_review_decision(
+        data_dir,
+        session_id=session_id,
+        review_request_id=review_request_id,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        decision=request,
+        request_hash=review_request_hash,
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
+        artifact_type="assembly_review.decision",
+    )
+    ledger.record_review_decision(
+        session_id,
+        "assembly_review",
+        decision="rerun",
+        candidate_id=request.candidate_id,
+        notes=list(request.notes),
+        artifact_ref=review_decision_ref.model_dump(mode="json"),
+        metadata=request.metadata,
+        decided_by=request.decided_by,
+        rationale_artifact_ref=request.rationale_artifact_ref,
+        review_request_id=review_request_id,
+    )
     candidate_id = f"{session_id}:{FLYE_METHOD}:rerun_{rerun_index}"
-    working_dir = data_dir / "work" / "assembly" / session_id / f"flye_rerun_{rerun_index}"
+    working_dir = stage_work_dir(state, "assembly", f"flye_rerun_{rerun_index}")
     flye_out_dir = working_dir / "flye_out"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"flye_rerun_{rerun_index}"
+    artifact_dir = stage_artifacts_dir(state, "assembly", f"flye_rerun_{rerun_index}")
     draft_assembly = artifact_dir / "draft_assembly.fasta"
     script_path = working_dir / "run_flye.sh"
     bundle_path = candidate_dir / f"flye_rerun_{rerun_index}_candidate.json"
@@ -1248,8 +1325,7 @@ def _validate_rerun_flye_parameters(
 
 
 def _next_rerun_index(
-    data_dir: Path,
-    session_id: str,
+    state: TopLevelState,
     candidate_dir: Path,
     *,
     max_reruns: int,
@@ -1263,8 +1339,8 @@ def _next_rerun_index(
         bundle_path = candidate_dir / f"flye_rerun_{index}_candidate.json"
         if bundle_path.exists():
             return index, str(bundle_path)
-        working_dir = data_dir / "work" / "assembly" / session_id / f"flye_rerun_{index}"
-        artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"flye_rerun_{index}"
+        working_dir = stage_work_dir(state, "assembly", f"flye_rerun_{index}")
+        artifact_dir = stage_artifacts_dir(state, "assembly", f"flye_rerun_{index}")
         if working_dir.exists() or artifact_dir.exists():
             index += 1
             continue
@@ -1424,7 +1500,7 @@ def _target_species_name(state: TopLevelState) -> str | None:
     manifest_ref = state.get("input_manifest_ref")
     if not manifest_ref:
         return None
-    path = Path(str(manifest_ref))
+    path = resolve_run_ref(state, str(manifest_ref))
     if not path.exists():
         return None
     try:
@@ -1450,42 +1526,29 @@ def _ensure_assembly_review_reports(
     payload = _assembly_review_report_payload(state, ar_out, report_kind=report_kind)
     data_ref = _write_report_json_artifact_if_changed(
         state,
-        "assembly_review_report.json",
+        "assembly_review_packet.json",
         payload,
-        artifact_type=ASSEMBLY_REVIEW_REPORT_DATA,
+        artifact_type=ASSEMBLY_REVIEW_PACKET,
     )
-    report_ref = _write_report_text_artifact_if_changed(
+    report_ref = _write_derived_report_text(
         state,
-        "assembly_review_report.md",
+        "assembly_review.md",
         _render_assembly_review_markdown(payload, title="Assembly Review Report"),
-        artifact_type=ASSEMBLY_REVIEW_REPORT,
-        metadata={"report_kind": report_kind, "candidate_count": len(candidates)},
     )
 
     updated = {
         **ar_out,
         "assembly_review_report_ref": report_ref,
-        "assembly_review_report_data_ref": data_ref,
+        "assembly_review_packet_ref": data_ref,
     }
     report_refs = {
         "assembly_review_report": report_ref,
-        "assembly_review_report_data": data_ref,
+        "review_packet": data_ref,
     }
     if ar_out.get("candidate_comparison_ref"):
         report_refs["candidate_comparison"] = str(ar_out["candidate_comparison_ref"])
     if ar_out.get("related_species_evidence_pack_ref"):
         report_refs["related_species_evidence_pack"] = str(ar_out["related_species_evidence_pack_ref"])
-
-    if len(candidates) >= 2:
-        comparison_ref = _write_report_text_artifact_if_changed(
-            state,
-            "assembly_candidate_comparison_report.md",
-            _render_assembly_review_markdown(payload, title="Assembly Candidate Comparison Report"),
-            artifact_type=ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
-            metadata={"report_kind": report_kind, "candidate_count": len(candidates)},
-        )
-        updated["assembly_candidate_comparison_report_ref"] = comparison_ref
-        report_refs["assembly_candidate_comparison_report"] = comparison_ref
 
     comparison_context = _candidate_comparison_context(updated)
     return updated, report_refs, comparison_context
@@ -1503,7 +1566,7 @@ def _assembly_review_report_payload(
     eval_bundle = _read_eval_bundle(ar_out.get("eval_bundle_ref"))
     review_plan = ar_out.get("review_plan") or {}
     return {
-        "artifact_type": ASSEMBLY_REVIEW_REPORT_DATA,
+        "artifact_type": ASSEMBLY_REVIEW_PACKET,
         "session_id": state["session_id"],
         "stage": "assembly_review",
         "report_kind": report_kind,
@@ -1584,7 +1647,7 @@ def _candidate_comparison_context(ar_out: dict[str, Any]) -> dict[str, Any]:
             if candidate.get("candidate_id") and (candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
         },
     }
-    for key in ("candidate_comparison_ref", "assembly_candidate_comparison_report_ref"):
+    for key in ("candidate_comparison_ref",):
         if ar_out.get(key):
             context[key] = ar_out[key]
     return context
@@ -1744,57 +1807,33 @@ def _write_report_json_artifact_if_changed(
     *,
     artifact_type: str,
 ) -> str:
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
-    return _write_report_text_artifact_if_changed(
+    return _write_json_artifact(
         state,
         filename,
-        text,
+        payload,
         artifact_type=artifact_type,
-        metadata={"report_kind": payload.get("report_kind"), "candidate_count": payload.get("candidate_count")},
     )
 
 
-def _write_report_text_artifact_if_changed(
+def _write_derived_report_text(
     state: TopLevelState,
     filename: str,
     text: str,
-    *,
-    artifact_type: str,
-    metadata: dict[str, Any] | None = None,
 ) -> str:
-    data_dir = Path(state.get("data_dir", "data"))
-    out_dir = data_dir / "artifacts" / "assembly_review" / state["session_id"] / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / filename
-    if _path_has_same_content(path, text) and _artifact_record_exists(data_dir, state["session_id"], artifact_type, path):
-        return str(path)
-    if not _path_has_same_content(path, text):
-        path.write_text(text, encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        path,
-        stage="assembly_review",
-        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
-        artifact_type=artifact_type,
-        metadata=metadata or {},
+    """Overwrite the optional Markdown projection without indexing it."""
+
+    path = session_paths(state).report_path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = stage_work_dir(
+        state,
+        "assembly_review",
+        "reports",
+        f".{filename}.{uuid4().hex}.tmp",
     )
-    append_artifact_records(data_dir, state["session_id"], [artifact])
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
     return str(path)
-
-
-def _artifact_record_exists(data_dir: Path | str, session_id: str, artifact_type: str, path: Path) -> bool:
-    for record in read_artifact_records(data_dir, session_id):
-        if record.get("artifact_type") == artifact_type and Path(record.get("file_path", "")) == path:
-            return True
-    return False
-
-
-def _path_has_same_content(path: Path, expected: str) -> bool:
-    if not path.exists():
-        return False
-    try:
-        return path.read_text(encoding="utf-8") == expected
-    except OSError:
-        return False
 
 
 

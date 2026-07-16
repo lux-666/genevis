@@ -16,11 +16,17 @@ from app.schemas.artifacts import (
     HIC_QC_REPORT,
     HIC_REVIEW_BUNDLE,
     HIC_SCAFFOLDED_ASSEMBLY,
+    HIC_PARAMETER_EXECUTION,
     ArtifactMeta,
+    ParameterAttempt,
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.hic_scaffolding.parameter_persistence import (
+    AutoHiCParameterPersistenceError,
+    write_autohic_parameter_artifact,
+)
 
 
 @dataclass(frozen=True)
@@ -45,7 +51,7 @@ def build_method_graph(
     graph.add_node("freeze", freeze)
     graph.add_node("run", lambda state: run_method_attempt(state, lifecycle))
     graph.add_node("collect", collect)
-    graph.add_node("done", lambda state: finish_method_lifecycle(state, lifecycle))
+    graph.add_node("done", lambda _state: {})
     graph.add_edge(START, "freeze")
     graph.add_conditional_edges(
         "freeze",
@@ -71,7 +77,7 @@ def update_hic_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
 
 
 def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> dict:
-    """Run one frozen method attempt, preserving fallback review semantics."""
+    """Run the approved frozen AutoHiC attempt and persist its outcome."""
     output = hic_output(state)
     if output.get("status") != lifecycle.frozen_status:
         return {}
@@ -86,19 +92,86 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
     result = outcome.result.model_dump(mode="json")
     if not outcome.success:
         result["error"] = outcome.error
+    try:
+        parameter_attempts = _record_parameter_execution(
+            state,
+            output,
+            lifecycle=lifecycle,
+            result=result,
+            succeeded=outcome.success,
+        )
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "execution_evidence",
+                "reason": f"AutoHiC execution evidence could not be persisted: {exc}",
+            },
+        )
     return update_hic_output(
         state,
-        {"status": lifecycle.ran_status, lifecycle.execution_result_key: result},
+        {
+            "status": lifecycle.ran_status,
+            lifecycle.execution_result_key: result,
+            "parameter_attempts": parameter_attempts,
+        },
     )
 
 
-def finish_method_lifecycle(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> dict:
-    """Mark a method adapter complete so the parent can schedule the next one."""
-    output = hic_output(state)
-    completed = list(output.get("completed_method_names") or [])
-    if lifecycle.method_name not in completed:
-        completed.append(lifecycle.method_name)
-    return update_hic_output(state, {"completed_method_names": completed})
+def _record_parameter_execution(
+    state: TopLevelState,
+    output: dict[str, Any],
+    *,
+    lifecycle: HiCMethodLifecycle,
+    result: dict[str, Any],
+    succeeded: bool,
+) -> list[dict[str, Any]]:
+    """Attach immutable execution evidence to the approved parameter attempt."""
+
+    current_id = int(output.get("current_parameter_attempt_id") or 0)
+    attempts = list(output.get("parameter_attempts") or [])
+    matches = [
+        item
+        for item in attempts
+        if isinstance(item, dict) and item.get("attempt_id") == current_id
+    ]
+    if len(matches) != 1:
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC execution requires one current parameter attempt"
+        )
+    current = ParameterAttempt.model_validate(matches[0])
+    if current.method_id != lifecycle.method_name or current.status != "frozen":
+        raise AutoHiCParameterPersistenceError(
+            "AutoHiC current parameter attempt is not the approved frozen attempt"
+        )
+    execution_ref = write_autohic_parameter_artifact(
+        state,
+        current_id,
+        "execution.json",
+        {
+            "schema_version": 2,
+            "attempt_id": current_id,
+            "method_id": lifecycle.method_name,
+            "result": result,
+        },
+        artifact_type=HIC_PARAMETER_EXECUTION,
+        method_name=lifecycle.method_name,
+        scope="attempt",
+    )
+    updated = ParameterAttempt.model_validate(
+        {
+            **current.model_dump(mode="json"),
+            "status": "executed" if succeeded else "execution_failed",
+            "execution_ref": execution_ref.model_dump(mode="json"),
+        }
+    ).model_dump(mode="json")
+    return [
+        updated
+        if isinstance(item, dict) and item.get("attempt_id") == current_id
+        else ParameterAttempt.model_validate(item).model_dump(mode="json")
+        for item in attempts
+    ]
 
 
 def collect_method_artifacts(
@@ -225,7 +298,7 @@ def collect_method_artifacts(
             "qc_report_ref": str(qc_report_ref),
         }
         update = {
-            "status": "blocked_human",
+            "status": "autohic_review_ready",
             "chromosome_scaffolded_assembly_candidate_ref": str(attempt.metadata["scaffold_fasta"]),
             "hic_review_bundle_ref": str(review_bundle_ref),
             "hic_qc_report_ref": str(qc_report_ref),
@@ -234,11 +307,13 @@ def collect_method_artifacts(
             "method_candidates": candidates,
         }
     else:
-        notes = unique_refs([*notes, f"{lifecycle.name}_execution_failed", "annotation_continues_on_pre_hic_assembly_fallback"])
+        notes = unique_refs([*notes, f"{lifecycle.name}_execution_failed"])
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {"status": "failed", "error": result.get("error")}
         update = {
-            "status": "blocked_human",
+            "status": "failed",
+            "failure_kind": "execution",
+            "reason": result.get("error") or f"{lifecycle.name} execution failed",
             "selected_method_name": lifecycle.method_name,
             "notes": notes,
             f"{lifecycle.name}_error": result.get("error"),

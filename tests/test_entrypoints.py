@@ -16,17 +16,19 @@ from typing import get_args
 from unittest.mock import patch
 
 from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records, read_artifact_records
+from app.execution.artifacts import read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
 from app.entrypoints.tui import _tui_main, run_tui
 from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
-from app.review.base import ResumeReviewRequest
-from app.schemas.artifacts import ArtifactMeta
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import PersistedReviewRequest, load_review_request, persist_review_request
+from app.schemas.artifacts import ArtifactRef
 from app.schemas.entry import EntryRequest
 from app.schemas.ask_plan import AskPlanState, save_ask_plan
 from app.schemas.run_config import LocalExecStage
 from app.storage.paths import SessionPaths, locate_session_data_dir
+from tests.data_v2 import v2_run_dir
 
 
 class _FakeGraph:
@@ -57,50 +59,76 @@ class _FakeResumeGraph:
         return self.result
 
 
-def _write_assembly_review_request(data_dir: Path, session_id: str) -> Path:
-    request_dir = data_dir / "artifacts" / "assembly_review" / session_id
-    request_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = request_dir / "assembly_review_request.json"
-    request_ref.write_text(
-        json.dumps(
-            {
-                "stage": "assembly_review",
-                "reason": "needs_review",
-                "candidates": [{"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}],
-                "signals": [],
-                "decisions_allowed": ["accept", "stop_human_review"],
-                "auto_decidable": False,
-                "report_refs": {
-                    "assembly_review_report": str(request_dir / "reports" / "assembly_review_report.md"),
-                    "assembly_review_report_data": str(request_dir / "reports" / "assembly_review_report.json"),
-                },
-                "candidate_comparison_context": {
-                    "candidate_ids": ["flye"],
-                    "candidate_final_assembly_refs": {"flye": "draft.fasta"},
-                },
-                "review_request_artifact_ref": str(request_ref),
-            }
-        ),
-        encoding="utf-8",
+def _write_assembly_review_request(
+    data_root: Path,
+    session_id: str,
+) -> tuple[Path, PersistedReviewRequest]:
+    run_dir = v2_run_dir(data_root, session_id)
+    paths = SessionPaths.from_run_dir(run_dir)
+    payload = ReviewPayload(
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason="needs_review",
+        candidates=[{"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}],
+        decisions_allowed=["accept", "stop_human_review"],
+        auto_decidable=False,
+        report_refs={
+            "assembly_review_report": "reports/assembly_review.md",
+            "review_packet": "artifacts/assembly_review/assembly_review_packet.json",
+        },
+        candidate_comparison_context={
+            "candidate_ids": ["flye"],
+            "candidate_final_assembly_refs": {"flye": "draft.fasta"},
+        },
     )
-    append_artifact_records(
-        data_dir,
-        session_id,
-        [
-            ArtifactMeta.from_file(
-                request_ref,
-                stage="assembly_review",
-                method_name="assembly_review.contract",
-                artifact_type="assembly_review.request",
-            )
-        ],
+    state = {
+        "session_id": session_id,
+        "data_dir": str(run_dir),
+        "input_manifest_ref": paths.to_ref(paths.manifest_path),
+    }
+    persisted = persist_review_request(
+        state,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason="needs_review",
+        payload=payload,
+        method_name="assembly_review.contract",
+        artifact_type="assembly_review.request",
     )
-    return request_ref
+    return run_dir, persisted
 
 
 def _artifact_types(data_dir: Path, session_id: str) -> list[str]:
     session_dir = locate_session_data_dir(data_dir, session_id)
     return [record["artifact_type"] for record in read_artifact_records(session_dir, session_id)]
+
+
+def _load_assembly_review_request(
+    data_root: Path,
+    session_id: str,
+) -> tuple[Path, ArtifactRef, dict]:
+    run_dir = locate_session_data_dir(data_root, session_id)
+    if run_dir is None:
+        raise AssertionError(f"missing v2 run for {session_id}")
+    record = next(
+        item
+        for item in read_artifact_records(run_dir, session_id)
+        if item["artifact_type"] == "assembly_review.request"
+    )
+    ref = ArtifactRef.model_validate(
+        {
+            key: record[key]
+            for key in (
+                "schema_version",
+                "artifact_id",
+                "path_ref",
+                "sha256",
+                "size_bytes",
+                "artifact_type",
+            )
+        }
+    )
+    return run_dir, ref, load_review_request(run_dir, ref, session_id=session_id)
 
 
 def _add_gene_method_bins(bin_dir: Path) -> Path:
@@ -150,16 +178,12 @@ def _assert_existing_assembly_blocks_at_review(
         test.assertIn("resume_note: use `gene-agent review` or `gene-agent resume` to continue", stdout)
     else:
         test.assertIn("resume_note: durable cross-process resume requires --checkpointer sqlite", stdout)
-    test.assertIn("'candidate_id': 'existing_assembly'", stdout)
-
-    run_dir = SessionPaths(data_dir, session_id).run_dir
-    request_ref = run_dir / "artifacts" / "assembly_review" / session_id / "assembly_review_request.json"
-    blocked_report = run_dir / "artifacts" / "operator_report" / session_id / "blocked_human_report.json"
-    test.assertTrue(request_ref.exists())
+    run_dir, _request_ref, request_record = _load_assembly_review_request(data_dir, session_id)
+    blocked_report = run_dir / "reports" / "current_status.json"
     test.assertTrue(blocked_report.exists())
 
-    request = json.loads(request_ref.read_text(encoding="utf-8"))
-    test.assertEqual(request["stage"], "assembly_review")
+    test.assertEqual(request_record["stage"], "assembly_review")
+    request = request_record["payload"]
     test.assertEqual(request["candidates"][0]["candidate_id"], "existing_assembly")
     test.assertFalse(request["auto_decidable"])
 
@@ -170,9 +194,9 @@ def _assert_existing_assembly_blocks_at_review(
 
     artifact_types = _artifact_types(data_dir, session_id)
     test.assertIn("assembly_review.request", artifact_types)
-    test.assertIn("assembly_review.report", artifact_types)
-    test.assertIn("assembly_review.report_data", artifact_types)
-    test.assertIn("operator_report.blocked_human", artifact_types)
+    test.assertIn("assembly_review.review_packet", artifact_types)
+    test.assertNotIn("operator_report.blocked_human", artifact_types)
+    test.assertTrue((run_dir / "reports" / "assembly_review.md").exists())
 
     events_path = run_dir / "ledger" / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
@@ -181,15 +205,18 @@ def _assert_existing_assembly_blocks_at_review(
 
 
 def _write_accept_existing_assembly_decision(data_dir: Path, session_id: str, path: Path) -> Path:
-    request_ref = SessionPaths(data_dir, session_id).run_dir / "artifacts" / "assembly_review" / session_id / "assembly_review_request.json"
-    request = json.loads(request_ref.read_text(encoding="utf-8"))
+    run_dir, request_ref, request_record = _load_assembly_review_request(data_dir, session_id)
+    request = request_record["payload"]
     candidate = request["candidates"][0]
-    path.write_text(
+    decision_path = run_dir / "control" / path.name
+    decision_path.write_text(
         json.dumps(
             {
                 "session_id": session_id,
-                "stage": request["stage"],
-                "gate_id": request.get("gate_id"),
+                "stage": request_record["stage"],
+                "gate_id": request_record["gate_id"],
+                "review_request_id": request_record["review_request_id"],
+                "review_request_hash": request_ref.sha256,
                 "decision": "accept",
                 "candidate_id": candidate["candidate_id"],
                 "final_assembly_ref": candidate["final_assembly_ref"],
@@ -200,7 +227,7 @@ def _write_accept_existing_assembly_decision(data_dir: Path, session_id: str, pa
         ),
         encoding="utf-8",
     )
-    return path
+    return decision_path
 
 
 class EntrypointTests(unittest.TestCase):
@@ -366,13 +393,12 @@ class EntrypointTests(unittest.TestCase):
         self.assertIsNone(args.session_id)
         self.assertEqual(args.manifest, "manifest.yaml")
 
-    def test_generate_session_id_uses_daily_sequence_from_ledger_dirs(self):
+    def test_generate_session_id_uses_daily_sequence_from_v2_run_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            ledger = data_dir / "ledger"
-            (ledger / "gene-20260508-000001").mkdir(parents=True)
-            (ledger / "gene-20260508-000003").mkdir()
-            (ledger / "other-session").mkdir()
+            v2_run_dir(data_dir, "gene-20260508-000001")
+            v2_run_dir(data_dir, "gene-20260508-000003")
+            v2_run_dir(data_dir, "other-session")
 
             session_id = generate_session_id(data_dir, now=datetime(2026, 5, 8, 10, 0, 0))
 
@@ -409,7 +435,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("session_id: gene-20260508-000001", stdout)
             self.assertEqual(captured["session_id"], "gene-20260508-000001")
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "gene-20260508-000001"}})
-            self.assertTrue((root / "data" / "runs" / "gene-20260508-000001" / "ledger" / "session.json").exists())
+            self.assertTrue((root / "data" / "runs" / "gene-20260508-000001" / "ledger" / "events.jsonl").exists())
 
     def test_structured_run_uses_manifest_session_id_when_cli_omits_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,13 +503,13 @@ class EntrypointTests(unittest.TestCase):
                 captured,
                 {
                     "session_id": "s1",
-                    "input_manifest_ref": str(manifest),
+                    "input_manifest_ref": "control/manifest.yaml",
                     "data_dir": str(SessionPaths(root / "data", "s1").run_dir),
                     "requested_stages": None,
                 },
             )
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
-            self.assertTrue((root / "data" / "runs" / "s1" / "ledger" / "session.json").exists())
+            self.assertTrue((root / "data" / "runs" / "s1" / "ledger" / "events.jsonl").exists())
 
     def test_structured_run_resolves_relative_data_dir_before_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -522,7 +548,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             self.assertEqual(captured["data_dir"], expected)
             build_graph.assert_called_once_with(backend="memory", data_dir=expected)
-            self.assertTrue((root / "out" / "runs" / "s1" / "ledger" / "session.json").exists())
+            self.assertTrue((root / "out" / "runs" / "s1" / "ledger" / "events.jsonl").exists())
 
     def test_missing_manifest_returns_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
@@ -780,7 +806,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("target_species: 卵鳎", text)
             build_graph.assert_not_called()
 
-    def test_ask_resume_falls_back_to_legacy_plan_location(self):
+    def test_ask_resume_does_not_adopt_legacy_plan_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             legacy_plan = data_dir / "ask_plans" / "s1" / "ask_plan.json"
@@ -805,9 +831,9 @@ class EntrypointTests(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(code, 0)
-            self.assertEqual(stderr, "")
-            self.assertIn("clarification_required", stdout)
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("ask_plan.json", stderr)
 
     def test_ask_raw_reads_emits_stage_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -917,9 +943,11 @@ class EntrypointTests(unittest.TestCase):
 
     def test_inspect_missing_session_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            v2_run_dir(data_root, "existing")
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
-                argparse.Namespace(session_id="missing", data_dir=str(Path(tmp) / "data")),
+                argparse.Namespace(session_id="missing", data_dir=str(data_root)),
             )
 
         self.assertEqual(code, 1)
@@ -929,9 +957,11 @@ class EntrypointTests(unittest.TestCase):
 
     def test_inspect_missing_session_json_returns_machine_readable_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / "data"
+            v2_run_dir(data_root, "existing")
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
-                argparse.Namespace(session_id="missing", data_dir=str(Path(tmp) / "data"), json=True),
+                argparse.Namespace(session_id="missing", data_dir=str(data_root), json=True),
             )
 
         self.assertEqual(code, 1)
@@ -943,11 +973,17 @@ class EntrypointTests(unittest.TestCase):
     def test_inspect_existing_session_prints_memory_only_limitation(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            from app.control.ledger import Ledger
-
-            ledger = Ledger(data_dir)
-            ledger.create_session("s1", "manifest.yaml")
-            ledger.record_review_requested("s1", "assembly_review", reason="needs_review")
+            run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
+            ledger.record_review_requested(
+                "s1",
+                "assembly_review",
+                reason="needs_review",
+                review_request_artifact_ref=persisted.request_ref,
+                review_request_id=persisted.review_request_id,
+                auto_decidable=False,
+            )
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
                 argparse.Namespace(session_id="s1", data_dir=str(data_dir)),
@@ -962,16 +998,16 @@ class EntrypointTests(unittest.TestCase):
     def test_inspect_blocked_review_prints_next_action_and_writes_template(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            request_ref = _write_assembly_review_request(data_dir, "s1")
-            from app.control.ledger import Ledger
-
-            ledger = Ledger(data_dir)
-            ledger.create_session("s1", "manifest.yaml")
+            run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
                 reason="needs_review",
-                review_request_artifact_ref=str(request_ref),
+                review_request_artifact_ref=persisted.request_ref,
+                review_request_id=persisted.review_request_id,
+                auto_decidable=False,
             )
             template_path = Path(tmp) / "decision.json"
             code, stdout, stderr = _capture_cli(
@@ -989,10 +1025,12 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("next_action.kind: review_decision_required", stdout)
             self.assertIn("--write-decision-template", stdout)
             self.assertIn("gene-agent resume", stdout)
-            self.assertIn("assembly_review_report.md", stdout)
+            self.assertIn("assembly_review.md", stdout)
             self.assertEqual(template["session_id"], "s1")
             self.assertEqual(template["stage"], "assembly_review")
             self.assertEqual(template["gate_id"], "assembly_review")
+            self.assertEqual(template["review_request_id"], persisted.review_request_id)
+            self.assertEqual(template["review_request_hash"], persisted.request_hash)
             self.assertEqual(template["decision"], "accept")
             self.assertEqual(template["candidate_id"], "flye")
             self.assertEqual(template["final_assembly_ref"], "draft.fasta")
@@ -1002,16 +1040,16 @@ class EntrypointTests(unittest.TestCase):
     def test_inspect_json_includes_review_next_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
-            request_ref = _write_assembly_review_request(data_dir, "s1")
-            from app.control.ledger import Ledger
-
-            ledger = Ledger(data_dir)
-            ledger.create_session("s1", "manifest.yaml")
+            run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
+            ledger = Ledger(run_dir)
+            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
                 reason="needs_review",
-                review_request_artifact_ref=str(request_ref),
+                review_request_artifact_ref=persisted.request_ref,
+                review_request_id=persisted.review_request_id,
+                auto_decidable=False,
             )
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
@@ -1024,7 +1062,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
         self.assertIn("gene-agent resume", summary["next_action"]["resume_command"])
         self.assertTrue(
-            any(ref.endswith("assembly_review_report.md") for ref in summary["next_action"]["relevant_refs"])
+            any(ref.endswith("assembly_review.md") for ref in summary["next_action"]["relevant_refs"])
         )
 
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
@@ -1431,13 +1469,7 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertNotIn("Traceback", stderr)
 
             session_dir = SessionPaths(data_dir, "s1").run_dir
-            report_path = (
-                session_dir
-                / "artifacts"
-                / "operator_report"
-                / "s1"
-                / "failed_terminal_report.json"
-            )
+            report_path = session_dir / "reports" / "current_status.json"
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["supervision_state"], "failed_terminal")
             self.assertEqual(report["current_stage"], "assembly")
@@ -1445,7 +1477,9 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(report["next_action"]["kind"], "failed_terminal")
 
             events = Ledger(session_dir).read_events("s1")
-            self.assertTrue(any(event["event_type"] == "run_failed" for event in events))
+            terminal = [event for event in events if event["event_type"] == "session_terminal"]
+            self.assertEqual(len(terminal), 1)
+            self.assertEqual(terminal[0]["outcome"], "failed")
 
     def test_run_config_seeds_nextdenovo_method_and_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1886,7 +1920,17 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
         )
         run_config = root / "run_config.json"
         run_config.write_text(
-            json.dumps({"local_exec": ["repeat_annotation"]}),
+            json.dumps(
+                {
+                    "local_exec": ["repeat_annotation"],
+                    "requested_stages": [
+                        "assembly_review",
+                        "repeat_annotation",
+                        "gene_annotation",
+                        "function_annotation",
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         return manifest, run_config, root / "out"
@@ -1933,9 +1977,9 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             )
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
-            function_bundle = run_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
+            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
+            function_bundle = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
             self.assertFalse(repeat_bundle.exists())
             self.assertFalse(gene_bundle.exists())
             self.assertFalse(function_bundle.exists())
@@ -2001,9 +2045,9 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("database_provenance", resume_stderr)
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
-            function_bundle = run_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
+            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
+            function_bundle = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
             self.assertTrue(repeat_bundle.exists())
             self.assertTrue(gene_bundle.exists())
             self.assertFalse(function_bundle.exists())
@@ -2017,7 +2061,8 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
             self.assertIn("repeat_annotation.gff3", artifact_types)
             self.assertIn("gene_annotation.bundle", artifact_types)
-            self.assertIn("operator_report.failed_terminal", artifact_types)
+            self.assertNotIn("operator_report.failed_terminal", artifact_types)
+            self.assertTrue((run_dir / "reports" / "current_status.json").exists())
 
     def test_existing_assembly_interactive_review_reports_missing_function_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2107,8 +2152,8 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             preflight.assert_not_called()
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_work = run_dir / "work" / "repeat_annotation" / session_id / "repeatmasker"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            repeat_work = run_dir / "work" / "repeat_annotation" / "repeatmasker"
+            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
             self.assertFalse(repeat_work.exists())
             self.assertFalse(gene_bundle.exists())
             events_path = run_dir / "ledger" / "events.jsonl"
@@ -2140,8 +2185,9 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                 data_dir=data_dir,
                 session_id=session_id,
             )
-            repeat_bundle = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeat_annotation_bundle.json"
-            gene_bundle = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
+            run_dir = SessionPaths(data_dir, session_id).run_dir
+            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
+            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
             self.assertFalse(repeat_bundle.exists())
             self.assertFalse(gene_bundle.exists())
             artifact_types = _artifact_types(data_dir, session_id)
@@ -2187,7 +2233,15 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             encoding="utf-8",
         )
         run_config = root / "run_config.json"
-        run_config_payload = {"local_exec": []}
+        run_config_payload = {
+            "local_exec": [],
+            "requested_stages": [
+                "assembly_review",
+                "repeat_annotation",
+                "gene_annotation",
+                "function_annotation",
+            ],
+        }
         if include_provenance:
             run_config_payload["function_annotation"] = {
                 "database_provenance": [
@@ -2241,8 +2295,9 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                 session_id=session_id,
             )
 
-            gene_bundle_path = data_dir / "artifacts" / "gene_annotation" / session_id / "gene_annotation_bundle.json"
-            function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
+            run_dir = SessionPaths(data_dir, session_id).run_dir
+            gene_bundle_path = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
+            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
             self.assertFalse(gene_bundle_path.exists())
             self.assertFalse(function_bundle_path.exists())
 
@@ -2275,8 +2330,9 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                 session_id=session_id,
             )
 
-            function_bundle_path = data_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
-            final_report_path = data_dir / "artifacts" / "final_report" / session_id / "review_decision_report.json"
+            run_dir = SessionPaths(data_dir, session_id).run_dir
+            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            final_report_path = run_dir / "reports" / "session_summary.json"
             self.assertFalse(function_bundle_path.exists())
             self.assertFalse(final_report_path.exists())
             artifact_types = _artifact_types(data_dir, session_id)
@@ -2361,8 +2417,8 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
 
             proteins_file = root / "predicted_proteins.fasta"
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            function_bundle_path = run_dir / "artifacts" / "function_annotation" / session_id / "function_annotation_bundle.json"
-            final_report_path = run_dir / "artifacts" / "final_report" / session_id / "review_decision_report.json"
+            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            final_report_path = run_dir / "reports" / "session_summary.json"
             self.assertTrue(function_bundle_path.exists())
             self.assertTrue(final_report_path.exists())
 
@@ -2377,22 +2433,37 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertIn("function_annotation.plan", artifact_types)
             self.assertIn("function_annotation.bundle", artifact_types)
-            self.assertIn("final_report.review_decisions", artifact_types)
+            self.assertNotIn("final_report.review_decisions", artifact_types)
 
 
 class InteractiveGateLoopTests(unittest.TestCase):
     def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
+            data_root = Path(tmp) / "data"
             session_id = "s1"
+            run_dir, persisted = _write_assembly_review_request(data_root, session_id)
+            paths = SessionPaths.from_run_dir(run_dir)
+            Ledger(run_dir).create_session(session_id, paths.manifest_path)
             state = {
                 "session_id": session_id,
-                "data_dir": str(data_dir),
+                "data_dir": str(run_dir),
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
                 "requested_stages": ["read_qc", "assembly", "assembly_review"],
-                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
-                "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "active_interrupt": persisted.compact_interrupt(
+                    stage="assembly_review",
+                    gate_id="assembly_review",
+                    reason="needs_review",
+                ),
+                "stage_outputs": {
+                    "assembly_review": {
+                        "status": "blocked_human",
+                        "candidates": [
+                            {"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}
+                        ],
+                        "review_request_artifact_ref": persisted.request_ref.model_dump(mode="json"),
+                    }
+                },
                 "route_trace": [],
             }
             graph = _FakeResumeGraph(state, result={"supervision_state": "blocked_human"})
@@ -2400,6 +2471,8 @@ class InteractiveGateLoopTests(unittest.TestCase):
                 session_id=session_id,
                 stage="assembly_review",
                 gate_id="assembly_review",
+                review_request_id=persisted.review_request_id,
+                review_request_hash=persisted.request_hash,
                 decision="accept",
                 candidate_id="flye",
                 final_assembly_ref="draft.fasta",
@@ -2414,16 +2487,16 @@ class InteractiveGateLoopTests(unittest.TestCase):
                     {"configurable": {"thread_id": session_id}},
                     {"supervision_state": "blocked_human"},
                     session_id,
-                    str(data_dir),
+                    str(run_dir),
                 )
 
             self.assertEqual(result["supervision_state"], "blocked_human")
             intake_prompt.assert_called_once()
             resume_mock.assert_not_called()
             self.assertEqual(graph.updated, [])
-            decision_dir = data_dir / "artifacts" / "assembly_review" / session_id
-            self.assertFalse(list(decision_dir.glob("assembly_review_interactive_decision_*.json")) if decision_dir.exists() else [])
-            events = Ledger(data_dir).read_events(session_id)
+            decision_path = run_dir / "artifacts" / "reviews" / persisted.review_request_id / "decision.json"
+            self.assertFalse(decision_path.exists())
+            events = Ledger(run_dir).read_events(session_id)
             self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
 
 
@@ -2545,17 +2618,26 @@ class ResumeCLITests(unittest.TestCase):
             root = Path(tmp)
             data_root = root / "data"
             session_id = "s1"
-            run_dir = SessionPaths(data_root, session_id).run_dir
-            (run_dir / "checkpoints").mkdir(parents=True)
-            (run_dir / "checkpoints" / "checkpoints.sqlite").write_text("", encoding="utf-8")
-            Ledger(run_dir).create_session(session_id, "manifest.json")
-            decision = self._write_decision(root / "decision.json")
+            run_dir, persisted = _write_assembly_review_request(data_root, session_id)
+            paths = SessionPaths.from_run_dir(run_dir)
+            paths.checkpoint_db_path.write_text("", encoding="utf-8")
+            Ledger(run_dir).create_session(session_id, paths.manifest_path)
+            decision = self._write_decision(
+                paths.control_dir / "decision.json",
+                gate_id="assembly_review",
+                review_request_id=persisted.review_request_id,
+                review_request_hash=persisted.request_hash,
+            )
             state = {
                 "session_id": session_id,
                 "data_dir": str(run_dir),
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
-                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "active_interrupt": persisted.compact_interrupt(
+                    stage="assembly_review",
+                    gate_id="assembly_review",
+                    reason="needs_review",
+                ),
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
             }
             graph = _FakeResumeGraph(state)
@@ -2592,14 +2674,13 @@ class ResumeCLITests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            data_dir = root / "data"
-            db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
-            db_path.write_text("", encoding="utf-8")
+            data_root = root / "data"
             session_id = "s1"
-            Ledger(data_dir).create_session(session_id, "manifest.json")
+            run_dir, persisted = _write_assembly_review_request(data_root, session_id)
+            paths = SessionPaths.from_run_dir(run_dir)
+            paths.checkpoint_db_path.write_text("", encoding="utf-8")
 
-            manifest_ref = root / "manifest.json"
+            manifest_ref = paths.manifest_path
             manifest_ref.write_text(
                 json.dumps(
                     {
@@ -2616,15 +2697,25 @@ class ResumeCLITests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            decision = self._write_decision(root / "decision.json")
+            Ledger(run_dir).create_session(session_id, manifest_ref)
+            decision = self._write_decision(
+                paths.control_dir / "decision.json",
+                gate_id="assembly_review",
+                review_request_id=persisted.review_request_id,
+                review_request_hash=persisted.request_hash,
+            )
             state = {
                 "session_id": session_id,
-                "data_dir": str(data_dir),
-                "input_manifest_ref": str(manifest_ref),
+                "data_dir": str(run_dir),
+                "input_manifest_ref": paths.to_ref(manifest_ref),
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
                 "requested_stages": ["read_qc", "assembly", "assembly_review"],
-                "active_interrupt": {"stage": "assembly_review", "gate_id": "assembly_review"},
+                "active_interrupt": persisted.compact_interrupt(
+                    stage="assembly_review",
+                    gate_id="assembly_review",
+                    reason="needs_review",
+                ),
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
             }
             graph = _FakeResumeGraph(state)
@@ -2640,7 +2731,7 @@ class ResumeCLITests(unittest.TestCase):
                     argparse.Namespace(
                         session_id=session_id,
                         decision_file=str(decision),
-                        data_dir=str(data_dir),
+                        data_dir=str(data_root),
                         checkpointer="sqlite",
                         max_blocked_seconds=None,
                     ),
@@ -2649,7 +2740,7 @@ class ResumeCLITests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             intake_prompt.assert_not_called()
-            artifact_types = [record["artifact_type"] for record in read_artifact_records(data_dir, session_id)]
+            artifact_types = [record["artifact_type"] for record in read_artifact_records(run_dir, session_id)]
             self.assertIn("annotation.intake_plan", artifact_types)
             self.assertEqual(len(graph.updated), 1)
 

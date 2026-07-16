@@ -12,10 +12,12 @@ import inspect
 from pathlib import Path
 
 from app.control.lifecycle import inspect_session
+from app.control.ledger import Ledger
 from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 from app.stages.read_qc.builder import build_stage
 from app.stages.read_qc.method_application.make_fofn import build_make_fofn_graph
 from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
@@ -95,8 +97,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "read_qc"
         state["asset_registry_ref"] = registry_ref
@@ -169,9 +171,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                     }
                 ],
             )
-            state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=str(data_dir))
+            state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(data_dir, "s1")))
             state["current_stage"] = "read_qc"
             state["asset_registry_ref"] = str(registry)
+            Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
 
             result = build_graph(backend="memory", data_dir=str(data_dir)).invoke(
                 state,
@@ -179,15 +182,20 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             )
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            report_ref = data_dir / "artifacts" / "operator_report" / "s1" / "failed_terminal_report.json"
+            run_dir = Path(result["data_dir"])
+            report_ref = run_dir / "reports" / "current_status.json"
             report = json.loads(report_ref.read_text(encoding="utf-8"))
             self.assertEqual(report["next_action"]["kind"], "missing_input")
             self.assertEqual(report["next_action"]["blocked_input_ref"], str(missing))
-            summary = inspect_session("s1", data_dir)
-            self.assertEqual(summary["next_action"]["kind"], "missing_input")
-            artifact_index = data_dir / "artifacts" / "s1" / "artifacts.jsonl"
-            artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(artifact_types.count("operator_report.failed_terminal"), 1)
+            summary = inspect_session("s1", run_dir)
+            self.assertEqual(summary["next_action"]["kind"], "failed_terminal")
+            artifact_index = run_dir / "artifacts" / "index.jsonl"
+            artifact_types = (
+                [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+                if artifact_index.exists()
+                else []
+            )
+            self.assertNotIn("operator_report.failed_terminal", artifact_types)
 
     def test_seqkit_stats_success_writes_artifacts_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,7 +247,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertNotIn("execution_result", result["stage_outputs"]["read_qc"])
             self.assertNotIn("stats_output_path", result["stage_outputs"]["read_qc"])
 
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_index = Path(result["data_dir"]) / "artifacts" / "index.jsonl"
             self.assertTrue(artifact_index.exists())
             artifact_events = [json.loads(line) for line in artifact_index.read_text().splitlines()]
             artifact_types = {event["artifact_type"] for event in artifact_events}
@@ -256,7 +264,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -325,7 +333,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.long_reads.fofn", artifact_types)
@@ -372,7 +380,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             ])
             fofn_ref = Path(read_qc["long_reads_fofn_ref"])
             self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{fq1}\n{fq2}\n")
-            stats_script = Path(tmpdir) / "work" / "read_qc" / "s1" / "seqkit_stats" / "run_seqkit_stats.sh"
+            stats_script = Path(result["data_dir"]) / "work" / "read_qc" / "seqkit_stats" / "run_seqkit_stats.sh"
             stats_script_text = stats_script.read_text(encoding="utf-8")
             self.assertIn(str(fq1), stats_script_text)
             self.assertIn(str(fq2), stats_script_text)
@@ -426,7 +434,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{filtered_ref}\n")
             self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
 
-            filter_script = Path(tmpdir) / "work" / "read_qc" / "s1" / "length_filter" / "run_length_filter.sh"
+            filter_script = Path(result["data_dir"]) / "work" / "read_qc" / "length_filter" / "run_length_filter.sh"
             filter_script_text = filter_script.read_text(encoding="utf-8")
             self.assertIn("seqkit seq -m 1000", filter_script_text)
             self.assertIn("seqkit stats -a -T", filter_script_text)
@@ -442,7 +450,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("raw_summary_artifact_ref", read_qc)
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
@@ -642,11 +650,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("seqkit", result["last_error"])
-            stats_dir = Path(tmpdir) / "artifacts" / "read_qc" / "s1"
+            stats_dir = Path(result["data_dir"]) / "artifacts" / "read_qc"
             self.assertFalse((stats_dir / "seqkit_stats.tsv").exists())
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             self.assertIn("attempt_failed", [event["event_type"] for event in ledger_events])
 
@@ -665,8 +673,8 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "read_qc"
         state["asset_registry_ref"] = registry_ref
@@ -726,7 +734,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             self.assertIn("conda", result["last_error"])
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)
@@ -823,9 +831,10 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             old_cwd = os.getcwd()
             os.chdir(tmp)
             try:
+                run_dir = v2_run_dir(tmp / "out", "s1")
                 state = {
                     "session_id": "s1",
-                    "data_dir": "out",
+                    "data_dir": "out/runs/s1",
                     "stage_outputs": {
                         "read_qc": {
                             "status": "planned",
@@ -846,15 +855,15 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                     },
                 }
                 freeze_seqkit_attempt(state)
-                script_path = tmp / "out/work/read_qc/s1/seqkit_stats/run_seqkit_stats.sh"
+                script_path = run_dir / "work/read_qc/seqkit_stats/run_seqkit_stats.sh"
                 self.assertTrue(script_path.exists())
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_artifact = tmp / "out/artifacts/read_qc/s1/seqkit_stats.tsv"
+                expected_artifact = run_dir / "artifacts/read_qc/seqkit_stats.tsv"
                 self.assertIn(str(expected_artifact), script_text)
                 # And the script must NOT carry the bare relative form
                 # that would resolve from the runner's cwd.
                 self.assertNotIn(
-                    " > out/artifacts/read_qc/s1/seqkit_stats.tsv",
+                    " > out/runs/s1/artifacts/read_qc/seqkit_stats.tsv",
                     script_text,
                 )
             finally:
@@ -914,7 +923,7 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             rc = run_main(argv)
             self.assertEqual(rc, 0)
 
-            artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc" / session_id
+            artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
             stats = artifact_dir / "seqkit_stats.tsv"
             summary = artifact_dir / "read_qc_summary.json"
             fofn = artifact_dir / "long_reads.fofn"

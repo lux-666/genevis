@@ -9,9 +9,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
+from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
     AssemblyInputProfile,
     AssemblyQCSummary,
@@ -24,10 +26,13 @@ from app.schemas.state import initial_state
 from app.knowledge.packs import load_knowledge_pack
 from app.stages.assembly.nodes import (
     apply_route_decision,
+    block_assembly_for_human,
     infer_input_profile,
     resolve_extended_inputs,
     select_route,
 )
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 
 
 class Phase8SchemaTests(unittest.TestCase):
@@ -157,16 +162,84 @@ class KnowledgePackTests(unittest.TestCase):
 
 class InputProfilerTests(unittest.TestCase):
     def _state(self, tmpdir: str, *, assets: list[dict] | None = None) -> dict:
+        run_dir = v2_run_dir(tmpdir, "s1")
+        Ledger(run_dir).create_session("s1", "control/manifest.yaml")
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
-        registry = Path(tmpdir) / "registry.json"
+        registry = run_dir / "artifacts" / "inventory" / "asset_registry.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
         registry.write_text(json.dumps({"session_id": "s1", "assets": assets or []}), encoding="utf-8")
         state["asset_registry_ref"] = str(registry)
         return state
+
+    def _blocked_route_state(self, state: dict, assembly: dict | None = None) -> dict:
+        if assembly is not None:
+            state["stage_outputs"] = {"assembly": assembly}
+        routed = {**state, **select_route(state)}
+        return {**routed, **block_assembly_for_human(routed)}
+
+    def _route_assembly(
+        self,
+        recommended_route: str = "hifi",
+        *,
+        review_policy: dict | None = None,
+    ) -> dict:
+        selections = {
+            "hifi": ("pacbio_hifi", "assembly.candidate.hifiasm"),
+            "ont": ("ont_raw", "assembly.candidate.hifiasm_ont"),
+            "cyclone": ("cyclone", "assembly.candidate.flye"),
+        }
+        selection = None
+        if recommended_route in selections:
+            read_type, method = selections[recommended_route]
+            selection = {
+                "read_type": read_type,
+                "primary_method": method,
+                "source": "recommendation",
+                "rationale": f"{recommended_route} recommended",
+            }
+        assembly = {
+            "status": "profile_ready",
+            "input_profile": {
+                "recommended_route": recommended_route,
+                "recommendation_confidence": 0.95,
+                "recommendation_reasoning": f"{recommended_route} recommendation",
+                "uncertainty_notes": [],
+            },
+            "recommended_assembly_selection": selection,
+        }
+        if review_policy is not None:
+            assembly["review_policy"] = review_policy
+        return assembly
+
+    def _request(self, state: dict, decision: str, **kwargs) -> ResumeReviewRequest:
+        interrupt = state["active_interrupt"]
+        return ResumeReviewRequest(
+            session_id=state["session_id"],
+            stage="assembly",
+            gate_id="route_selection",
+            decision=decision,
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
+            **kwargs,
+        )
+
+    def _request_payload(self, state: dict) -> dict:
+        interrupt = state["active_interrupt"]
+        return load_review_request(
+            state["data_dir"],
+            interrupt["request_ref"],
+            session_id=state["session_id"],
+        )["payload"]
+
+    def _ref_path(self, state: dict, ref: str | dict) -> Path:
+        if isinstance(ref, dict):
+            return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(ref["path_ref"])
+        return Path(ref)
 
     def test_resolve_extended_inputs_ont_only_preserves_input_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -259,7 +332,7 @@ class InputProfilerTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["input_profile"]["profile_source"], "run_config_explicit")
             self.assertEqual(assembly["route_decision"]["selected_route"], "hifi")
-            self.assertTrue(Path(assembly["input_profile_ref"]).exists())
+            self.assertTrue(self._ref_path(state, assembly["input_profile_ref"]).exists())
 
     def test_explicit_cyclone_route_defaults_to_flye_method_decision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -351,84 +424,59 @@ class InputProfilerTests(unittest.TestCase):
     def test_select_route_defaults_to_strict_and_blocks_high_confidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "profile_ready",
-                    "input_profile": {
-                        "recommended_route": "cyclone",
-                        "recommendation_confidence": 0.95,
-                        "recommendation_reasoning": "strong recommendation",
-                        "uncertainty_notes": [],
-                    },
-                }
-            }
-
-            result = select_route(state)
-            assembly = result["stage_outputs"]["assembly"]
+            blocked = self._blocked_route_state(
+                state,
+                self._route_assembly("cyclone"),
+            )
+            assembly = blocked["stage_outputs"]["assembly"]
+            payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
             self.assertNotIn("route_decision", assembly)
-            self.assertEqual(assembly["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(blocked["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(payload["recommended_route"], "cyclone")
+            self.assertEqual(payload["review_policy"]["mode"], "strict")
+            self.assertNotIn("recommended_route", blocked["active_interrupt"])
+            self.assertNotIn("review_policy", blocked["active_interrupt"])
 
     def test_select_route_auto_policy_can_adopt_high_confidence(self):
         """All LLM recommendations now require human gate (confidence removed)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "profile_ready",
-                    "review_policy": {"mode": "auto"},
-                    "input_profile": {
-                        "recommended_route": "cyclone",
-                        "recommendation_confidence": 0.95,
-                        "recommendation_reasoning": "strong recommendation",
-                        "uncertainty_notes": [],
-                    },
-                }
-            }
-
-            result = select_route(state)
-            assembly = result["stage_outputs"]["assembly"]
+            blocked = self._blocked_route_state(
+                state,
+                self._route_assembly("cyclone", review_policy={"mode": "auto"}),
+            )
+            assembly = blocked["stage_outputs"]["assembly"]
+            payload = self._request_payload(blocked)
 
             # After confidence removal, all LLM recommendations block for human gate
             self.assertEqual(assembly["status"], "blocked_human")
             self.assertNotIn("route_decision", assembly)
-            self.assertEqual(assembly["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(blocked["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(payload["review_policy"]["mode"], "auto")
 
     def test_select_route_insufficient_data_blocks_without_decision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "profile_ready",
-                    "input_profile": {
-                        "recommended_route": "insufficient_data",
-                        "recommendation_confidence": 0.0,
-                        "recommendation_reasoning": "missing reads",
-                        "uncertainty_notes": ["no reads"],
-                    },
-                }
-            }
-
-            result = select_route(state)
-            assembly = result["stage_outputs"]["assembly"]
+            blocked = self._blocked_route_state(
+                state,
+                self._route_assembly("insufficient_data"),
+            )
+            assembly = blocked["stage_outputs"]["assembly"]
+            payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
             self.assertNotIn("route_decision", assembly)
-            self.assertEqual(assembly["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(blocked["active_interrupt"]["gate_id"], "route_selection")
+            self.assertEqual(payload["recommended_route"], "insufficient_data")
+            self.assertEqual(payload["recommended_assembly_selection"], {})
 
     def test_apply_route_decision_maps_gate_decision(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["supervision_state"] = "blocked_human"
-            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
-            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="assembly",
-                gate_id="route_selection",
-                decision="select_ont",
-            )
+            state = self._blocked_route_state(state, self._route_assembly())
+            request = self._request(state, "select_ont")
 
             result = apply_route_decision(state, request)
 
@@ -436,7 +484,7 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["status"], "route_selected")
             self.assertEqual(assembly["selected_route"], "ont")
             self.assertEqual(assembly["route_decision"]["selected_route"], "ont")
-            self.assertTrue(Path(assembly["route_decision_ref"]).exists())
+            self.assertTrue(self._ref_path(state, assembly["route_decision_ref"]).exists())
 
     def test_route_selection_gate_registered_and_resumable(self):
         gate = get_review_gate("assembly", "route_selection")
@@ -444,19 +492,8 @@ class InputProfilerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["supervision_state"] = "blocked_human"
-            state["active_interrupt"] = {
-                "stage": "assembly",
-                "gate_id": "route_selection",
-                "decisions_allowed": ["select_cyclone", "select_ont", "select_hifi", "stop_human_review"],
-            }
-            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="assembly",
-                gate_id="route_selection",
-                decision="select_cyclone",
-            )
+            state = self._blocked_route_state(state, self._route_assembly())
+            request = self._request(state, "select_cyclone")
 
             result = resume_review_state(state, request)
 
@@ -499,15 +536,8 @@ class InputProfilerTests(unittest.TestCase):
             with self.subTest(case["name"]):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     state = self._state(tmpdir)
-                    state["supervision_state"] = "blocked_human"
-                    state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
-                    state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-                    request = ResumeReviewRequest(
-                        session_id="s1",
-                        stage="assembly",
-                        gate_id="route_selection",
-                        decision=case["decision"],
-                    )
+                    state = self._blocked_route_state(state, self._route_assembly())
+                    request = self._request(state, case["decision"])
 
                     result = apply_route_decision(state, request)
                     assembly = result["stage_outputs"]["assembly"]
@@ -525,54 +555,36 @@ class InputProfilerTests(unittest.TestCase):
         """P1 fix: route selection should call evaluate() and include policy outcome"""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "profile_ready",
-                    "review_policy": {"mode": "strict", "max_blocked_seconds": 180},
-                    "input_profile": {
-                        "recommended_route": "hifi",
-                        "recommendation_reasoning": "HiFi available",
-                        "uncertainty_notes": [],
-                    },
-                }
-            }
-
-            result = select_route(state)
-            assembly = result["stage_outputs"]["assembly"]
+            blocked = self._blocked_route_state(
+                state,
+                self._route_assembly(
+                    review_policy={"mode": "strict", "max_blocked_seconds": 180},
+                ),
+            )
+            assembly = blocked["stage_outputs"]["assembly"]
+            payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
-            self.assertIn("review_policy_outcome", assembly)
-            outcome = assembly["review_policy_outcome"]
+            outcome = payload["review_policy_outcome"]
             self.assertEqual(outcome["action"], "BLOCK_WITH_TIMEOUT")
             self.assertEqual(outcome["max_blocked_seconds"], 180)
-
-            # Check interrupt includes blocked_at and review_policy
-            interrupt = assembly["active_interrupt"]
-            self.assertIn("blocked_at", interrupt)
-            self.assertIn("review_policy", interrupt)
-            self.assertIn("review_policy_outcome", interrupt)
+            self.assertEqual(payload["review_policy"]["max_blocked_seconds"], 180)
+            self.assertIn("blocked_at", blocked["active_interrupt"])
+            self.assertNotIn("review_policy_outcome", blocked["active_interrupt"])
 
     def test_route_selection_no_timeout_blocks_indefinitely(self):
         """P1 fix: strict mode without timeout should block indefinitely"""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["stage_outputs"] = {
-                "assembly": {
-                    "status": "profile_ready",
-                    "review_policy": {"mode": "strict"},
-                    "input_profile": {
-                        "recommended_route": "hifi",
-                        "recommendation_reasoning": "HiFi available",
-                        "uncertainty_notes": [],
-                    },
-                }
-            }
-
-            result = select_route(state)
-            assembly = result["stage_outputs"]["assembly"]
+            blocked = self._blocked_route_state(
+                state,
+                self._route_assembly(review_policy={"mode": "strict"}),
+            )
+            assembly = blocked["stage_outputs"]["assembly"]
+            payload = self._request_payload(blocked)
 
             self.assertEqual(assembly["status"], "blocked_human")
-            outcome = assembly["review_policy_outcome"]
+            outcome = payload["review_policy_outcome"]
             self.assertEqual(outcome["action"], "BLOCK_INDEFINITE")
             self.assertIsNone(outcome["max_blocked_seconds"])
 
@@ -602,14 +614,10 @@ class InputProfilerTests(unittest.TestCase):
         """Selector V2 uses method_name plus metadata.read_type for human intent."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["supervision_state"] = "blocked_human"
-            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
-            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="assembly",
-                gate_id="route_selection",
-                decision="select_hifi",
+            state = self._blocked_route_state(state, self._route_assembly())
+            request = self._request(
+                state,
+                "select_hifi",
                 method_name="assembly.candidate.nextdenovo",
                 metadata={"read_type": "pacbio_hifi"},
             )
@@ -625,14 +633,10 @@ class InputProfilerTests(unittest.TestCase):
     def test_route_decision_rejects_read_type_metadata_that_conflicts_with_route(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["supervision_state"] = "blocked_human"
-            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
-            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="assembly",
-                gate_id="route_selection",
-                decision="select_hifi",
+            state = self._blocked_route_state(state, self._route_assembly())
+            request = self._request(
+                state,
+                "select_hifi",
                 metadata={"read_type": "ont"},
             )
 
@@ -642,14 +646,10 @@ class InputProfilerTests(unittest.TestCase):
     def test_route_decision_rejects_unknown_method_name_as_resume_validation_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
-            state["supervision_state"] = "blocked_human"
-            state["active_interrupt"] = {"stage": "assembly", "gate_id": "route_selection"}
-            state["stage_outputs"] = {"assembly": {"status": "blocked_human"}}
-            request = ResumeReviewRequest(
-                session_id="s1",
-                stage="assembly",
-                gate_id="route_selection",
-                decision="select_hifi",
+            state = self._blocked_route_state(state, self._route_assembly())
+            request = self._request(
+                state,
+                "select_hifi",
                 method_name="assembly.candidate.unknown",
             )
 

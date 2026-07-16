@@ -221,15 +221,37 @@ register_review_gate(
 register_review_gate(
     ReviewGateDeclaration(
         stage="hic_scaffolding",
+        gate_id="parameter_approval",
+        decisions_allowed=("approve_parameters", "reject_parameters"),
+        decision_applier=(
+            "app.stages.hic_scaffolding.parameter_nodes:"
+            "apply_autohic_parameter_approval_decision"
+        ),
+        prompt_adapter="generic",
+        proposal_kind="parameter_recommendation",
+        proposal_label="AutoHiC restriction-enzyme proposal",
+        parameter_recommendation_status="implemented",
+        plan_order=20,
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="hic_scaffolding",
         gate_id="hic_scaffolding",
-        decisions_allowed=("select_method", "accept_candidate", "skip", "stop_human_review"),
+        decisions_allowed=(
+            "accept_candidate",
+            "keep_prior_assembly",
+            "stop_human_review",
+        ),
         decision_applier="app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_resume_decision",
         prompt_adapter="hic_scaffolding",
-        template_preferred_decision="select_method",
-        required_resume_fields=("method_name",),
-        proposal_kind="scaffolding_method_or_candidate_review",
-        proposal_label="Hi-C scaffolding method or result review",
-        parameter_recommendation_status="not_implemented",
+        template_preferred_decision="accept_candidate",
+        proposal_kind="autohic_result_review",
+        proposal_label="AutoHiC chromosome-assembly adoption review",
+        parameter_recommendation_status="implemented",
+        related_parameter_gate=("hic_scaffolding", "parameter_approval"),
+        plan_order=30,
     )
 )
 

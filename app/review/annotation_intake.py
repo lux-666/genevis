@@ -28,6 +28,8 @@ from app.schemas.artifacts import ArtifactMeta
 from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
 from app.schemas.state import TopLevelState
 from app.stages import STAGE_ORDER
+from app.stages.base import resolve_run_ref
+from app.storage.paths import SessionPaths
 
 ANNOTATION_INTAKE_PLAN = "annotation.intake_plan"
 ANNOTATION_INTAKE_METHOD = "annotation.intake"
@@ -122,7 +124,10 @@ def build_recommended_annotation_plan(state: TopLevelState) -> AskPlanState:
     """Build a downstream-only annotation intake recommendation."""
     prior_downstream = _prior_downstream_requested_stages(state)
     manifest_downstream = [
-        stage for stage in _recommended_stages_from_manifest(str(state.get("input_manifest_ref") or ""))
+        stage
+        for stage in _recommended_stages_from_manifest(
+            str(resolve_run_ref(state, str(state.get("input_manifest_ref") or "")))
+        )
         if stage in DOWNSTREAM_STAGES
     ]
     selected = prior_downstream if prior_downstream or state.get("requested_stages") is None else manifest_downstream
@@ -219,7 +224,7 @@ def persist_annotation_intake_plan(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    out_dir = data_dir / "artifacts" / ASSEMBLY_REVIEW_STAGE / session_id
+    out_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir(ASSEMBLY_REVIEW_STAGE)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     path = out_dir / f"annotation_intake_plan_{ts}.json"

@@ -15,6 +15,7 @@ from app.stages.genome_survey.builder import build_stage
 from app.stages.genome_survey.method_application.genomescope2 import build_genomescope2_graph
 from app.stages.genome_survey.method_application.jellyfish import build_jellyfish_graph
 from app.stages.genome_survey.nodes import _parse_genomescope_summary
+from tests.data_v2 import v2_run_dir
 
 
 class GenomeSurveyDescriptorTests(unittest.TestCase):
@@ -85,8 +86,8 @@ class GenomeSurveyStageTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "genome_survey"
         state["asset_registry_ref"] = registry_ref
@@ -356,7 +357,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("genome_survey.kmer_db", artifact_types)
@@ -366,7 +367,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertEqual(event_types.count("attempt_started"), 2)
@@ -463,7 +464,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             )
             self.assertEqual(survey["estimates"]["genome_size"], 2_000_000)
             self.assertEqual(survey["provided_overrides"], {"genome_size": 2_000_000})
-            self.assertTrue((Path(tmpdir) / "work" / "genome_survey" / "s1").exists())
+            self.assertTrue((Path(result["data_dir"]) / "work" / "genome_survey").exists())
 
     def test_parse_genomescope2_summary_table(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -587,7 +588,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
                 [f"s1:clean_long_reads:read_qc:{filtered.name}"],
             )
             # Jellyfish must have been pointed at filtered path, not raw gz.
-            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
             self.assertTrue(script.exists(), "expected jellyfish script under work/")
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(filtered), script_text)
@@ -679,7 +680,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "clean_long_reads")
-            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(filtered.resolve()), script_text)
             self.assertNotIn(str(raw_reads), script_text)
@@ -723,7 +724,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "completed")
             self.assertEqual(survey["survey_input_family"], "raw_short_dna_reads")
-            script = Path(tmpdir) / "work" / "genome_survey" / "s1" / "jellyfish" / "run_jellyfish.sh"
+            script = Path(result["data_dir"]) / "work" / "genome_survey" / "jellyfish" / "run_jellyfish.sh"
             script_text = script.read_text(encoding="utf-8")
             self.assertIn(str(short_reads), script_text)
             self.assertNotIn(str(filtered), script_text)
@@ -778,7 +779,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.hash_size", result["last_error"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
 
     def test_local_full_mode_requires_explicit_survey_parameters(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -802,7 +803,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("survey_parameters.kmer_size", result["last_error"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
 
     def test_explicit_genome_size_overrides_measurement_but_keeps_other_survey_estimates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -924,8 +925,8 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "genome_survey"
         state["asset_registry_ref"] = registry_ref
@@ -977,7 +978,7 @@ class GenomeSurveyEnvPreflightTests(unittest.TestCase):
             self.assertIn("conda", result["last_error"])
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)

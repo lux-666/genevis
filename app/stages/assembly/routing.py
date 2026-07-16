@@ -112,5 +112,5 @@ def _current_attempt_has_execution_result(output: dict) -> bool:
     attempt_id = int(output.get("current_parameter_attempt_id") or 0)
     for item in output.get("parameter_attempts") or []:
         if isinstance(item, dict) and item.get("attempt_id") == attempt_id:
-            return bool(item.get("execution_result"))
+            return bool(item.get("execution_ref"))
     return False

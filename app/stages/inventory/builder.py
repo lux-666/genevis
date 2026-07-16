@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from app.control.ledger import Ledger
+from app.review.base import ReviewPayload
+from app.review.persistence import persist_review_request
 from app.schemas.state import TopLevelState
 from app.stages.inventory.nodes import (
     commit_inventory,
@@ -22,15 +25,45 @@ def _review_gate(state: TopLevelState) -> dict:
     """Set an active interrupt for ambiguous or questionable inventory results."""
     inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
     warnings = inventory_out.get("warnings", [])
+    reason = "review_required"
+    payload = ReviewPayload(
+        stage="inventory",
+        gate_id="inventory_review",
+        reason=reason,
+        decisions_allowed=["continue", "stop_human_review"],
+        notes=[str(message) for message in warnings],
+        auto_decidable=False,
+    )
+    persisted_request = persist_review_request(
+        state,
+        stage="inventory",
+        gate_id="inventory_review",
+        reason=reason,
+        payload=payload,
+        method_name="inventory.contract",
+        artifact_type="inventory.review_request",
+    )
+    Ledger(state["data_dir"]).record_review_requested(
+        state["session_id"],
+        "inventory",
+        reason=reason,
+        review_request_artifact_ref=persisted_request.request_ref.model_dump(mode="json"),
+        auto_decidable=False,
+    )
+    outputs = dict(state.get("stage_outputs") or {})
+    outputs["inventory"] = {
+        **inventory_out,
+        "status": "blocked_human",
+        "review_request_artifact_ref": persisted_request.request_ref.model_dump(mode="json"),
+    }
     return {
-        "active_interrupt": {
-            "stage": "inventory",
-            "gate_id": "inventory_review",
-            "reason": "review_required",
-            "messages": warnings,
-            "decisions_allowed": ["continue", "stop_human_review"],
-        },
+        "active_interrupt": persisted_request.compact_interrupt(
+            stage="inventory",
+            gate_id="inventory_review",
+            reason=reason,
+        ),
         "supervision_state": "blocked_human",
+        "stage_outputs": outputs,
     }
 
 

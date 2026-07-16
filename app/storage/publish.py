@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import shlex
 import os
+import shlex
 import shutil
-from errno import EXDEV
-from uuid import uuid4
+from errno import EEXIST, EXDEV
 from pathlib import Path
+from uuid import uuid4
 
 from app.execution.results import ExecutionResult
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.storage.paths import is_session_run_dir
+from app.storage.integrity import sha256_file
+from app.storage.paths import SessionPaths, ensure_run_layout
 
 
 def publish_file(source: str | Path, destination: str | Path) -> Path:
@@ -19,35 +20,65 @@ def publish_file(source: str | Path, destination: str | Path) -> Path:
 
     Published paths never overwrite a distinct snapshot.  A replay that
     recreates byte-identical work output reuses the existing artifact and
-    removes the duplicate source.  Within one run root this is an atomic
-    rename and consumes no extra storage.  A cross-device move falls back to
-    copy, verifies bytes, then removes the source.
+    removes the duplicate source.  Within one filesystem an atomic hard-link
+    plus unlink consumes no extra storage and cannot replace an existing path.
+    A cross-device move falls back to copy, verifies bytes, then removes the
+    source.
     """
-    source_path = Path(source)
-    destination_path = Path(destination)
+    source_path = Path(source).expanduser().resolve(strict=False)
+    destination_path = Path(destination).expanduser().resolve(strict=False)
+    if source_path == destination_path:
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        return destination_path
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     if destination_path.exists():
-        if source_path.exists():
-            if _sha256(source_path) != _sha256(destination_path):
-                raise FileExistsError(f"published artifact conflicts with existing snapshot: {destination_path}")
-            source_path.unlink()
-        return destination_path
+        return _reuse_existing_snapshot(source_path, destination_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
     try:
-        os.replace(source_path, destination_path)
+        # Link-without-replace makes the immutability check race-safe.  On the
+        # same filesystem it has the storage cost of a rename after unlinking
+        # the mutable work name.
+        os.link(source_path, destination_path)
+        source_path.unlink()
         return destination_path
     except OSError as exc:
+        if exc.errno == EEXIST or destination_path.exists():
+            return _reuse_existing_snapshot(source_path, destination_path)
         if exc.errno != EXDEV:
             raise
     temporary = destination_path.with_name(f".{destination_path.name}.{uuid4().hex}.partial")
     try:
         shutil.copy2(source_path, temporary)
-        if _sha256(source_path) != _sha256(temporary):
+        if sha256_file(source_path) != sha256_file(temporary):
             raise OSError(f"published artifact verification failed: {source_path}")
-        os.replace(temporary, destination_path)
+        try:
+            os.link(temporary, destination_path)
+        except FileExistsError:
+            if sha256_file(temporary) != sha256_file(destination_path):
+                raise FileExistsError(
+                    f"published artifact conflicts with existing snapshot: {destination_path}"
+                )
+        temporary.unlink()
         source_path.unlink()
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+    return destination_path
+
+
+def _reuse_existing_snapshot(source_path: Path, destination_path: Path) -> Path:
+    if not destination_path.is_file():
+        raise FileExistsError(f"published artifact destination is not a file: {destination_path}")
+    if source_path.exists():
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        if sha256_file(source_path) != sha256_file(destination_path):
+            raise FileExistsError(
+                f"published artifact conflicts with existing snapshot: {destination_path}"
+            )
+        source_path.unlink()
     return destination_path
 
 
@@ -58,7 +89,8 @@ def shell_publish_file(source: str | Path, destination: str | Path) -> str:
     return (
         f"if test -e {destination_q}; then "
         f"if test -e {source_q}; then cmp -s {source_q} {destination_q} "
-        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing snapshot: {destination_q}' >&2; false; }}; fi; "
+        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing "
+        f"snapshot: {destination_q}' >&2; false; }}; fi; "
         f"else mv {source_q} {destination_q}; fi"
     )
 
@@ -70,7 +102,8 @@ def shell_publish_variable(variable: str, destination: str | Path) -> str:
     return (
         f"if test -e {destination_q}; then "
         f"if test -e {source_q}; then cmp -s {source_q} {destination_q} "
-        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing snapshot: {destination_q}' >&2; false; }}; fi; "
+        f"&& rm -f {source_q} || {{ echo 'published artifact conflicts with existing "
+        f"snapshot: {destination_q}' >&2; false; }}; fi; "
         f"else mv {source_q} {destination_q}; fi"
     )
 
@@ -81,22 +114,25 @@ def publish_execution_logs(
     result: ExecutionResult,
 ) -> ExecutionResult:
     """Return a result whose log references are durable artifact snapshots."""
-    if not is_session_run_dir(data_dir, attempt.session_id):
-        return result
-    run_dir = Path(data_dir)
-    logs_dir = run_dir / "artifacts" / attempt.stage / attempt.session_id / "logs"
-    safe_attempt_id = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in attempt.attempt_id)
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(attempt.session_id)
+    ensure_run_layout(paths)
+    logs_dir = paths.artifact_path(attempt.stage, "logs")
+    safe_attempt_id = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in attempt.attempt_id
+    )
     invocation_id = uuid4().hex
-    stdout = publish_file(result.stdout_path, logs_dir / f"{safe_attempt_id}.{invocation_id}.stdout.log")
-    stderr = publish_file(result.stderr_path, logs_dir / f"{safe_attempt_id}.{invocation_id}.stderr.log")
+    stdout = publish_file(
+        result.stdout_path,
+        logs_dir / f"{safe_attempt_id}.{invocation_id}.stdout.log",
+    )
+    stderr = publish_file(
+        result.stderr_path,
+        logs_dir / f"{safe_attempt_id}.{invocation_id}.stderr.log",
+    )
     return result.model_copy(update={"stdout_path": stdout, "stderr_path": stderr})
 
 
-def _sha256(path: Path) -> str:
-    import hashlib
-
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+file_sha256 = sha256_file
+_sha256 = sha256_file

@@ -154,7 +154,6 @@ def verify_envs_yaml(config_path: Path) -> list[str]:
 
     if not config_path.exists():
         issues.append(f"Configuration file not found: {config_path}")
-        issues.append("Run: cp config/envs.yaml.example config/envs.yaml")
         return issues
 
     try:
@@ -182,5 +181,18 @@ def verify_envs_yaml(config_path: Path) -> list[str]:
             issues.append(f"packages.{package_name}.install_root is still a placeholder: {install_root}")
         elif not Path(install_root).exists():
             issues.append(f"packages.{package_name}.install_root does not exist: {install_root}")
+
+    autohic = resolver.packages.get("autohic")
+    if autohic is not None:
+        for model_name in ("error", "chromosome"):
+            configured = autohic.models.get(model_name)
+            field = f"packages.autohic.models.{model_name}"
+            if not configured:
+                continue
+            model_path = autohic.model_path(model_name)
+            if "/path/to/" in configured:
+                issues.append(f"{field} is still a placeholder: {configured}")
+            elif model_path is None or not model_path.is_file():
+                issues.append(f"{field} does not exist: {model_path}")
 
     return issues

@@ -12,13 +12,19 @@ from app.schemas.artifacts import HIC_ASSEMBLY_FILE, HIC_CONTACT_MAP, HIC_HTML_R
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.storage.publish import shell_publish_variable
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     HiCMethodLifecycle,
     build_method_graph,
     collect_method_artifacts,
     hic_output,
     update_hic_output,
+)
+from app.stages.hic_scaffolding.parameter_nodes import (
+    load_approved_autohic_parameters,
+)
+from app.stages.hic_scaffolding.parameter_persistence import (
+    AutoHiCParameterPersistenceError,
 )
 
 METHOD = "hic_scaffolding.candidate.autohic"
@@ -45,14 +51,14 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     if METHOD not in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods:
         return update_hic_output(
             state,
-            {"status": "failed", "reason": f"hic_scaffolding descriptors missing: [{METHOD!r}]"},
+            _missing_block(f"descriptor: {METHOD}"),
         )
 
     assembly = Path(str(output.get("pre_hic_assembly_ref", "")))
     if not assembly.is_file():
         return _blocked(state, output, "pre_hic_contig_assembly_not_materialized_for_autohic")
 
-    parameters, blocked = _parameters(output, assembly)
+    parameters, blocked = _parameters(state, output, assembly)
     if blocked:
         return update_hic_output(state, blocked)
 
@@ -67,7 +73,10 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if env_blocked is not None:
-        return update_hic_output(state, env_blocked)
+        return update_hic_output(
+            state,
+            _missing_block(str(env_blocked.get("reason") or "AutoHiC environment")),
+        )
 
     package_by_name = {package.name: package for package in packages}
     missing_packages = [name for name in ("autohic", "juicer", "three_d_dna") if name not in package_by_name]
@@ -81,8 +90,20 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     if not autohic_entry.is_file():
         return update_hic_output(state, _missing_tool_block("autohic.py", autohic_root))
 
-    working_dir = data_dir / "work" / "hic_scaffolding" / session_id / "autohic"
-    artifact_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id / "autohic"
+    error_model = package_by_name["autohic"].model_path("error")
+    chromosome_model = package_by_name["autohic"].model_path("chromosome")
+    missing_models: list[str] = []
+    if error_model is None or not error_model.is_file():
+        missing_models.append("packages.autohic.models.error")
+    if chromosome_model is None or not chromosome_model.is_file():
+        missing_models.append("packages.autohic.models.chromosome")
+    if missing_models:
+        return update_hic_output(state, _missing_block(", ".join(missing_models)))
+    parameters["error_model_ref"] = str(error_model.resolve())
+    parameters["chromosome_model_ref"] = str(chromosome_model.resolve())
+
+    working_dir = stage_work_dir(state, "hic_scaffolding", "autohic")
+    artifact_dir = stage_artifacts_dir(state, "hic_scaffolding", "autohic")
     reference_dir = working_dir / "input" / "references"
     fastq_root = working_dir / "input" / "rawdata"
     fastq_dir = fastq_root / "fastq"
@@ -166,6 +187,11 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
                 "chromosome_assignment",
                 "html_report_generation",
             ],
+            "parameter_recommendation_hash": (
+                (output.get("current_parameter_recommendation") or {}).get(
+                    "recommendation_hash"
+                )
+            ),
         },
     )
     return update_hic_output(
@@ -203,23 +229,27 @@ def collect_autohic_artifacts(state: TopLevelState) -> dict:
 
 
 def is_enabled(output: dict[str, Any]) -> bool:
-    """Return whether this state explicitly selected local AutoHiC execution."""
-    methods = output.get("selected_methods") or [output.get("primary_method") or output.get("selected_method_name")]
-    return output.get("execution_mode") == "local" and METHOD in methods
+    """Return whether selected-stage execution has approved frozen parameters."""
+
+    return (
+        output.get("execution_mode") == "local"
+        and output.get("status") == "parameters_approved"
+    )
 
 
-def _parameters(output: dict[str, Any], assembly: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _parameters(
+    state: TopLevelState,
+    output: dict[str, Any],
+    assembly: Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     raw = dict(output.get("autohic_parameters") or {})
-    enzyme = str(raw.get("restriction_enzyme") or "").strip()
+    try:
+        approved = load_approved_autohic_parameters(state)
+    except (ValueError, AutoHiCParameterPersistenceError) as exc:
+        return {}, _missing_block(f"approved AutoHiC parameter attempt: {exc}")
+    enzyme = str(approved.get("restriction_enzyme") or "").strip()
     if not enzyme:
-        return {}, _missing_block("autohic_parameters.restriction_enzyme")
-
-    error_model = _materialized_path(raw.get("error_model_ref"))
-    if error_model is None:
-        return {}, _missing_block("autohic_parameters.error_model_ref")
-    chromosome_model = _materialized_path(raw.get("chromosome_model_ref"))
-    if chromosome_model is None:
-        return {}, _missing_block("autohic_parameters.chromosome_model_ref")
+        return {}, _missing_block("approved restriction_enzyme")
 
     reads = [Path(str(path)) for path in output.get("hic_read_paths") or []]
     if len(reads) < 2 or len(reads) % 2:
@@ -269,8 +299,6 @@ def _parameters(output: dict[str, Any], assembly: Path) -> tuple[dict[str, Any],
         "species_name": _safe_name(str(output.get("species_name") or assembly.stem)),
         "hic_read_paths": [str(path.resolve()) for path in reads],
         "restriction_enzyme": enzyme,
-        "error_model_ref": str(error_model.resolve()),
-        "chromosome_model_ref": str(chromosome_model.resolve()),
         "threads": threads,
         "number_of_edit_rounds": number_of_edit_rounds,
         "translocation_adjust": bool(raw.get("translocation_adjust", True)),
@@ -387,11 +415,6 @@ def _script(
     return "\n".join(lines) + "\n"
 
 
-def _materialized_path(value: Any) -> Path | None:
-    path = Path(str(value or ""))
-    return path if path.is_file() else None
-
-
 def _positive_int(value: Any) -> int | None:
     try:
         converted = int(value)
@@ -426,24 +449,30 @@ def _autohic_bool(value: bool) -> str:
 
 
 def _missing_block(field: str) -> dict[str, Any]:
-    return {"status": "blocked_param", "missing_params": [field], "invalid_params": [], "method_name": METHOD}
+    return {
+        "status": "blocked_missing_requirements",
+        "missing_requirements": [field],
+        "reason": f"AutoHiC requirement is missing: {field}",
+        "method_name": METHOD,
+    }
 
 
 def _parameter_block(field: str, value: Any, reason: str) -> dict[str, Any]:
     return {
-        "status": "blocked_param",
-        "missing_params": [],
+        "status": "blocked_missing_requirements",
+        "missing_requirements": [],
         "invalid_params": [{"param": field, "value": value, "reason": reason}],
+        "reason": f"Invalid AutoHiC requirement {field}: {reason}",
         "method_name": METHOD,
     }
 
 
 def _missing_tool_block(tool: str, root: Path) -> dict[str, Any]:
     return {
-        "status": "missing_tool",
+        "status": "blocked_missing_requirements",
         "reason": f"{tool} missing under {root}",
         "env_target": str(root),
-        "missing_tools": [tool],
+        "missing_requirements": [tool],
         "method_name": METHOD,
     }
 
@@ -451,5 +480,10 @@ def _missing_tool_block(tool: str, root: Path) -> dict[str, Any]:
 def _blocked(state: TopLevelState, output: dict[str, Any], note: str) -> dict:
     return update_hic_output(
         state,
-        {"status": "blocked_human", "notes": list(dict.fromkeys([*(output.get("notes") or []), note]))},
+        {
+            "status": "blocked_missing_requirements",
+            "reason": note,
+            "missing_requirements": [note],
+            "notes": list(dict.fromkeys([*(output.get("notes") or []), note])),
+        },
     )

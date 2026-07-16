@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from typing import Any, Mapping
 
 from app.llm.assembly_parameter_context import build_assembly_parameter_context
@@ -53,6 +54,23 @@ def parameter_prompt_bundle_name(method_id: Any) -> str:
         raise ValueError(
             f"Unsupported assembly parameter prompt method: {normalized!r}"
         ) from exc
+
+
+def parameter_prompt_bundle_hash(method_id: Any) -> str:
+    """Hash the exact immutable prompt templates selected for a method."""
+
+    bundle = load_prompt_bundle(parameter_prompt_bundle_name(method_id))
+    canonical = json.dumps(
+        {
+            "name": bundle.name,
+            "system": bundle.system,
+            "user_template": bundle.user_template,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(canonical).hexdigest()
 
 
 def _normalized_method_id(method_id: Any) -> str:

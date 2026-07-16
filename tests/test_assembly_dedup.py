@@ -12,6 +12,7 @@ from app.control.ledger import Ledger
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_review_stage
+from tests.data_v2 import v2_run_dir
 
 
 class AssemblyDedupStageTests(unittest.TestCase):
@@ -36,10 +37,11 @@ class AssemblyDedupStageTests(unittest.TestCase):
         return path
 
     def _state(self, tmpdir: str):
+        run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly_dedup"
         return state
@@ -86,11 +88,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
                 candidate_id="s1:assembly.candidate.flye",
                 draft_ref=str(draft),
             )
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-                data_dir=tmpdir,
-            )
+            state = self._state(tmpdir)
             state["current_stage"] = "assembly_review"
             state["stage_outputs"] = {
                 "assembly": {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]},
@@ -205,11 +203,12 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(Path(dedup["purged_assembly_ref"]).read_text(encoding="utf-8"), draft.read_text(encoding="utf-8"))
             self.assertEqual(draft.read_text(encoding="utf-8"), ">contig1\nACGT\n")
             self.assertTrue(Path(dedup["purged_candidate_ref"]).exists())
-            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_dedup" / "s1" / "reads_to_raw_assembly.paf.gz").is_file())
-            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_dedup" / "s1" / "raw_assembly.split.fasta").is_file())
+            run_dir = Path(state["data_dir"])
+            self.assertTrue((run_dir / "artifacts" / "assembly_dedup" / "reads_to_raw_assembly.paf.gz").is_file())
+            self.assertTrue((run_dir / "artifacts" / "assembly_dedup" / "raw_assembly.split.fasta").is_file())
             self.assertEqual(dedup["cutoffs_strategy"], "calcuts_auto")
             self.assertTrue(any(ref.endswith("dups.bed") for ref in dedup["artifact_refs"]))
-            event_types = [event["event_type"] for event in Ledger(tmpdir).read_events("s1")]
+            event_types = [event["event_type"] for event in Ledger(run_dir).read_events("s1")]
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
 

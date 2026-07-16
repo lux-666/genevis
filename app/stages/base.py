@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.schemas.state import TopLevelState
+from app.storage.paths import SessionPaths
 
 
 def absolute_data_dir(state: TopLevelState) -> Path:
@@ -20,6 +21,40 @@ def absolute_data_dir(state: TopLevelState) -> Path:
     generated so local and cloud runs use stable absolute paths.
     """
     return Path(state.get("data_dir", "data")).expanduser().resolve(strict=False)
+
+
+def session_paths(state: TopLevelState) -> SessionPaths:
+    """Return the validated v2 path owner for the current run.
+
+    Runtime state carries the run root, not the shared ``data/`` root.  Keeping
+    this conversion here prevents stage code from reconstructing storage roots
+    or appending the session identifier below an already session-scoped path.
+    """
+
+    return SessionPaths.from_run_dir(absolute_data_dir(state))
+
+
+def stage_artifacts_dir(state: TopLevelState, stage: str, *parts: str) -> Path:
+    """Return a path below ``artifacts/<stage>/`` for this run."""
+
+    return session_paths(state).artifact_path(stage, *parts)
+
+
+def stage_work_dir(state: TopLevelState, stage: str, *parts: str) -> Path:
+    """Return a path below ``work/<stage>/`` for this run."""
+
+    return session_paths(state).work_path(stage, *parts)
+
+
+def resolve_run_ref(state: TopLevelState, path_ref: str | Path) -> Path:
+    """Resolve a durable run-relative ref without accepting path traversal."""
+
+    path = Path(path_ref)
+    if path.is_absolute():
+        # External biological inputs remain absolute execution dependencies;
+        # internal durable refs are always run-relative and take this branch.
+        return path.resolve(strict=False)
+    return session_paths(state).resolve_ref(path.as_posix())
 
 
 # ============================================================================

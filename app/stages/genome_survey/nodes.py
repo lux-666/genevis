@@ -17,7 +17,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_output, update_stage_output
+from app.stages.base import stage_artifacts_dir, stage_output, update_stage_output
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -583,7 +583,7 @@ def _record_result(
     preserve_artifact_refs: bool = False,
 ) -> dict:
     data_dir = Path(state.get("data_dir", "data"))
-    result_dir = data_dir / "artifacts" / "genome_survey" / state["session_id"]
+    result_dir = stage_artifacts_dir(state, "genome_survey")
     result_dir.mkdir(parents=True, exist_ok=True)
     result_path = result_dir / "genome_survey_result.json"
     result_path.write_text(

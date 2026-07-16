@@ -21,6 +21,26 @@ from app.stages.assembly.method_application import nextdenovo as nextdenovo_grap
 from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
+
+
+def _ref_path(state: dict, ref: object) -> Path:
+    if isinstance(ref, dict):
+        return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(ref["path_ref"])
+    return Path(str(ref))
+
+
+def _ref_json(state: dict, ref: object) -> dict:
+    return json.loads(_ref_path(state, ref).read_text(encoding="utf-8"))
+
+
+def _attempt_command(state: dict, attempt: dict) -> dict:
+    return _ref_json(state, attempt["command_ref"])
+
+
+def _attempt_execution(state: dict, attempt: dict) -> dict:
+    return _ref_json(state, attempt["execution_ref"])
 
 
 class AssemblyDescriptorTests(unittest.TestCase):
@@ -74,10 +94,14 @@ class AssemblyStageTests(unittest.TestCase):
         )
         for key in metadata_keys:
             self.assertIn(key, interrupt)
+        self.assertIn("review_request_id", interrupt)
+        self.assertIn("request_hash", interrupt)
         return ResumeReviewRequest(
             session_id=blocked["session_id"],
             stage="assembly",
             gate_id="parameter_approval",
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
             decision="approve_parameters",
             metadata={key: interrupt[key] for key in metadata_keys},
         )
@@ -143,10 +167,11 @@ class AssemblyStageTests(unittest.TestCase):
         return path
 
     def _state(self, tmpdir: str, registry_ref: str | None):
+        run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = registry_ref
@@ -606,7 +631,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(Path(candidate["expected_outputs"]["draft_assembly_fasta"]).exists())
             self.assertTrue(candidate["metadata"]["execution_enabled"])
@@ -616,7 +641,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly.draft_assembly", artifact_types)
@@ -627,7 +652,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -664,7 +689,7 @@ class AssemblyStageTests(unittest.TestCase):
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["input_type"], "long_reads.fofn")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
 
     def test_local_flye_execution_from_multi_line_read_qc_fofn(self):
@@ -698,7 +723,8 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
+            command = _attempt_command(result, assembly["parameter_attempts"][0])
+            flye_script = Path(command["script_path"])
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn(str(reads_1), script_text)
             self.assertIn(str(reads_2), script_text)
@@ -753,16 +779,17 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertEqual(result["last_error"], "execution_retry_budget_exhausted")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertIn("fake flye failed", assembly["execution_failure_log_tail"])
             self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.flye")
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
+            self.assertIn("fake flye failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            artifact_index = Path(result["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = {json.loads(line)["artifact_type"] for line in artifact_index.read_text().splitlines()}
             self.assertNotIn("assembly.draft_assembly", artifact_types)
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -811,7 +838,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertNotIn("hifiasm_frozen_attempt", assembly)
             self.assertNotIn("hifiasm_execution_result", assembly)
 
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
@@ -819,7 +846,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
 
-            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             events = [
                 json.loads(line)["event_type"]
                 for line in ledger_path.read_text(encoding="utf-8").splitlines()
@@ -855,15 +882,8 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm_ont")
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "executed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
-            script = (
-                Path(tmpdir)
-                / "work"
-                / "assembly"
-                / "s1"
-                / "parameter_attempt_0"
-                / "hifiasm_ont"
-                / "run_hifiasm_ont.sh"
-            ).read_text(encoding="utf-8")
+            command = _attempt_command(result, assembly["parameter_attempts"][0])
+            script = Path(command["script_path"]).read_text(encoding="utf-8")
             self.assertIn("--ont", script)
 
     def test_local_hifiasm_rejects_invalid_threads(self):
@@ -937,8 +957,9 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(assembly["parameter_attempts"][0]["method_id"], "assembly.candidate.hifiasm")
             self.assertEqual(assembly["parameter_attempts"][0]["status"], "execution_failed")
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
-            self.assertIn("fake hifiasm failed", assembly["execution_failure_log_tail"])
-            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            execution = _attempt_execution(result, assembly["parameter_attempts"][0])["result"]
+            self.assertIn("fake hifiasm failed", Path(execution["stderr_path"]).read_text(encoding="utf-8"))
+            ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             events = [
                 json.loads(line)["event_type"]
                 for line in ledger_path.read_text(encoding="utf-8").splitlines()
@@ -999,7 +1020,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIsNotNone(assembly["parameter_attempts"][0]["command_ref"])
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
 
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertTrue(candidate["metadata"]["method_graph_requested"])
@@ -1012,7 +1033,7 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertIn("read_cutoff = 1000", run_cfg_text)
             self.assertEqual(candidate["logs"]["run_cfg"], str(run_cfg))
 
-            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            ledger_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             events = [
                 json.loads(line)["event_type"]
                 for line in ledger_path.read_text(encoding="utf-8").splitlines()
@@ -1062,22 +1083,19 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             attempt = assembly["parameter_attempts"][0]
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            command_payload = _attempt_command(result, attempt)
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             run_cfg = Path(candidate["logs"]["run_cfg"])
             run_cfg_text = run_cfg.read_text(encoding="utf-8")
             self.assertIn("read_cutoff = 1000", run_cfg_text)
             self.assertIn("parallel_jobs = 32", run_cfg_text)
             self.assertIn("sort_options = -m 1g -t 32", run_cfg_text)
             self.assertIn("nextgraph_options = -a 1", run_cfg_text)
-            self.assertEqual(attempt["parameter_sources"]["l0_fixed"]["threads"], 32)
-            self.assertNotIn("read_cutoff", attempt["parameter_sources"]["l0_fixed"])
-            self.assertEqual(sorted(attempt["parameter_sources"]), ["l0_fixed", "l1_readonly", "l2_recommended"])
-            self.assertEqual(attempt["rendered_parameters"]["read_cutoff"], 1000)
-            self.assertEqual(attempt["rendered_parameters"]["nextgraph_a"], 1)
-
-            command_ref = attempt["command_ref"]["path_ref"].removeprefix("data/")
-            command_payload = json.loads((Path(tmpdir) / command_ref).read_text(encoding="utf-8"))
+            self.assertEqual(command_payload["parameter_sources"]["l0_fixed"]["threads"], 32)
+            self.assertNotIn("read_cutoff", command_payload["parameter_sources"]["l0_fixed"])
             self.assertEqual(sorted(command_payload["parameter_sources"]), ["l0_fixed", "l1_readonly", "l2_recommended"])
+            self.assertEqual(command_payload["rendered_parameters"]["read_cutoff"], 1000)
+            self.assertEqual(command_payload["rendered_parameters"]["nextgraph_a"], 1)
             self.assertEqual(command_payload["rendered_parameters"]["nextgraph_a"], 1)
 
 
@@ -1096,10 +1114,11 @@ class Phase4FlyeParameterTests(unittest.TestCase):
         return path
 
     def _state(self, tmpdir: str, registry_ref: str):
+        run_dir = v2_run_dir(tmpdir, "s1")
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
         )
         state["current_stage"] = "assembly"
         state["asset_registry_ref"] = registry_ref
@@ -1188,11 +1207,12 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             attempt = assembly["parameter_attempts"][0]
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
+            command = _attempt_command(result, attempt)
+            flye_script = Path(command["script_path"])
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--threads 32", script_text)
-            self.assertEqual(attempt["parameter_sources"]["l0_fixed"]["threads"], 32)
-            self.assertEqual(attempt["argv"][attempt["argv"].index("--threads") + 1], "32")
+            self.assertEqual(command["parameter_sources"]["l0_fixed"]["threads"], 32)
+            self.assertEqual(command["argv"][command["argv"].index("--threads") + 1], "32")
 
     def test_shared_parameters_fill_flye_read_type_and_genome_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1206,11 +1226,12 @@ class Phase4FlyeParameterTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
+            command = _attempt_command(result, assembly["parameter_attempts"][0])
+            flye_script = Path(command["script_path"])
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--pacbio-hifi", script_text)
             self.assertIn("--genome-size 2000000", script_text)
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["metadata"]["read_profile"], "pacbio-hifi")
             self.assertEqual(candidate["metadata"]["estimated_genome_size"], 2_000_000)
 
@@ -1254,7 +1275,8 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "draft_ready")
-            flye_script = Path(tmpdir) / "work" / "assembly" / "s1" / "parameter_attempt_0" / "flye" / "run_flye.sh"
+            command = _attempt_command(result, assembly["parameter_attempts"][0])
+            flye_script = Path(command["script_path"])
             script_text = flye_script.read_text(encoding="utf-8")
             self.assertIn("--nano-hq", script_text)
             self.assertIn("--genome-size 2000000", script_text)
@@ -1262,7 +1284,7 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             # pre-commit stage state still holds the rich metadata until commit
             # strips it; the executed Flye candidate bundle carries execution
             # provenance.
-            candidate = json.loads(Path(assembly["selected_candidate_refs"][0]).read_text(encoding="utf-8"))
+            candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertTrue(candidate["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", candidate["metadata"])
             # The executed bundle metadata must reflect the validated
@@ -1290,16 +1312,14 @@ class Phase4FlyeParameterTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
             attempt = assembly["parameter_attempts"][0]
-            argv = attempt["argv"]
+            command_payload = _attempt_command(result, attempt)
+            argv = command_payload["argv"]
             read_flag_index = argv.index("--nano-hq")
             self.assertEqual(argv[read_flag_index + 1], assembly["input_ref"])
             self.assertIn("--out-dir", argv[read_flag_index + 2 :])
             self.assertNotIn("10000", argv)
-            self.assertEqual(attempt["parameter_sources"]["l1_readonly"]["read_n50"], 10000)
-            self.assertNotIn("estimated_coverage", attempt["parameter_sources"]["l1_readonly"])
-
-            command_ref = attempt["command_ref"]["path_ref"].removeprefix("data/")
-            command_payload = json.loads((Path(tmpdir) / command_ref).read_text(encoding="utf-8"))
+            self.assertEqual(command_payload["parameter_sources"]["l1_readonly"]["read_n50"], 10000)
+            self.assertNotIn("estimated_coverage", command_payload["parameter_sources"]["l1_readonly"])
             self.assertEqual(command_payload["argv"], argv)
             self.assertNotIn("10000", command_payload["command"])
             self.assertNotIn("35.5", command_payload["command"])

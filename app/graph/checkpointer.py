@@ -12,13 +12,15 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
+from app.storage.paths import SessionPaths
+
 CheckpointerBackend = Literal["sqlite", "memory"]
 DEFAULT_CHECKPOINTER_BACKEND: CheckpointerBackend = "sqlite"
 
 
 def checkpoint_db_path(data_dir: str | Path) -> Path:
     """Return the sqlite checkpoint file path under ``data_dir``."""
-    return Path(data_dir) / "checkpoints" / "checkpoints.sqlite"
+    return SessionPaths.from_run_dir(data_dir).checkpoint_db_path
 
 
 def get_checkpointer(

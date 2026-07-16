@@ -3,12 +3,11 @@
 # override the default fallback.
 #
 # SETUP INSTRUCTIONS:
-# 1. Copy this file to config/envs.yaml:
-#    cp config/envs.yaml.example config/envs.yaml
-# 2. Fill in your conda environment name (e.g., env_geno_exec) in the default section
-# 3. Fill in the install_root paths for AutoHiC, Juicer, 3D-DNA, and juicer_tools
-# 4. Run bootstrap to conform Juicer installation:
+# 1. Run bootstrap; it creates config/envs.yaml and asks for the values below:
 #    python -m app.entrypoints.run bootstrap --apply
+# 2. Bootstrap records the shared conda environment plus the AutoHiC, Juicer,
+#    3D-DNA, juicer_tools, and AutoHiC model paths consumed by execution.
+# 3. Bootstrap then validates the generated config and conforms Juicer.
 #
 # Two mutually exclusive target forms are supported on any entry:
 #   conda_env: env_geno_exec          # named env  → conda run -n env_geno_exec
@@ -44,6 +43,9 @@ default:
 packages:
   autohic:
     install_root: /path/to/AutoHiC         # REPLACE: AutoHiC repo root
+    models:
+      error: /path/to/error_model.pth      # REPLACE: AutoHiC error model
+      chromosome: /path/to/chr_model.pth   # REPLACE: AutoHiC chromosome model
     entrypoints:
       - autohic.py
     canary_paths:

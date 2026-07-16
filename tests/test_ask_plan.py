@@ -1383,18 +1383,29 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         self.assertIn("function_annotation", payload.get("local_exec", []))
         self.assertEqual(payload["function_annotation"]["database_provenance"], provenance)
 
-    def test_hic_scaffolding_method_selection(self):
+    def test_hic_scaffolding_has_no_method_selection_step(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
         )
         result = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
-        self.assertEqual(result.kind, "method_selection")
-        methods = result.choices["methods_by_stage"]["hic_scaffolding"]
-        self.assertEqual([method["method_name"] for method in methods], ["hic_scaffolding.candidate.autohic"])
-        self.assertEqual(result.choices["defaults"]["hic_scaffolding"], ["hic_scaffolding.candidate.autohic"])
+        self.assertEqual(result.kind, "confirm")
+        summary = build_run_plan_summary(plan)
+        self.assertIn(
+            {
+                "stage": "hic_scaffolding",
+                "method": "hic_scaffolding.candidate.autohic",
+                "status": "deferred",
+                "trigger_gate": {
+                    "stage": "hic_scaffolding",
+                    "gate_id": "parameter_approval",
+                },
+                "parameter_names": ["restriction_enzyme"],
+            },
+            summary["runtime_parameter_contracts"],
+        )
 
-    def test_incomplete_hic_candidates_remain_planned_not_local_execution(self):
+    def test_selected_hic_stage_is_local_without_planning_time_model_paths(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
@@ -1407,21 +1418,15 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
         payload = build_run_config_payload(plan)
         summary = build_run_plan_summary(plan)
 
-        self.assertNotIn("hic_scaffolding", payload["local_exec"])
-        self.assertNotIn("hic_scaffolding", payload)
-        candidates = summary["hic_scaffolding_plan_candidates"]
-        self.assertEqual(candidates[0]["status"], "needs_clarification")
-        self.assertIn("autohic_parameters.error_model_ref", candidates[0]["missing_fields"])
+        self.assertIn("hic_scaffolding", payload["local_exec"])
+        self.assertEqual(
+            payload["hic_scaffolding"]["autohic_parameters"]["restriction_enzyme"],
+            "MboI",
+        )
+        self.assertNotIn("hic_scaffolding_plan_candidates", summary)
         autohic_defaults = summary["parameter_defaults"]["hic_scaffolding.candidate.autohic"]
         self.assertEqual(autohic_defaults["threads"], 10)
-        self.assertIn(
-            "hic_scaffolding.candidate.autohic.error_model_ref",
-            summary["missing_parameter_fields"],
-        )
-        self.assertIn(
-            "hic_scaffolding.candidate.autohic.chromosome_model_ref",
-            summary["missing_parameter_fields"],
-        )
+        self.assertNotIn("missing_parameter_fields", summary)
 
     def test_complete_autohic_candidate_is_emitted_as_local_run_config(self):
         plan = _base_plan(
@@ -1439,10 +1444,14 @@ class AskPlannerAnnotationMethodTests(unittest.TestCase):
 
         payload = build_run_config_payload(plan)
         self.assertIn("hic_scaffolding", payload["local_exec"])
-        self.assertEqual(payload["hic_scaffolding"]["method"], "autohic")
         self.assertEqual(
-            payload["hic_scaffolding"]["autohic_parameters"]["chromosome_model_ref"],
-            "/models/chr_model.pth",
+            payload["hic_scaffolding"]["autohic_parameters"]["restriction_enzyme"],
+            "DpnII",
+        )
+        self.assertNotIn("method", payload["hic_scaffolding"])
+        self.assertNotIn(
+            "chromosome_model_ref",
+            payload["hic_scaffolding"]["autohic_parameters"],
         )
 
     def test_repeat_annotation_method_selection(self):

@@ -1,4 +1,4 @@
-"""Final review decision report."""
+"""Regenerable operator-status and session-summary report entry points."""
 
 from __future__ import annotations
 
@@ -7,202 +7,231 @@ from pathlib import Path
 from typing import Any
 
 from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records, read_artifact_records
-from app.review.records import counts_by_origin, decision_records
-from app.schemas.artifacts import ArtifactMeta
+from app.reports._projection import atomic_write_text, source_watermark
+from app.storage.paths import DataLayoutError, SessionPaths
 
 
-def write_operator_report(data_dir: str | Path, session_id: str, result: dict[str, Any]) -> str | None:
+def write_operator_report(
+    data_dir: str | Path,
+    session_id: str,
+    result: dict[str, Any],
+) -> str | None:
+    """Overwrite ``reports/current_status.json`` from the latest live result.
+
+    This function has no ledger or artifact-index side effects.  It is a read
+    model writer, not a lifecycle transition.
+    """
     supervision = result.get("supervision_state")
     if supervision not in {"blocked_human", "failed_terminal"}:
         return None
 
     from app.control.lifecycle import build_result_next_action
 
-    ledger = Ledger(data_dir)
-    ledger.create_session(session_id, str(result.get("input_manifest_ref") or ""))
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(session_id)
+    ledger = Ledger(paths.run_dir)
+    if ledger.read_session(session_id) is None:
+        return None
 
     report = {
+        "schema_version": 2,
+        "report_type": "current_status",
         "session_id": session_id,
+        "source_watermark": source_watermark(paths, ledger),
         "current_stage": result.get("current_stage"),
         "supervision_state": supervision,
-        "last_error": result.get("last_error"),
-        "active_interrupt": _compact_active_interrupt(result.get("active_interrupt")),
-        "next_action": build_result_next_action({**result, "session_id": session_id, "data_dir": str(data_dir)}),
-        "relevant_refs": _selected_result_refs(result),
-        "route_trace_tail": list(result.get("route_trace") or [])[-5:],
+        "last_error": _bounded_text(result.get("last_error"), 4096),
+        "active_interrupt": _compact_active_interrupt(
+            result.get("active_interrupt"), paths
+        ),
+        "next_action": build_result_next_action(
+            {**result, "session_id": session_id, "data_dir": str(paths.run_dir)}
+        ),
+        "relevant_refs": _selected_result_refs(result, paths),
+        "route_trace_tail": [
+            str(item) for item in list(result.get("route_trace") or [])[-16:]
+        ],
     }
-    report_kind = "blocked_human" if supervision == "blocked_human" else "failed_terminal"
-    artifact_type = f"operator_report.{report_kind}"
-    out_dir = Path(data_dir) / "artifacts" / "operator_report" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report_text = json.dumps(report, ensure_ascii=False, indent=2)
-    report_ref = _operator_report_path(data_dir, session_id, report_kind, result.get("current_stage"), report_text)
-    if _path_has_same_content(report_ref, report_text) and _artifact_record_exists(data_dir, session_id, artifact_type, report_ref):
-        return str(report_ref)
-    report_ref.write_text(report_text, encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
+    report_ref = paths.report_path("current_status.json")
+    atomic_write_text(
         report_ref,
-        stage="operator_report",
-        method_name=artifact_type,
-        artifact_type=artifact_type,
-        metadata={"supervision_state": supervision, "current_stage": result.get("current_stage")},
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
     )
-    append_artifact_records(data_dir, session_id, [artifact])
-    ledger.record_artifact_registered(session_id, artifact.model_dump(mode="json"))
     return str(report_ref)
 
 
 def write_final_review_report(data_dir: str | Path, session_id: str) -> str:
-    events = Ledger(data_dir).read_events(session_id)
-    artifacts = read_artifact_records(data_dir, session_id)
-    decisions = decision_records(events)
-    pending = _pending_confirmations(events, decisions)
-    report = {
-        "session_id": session_id,
-        "pending_human_confirmations": pending,
-        "decisions_by_origin": counts_by_origin(decisions),
-        "decisions": decisions,
-        "artifact_count": len(artifacts),
-    }
-    out_dir = Path(data_dir) / "artifacts" / "final_report" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report_ref = out_dir / "review_decision_report.json"
-    report_ref.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        report_ref,
-        stage="final_report",
-        method_name="final_report.review_decisions",
-        artifact_type="final_report.review_decisions",
-        metadata={"pending_human_confirmations": len(pending)},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    Ledger(data_dir).record_artifact_registered(session_id, artifact.model_dump(mode="json"))
+    """Generate the unified session summary and return its JSON path."""
+    from app.reports.trace_writer import write_session_trace
+
+    result = write_session_trace(data_dir, session_id)
+    report_ref = result.get("json_ref")
+    if not report_ref:
+        raise ValueError(f"cannot write a session summary for unknown session {session_id!r}")
     return str(report_ref)
 
 
-def _operator_report_path(
-    data_dir: str | Path,
-    session_id: str,
-    report_kind: str,
-    current_stage: Any,
-    report_text: str,
-) -> Path:
-    out_dir = Path(data_dir) / "artifacts" / "operator_report" / session_id
-    base = out_dir / f"{report_kind}_report.json"
-    if _path_has_same_content(base, report_text):
-        return base
-    if not base.exists():
-        return base
-
-    stage = _safe_report_segment(str(current_stage or "unknown"))
-    staged = out_dir / f"{report_kind}_{stage}_report.json"
-    if _path_has_same_content(staged, report_text) or not staged.exists():
-        return staged
-
-    index = 2
-    while True:
-        candidate = out_dir / f"{report_kind}_{stage}_{index}_report.json"
-        if _path_has_same_content(candidate, report_text) or not candidate.exists():
-            return candidate
-        index += 1
-
-
-def _artifact_record_exists(data_dir: str | Path, session_id: str, artifact_type: str, report_ref: Path) -> bool:
-    for record in read_artifact_records(data_dir, session_id):
-        if record.get("artifact_type") == artifact_type and Path(record.get("file_path", "")) == report_ref:
-            return True
-    return False
-
-
-def _path_has_same_content(path: Path, expected: str) -> bool:
-    if not path.exists():
-        return False
-    try:
-        return path.read_text(encoding="utf-8") == expected
-    except OSError:
-        return False
-
-
-def _safe_report_segment(value: str) -> str:
-    return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value).strip("_") or "unknown"
-
-
-def _compact_active_interrupt(active_interrupt: Any) -> dict[str, Any] | None:
+def _compact_active_interrupt(
+    active_interrupt: Any,
+    paths: SessionPaths,
+) -> dict[str, Any] | None:
     if not isinstance(active_interrupt, dict):
         return None
     compact: dict[str, Any] = {}
     for key in (
         "stage",
+        "gate_id",
         "reason",
         "decisions_allowed",
-        "candidate_methods",
-        "review_request_artifact_ref",
         "auto_decidable",
         "pending_human_confirmation",
         "blocked_at",
-        "report_refs",
-        "candidate_comparison_context",
+        "review_request_id",
+        "request_hash",
     ):
         if key in active_interrupt:
-            compact[key] = active_interrupt[key]
+            compact[key] = _bounded_value(active_interrupt[key])
+
+    request_ref = _normalize_ref(paths, active_interrupt.get("review_request_artifact_ref"))
+    if request_ref:
+        compact["review_request_artifact_ref"] = request_ref
+    compact_request_ref = _normalize_ref(paths, active_interrupt.get("request_ref"))
+    if compact_request_ref:
+        compact["request_ref"] = compact_request_ref
+
+    candidate_methods = active_interrupt.get("candidate_methods")
+    if isinstance(candidate_methods, list):
+        compact["candidate_methods"] = [str(item)[:256] for item in candidate_methods[:32]]
     candidates = active_interrupt.get("candidates")
     if isinstance(candidates, list):
         compact["candidate_ids"] = [
-            candidate.get("candidate_id")
-            for candidate in candidates
+            str(candidate.get("candidate_id"))[:256]
+            for candidate in candidates[:32]
             if isinstance(candidate, dict) and candidate.get("candidate_id")
         ]
+
+    report_refs = _normalize_ref_mapping(paths, active_interrupt.get("report_refs"))
+    if report_refs:
+        compact["report_refs"] = report_refs
+    comparison = active_interrupt.get("candidate_comparison_context")
+    if isinstance(comparison, dict):
+        candidate_ids = comparison.get("candidate_ids")
+        compact["candidate_comparison_context"] = {
+            "candidate_ids": [str(item)[:256] for item in candidate_ids[:32]]
+            if isinstance(candidate_ids, list)
+            else [],
+        }
     return compact
 
 
-def _selected_result_refs(result: dict[str, Any]) -> dict[str, Any]:
+def _selected_result_refs(
+    result: dict[str, Any],
+    paths: SessionPaths,
+) -> dict[str, Any]:
     refs: dict[str, Any] = {}
     for key in ("asset_registry_ref", "stage_plan_ref"):
-        if result.get(key):
-            refs[key] = result[key]
+        normalized = _normalize_ref(paths, result.get(key))
+        if normalized:
+            refs[key] = normalized
     stage_outputs = result.get("stage_outputs") or {}
     if not isinstance(stage_outputs, dict):
         return refs
     for stage, output in stage_outputs.items():
         if not isinstance(output, dict):
             continue
-        stage_refs = {
-            key: value
-            for key, value in output.items()
-            if (key.endswith("_ref") or key.endswith("_artifact_ref")) and isinstance(value, str)
-        }
+        stage_refs: dict[str, Any] = {}
+        for key, value in output.items():
+            if not (key.endswith("_ref") or key.endswith("_artifact_ref")):
+                continue
+            normalized = _normalize_ref(paths, value)
+            if normalized:
+                stage_refs[key] = normalized
         if output.get("env_target"):
-            stage_refs["env_target"] = output["env_target"]
-        if output.get("missing_tools"):
-            stage_refs["missing_tools"] = output["missing_tools"]
+            stage_refs["env_target"] = _bounded_text(output["env_target"], 512)
+        if isinstance(output.get("missing_tools"), list):
+            stage_refs["missing_tools"] = [
+                str(item)[:256] for item in output["missing_tools"][:32]
+            ]
         if stage_refs:
-            refs[stage] = stage_refs
+            refs[str(stage)] = stage_refs
     return refs
 
 
-def _pending_confirmations(events: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # KNOWN LIMITATION: resolution is tracked at stage-level granularity. If a
-    # stage emits multiple review_requested events (e.g. retry/rerun), a single
-    # decision will mark all of them resolved. This is acceptable today because
-    # no committed code path emits more than one review_requested per stage per
-    # session. If multi-round review lands, switch to per-request binding via
-    # `review_request_id` (or the request artifact ref).
-    decided_stages = {decision.get("stage") for decision in decisions}
-    pending = []
+def _pending_confirmations(
+    events: list[dict[str, Any]],
+    decisions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Project pending review requests using request IDs, never stage alone."""
+    del decisions  # decisions are read directly so their request IDs are retained.
+    decided_request_ids = {
+        str(event.get("review_request_id") or event.get("subject_id"))
+        for event in events
+        if event.get("event_type") == "review_decision"
+    }
+    pending: list[dict[str, Any]] = []
     for event in events:
         if event.get("event_type") != "review_requested":
             continue
-        if event.get("pending_human_confirmation") or event.get("auto_decidable") is False:
-            pending.append(
-                {
-                    "timestamp": event.get("timestamp"),
-                    "stage": event.get("stage"),
-                    "reason": event.get("reason"),
-                    "review_request_artifact_ref": event.get("review_request_artifact_ref"),
-                    "auto_decidable": event.get("auto_decidable"),
-                    "policy_mode": event.get("policy_mode"),
-                    "resolved": event.get("stage") in decided_stages,
-                }
-            )
+        if not (
+            event.get("pending_human_confirmation")
+            or event.get("auto_decidable") is False
+        ):
+            continue
+        request_id = str(event.get("review_request_id") or event.get("subject_id"))
+        pending.append(
+            {
+                "review_request_id": request_id,
+                "timestamp": event.get("timestamp"),
+                "stage": event.get("stage"),
+                "reason": event.get("reason"),
+                "review_request_artifact_ref": event.get(
+                    "review_request_artifact_ref"
+                ),
+                "auto_decidable": event.get("auto_decidable"),
+                "policy_mode": event.get("policy_mode"),
+                "resolved": request_id in decided_request_ids,
+            }
+        )
     return pending
+
+
+def _normalize_ref(paths: SessionPaths, value: Any) -> str | None:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, dict):
+        value = value.get("path_ref") or value.get("file_path")
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        return None
+    try:
+        path = Path(value)
+        if path.is_absolute():
+            return paths.to_ref(path)
+        return paths.to_ref(paths.resolve_ref(path))
+    except DataLayoutError:
+        return None
+
+
+def _normalize_ref_mapping(paths: SessionPaths, value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for key, candidate in list(value.items())[:32]:
+        ref = _normalize_ref(paths, candidate)
+        if ref:
+            normalized[str(key)] = ref
+    return normalized
+
+
+def _bounded_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [str(item)[:256] for item in value[:32]]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    return _bounded_text(value, 1024)
+
+
+def _bounded_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"

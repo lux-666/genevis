@@ -12,7 +12,7 @@ from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import READ_QC_FILTERED_LONG_READS, READ_QC_LONG_READ_STATS, READ_QC_LONG_READ_SUMMARY, ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.read_qc.constants import LENGTH_FILTER_DECISIONS, LENGTH_FILTER_METHOD_NAME, METHOD_NAME
 from app.stages.read_qc.method_application.lifecycle import (
     ReadQCMethodLifecycle,
@@ -49,8 +49,8 @@ def freeze_length_filter_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return update_read_qc_output(state, blocked)
     min_len = int(output["substeps"]["length_filter"]["thresholds"]["min_len"])
-    working_dir = data_dir / "work" / "read_qc" / session_id / "length_filter"
-    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    working_dir = stage_work_dir(state, "read_qc", "length_filter")
+    artifact_dir = stage_artifacts_dir(state, "read_qc")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output, "raw_long_reads_paths", "raw_long_reads_path")

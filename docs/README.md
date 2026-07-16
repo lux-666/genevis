@@ -11,13 +11,16 @@ If you are taking over:
 2. `governance.md` — coordinator responsibilities, source-of-truth order,
    boundary rules.
 3. `architecture.md` — parent graph, modules, state categories.
-4. `stage_contracts.md` — stable inputs / outputs / planning rules per
+4. `architecture/README.md` — accepted cross-cutting specifications; start
+   with `architecture/data-v2.md` for run data and parameter-recommendation
+   persistence.
+5. `stage_contracts.md` — stable inputs / outputs / planning rules per
    biological stage.
-5. `descriptor_spec.md` — descriptor registry, package and method
+6. `descriptor_spec.md` — descriptor registry, package and method
    descriptors.
-6. `phases/phase_completion_plan.md` — long-range roadmap, with pointers
+7. `phases/phase_completion_plan.md` — long-range roadmap, with pointers
    into per-phase folders for history.
-7. The phase folder relevant to the current work
+8. The phase folder relevant to the current work
    (`phases/phase1/` … `phases/phase8/`).
 
 If you are setting this project up on a new host, read
@@ -30,6 +33,7 @@ If you are setting this project up on a new host, read
 | `handoff.md` | Current status, next task, verification, known risks, stop conditions |
 | `governance.md` | Coordinator responsibilities, source-of-truth order, boundary rules |
 | `architecture.md` | Parent graph, modules, state categories, extension rule |
+| `architecture/` | Accepted cross-cutting specifications; `data-v2.md` is normative for new run data |
 | `stage_contracts.md` | Stable inputs, outputs, planning rules, and review triggers per stage |
 | `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
 | `deployment/mac_dev_server_pull.md` | Mac-dev / server `git pull` workflow contract |

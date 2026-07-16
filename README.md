@@ -85,6 +85,8 @@ app/
 
 docs/
   architecture.md          system architecture and ownership boundaries
+  architecture/            accepted cross-cutting architecture specifications
+    data-v2.md              run data and parameter-recommendation persistence contract
   stage_contracts.md      stage-by-stage input/output contracts
   beginner_mainline_guide.md
                            beginner-friendly source reading map
@@ -271,7 +273,7 @@ gene-agent ask "assemble this ONT genome and annotate it" \
 
 非交互场景可以先让 `ask` 输出澄清模板，补完后再继续同一个 ask plan。
 
-### 3. Stage Layer: automatic skip and gates
+### 3. Stage selection and gates
 
 即使 `requested_stages` 里包含某个 stage，stage 内部仍会根据 manifest、
 artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
@@ -281,12 +283,13 @@ artifact registry、目标级别和已有产物决定执行、跳过或阻塞。
 - **existing assembly input**：如果 manifest 只提供已有 assembly，inventory 会
   直接把主线推进到 `assembly_review`，并记录 `read_qc`、`genome_survey`、
   `assembly` 的 skip reason。
-- **Hi-C scaffolding**：`hic_scaffolding` 会读取 inventory 里的
-  `target_assembly_level`。如果没有成对 Hi-C R1/R2 reads，会写
-  `skipped_no_hic`；如果目标不是 `chromosome`，会写
-  `skipped_not_chromosome_level`，下游 annotation 继续使用 pre-Hi-C assembly。
-  chromosome 目标会以 AutoHiC 作为唯一候选；它内部完成 Juicer mapping、
-  3D-DNA scaffolding、深度学习纠错、染色体划分和 HTML report 生成。
+- **Hi-C scaffolding**：父图只在 `requested_stages` 选择了
+  `hic_scaffolding` 时进入该子图；未选择时直接路由到下一个请求的 stage。
+  一旦选择，stage 会检查 contig assembly、成对 Hi-C R1/R2 reads 和 AutoHiC
+  运行配置，缺少必要条件会以 `blocked_missing_requirements` 终止，而不会写
+  stage-local skip。AutoHiC 是固定且唯一的方法；LLM 推荐限制酶并等待人工
+  批准后，AutoHiC 内部完成 Juicer mapping、3D-DNA scaffolding、深度学习
+  纠错、染色体划分和 HTML report 生成，最后进入染色体组装采纳 gate。
 - **human gates**：`assembly_review`、`hic_scaffolding`、`t2t`、`gene_annotation`
   等阶段会在需要人工判断时进入 `blocked_human`，并写 review request artifact。
 - **provenance gates**：`function_annotation` 需要明确的 database provenance；
@@ -314,8 +317,8 @@ assets:
     format: fastq
 ```
 
-如果 `target_assembly_level: contig`，即使 `requested_stages` 里有
-`hic_scaffolding`，Hi-C stage 也会走明确 skip 路径，而不是默认做染色体挂载。
+如果目标仅为 contig level，规划时不应选择 `hic_scaffolding`；父图会按
+`requested_stages` 绕过它。用户明确选择 Hi-C 后，stage 就按 AutoHiC 流程执行。
 
 ## Inspect / Review / Resume
 
@@ -390,6 +393,7 @@ under `docs/phases/`.
 ## Read More
 
 - `docs/architecture.md`：系统架构和模块边界
+- `docs/architecture/data-v2.md`：新 session 的数据、参数推荐、审计、恢复与保留规范
 - `docs/stage_contracts.md`：各阶段输入/输出合同
 - `docs/beginner_mainline_guide.md`：从业务到源码的阅读地图
 - `docs/handoff.md`：当前状态、验证记录和已知风险

@@ -47,6 +47,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
+_FIXED_METHOD_STAGES = {"hic_scaffolding"}
 
 
 class _UserAbort(Exception):
@@ -202,9 +203,6 @@ _PARAM_HINTS: dict[str, str] = {
     "genome_survey.kmer_count.jellyfish.kmer_size": "k-mer length, typically 21",
     "genome_survey.kmer_count.jellyfish.hash_size": "hash table size, e.g. 1G",
     "genome_survey.kmer_count.jellyfish.threads": "CPU threads for jellyfish",
-    "hic_scaffolding.candidate.autohic.restriction_enzyme": "Hi-C restriction enzyme, e.g. MboI or DpnII",
-    "hic_scaffolding.candidate.autohic.error_model_ref": "path to AutoHiC error_model.pth",
-    "hic_scaffolding.candidate.autohic.chromosome_model_ref": "path to AutoHiC chr_model.pth",
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
     "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
@@ -263,6 +261,12 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
             continue
         if action.startswith("method:"):
             _, stage = action.split(":", 1)
+            if stage in _FIXED_METHOD_STAGES:
+                print(
+                    f"{stage} uses the fixed AutoHiC pipeline; "
+                    "there is no method choice."
+                )
+                continue
             plan = _edit_stage_methods(plan, stage)
             continue
         if action.startswith("params:"):
@@ -388,8 +392,12 @@ def _render_draft_stage_summary(
         print("   attention:")
         for item in attention:
             print(f"     - {item}")
-    if nested:
+    if nested and stage in _FIXED_METHOD_STAGES:
+        print("   edit: p parameters / b back")
+    elif nested:
         print("   edit: m method / p parameters / b back")
+    elif stage in _FIXED_METHOD_STAGES:
+        print(f"   edit: {idx} / {idx}p parameters")
     else:
         print(f"   edit: {idx} / {idx}m method / {idx}p parameters")
 
@@ -398,6 +406,8 @@ def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any])
     roles = summary.get("stage_roles") or {}
     role = roles.get(stage)
     selected = _selected_methods_for_stage(plan, stage)
+    if stage in _FIXED_METHOD_STAGES:
+        return "will run fixed AutoHiC pipeline"
     if stage in _STAGES_NEEDING_METHOD_SELECTION and not selected:
         return "method needed before locking"
     if selected:
@@ -408,6 +418,8 @@ def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any])
 
 
 def _draft_stage_method_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
+    if stage in _FIXED_METHOD_STAGES:
+        return []
     selected = _selected_methods_for_stage(plan, stage)
     if not selected and stage in _STAGES_NEEDING_METHOD_SELECTION:
         return ["missing"]
@@ -578,6 +590,8 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
     if len(raw) > 1 and raw[:-1].isdigit() and raw[-1] in {"m", "p"}:
         idx = int(raw[:-1]) - 1
         if 0 <= idx < len(stages):
+            if raw[-1] == "m" and stages[idx] in _FIXED_METHOD_STAGES:
+                return f"method:{stages[idx]}"
             return ("method:" if raw[-1] == "m" else "params:") + stages[idx]
     if raw.isdigit():
         idx = int(raw) - 1
@@ -599,13 +613,20 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
         attention = _draft_stage_attention(stage, current, summary, attention_items)
         _render_draft_stage_summary(1, stage, current, summary, attention, nested=True)
         print("\nActions:")
-        print("  m      change method")
+        if stage not in _FIXED_METHOD_STAGES:
+            print("  m      change method")
         print("  p      edit parameters")
         print("  b      back to plan")
         raw = input(f"{stage}> ").strip().lower()
         if raw in ("", "b", "back"):
             return current
         if raw in ("m", "method", "methods"):
+            if stage in _FIXED_METHOD_STAGES:
+                print(
+                    f"{stage} uses the fixed AutoHiC pipeline; "
+                    "there is no method choice."
+                )
+                continue
             invalid_attempts = 0
             current = _edit_stage_methods(current, stage)
             continue
@@ -614,7 +635,8 @@ def _edit_draft_stage(plan: AskPlanState, stage: str) -> AskPlanState:
             current = _edit_stage_parameters(current, stage)
             continue
         invalid_attempts += 1
-        print("Unknown action. Use m, p, or b.")
+        allowed = "p or b" if stage in _FIXED_METHOD_STAGES else "m, p, or b"
+        print(f"Unknown action. Use {allowed}.")
         if invalid_attempts >= _MAX_INVALID_PROMPT_ATTEMPTS:
             print("Too many invalid actions; returning to the plan.")
             return current
@@ -638,6 +660,9 @@ def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
 
 
 def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
+    if stage in _FIXED_METHOD_STAGES:
+        print(f"\n{stage} uses the fixed AutoHiC pipeline; there is no method choice.")
+        return plan
     methods = _executable_methods_for_stage(stage)
     if not methods:
         print(f"\nNo method choices are registered for {stage}.")
@@ -835,9 +860,10 @@ def _render_plan_summary(
 
     methods = summary.get("selected_methods", {})
     method_note = "  (recommended)" if draft is not None else ""
-    if preview and order:
+    method_stages = [stage for stage in order if stage not in _FIXED_METHOD_STAGES]
+    if preview and method_stages:
         print("\nMethods:")
-        for stage in order:
+        for stage in method_stages:
             value = methods.get(stage)
             if not value:
                 print(f"  {stage}: pending")
@@ -846,8 +872,14 @@ def _render_plan_summary(
             for m in method_list:
                 print(f"  {stage}: {m}{method_note}")
     elif methods:
-        print("\nMethods:")
-        for stage, value in methods.items():
+        visible_methods = {
+            stage: value
+            for stage, value in methods.items()
+            if stage not in _FIXED_METHOD_STAGES
+        }
+        if visible_methods:
+            print("\nMethods:")
+        for stage, value in visible_methods.items():
             method_list = value if isinstance(value, list) else [value]
             for m in method_list:
                 print(f"  {stage}: {m}")
@@ -1322,11 +1354,7 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
     shared_params: dict[str, Any] = {}
     print("\n--- Step 3: Parameters ---")
     print("  Press Enter to accept [default], or type a new value.\n")
-    hic_method = "hic_scaffolding.candidate.autohic"
     handled = set()
-    if hic_method in _selected_method_names(plan):
-        params[hic_method] = _prompt_autohic_parameters(dict(defaults.get(hic_method) or {}))
-        handled = {field for field in req.required_fields if field.startswith(hic_method + ".")}
     for field in req.required_fields:
         if field in handled:
             continue
@@ -1373,33 +1401,6 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
         method_parameters=params or None,
         stage_parameters=stage_params or None,
     )
-
-
-def _prompt_autohic_parameters(defaults: dict[str, Any]) -> dict[str, Any]:
-    """Collect AutoHiC's enzyme and two pretrained-model inputs."""
-    return {
-        **defaults,
-        "restriction_enzyme": _prompt_text_value(
-            "[hic_scaffolding / autohic] restriction_enzyme  (e.g. MboI or DpnII)",
-            defaults.get("restriction_enzyme"),
-        ),
-        "error_model_ref": _prompt_text_value(
-            "[hic_scaffolding / autohic] error_model_ref  (error_model.pth)",
-            defaults.get("error_model_ref"),
-        ),
-        "chromosome_model_ref": _prompt_text_value(
-            "[hic_scaffolding / autohic] chromosome_model_ref  (chr_model.pth)",
-            defaults.get("chromosome_model_ref"),
-        ),
-        "threads": _prompt_text_value("[hic_scaffolding / autohic] threads", defaults.get("threads", 10)),
-    }
-
-
-def _selected_method_names(plan: AskPlanState) -> set[str]:
-    names: set[str] = set()
-    for value in (plan.selected_methods or {}).values():
-        names.update(value if isinstance(value, list) else [value])
-    return names
 
 
 def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, Any]]:
@@ -1666,9 +1667,6 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
         "platform": ("shared_parameters", "platform"),
         "read_type": ("shared_parameters", "read_type"),
         "threads": ("assembly.candidate.flye", "threads"),
-        "hic_restriction_enzyme": ("hic_scaffolding.candidate.autohic", "restriction_enzyme"),
-        "hic_error_model_ref": ("hic_scaffolding.candidate.autohic", "error_model_ref"),
-        "hic_chromosome_model_ref": ("hic_scaffolding.candidate.autohic", "chromosome_model_ref"),
         "hic_threads": ("hic_scaffolding.candidate.autohic", "threads"),
     }
     existing = dict(plan.method_parameters or {})

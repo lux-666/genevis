@@ -16,6 +16,7 @@ data/
 data_archive/
 !data/
 data/*
+!data/layout.json
 !data/reference/
 data/reference/*
 !data/reference/ncbi_metazoa/

@@ -36,7 +36,9 @@ When instructions conflict, use this order:
 1. Direct user instruction in the current conversation.
 2. `CLAUDE.md`.
 3. `deep-research-report.md`.
-4. `docs/architecture.md`.
+4. `docs/architecture.md` and accepted topic specifications under
+   `docs/architecture/`; within a topic, the dedicated accepted specification
+   is authoritative.
 5. `docs/stage_contracts.md`.
 6. `docs/phases/phase_completion_plan.md`.
 7. Existing code and tests.
@@ -69,9 +71,9 @@ the scaffold structure test passing when they add required documents or paths.
 - input manifest reference
 - asset registry reference
 - stage plan reference
-- interrupt metadata
-- route trace
-- skip reasons
+- compact interrupt request ref and hash
+- current parameter-recommendation / execution-attempt cursors
+- bounded diagnostic route tail
 - compact stage output references
 
 Anything large or replay-sensitive belongs outside checkpointed state.
@@ -85,7 +87,7 @@ Ledger stores business execution facts:
 - frozen spec path
 - status
 - error summary
-- artifact metadata
+- immutable artifact refs needed to prove a transition
 - review event
 
 Ledger is append-oriented. Do not treat it as a mutable cache.
@@ -103,6 +105,11 @@ Artifacts store external world facts:
 
 The graph state should point to artifact registry outputs rather than embedding
 artifact content.
+
+The accepted Data Architecture v2 contract in
+`docs/architecture/data-v2.md` governs run-relative paths, exact fact ownership,
+parameter-recommendation persistence, checkpoint budgets, report derivation,
+and retention. No stage may introduce a conflicting local convention.
 
 ### Descriptor Layer
 

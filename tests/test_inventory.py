@@ -12,33 +12,51 @@ from app.review.base import ResumeReviewRequest
 from app.stages.inventory.builder import build_stage
 from app.stages.inventory.nodes import apply_inventory_resume_decision
 from app.schemas.state import initial_state
+from app.review.persistence import load_review_request
+from tests.data_v2 import v2_run_dir
 import yaml
 
 
 class InventoryStageTests(unittest.TestCase):
-    def _build_manifest_file(self, tmpdir: str, manifest: dict) -> Path:
-        path = Path(tmpdir) / "manifest.yaml"
+    def _build_manifest_file(
+        self,
+        tmpdir: str,
+        manifest: dict,
+        *,
+        session_id: str | None = None,
+    ) -> Path:
+        run_dir = v2_run_dir(tmpdir, session_id or manifest["session_id"])
+        path = run_dir / "control" / "manifest.yaml"
         path.write_text(yaml.dump(manifest), encoding="utf-8")
         return path
 
+    @staticmethod
+    def _state(session_id: str, manifest_path: Path):
+        return initial_state(
+            session_id=session_id,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(manifest_path.parents[1]),
+        )
+
     def test_inventory_fails_without_manifest_ref(self):
-        state = initial_state(session_id="test", input_manifest_ref="")
-        graph = build_stage()
-        result = graph.invoke(state)
-        self.assertEqual(result["supervision_state"], "failed_terminal")
-        inventory_out = result["stage_outputs"]["inventory"]
-        self.assertEqual(inventory_out["status"], "failed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = initial_state(
+                session_id="test",
+                input_manifest_ref="",
+                data_dir=str(v2_run_dir(tmpdir, "test")),
+            )
+            graph = build_stage()
+            result = graph.invoke(state)
+            self.assertEqual(result["supervision_state"], "failed_terminal")
+            inventory_out = result["stage_outputs"]["inventory"]
+            self.assertEqual(inventory_out["status"], "failed")
 
     def test_inventory_fails_with_missing_manifest_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest = {"session_id": "s1", "assets": []}
-            path = self._build_manifest_file(tmpdir, manifest)
+            path = self._build_manifest_file(tmpdir, manifest, session_id="test")
             path.unlink()
-            state = initial_state(
-                session_id="test",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("test", path)
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -53,11 +71,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s1", path)
             graph = build_stage()
             result = graph.invoke(state)
 
@@ -81,11 +95,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s1",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s1", path)
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["current_stage"], "read_qc")
@@ -97,7 +107,7 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(registry["session_id"], "s1")
             self.assertEqual(len(registry["assets"]), 1)
             asset = registry["assets"][0]
-            self.assertEqual(asset["provenance"]["manifest_ref"], str(path))
+            self.assertEqual(asset["provenance"]["manifest_ref"], "control/manifest.yaml")
             self.assertEqual(asset["provenance"]["declared_path"], str(fq))
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
@@ -112,11 +122,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="unknown-platform",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("unknown-platform", path)
 
             result = build_stage().invoke(state)
 
@@ -139,11 +145,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="override-platform",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("override-platform", path)
             state["shared_parameters"] = {"platform": "ont"}
 
             result = build_stage().invoke(state)
@@ -169,11 +171,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="cyclone-s1",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("cyclone-s1", path)
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["current_stage"], "read_qc")
@@ -200,11 +198,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s2",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s2", path)
             graph = build_stage()
             result = graph.invoke(state)
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
@@ -226,17 +220,16 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s3",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s3", path)
             graph = build_stage()
             result = graph.invoke(state)
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "inventory")
             self.assertEqual(result["active_interrupt"]["gate_id"], "inventory_review")
-            self.assertIn("continue", result["active_interrupt"]["decisions_allowed"])
+            request = load_review_request(
+                result["data_dir"], result["active_interrupt"]["request_ref"]
+            )
+            self.assertIn("continue", request["payload"]["decisions_allowed"])
             self.assertEqual(result["current_stage"], "inventory")
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNone(result.get("asset_registry_ref"))
@@ -255,11 +248,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s3-continue",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s3-continue", path)
             blocked = build_stage().invoke(state)
             decision = ResumeReviewRequest(
                 session_id="s3-continue",
@@ -267,6 +256,8 @@ class InventoryStageTests(unittest.TestCase):
                 gate_id="inventory_review",
                 decision="continue",
                 notes=["confirmed inputs"],
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
             update = apply_inventory_resume_decision(blocked, decision)
@@ -288,11 +279,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s4",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s4", path)
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["current_stage"], "assembly_review")
@@ -323,7 +310,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(session_id="s4-annotation", input_manifest_ref=str(path), data_dir=tmpdir)
+            state = self._state("s4-annotation", path)
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "assembly_review")
@@ -346,7 +333,7 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(session_id="s4-missing-annotation", input_manifest_ref=str(path), data_dir=tmpdir)
+            state = self._state("s4-missing-annotation", path)
             result = build_stage().invoke(state)
 
             self.assertEqual(result["current_stage"], "inventory")
@@ -365,20 +352,16 @@ class InventoryStageTests(unittest.TestCase):
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
-            state = initial_state(
-                session_id="s5",
-                input_manifest_ref=str(path),
-                data_dir=tmpdir,
-            )
+            state = self._state("s5", path)
             graph = build_stage()
             result = graph.invoke(state)
-            events_path = Path(tmpdir) / "ledger" / "s5" / "events.jsonl"
+            events_path = Path(state["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")
             events = [json.loads(line) for line in lines]
             self.assertTrue(any(e["event_type"] == "assets_registered" for e in events))
             asset_event = next(e for e in events if e["event_type"] == "assets_registered")
-            self.assertEqual(asset_event["asset_count"], 1)
+            self.assertEqual(asset_event["summary"]["asset_count"], 1)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from app.review.annotation_intake import (
     rewrite_requested_stages_after_assembly_review,
 )
 from app.review.base import ResumeReviewRequest
+from tests.data_v2 import v2_run_dir
 
 
 def _manifest(path: Path, session_id: str) -> Path:
@@ -41,8 +42,9 @@ def _manifest(path: Path, session_id: str) -> Path:
     return manifest_ref
 
 
-def _state(data_dir: Path, session_id: str, requested_stages: list[str] | None) -> dict:
-    manifest_ref = _manifest(data_dir, session_id)
+def _state(data_root: Path, session_id: str, requested_stages: list[str] | None) -> dict:
+    data_dir = v2_run_dir(data_root, session_id)
+    manifest_ref = _manifest(data_dir / "control", session_id)
     return {
         "session_id": session_id,
         "thread_id": session_id,
@@ -126,8 +128,9 @@ class AnnotationIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s2"
-            Ledger(data_dir).create_session(session_id, "manifest.json")
             state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
+            run_dir = Path(state["data_dir"])
+            Ledger(run_dir).create_session(session_id, "control/manifest.json")
             resume_update = {
                 "supervision_state": "running_stage",
                 "active_interrupt": None,
@@ -166,17 +169,17 @@ class AnnotationIntakeTests(unittest.TestCase):
             self.assertFalse(payload["changed"])
             self.assertEqual(payload["decision"]["decision"], "accept")
 
-            artifact_types = [record["artifact_type"] for record in read_artifact_records(data_dir, session_id)]
+            artifact_types = [record["artifact_type"] for record in read_artifact_records(run_dir, session_id)]
             self.assertIn(ANNOTATION_INTAKE_PLAN, artifact_types)
-            events = Ledger(data_dir).read_events(session_id)
+            events = Ledger(run_dir).read_events(session_id)
             self.assertTrue(any(event["event_type"] == "annotation_intake_planned" for event in events))
 
     def test_override_can_add_downstream_stage_not_in_original_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s3"
-            Ledger(data_dir).create_session(session_id, "manifest.json")
             state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review", "repeat_annotation"])
+            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
             recommended = build_recommended_annotation_plan(state)
             final = recommended.model_copy(
                 update={
@@ -216,8 +219,8 @@ class AnnotationIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s6"
-            Ledger(data_dir).create_session(session_id, "manifest.json")
             state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
+            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
             provenance = _diamond_provenance()
             recommended = build_recommended_annotation_plan(state)
             final = recommended.model_copy(
@@ -246,12 +249,12 @@ class AnnotationIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s5"
-            Ledger(data_dir).create_session(session_id, "manifest.json")
             state = _state(
                 data_dir,
                 session_id,
                 ["read_qc", "assembly", "assembly_review", "repeat_annotation", "gene_annotation", "function_annotation"],
             )
+            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
             state["skip_reasons"] = {
                 "repeat_annotation": "old skip",
                 "gene_annotation": "old skip",

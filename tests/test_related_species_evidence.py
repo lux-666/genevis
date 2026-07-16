@@ -10,9 +10,11 @@ import unittest
 from pathlib import Path
 
 from app.reference.ncbi_metazoa import build_related_species_evidence_pack
+from app.review.persistence import load_review_request
 from app.schemas.state import initial_state
 from app.stages.assembly_review.nodes import build_related_species_evidence_pack as build_review_evidence_pack
 from app.stages.assembly_review.nodes import human_review_gate
+from tests.data_v2 import v2_run_dir
 
 
 _HEADERS = [
@@ -26,6 +28,18 @@ _HEADERS = [
 
 
 class RelatedSpeciesEvidenceTests(unittest.TestCase):
+    def _state(self, tmpdir: str, manifest_text: str, *, session_id: str = "s1") -> dict:
+        run_dir = v2_run_dir(tmpdir, session_id)
+        (run_dir / "control" / "manifest.yaml").write_text(
+            manifest_text,
+            encoding="utf-8",
+        )
+        return initial_state(
+            session_id=session_id,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
+        )
+
     def _reference_dir(self, tmpdir: str) -> Path:
         root = Path(tmpdir) / "ncbi_metazoa"
         root.mkdir()
@@ -178,9 +192,10 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
 
     def test_assembly_review_node_writes_pack_from_manifest_user_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n", encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref=str(manifest), data_dir=tmpdir)
+            state = self._state(
+                tmpdir,
+                "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
+            )
             state["stage_outputs"] = {"assembly_review": {"status": "evaluated"}}
 
             update = build_review_evidence_pack(state)
@@ -194,17 +209,18 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
     def test_assembly_review_node_skips_all_failure_statuses_without_artifact(self):
         for status in ("failed", "blocked_env", "missing_tool"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as tmpdir:
-                state = initial_state(session_id="s1", input_manifest_ref="missing.yaml", data_dir=tmpdir)
+                state = self._state(tmpdir, "session_id: s1\nassets: []\n")
                 state["stage_outputs"] = {"assembly_review": {"status": status}}
 
                 self.assertEqual(build_review_evidence_pack(state), {})
-                self.assertFalse((Path(tmpdir) / "artifacts" / "assembly_review").exists())
+                self.assertFalse((Path(state["data_dir"]) / "artifacts" / "assembly_review").exists())
 
     def test_review_report_and_llm_payload_receive_structured_evidence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n", encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref=str(manifest), data_dir=tmpdir)
+            state = self._state(
+                tmpdir,
+                "session_id: s1\nuser_metadata:\n  target_species: 卵鳎\nassets: []\n",
+            )
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
@@ -219,7 +235,11 @@ class RelatedSpeciesEvidenceTests(unittest.TestCase):
             review_update = human_review_gate(state)
 
             ar_out = review_update["stage_outputs"]["assembly_review"]
-            request = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request = load_review_request(
+                state["data_dir"],
+                ar_out["review_request_artifact_ref"],
+                session_id=state["session_id"],
+            )["payload"]
             report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
             self.assertEqual(request["related_species_evidence_pack"]["matching_mode"], "same_genus")
             self.assertEqual(request["related_species_evidence_pack"]["computed_summary"]["selected_record_count"], 3)

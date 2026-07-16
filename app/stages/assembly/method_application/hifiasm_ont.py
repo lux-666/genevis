@@ -8,7 +8,10 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import ASSEMBLY_PARAMETER_COMMAND
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_COMMAND,
+    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+)
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
@@ -19,15 +22,18 @@ from app.stages.assembly.method_application.lifecycle import (
     blocked_parameters,
     build_method_graph,
     collect_method_artifacts,
-    current_parameter_attempt,
+    current_recommended_parameters,
     fail_update,
+    load_frozen_attempt,
     positive_int,
+    persist_frozen_attempt,
     update_assembly_output,
     update_current_parameter_attempt,
     write_parameter_attempt_json_artifact,
 )
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
+from app.storage.paths import SessionPaths
 
 
 LIFECYCLE = MethodLifecycle(
@@ -79,9 +85,15 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
         return update_assembly_output(state, env_blocked)
 
     parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
-    working_dir = data_dir / "work" / "assembly" / session_id / f"parameter_attempt_{parameter_attempt_id}" / "hifiasm_ont"
+    paths = SessionPaths.from_run_dir(data_dir)
+    attempt_scope = f"{parameter_attempt_id:03d}"
+    working_dir = paths.work_path(
+        "assembly", "attempts", attempt_scope, "hifiasm_ont"
+    )
     output_dir = working_dir / "hifiasm_ont_out"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / f"parameter_attempt_{parameter_attempt_id}" / "hifiasm_ont"
+    artifact_dir = paths.artifact_path(
+        "assembly", "attempts", attempt_scope, "outputs", "hifiasm_ont"
+    )
     working_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +105,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     catalog, catalog_error = _load_catalog()
     if catalog_error:
         return fail_update(state, catalog_error)
-    recommended_params, recommended_error = _recommended_params(output)
+    recommended_params, recommended_error = _recommended_params(state, output)
     if recommended_error:
         return fail_update(state, recommended_error)
 
@@ -142,6 +154,19 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_PARAMETER_COMMAND,
         method_name=HIFIASM_ONT_METHOD,
     )
+    frozen_parameters_ref = write_parameter_attempt_json_artifact(
+        state,
+        parameter_attempt_id,
+        "frozen_parameters.json",
+        {
+            "schema_version": 2,
+            "attempt_id": parameter_attempt_id,
+            "method_id": HIFIASM_ONT_METHOD,
+            "parameter_sources": parameter_sources,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+        method_name=HIFIASM_ONT_METHOD,
+    )
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:assembly:hifiasm_ont:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
@@ -165,13 +190,18 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
             "parameter_attempt_id": parameter_attempt_id,
         },
     )
+    frozen_attempt_ref = persist_frozen_attempt(
+        state,
+        parameter_attempt_id,
+        attempt,
+        method_name=HIFIASM_ONT_METHOD,
+    )
     parameter_attempts, attempt_error = update_current_parameter_attempt(
         output,
         method_id=HIFIASM_ONT_METHOD,
         label="Hifiasm ONT",
         status="frozen",
-        parameter_sources=parameter_sources,
-        argv=argv,
+        frozen_parameters_ref=frozen_parameters_ref.model_dump(mode="json"),
         command_ref=command_ref.model_dump(mode="json"),
     )
     if attempt_error:
@@ -180,7 +210,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
         state,
         {
             "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: attempt.model_dump(mode="json"),
+            LIFECYCLE.frozen_attempt_key: frozen_attempt_ref.model_dump(mode="json"),
             "hifiasm_ont_output_dir": str(output_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
             "parameter_attempts": parameter_attempts,
@@ -190,8 +220,8 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
 
 def collect_hifiasm_ont_artifacts(state: TopLevelState) -> dict:
     output = assembly_output(state)
-    attempt_data = output.get(LIFECYCLE.frozen_attempt_key) or {}
-    metadata = dict(attempt_data.get("metadata") or {})
+    attempt = load_frozen_attempt(state, output[LIFECYCLE.frozen_attempt_key])
+    metadata = dict(attempt.metadata or {})
     return collect_method_artifacts(
         state,
         LIFECYCLE,
@@ -268,9 +298,13 @@ def _load_catalog():
         return None, f"Hifiasm ONT parameter catalog is not usable: {exc}"
 
 
-def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    attempt, error = current_parameter_attempt(output, method_id=HIFIASM_ONT_METHOD, label="Hifiasm ONT")
-    if error:
-        return {}, error
-    assert attempt is not None
-    return dict(attempt.execution_params), None
+def _recommended_params(
+    state: TopLevelState,
+    output: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    return current_recommended_parameters(
+        state,
+        output,
+        method_id=HIFIASM_ONT_METHOD,
+        label="Hifiasm ONT",
+    )

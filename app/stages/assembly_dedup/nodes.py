@@ -15,7 +15,7 @@ from app.graph.routing import next_stage_name
 from app.schemas.artifacts import ASSEMBLY_CANDIDATE_BUNDLE, ASSEMBLY_DRAFT_ASSEMBLY, ArtifactMeta, AssemblyCandidateBundle
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
 
@@ -64,7 +64,7 @@ def plan_purge_dups(state: TopLevelState) -> dict:
             },
         )
 
-    dedup_dir = absolute_data_dir(state) / "artifacts" / "assembly_dedup" / state["session_id"]
+    dedup_dir = stage_artifacts_dir(state, "assembly_dedup")
     dedup_dir.mkdir(parents=True, exist_ok=True)
     return _update_output(
         state,
@@ -111,8 +111,8 @@ def run_purge_dups(state: TopLevelState) -> dict:
     input_assembly_ref = Path(dedup_out["input_assembly_ref"])
     output_assembly_ref = Path(dedup_out["output_assembly_ref"])
     long_reads_ref = Path(str(dedup_out["long_reads_ref"]))
-    work_dir = data_dir / "work" / "assembly_dedup" / session_id
-    artifact_dir = data_dir / "artifacts" / "assembly_dedup" / session_id
+    work_dir = stage_work_dir(state, "assembly_dedup")
+    artifact_dir = stage_artifacts_dir(state, "assembly_dedup")
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 

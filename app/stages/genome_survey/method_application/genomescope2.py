@@ -10,7 +10,7 @@ from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_MODEL_SUMMARY
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.genome_survey.method_application.lifecycle import (
     attempt_artifacts,
     build_method_graph,
@@ -57,8 +57,8 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return update_genome_survey_output(state, blocked)
 
-    working_dir = data_dir / "work" / "genome_survey" / session_id / "genomescope2"
-    artifact_dir = data_dir / "artifacts" / "genome_survey" / session_id / "genomescope2"
+    working_dir = stage_work_dir(state, "genome_survey", "genomescope2")
+    artifact_dir = stage_artifacts_dir(state, "genome_survey", "genomescope2")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 

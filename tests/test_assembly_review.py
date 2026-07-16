@@ -15,13 +15,13 @@ import os
 import ast
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 from app.schemas.artifacts import (
-    ASSEMBLY_CANDIDATE_COMPARISON_REPORT,
-    ASSEMBLY_REVIEW_REPORT,
-    ASSEMBLY_REVIEW_REPORT_DATA,
+    ASSEMBLY_CANDIDATE_COMPARISON,
+    ASSEMBLY_REVIEW_PACKET,
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry
@@ -29,6 +29,19 @@ from app.stages.assembly_review.builder import build_stage
 from app.stages.assembly_review.method_application.busco import build_busco_graph
 from app.stages.assembly_review.method_application.quast import build_quast_graph
 from app.schemas.state import initial_state
+from app.review.persistence import load_review_request, persist_review_request
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
+
+
+def _request_record(result: dict) -> dict:
+    return load_review_request(
+        result["data_dir"], result["active_interrupt"]["request_ref"]
+    )
+
+
+def _request_payload(result: dict) -> dict:
+    return _request_record(result)["payload"]
 
 
 class AssemblyReviewDescriptorTests(unittest.TestCase):
@@ -82,7 +95,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
         entry_mode: str | None = None,
         candidate_bundles: list[dict] | None = None,
         registry_ref: str | None = None,
-        data_dir: str = "/tmp",
+        data_dir: str | None = None,
     ) -> dict:
         stage_outputs = {
             "inventory": {
@@ -95,10 +108,15 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "status": "completed",
                 "candidate_bundles": candidate_bundles,
             }
+        data_root = Path(data_dir) if data_dir is not None else Path(
+            tempfile.mkdtemp(prefix="gene-agent-assembly-review-")
+        )
+        if data_dir is None:
+            self.addCleanup(shutil.rmtree, data_root, True)
         state = initial_state(
             session_id=session_id,
-            input_manifest_ref="inputs/manifest.yaml",
-            data_dir=data_dir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(data_root, session_id)),
         )
         state["stage_outputs"] = stage_outputs
         if registry_ref:
@@ -234,21 +252,24 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNotNone(result.get("active_interrupt"))
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
-            self.assertIn("accept", result["active_interrupt"]["decisions_allowed"])
-            self.assertIn("rerun", result["active_interrupt"]["decisions_allowed"])
-            self.assertIn("stop_human_review", result["active_interrupt"]["decisions_allowed"])
-            self.assertNotIn("pass", result["active_interrupt"]["decisions_allowed"])
+            request_payload = _request_payload(result)
+            self.assertIn("accept", request_payload["decisions_allowed"])
+            self.assertIn("rerun", request_payload["decisions_allowed"])
+            self.assertIn("stop_human_review", request_payload["decisions_allowed"])
+            self.assertNotIn("pass", request_payload["decisions_allowed"])
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertEqual(ar_out["status"], "blocked_human")
             self.assertEqual(ar_out["candidates"][0]["candidate_id"], "existing_assembly")
             self.assertEqual(ar_out["candidates"][0]["final_assembly_ref"], str(assembly_fasta))
             self.assertFalse(ar_out["auto_decidable"])
-            request_ref = Path(ar_out["review_request_artifact_ref"])
+            request_ref = SessionPaths.from_run_dir(result["data_dir"]).resolve_ref(
+                result["active_interrupt"]["request_ref"]["path_ref"]
+            )
             self.assertTrue(request_ref.exists())
-            request_payload = json.loads(request_ref.read_text(encoding="utf-8"))
-            self.assertEqual(request_payload["stage"], "assembly_review")
-            self.assertEqual(request_payload["candidates"][0]["candidate_id"], "existing_assembly")
-            self.assertFalse(request_payload["auto_decidable"])
+            request_record = json.loads(request_ref.read_text(encoding="utf-8"))
+            self.assertEqual(request_record["stage"], "assembly_review")
+            self.assertEqual(request_record["payload"]["candidates"][0]["candidate_id"], "existing_assembly")
+            self.assertFalse(request_record["payload"]["auto_decidable"])
 
     def test_review_decision_artifact_allows_post_review_actions(self):
         for decision in ["pass", "polish"]:
@@ -282,7 +303,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(result["active_interrupt"]["stage"], "assembly_review")
             self.assertIn("blocked_at", result["active_interrupt"])
             self.assertEqual(
-                result["active_interrupt"]["decisions_allowed"],
+                _request_payload(result)["decisions_allowed"],
                 ["accept", "rerun", "stop_human_review"],
             )
             # current_stage stays at assembly_review while blocked
@@ -314,7 +335,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 if signal["signal_name"] == "quast"
             ]
             self.assertEqual(quast_signals[0]["status"], "pending")
-            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            events_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             event_types = [json.loads(line)["event_type"] for line in events_path.read_text().splitlines()]
             self.assertIn("review_requested", event_types)
             self.assertNotIn("attempt_started", event_types)
@@ -340,7 +361,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("quast (pending)", report_text)
             self.assertIn("busco (pending)", report_text)
             self.assertIn("No automatic biological thresholds are applied", report_text)
-            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            report_data = json.loads(Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8"))
             self.assertNotIn("recommended_candidate_id", report_data)
             self.assertNotIn("pass_fail", json.dumps(report_data))
 
@@ -374,15 +395,27 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertTrue(quast_signal["metric_refs"])
             self.assertEqual(quast_signal["metadata"]["metrics"]["n50"], 8)
             self.assertEqual(quast_signal["metadata"]["metrics"]["total_length"], 8)
-            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request_payload = _request_payload(result)
             request_quast = next(signal for signal in request_payload["signals"] if signal["signal_name"] == "quast")
             self.assertEqual(request_quast["status"], "available")
             self.assertEqual(request_quast["candidate_id"], "flye_01")
             self.assertTrue(all(signal.get("candidate_id") for signal in request_payload["signals"]))
-            self.assertTrue(ar_out["eval_bundle_ref"].endswith("assembly_eval_bundle.evaluating.json"))
-            self.assertTrue((Path(tmpdir) / "artifacts" / "assembly_review" / "test-session" / "assembly_eval_bundle.planned.json").exists())
+            self.assertRegex(
+                ar_out["eval_bundle_ref"],
+                r"assembly_eval_bundle\.evaluating\.[0-9a-f]{16}\.json$",
+            )
+            self.assertEqual(
+                len(
+                    list(
+                        (Path(result["data_dir"]) / "artifacts" / "assembly_review").glob(
+                            "assembly_eval_bundle.planned.*.json"
+                        )
+                    )
+                ),
+                1,
+            )
             self.assertTrue(Path(ar_out["assembly_review_report_ref"]).exists())
-            self.assertTrue(Path(ar_out["assembly_review_report_data_ref"]).exists())
+            self.assertTrue(Path(ar_out["assembly_review_packet_ref"]).exists())
             report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
             self.assertIn("flye_01", report_text)
             self.assertIn("N50", report_text)
@@ -390,26 +423,29 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("Largest contig", report_text)
             self.assertIn("busco", report_text)
             self.assertIn("thresholds_not_applied_without_human_approval", report_text)
-            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            report_data = json.loads(Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8"))
             self.assertEqual(report_data["candidates"][0]["metrics"]["quast"]["n50"], 8)
             self.assertEqual(report_data["candidates"][0]["signals"]["missing"], ["busco"])
-            self.assertEqual(request_payload["report_refs"]["assembly_review_report"], ar_out["assembly_review_report_ref"])
-            self.assertEqual(result["active_interrupt"]["report_refs"]["assembly_review_report"], ar_out["assembly_review_report_ref"])
+            paths = SessionPaths.from_run_dir(result["data_dir"])
+            self.assertEqual(
+                request_payload["report_refs"]["assembly_review_report"],
+                paths.to_ref(ar_out["assembly_review_report_ref"]),
+            )
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly_review.quast_report_tsv", artifact_types)
             self.assertIn("assembly_review.quast_report_txt", artifact_types)
-            self.assertIn(ASSEMBLY_REVIEW_REPORT, artifact_types)
-            self.assertIn(ASSEMBLY_REVIEW_REPORT_DATA, artifact_types)
+            self.assertNotIn("assembly_review.report", artifact_types)
+            self.assertIn(ASSEMBLY_REVIEW_PACKET, artifact_types)
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
@@ -460,7 +496,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly_review.quast_summary", artifact_types)
@@ -506,12 +542,12 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(busco_signal["metadata"]["metrics"]["complete_percent"], 95.0)
             self.assertEqual(busco_signal["metadata"]["metrics"]["total_busco_groups_searched"], 100)
             self.assertEqual(busco_signal["metadata"]["provenance"]["lineage_name"], "embryophyta_odb10")
-            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request_payload = _request_payload(result)
             request_busco = next(signal for signal in request_payload["signals"] if signal["signal_name"] == "busco")
             self.assertEqual(request_busco["status"], "available")
             self.assertEqual(request_busco["candidate_id"], "flye_01")
             self.assertTrue(request_payload["auto_decidable"])
-            report_data = json.loads(Path(ar_out["assembly_review_report_data_ref"]).read_text(encoding="utf-8"))
+            report_data = json.loads(Path(ar_out["assembly_review_packet_ref"]).read_text(encoding="utf-8"))
             self.assertEqual(report_data["candidates"][0]["metrics"]["busco"]["complete_percent"], 95.0)
             report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
             self.assertIn("95.0", report_text)
@@ -525,7 +561,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("assembly_review.busco_short_summary", artifact_types)
@@ -559,7 +595,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertEqual(busco_signal["status"], "missing")
             self.assertIn("busco_lineage_not_supplied", busco_signal["notes"])
             self.assertFalse(ar_out["auto_decidable"])
-            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
+            request_payload = _request_payload(result)
             self.assertFalse(request_payload["auto_decidable"])
 
     def test_local_busco_failure_marks_signal_failed_and_still_blocks(self):
@@ -601,7 +637,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("candidate_not_rejected_from_metrics", busco_signal["notes"])
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("command.stdout", artifact_types)
@@ -655,7 +691,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("candidate_not_rejected_from_metrics", quast_signal["notes"])
             ledger_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_failed", event_types)
@@ -663,7 +699,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self.assertIn("review_requested", event_types)
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / "test-session" / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("command.stdout", artifact_types)
@@ -692,7 +728,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 signal for signal in result["stage_outputs"]["assembly_review"]["signals"] if signal["signal_name"] == "quast"
             )
             self.assertEqual(quast_signal["status"], "missing")
-            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            events_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             event_types = [json.loads(line)["event_type"] for line in events_path.read_text().splitlines()]
             self.assertIn("review_requested", event_types)
             self.assertNotIn("attempt_started", event_types)
@@ -852,7 +888,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["supervision_state"], "blocked_human")
-            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            events_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")
             events = [json.loads(line) for line in lines]
@@ -860,8 +896,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
             decision_events = [e for e in events if e["event_type"] == "review_decision"]
             self.assertEqual(len(requested_events), 1)
             self.assertEqual(requested_events[0]["stage"], "assembly_review")
-            self.assertEqual(requested_events[0]["candidates"][0]["candidate_id"], "existing_assembly")
-            self.assertFalse(requested_events[0]["auto_decidable"])
+            self.assertEqual(_request_payload(result)["candidates"][0]["candidate_id"], "existing_assembly")
+            self.assertFalse(requested_events[0]["summary"]["auto_decidable"])
             self.assertEqual(decision_events, [])
 
     def test_human_gate_writes_review_requested_ledger(self):
@@ -879,18 +915,20 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             graph = build_stage()
             result = graph.invoke(state)
-            events_path = Path(tmpdir) / "ledger" / "test-session" / "events.jsonl"
+            events_path = Path(result["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(events_path.exists())
             lines = events_path.read_text().strip().split("\n")
             events = [json.loads(line) for line in lines]
             request_events = [e for e in events if e["event_type"] == "review_requested"]
             self.assertEqual(len(request_events), 1)
             self.assertEqual(request_events[0]["stage"], "assembly_review")
-            self.assertFalse(request_events[0]["auto_decidable"])
-            self.assertEqual(request_events[0]["policy_mode"], "strict")
-            self.assertIn("review_request_artifact_ref", request_events[0])
-            ar_out = result["stage_outputs"]["assembly_review"]
-            self.assertTrue(Path(ar_out["review_request_artifact_ref"]).exists())
+            self.assertFalse(request_events[0]["summary"]["auto_decidable"])
+            self.assertEqual(request_events[0]["summary"]["policy_mode"], "strict")
+            self.assertTrue(
+                any(ref.get("role") == "review_request_artifact_ref" for ref in request_events[0]["refs"])
+            )
+            request_record = _request_record(result)
+            self.assertEqual(request_record["review_request_id"], result["active_interrupt"]["review_request_id"])
 
     def test_auto_policy_recommender_failure_falls_back_to_blocked_human(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -908,7 +946,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
 
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertIsNotNone(result.get("active_interrupt"))
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()]
+            events = [json.loads(line) for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()]
             self.assertIn("auto_recommendation_failed", [event["event_type"] for event in events])
 
     def test_pending_contamination_signal_does_not_disable_auto_decidable(self):
@@ -987,8 +1025,8 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
-            self.assertFalse(result["active_interrupt"]["auto_decidable"])
-            self.assertTrue(result["active_interrupt"]["pending_human_confirmation"])
+            self.assertFalse(_request_payload(result)["auto_decidable"])
+            self.assertTrue(result["stage_outputs"]["assembly_review"]["pending_human_confirmation"])
             mock_rec.assert_not_called()
 
     def test_auto_resume_validation_failure_falls_back_to_blocked_human(self):
@@ -1018,10 +1056,10 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "test-session" / "events.jsonl").read_text().splitlines()]
+            events = [json.loads(line) for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()]
             failed_events = [e for e in events if e["event_type"] == "auto_recommendation_failed"]
             self.assertEqual(len(failed_events), 1)
-            self.assertEqual(failed_events[0]["error_type"], "ResumeValidationError")
+            self.assertEqual(failed_events[0]["summary"]["error_type"], "ResumeValidationError")
 
     def test_assembly_stage_executed_candidate_ref_points_to_real_fasta(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1106,11 +1144,13 @@ class AssemblyReviewStageTests(unittest.TestCase):
             old_cwd = os.getcwd()
             os.chdir(tmp)
             try:
+                run_dir = v2_run_dir(tmp / "out", "s1")
                 state = self._build_state(
                     session_id="s1",
                     entry_mode="raw_inputs",
-                    data_dir="out",
+                    data_dir=str(tmp / "out"),
                 )
+                state["data_dir"] = "out/runs/s1"
                 state["stage_outputs"]["assembly"] = {
                     "status": "draft_ready",
                     "selected_candidate_refs": [str(candidate_ref)],
@@ -1141,9 +1181,9 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 script_path = Path(attempts[0]["script_path"])
                 self.assertTrue(script_path.exists(), f"script not found: {script_path}")
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_out_dir = (tmp / "out" / "artifacts" / "assembly_review" / "s1" / "quast").resolve(strict=False)
+                expected_out_dir = run_dir / "artifacts" / "assembly_review" / "quast"
                 self.assertIn(str(expected_out_dir), script_text)
-                self.assertNotIn(" out/artifacts/", script_text)
+                self.assertNotIn(" out/runs/s1/artifacts/", script_text)
             finally:
                 os.chdir(old_cwd)
 
@@ -1197,8 +1237,16 @@ class AssemblyReviewSchemaTests(unittest.TestCase):
 class AssemblyRerunTests(unittest.TestCase):
     """Tests for the assembly parameter loop (rerun from review gate)."""
 
-    def _build_blocked_state(self, tmpdir: str, *, rerun_count: int = 0) -> dict:
+    def _build_blocked_state(
+        self,
+        tmpdir: str,
+        *,
+        rerun_count: int = 0,
+        persist_request: bool = True,
+    ) -> dict:
         """Build a state that is blocked at the assembly_review human gate with a Flye candidate."""
+        from app.stages.assembly_review.nodes import human_review_gate
+
         session_id = "test-rerun-session"
         assembly_fasta = Path(tmpdir) / "draft.fasta"
         assembly_fasta.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -1246,8 +1294,8 @@ class AssemblyRerunTests(unittest.TestCase):
 
         state = initial_state(
             session_id=session_id,
-            input_manifest_ref="inputs/manifest.yaml",
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, session_id)),
         )
         state["stage_outputs"] = {
             "assembly": {
@@ -1276,14 +1324,18 @@ class AssemblyRerunTests(unittest.TestCase):
                 }],
             },
         }
-        state["supervision_state"] = "blocked_human"
-        state["active_interrupt"] = {
-            "stage": "assembly_review",
-            "reason": "assembly_review_human_decision_required",
-            "decisions_allowed": ["accept", "rerun", "stop_human_review"],
-            "candidates": state["stage_outputs"]["assembly_review"]["candidates"],
+        if not persist_request:
+            return state
+        blocked = human_review_gate(state)
+        return {**state, **blocked}
+
+    @staticmethod
+    def _review_binding(state: dict) -> dict:
+        return {
+            "gate_id": state["active_interrupt"]["gate_id"],
+            "review_request_id": state["active_interrupt"]["review_request_id"],
+            "review_request_hash": state["active_interrupt"]["request_hash"],
         }
-        return state
 
     def _fake_flye_bin(self, tmpdir: str, *, fail: bool = False, name: str = "bin") -> Path:
         bin_dir = Path(tmpdir) / name
@@ -1322,7 +1374,43 @@ class AssemblyRerunTests(unittest.TestCase):
                 },
                 "rerun_reason": "try larger genome size",
             },
+            **self._review_binding(state),
         )
+
+    def _renew_review_request(self, state: dict, marker: str) -> dict:
+        """Model a new human-gate cycle after the prior request was decided."""
+        from app.control.ledger import Ledger
+
+        current = load_review_request(state["data_dir"], state["active_interrupt"]["request_ref"])
+        payload = dict(current["payload"])
+        payload["notes"] = [*list(payload.get("notes") or []), marker]
+        persisted = persist_review_request(
+            state,
+            stage="assembly_review",
+            gate_id="assembly_review",
+            reason=payload["reason"],
+            payload=payload,
+            method_name="assembly_review.contract",
+            artifact_type="assembly_review.request",
+        )
+        updated = {
+            **state,
+            "supervision_state": "blocked_human",
+            "active_interrupt": persisted.compact_interrupt(
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason=payload["reason"],
+            ),
+        }
+        Ledger(state["data_dir"]).record_review_requested(
+            state["session_id"],
+            "assembly_review",
+            reason=payload["reason"],
+            candidates=payload.get("candidates") or [],
+            review_request_artifact_ref=persisted.request_ref.model_dump(mode="json"),
+            review_request_id=persisted.review_request_id,
+        )
+        return updated
 
     def test_rerun_decision_validates_flye_parameters(self):
         """Rerun with missing or invalid parameters is rejected."""
@@ -1344,6 +1432,7 @@ class AssemblyRerunTests(unittest.TestCase):
                     decision="rerun",
                     candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                     metadata={"rerun_parameters": params},
+                    **self._review_binding(state),
                 )
                 with self.assertRaises(ResumeValidationError):
                     resume_review_state(state, request)
@@ -1361,6 +1450,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                 metadata={},
+                **self._review_binding(state),
             )
             with self.assertRaises(ResumeValidationError):
                 resume_review_state(state, request)
@@ -1388,6 +1478,7 @@ class AssemblyRerunTests(unittest.TestCase):
                     },
                     "rerun_reason": "try larger genome size",
                 },
+                **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
                 update = resume_review_state(state, request)
@@ -1428,8 +1519,8 @@ class AssemblyRerunTests(unittest.TestCase):
             first_refs = first_update["stage_outputs"]["assembly"]["selected_candidate_refs"]
             rerun_ref = first_refs[-1]
             self.assertTrue(Path(rerun_ref).exists())
-            artifacts_before = read_artifact_records(tmpdir, state["session_id"])
-            events_before = Ledger(tmpdir).read_events(state["session_id"])
+            artifacts_before = read_artifact_records(state["data_dir"], state["session_id"])
+            events_before = Ledger(state["data_dir"]).read_events(state["session_id"])
 
             with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
                 replay_update = resume_review_state(state, request)
@@ -1437,12 +1528,12 @@ class AssemblyRerunTests(unittest.TestCase):
             replay_refs = replay_update["stage_outputs"]["assembly"]["selected_candidate_refs"]
             self.assertEqual(replay_refs, first_refs)
             self.assertEqual(replay_refs.count(rerun_ref), 1)
-            self.assertEqual(read_artifact_records(tmpdir, state["session_id"]), artifacts_before)
-            self.assertEqual(Ledger(tmpdir).read_events(state["session_id"]), events_before)
+            self.assertEqual(read_artifact_records(state["data_dir"], state["session_id"]), artifacts_before)
+            self.assertEqual(Ledger(state["data_dir"]).read_events(state["session_id"]), events_before)
 
-    def test_rerun_replay_rejects_existing_bundle_with_different_parameters(self):
-        """A stale replay with changed parameters must not overwrite rerun_1."""
-        from app.control.lifecycle import ResumeValidationError, resume_review_state
+    def test_rerun_request_cannot_be_redecided_with_different_parameters(self):
+        """One immutable review request cannot acquire a second decision."""
+        from app.control.lifecycle import resume_review_state
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = self._fake_flye_bin(tmpdir)
@@ -1453,9 +1544,9 @@ class AssemblyRerunTests(unittest.TestCase):
                 resume_review_state(state, request)
 
             conflicting_request = self._rerun_request(state, genome_size=150000000)
-            with self.assertRaises(ResumeValidationError) as ctx:
+            with self.assertRaises(FileExistsError) as ctx:
                 resume_review_state(state, conflicting_request)
-            self.assertIn("existing rerun bundle conflicts", str(ctx.exception))
+            self.assertIn("decision.json", str(ctx.exception))
 
     def test_rerun_after_failed_attempt_uses_next_index(self):
         """Failed rerun output does not block the next parameter adjustment."""
@@ -1470,6 +1561,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 with self.assertRaises(ResumeValidationError):
                     resume_review_state(state, self._rerun_request(state, genome_size=150000000))
 
+            state = self._renew_review_request(state, "rerun_1_failed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
                 update = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
 
@@ -1492,10 +1584,12 @@ class AssemblyRerunTests(unittest.TestCase):
                 with self.assertRaises(ResumeValidationError):
                     resume_review_state(state, self._rerun_request(state, genome_size=150000000))
 
+            state = self._renew_review_request(state, "rerun_1_failed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
                 first_success = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
 
             state["stage_outputs"]["assembly"]["selected_candidate_refs"] = first_success["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            state = self._renew_review_request(state, "rerun_2_completed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
                 second_success = resume_review_state(state, self._rerun_request(state, genome_size=250000000))
 
@@ -1518,6 +1612,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id="unknown",
                 metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+                **self._review_binding(state),
             )
 
             with self.assertRaisesRegex(ResumeValidationError, "unknown assembly_review candidate_id"):
@@ -1539,6 +1634,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                 metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 150000000, "threads": 1}},
+                **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
                 update = resume_review_state(state, request)
@@ -1561,6 +1657,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                 metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+                **self._review_binding(state),
             )
             with self.assertRaises(ResumeValidationError) as ctx:
                 resume_review_state(state, request)
@@ -1582,6 +1679,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                 metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+                **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
                 with self.assertRaises(ResumeValidationError):
@@ -1616,23 +1714,23 @@ class AssemblyRerunTests(unittest.TestCase):
             first_update = generate_candidate_comparison(state)
             first_ref = first_update["stage_outputs"]["assembly_review"]["candidate_comparison_ref"]
             merged = {**state, "stage_outputs": first_update["stage_outputs"]}
-            artifacts_before = read_artifact_records(tmpdir, state["session_id"])
-            events_before = Ledger(tmpdir).read_events(state["session_id"])
+            artifacts_before = read_artifact_records(state["data_dir"], state["session_id"])
+            events_before = Ledger(state["data_dir"]).read_events(state["session_id"])
             mtime_before = Path(first_ref).stat().st_mtime_ns
 
             replay_update = generate_candidate_comparison(merged)
 
             self.assertEqual(replay_update, {})
             self.assertEqual(Path(first_ref).stat().st_mtime_ns, mtime_before)
-            self.assertEqual(read_artifact_records(tmpdir, state["session_id"]), artifacts_before)
-            self.assertEqual(Ledger(tmpdir).read_events(state["session_id"]), events_before)
+            self.assertEqual(read_artifact_records(state["data_dir"], state["session_id"]), artifacts_before)
+            self.assertEqual(Ledger(state["data_dir"]).read_events(state["session_id"]), events_before)
 
     def test_review_report_replay_does_not_duplicate_artifact_records(self):
         from app.execution.artifacts import read_artifact_records
         from app.stages.assembly_review.nodes import human_review_gate
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = self._build_blocked_state(tmpdir)
+            state = self._build_blocked_state(tmpdir, persist_request=False)
             state["stage_outputs"]["assembly_review"] = {
                 **state["stage_outputs"]["assembly_review"],
                 "status": "evaluated",
@@ -1643,23 +1741,24 @@ class AssemblyRerunTests(unittest.TestCase):
             first = human_review_gate(state)
             merged = {**state, **first}
             artifacts_before = [
-                record for record in read_artifact_records(tmpdir, state["session_id"])
-                if record["artifact_type"] in {ASSEMBLY_REVIEW_REPORT, ASSEMBLY_REVIEW_REPORT_DATA}
+                record for record in read_artifact_records(state["data_dir"], state["session_id"])
+                if record["artifact_type"] in {"assembly_review.report", ASSEMBLY_REVIEW_PACKET}
             ]
             report_ref = first["stage_outputs"]["assembly_review"]["assembly_review_report_ref"]
-            mtime_before = Path(report_ref).stat().st_mtime_ns
+            report_before = Path(report_ref).read_text(encoding="utf-8")
 
             second = human_review_gate(merged)
 
             artifacts_after = [
-                record for record in read_artifact_records(tmpdir, state["session_id"])
-                if record["artifact_type"] in {ASSEMBLY_REVIEW_REPORT, ASSEMBLY_REVIEW_REPORT_DATA}
+                record for record in read_artifact_records(state["data_dir"], state["session_id"])
+                if record["artifact_type"] in {"assembly_review.report", ASSEMBLY_REVIEW_PACKET}
             ]
-            self.assertEqual(Path(report_ref).stat().st_mtime_ns, mtime_before)
+            self.assertEqual(Path(report_ref).read_text(encoding="utf-8"), report_before)
             self.assertEqual(artifacts_after, artifacts_before)
+            second_result = {**merged, **second}
             self.assertEqual(
-                second["active_interrupt"]["report_refs"]["assembly_review_report"],
-                report_ref,
+                _request_payload(second_result)["report_refs"]["assembly_review_report"],
+                SessionPaths.from_run_dir(state["data_dir"]).to_ref(report_ref),
             )
 
     def test_rerun_generates_candidate_comparison_artifact(self):
@@ -1677,6 +1776,7 @@ class AssemblyRerunTests(unittest.TestCase):
                 decision="rerun",
                 candidate_id=state["stage_outputs"]["assembly_review"]["candidates"][0]["candidate_id"],
                 metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 200000000, "threads": 2}},
+                **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
                 update = resume_review_state(state, request)
@@ -1694,26 +1794,26 @@ class AssemblyRerunTests(unittest.TestCase):
             comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
             self.assertEqual(len(comparison["candidates"]), 2)
             self.assertIn("thresholds_not_applied_without_human_approval", comparison["notes"])
-            self.assertTrue(Path(ar_out["assembly_candidate_comparison_report_ref"]).exists())
-            report_text = Path(ar_out["assembly_candidate_comparison_report_ref"]).read_text(encoding="utf-8")
+            report_text = Path(ar_out["assembly_review_report_ref"]).read_text(encoding="utf-8")
             self.assertIn(comparison["candidates"][0]["candidate_id"], report_text)
             self.assertIn(comparison["candidates"][1]["candidate_id"], report_text)
-            request_payload = json.loads(Path(ar_out["review_request_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(request_payload["report_refs"]["candidate_comparison"], ar_out["candidate_comparison_ref"])
+            request_payload = _request_payload(result)
+            paths = SessionPaths.from_run_dir(result["data_dir"])
             self.assertEqual(
-                request_payload["report_refs"]["assembly_candidate_comparison_report"],
-                ar_out["assembly_candidate_comparison_report_ref"],
+                request_payload["report_refs"]["candidate_comparison"],
+                paths.to_ref(ar_out["candidate_comparison_ref"]),
             )
+            self.assertNotIn("assembly_candidate_comparison_report", request_payload["report_refs"])
             self.assertEqual(
                 sorted(request_payload["candidate_comparison_context"]["candidate_ids"]),
                 sorted(candidate["candidate_id"] for candidate in comparison["candidates"]),
             )
             artifact_events = [
                 json.loads(line)
-                for line in (Path(tmpdir) / "artifacts" / state["session_id"] / "artifacts.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
-            self.assertIn(ASSEMBLY_CANDIDATE_COMPARISON_REPORT, artifact_types)
+            self.assertIn(ASSEMBLY_CANDIDATE_COMPARISON, artifact_types)
 
 
 if __name__ == "__main__":

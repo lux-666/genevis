@@ -16,11 +16,11 @@ from app.control.lifecycle import (
 )
 from app.control.ledger import Ledger
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
-from app.execution.artifacts import append_artifact_records
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import ReviewGateDeclaration, get_review_gate, register_review_gate
+from app.review.persistence import persist_review_request
 from app.review.recommender import recommend_review_decision
-from app.schemas.artifacts import ArtifactMeta
+from tests.data_v2 import v2_run_dir
 
 
 def _apply_unit_gate_decision(state: dict, request: ResumeReviewRequest) -> dict:
@@ -81,9 +81,13 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
     def test_registered_gate_dispatches_resume_applier(self):
         state = _blocked_unit_state()
+        interrupt = state["active_interrupt"]
+        assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
             stage="unit_review_gate",
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
             decision="accept",
             candidate_id="candidate-a",
         )
@@ -96,10 +100,14 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
     def test_registered_gate_can_use_local_decision_verb(self):
         state = _blocked_unit_state(decisions_allowed=["defer_annotation", "stop_human_review"])
+        interrupt = state["active_interrupt"]
+        assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
             stage="unit_review_gate",
             gate_id="unit_review_gate",
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
             decision="defer_annotation",
             candidate_id="candidate-a",
         )
@@ -109,18 +117,23 @@ class ReviewGateRegistryTests(unittest.TestCase):
         self.assertEqual(update["stage_outputs"]["unit_review_gate"]["decision"], "defer_annotation")
 
     def test_unknown_gate_is_rejected_by_registry_not_schema(self):
+        state = _blocked_unit_state(stage="unregistered_gate", decisions_allowed=["accept"])
+        interrupt = state["active_interrupt"]
+        assert interrupt is not None
         request = ResumeReviewRequest(
             session_id="s1",
             stage="unregistered_gate",
+            review_request_id=interrupt["review_request_id"],
+            review_request_hash=interrupt["request_hash"],
             decision="accept",
         )
-        state = _blocked_unit_state(stage="unregistered_gate", decisions_allowed=["accept"])
 
         with self.assertRaisesRegex(ResumeValidationError, "Unsupported resume stage"):
             resume_review_state(state, request)
 
     def test_recommender_uses_registry_prompt_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
                 stage="unit_review_gate",
                 reason="review",
@@ -142,7 +155,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 session_id="s1",
                 stage="unit_review_gate",
                 request=request,
-                data_dir=tmp,
+                data_dir=run_dir,
                 chat_model=chat,
             )
 
@@ -152,6 +165,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
 
     def test_recommender_uses_gate_id_when_stage_has_multiple_gates(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
                 stage="unit_multi_stage",
                 gate_id="gate_b",
@@ -172,7 +186,7 @@ class ReviewGateRegistryTests(unittest.TestCase):
                 session_id="s1",
                 stage="unit_multi_stage",
                 request=request,
-                data_dir=tmp,
+                data_dir=run_dir,
                 chat_model=chat,
             )
 
@@ -238,23 +252,20 @@ def _blocked_unit_state(
     stage: str = "unit_review_gate",
     decisions_allowed: list[str] | None = None,
 ) -> dict:
-    return {
+    allowed = decisions_allowed or ["accept", "stop_human_review"]
+    run_dir = v2_run_dir(tempfile.mkdtemp(), "s1")
+    state = {
         "session_id": "s1",
         "thread_id": "s1",
-        "data_dir": tempfile.mkdtemp(),
+        "data_dir": str(run_dir),
         "control_state": "running",
         "supervision_state": "blocked_human",
         "current_stage": stage,
         "requested_stages": None,
-        "input_manifest_ref": "manifest.yaml",
+        "input_manifest_ref": "control/manifest.yaml",
         "asset_registry_ref": None,
         "stage_plan_ref": None,
-        "active_interrupt": {
-            "stage": stage,
-            "reason": "unit review",
-            "decisions_allowed": decisions_allowed or ["accept", "stop_human_review"],
-            "candidates": [{"candidate_id": "candidate-a"}],
-        },
+        "active_interrupt": None,
         "last_error": None,
         "review_notes": [],
         "route_trace": [],
@@ -266,44 +277,60 @@ def _blocked_unit_state(
         },
         "skip_reasons": {},
     }
+    payload = ReviewPayload(
+        stage=stage,
+        gate_id=stage,
+        reason="unit review",
+        decisions_allowed=allowed,
+        candidates=[{"candidate_id": "candidate-a"}],
+    )
+    persisted = persist_review_request(
+        state,
+        stage=stage,
+        gate_id=stage,
+        reason="unit review",
+        payload=payload,
+    )
+    state["active_interrupt"] = persisted.compact_interrupt(
+        stage=stage,
+        gate_id=stage,
+        reason="unit review",
+    )
+    return state
 
 
 def _blocked_unit_session(tmp: str) -> tuple[str, str]:
-    data_dir = Path(tmp) / "data"
     session_id = "s1"
-    request_dir = data_dir / "artifacts" / "unit_review_gate" / session_id
-    request_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = request_dir / "unit_review_gate_request.json"
-    request_ref.write_text(
-        json.dumps(
-            {
-                "stage": "unit_review_gate",
-                "gate_id": "unit_review_gate",
-                "reason": "unit review",
-                "candidates": [{"candidate_id": "candidate-a"}],
-            }
-        ),
-        encoding="utf-8",
+    data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+    state = {
+        "session_id": session_id,
+        "data_dir": str(data_dir),
+    }
+    payload = ReviewPayload(
+        stage="unit_review_gate",
+        gate_id="unit_review_gate",
+        reason="unit review",
+        candidates=[{"candidate_id": "candidate-a"}],
+        decisions_allowed=["accept", "defer_annotation", "stop_human_review"],
     )
-    append_artifact_records(
-        data_dir,
-        session_id,
-        [
-            ArtifactMeta.from_file(
-                request_ref,
-                stage="unit_review_gate",
-                method_name="unit_review_gate.contract",
-                artifact_type="unit_review_gate.request",
-            )
-        ],
+    persisted = persist_review_request(
+        state,
+        stage="unit_review_gate",
+        gate_id="unit_review_gate",
+        reason="unit review",
+        payload=payload,
+        method_name="unit_review_gate.contract",
+        artifact_type="unit_review_gate.request",
     )
     ledger = Ledger(data_dir)
-    ledger.create_session(session_id, "manifest.yaml")
+    ledger.create_session(session_id, "control/manifest.yaml")
     ledger.record_review_requested(
         session_id,
         "unit_review_gate",
         reason="unit review",
         candidates=[{"candidate_id": "candidate-a"}],
+        review_request_artifact_ref=persisted.request_ref,
+        review_request_id=persisted.review_request_id,
     )
     return session_id, str(data_dir)
 

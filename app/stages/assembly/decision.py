@@ -45,11 +45,13 @@ class AssemblyDecisionResult(BaseModel):
     model_id: str | None = None
 
 
-def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecisionResult:
-    """Render a prompt, invoke the model, and validate its JSON response."""
+def render_assembly_decision_messages(
+    request: AssemblyDecisionRequest,
+) -> list[dict[str, str]]:
+    """Render the ordered messages that will be passed to the model."""
 
     if request.system_prompt:
-        messages = [
+        return [
             {"role": "system", "content": request.system_prompt},
             {
                 "role": "user",
@@ -60,12 +62,23 @@ def make_assembly_decision(request: AssemblyDecisionRequest) -> AssemblyDecision
                 ),
             },
         ]
-    else:
-        messages = render_assembly_parameter_messages(request.prompt_payload)
+    return render_assembly_parameter_messages(request.prompt_payload)
+
+
+def make_assembly_decision(
+    request: AssemblyDecisionRequest,
+    *,
+    messages: list[dict[str, str]] | None = None,
+) -> AssemblyDecisionResult:
+    """Invoke the model with one already-rendered request and validate its response."""
+
+    invocation_messages = (
+        messages if messages is not None else render_assembly_decision_messages(request)
+    )
 
     try:
         model = build_chat_model()
-        response = model.invoke(messages)
+        response = model.invoke(invocation_messages)
     except Exception as exc:
         if request.kind == "parameter_recommendation" and request.allow_default_on_error:
             try:

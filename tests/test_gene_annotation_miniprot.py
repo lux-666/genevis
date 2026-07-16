@@ -16,6 +16,21 @@ from app.stages.gene_annotation.nodes import (
     run_augustus_attempt,
     run_miniprot_attempt,
 )
+from tests.data_v2 import v2_run_dir
+
+
+def _v2_state(tmpdir: str) -> dict:
+    return initial_state(
+        session_id="s1",
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(v2_run_dir(tmpdir, "s1")),
+    )
+
+
+def _gene_work_path(tmpdir: str, *parts: str) -> Path:
+    path = v2_run_dir(tmpdir, "s1") / "work" / "gene_annotation" / Path(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _write_intake_plan(tmpdir: str) -> str:
@@ -104,11 +119,7 @@ def _pending_execution_state(tmpdir: str, **gene_updates):
     """State as it stands after preparing executable gene methods."""
     softmasked = Path(tmpdir) / "softmasked.fa"
     softmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
-    state = initial_state(
-        session_id="s1",
-        input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-        data_dir=tmpdir,
-    )
+    state = _v2_state(tmpdir)
     state["current_stage"] = "gene_annotation"
     state["stage_outputs"] = {
         "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -117,7 +128,11 @@ def _pending_execution_state(tmpdir: str, **gene_updates):
             "genome_input_ref": str(softmasked),
             "genome_input_source": "softmasked_genome",
             "confirmed_methods": ["gene_annotation.candidate.miniprot"],
-            "candidate_refs": {"gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3")},
+            "candidate_refs": {
+                "gene_annotation.candidate.miniprot": str(
+                    _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
+                )
+            },
             "candidate_gene_counts": {"gene_annotation.candidate.miniprot": 0},
             "executed_methods": [],
             "env": {"PATH": os.environ.get("PATH", "")},
@@ -205,11 +220,7 @@ class MiniprotRunTests(unittest.TestCase):
                 "protein_evidence_refs": [str(Path(tmpdir) / "proteins.fa")],
             },
         )
-        state = initial_state(
-            session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
-        )
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -247,7 +258,7 @@ class MiniprotRunTests(unittest.TestCase):
             self.assertEqual(gene["status"], "failed")
             self.assertIn("miniprot failed", gene["reason"])
 
-            ledger_path = Path(tmpdir) / "ledger" / "s1" / "events.jsonl"
+            ledger_path = Path(state["data_dir"]) / "ledger" / "events.jsonl"
             self.assertTrue(ledger_path.exists(), "ledger should record attempt_failed event")
             events = [
                 json.loads(line)
@@ -259,7 +270,7 @@ class MiniprotRunTests(unittest.TestCase):
 
 class MiniprotCollectTests(unittest.TestCase):
     def _collect_state(self, tmpdir: str, *, gff3_exists: bool = True):
-        output_gff3 = Path(tmpdir) / "miniprot.gff3"
+        output_gff3 = _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
         if gff3_exists:
             output_gff3.write_text(
                 "##gff-version 3\n"
@@ -286,11 +297,7 @@ class MiniprotCollectTests(unittest.TestCase):
                 "protein_evidence_refs": [],
             },
         )
-        state = initial_state(
-            session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
-        )
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         genome = Path(tmpdir) / "genome.fa"
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -324,7 +331,17 @@ class MiniprotCollectTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "candidates_ready")
-            self.assertEqual(gene["candidate_gff_ref"], str(Path(tmpdir) / "miniprot.gff3"))
+            self.assertEqual(
+                gene["candidate_gff_ref"],
+                str(
+                    Path(state["data_dir"])
+                    / "artifacts"
+                    / "gene_annotation"
+                    / "outputs"
+                    / "miniprot"
+                    / "miniprot.gff3"
+                ),
+            )
             self.assertIn("gene_annotation.candidate.miniprot", gene["candidate_refs"])
             self.assertGreater(gene["miniprot_gene_count"], 0)
             self.assertEqual(gene["miniprot_gene_count"], 2,
@@ -334,7 +351,7 @@ class MiniprotCollectTests(unittest.TestCase):
                 gene["miniprot_gene_count"],
             )
 
-            artifacts_path = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             self.assertTrue(artifacts_path.exists())
             artifact_types = [
                 json.loads(line)["artifact_type"]
@@ -406,7 +423,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
             freeze_result = freeze_miniprot_attempt(freeze_state)
             self.assertEqual(freeze_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_frozen")
 
-            run_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -415,13 +432,17 @@ class MiniprotFullSliceTests(unittest.TestCase):
             run_result = run_miniprot_attempt(run_state)
             self.assertEqual(run_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran")
 
-            collect_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            collect_state = _v2_state(tmpdir)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     **run_result["stage_outputs"]["gene_annotation"],
-                    "candidate_refs": {"gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3")},
+                    "candidate_refs": {
+                        "gene_annotation.candidate.miniprot": str(
+                            _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
+                        )
+                    },
                     "candidate_gene_counts": {"gene_annotation.candidate.miniprot": 0},
                     "confirmed_methods": ["gene_annotation.candidate.miniprot"],
                     "executed_methods": [],
@@ -443,7 +464,9 @@ def _augustus_pending_state(tmpdir: str, **gene_updates):
     gene = state["stage_outputs"]["gene_annotation"]
     if "confirmed_methods" not in gene_updates:
         gene["confirmed_methods"] = ["gene_annotation.candidate.augustus"]
-    gene.setdefault("candidate_refs", {})["gene_annotation.candidate.augustus"] = str(Path(tmpdir) / "augustus.gff3")
+    gene.setdefault("candidate_refs", {})["gene_annotation.candidate.augustus"] = str(
+        _gene_work_path(tmpdir, "augustus", "augustus.gff3")
+    )
     gene.setdefault("candidate_gene_counts", {})["gene_annotation.candidate.augustus"] = 0
     # AUGUSTUS now requires an explicit species model; supply one by default
     # unless the caller passed its own lineage_or_species_hints.
@@ -532,7 +555,7 @@ class AugustusRunTests(unittest.TestCase):
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "species": "fly"},
         )
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -561,7 +584,7 @@ class AugustusRunTests(unittest.TestCase):
 
 class AugustusCollectTests(unittest.TestCase):
     def _collect_state(self, tmpdir: str, *, gff3_exists: bool = True):
-        output_gff3 = Path(tmpdir) / "augustus.gff3"
+        output_gff3 = _gene_work_path(tmpdir, "augustus", "augustus.gff3")
         if gff3_exists:
             output_gff3.write_text(
                 "##gff-version 3\n"
@@ -580,7 +603,7 @@ class AugustusCollectTests(unittest.TestCase):
             expected_outputs=[output_gff3],
             metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "species": "fly"},
         )
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         genome = Path(tmpdir) / "genome.fa"
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -610,7 +633,7 @@ class AugustusCollectTests(unittest.TestCase):
             self.assertEqual(gene["augustus_gene_count"], 2)
             self.assertIn("gene_annotation.candidate.augustus", gene["executed_methods"])
 
-            artifacts_path = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [
                 json.loads(line)["artifact_type"]
                 for line in artifacts_path.read_text(encoding="utf-8").splitlines()
@@ -636,8 +659,12 @@ class MultiMethodExecutionTests(unittest.TestCase):
                 protein_evidence_refs=[str(proteins)],
                 lineage_or_species_hints={"augustus_species_model": "test_species"},
                 candidate_refs={
-                    "gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3"),
-                    "gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3"),
+                    "gene_annotation.candidate.miniprot": str(
+                        _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
+                    ),
+                    "gene_annotation.candidate.augustus": str(
+                        _gene_work_path(tmpdir, "augustus", "augustus.gff3")
+                    ),
                 },
                 env={"PATH": combined_path},
             )
@@ -646,7 +673,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             self.assertEqual(mp_freeze["stage_outputs"]["gene_annotation"]["status"], "miniprot_frozen")
 
             # miniprot run
-            run_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -656,15 +683,19 @@ class MultiMethodExecutionTests(unittest.TestCase):
             self.assertEqual(mp_run["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran")
 
             # miniprot collect
-            collect_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            collect_state = _v2_state(tmpdir)
             collect_state["current_stage"] = "gene_annotation"
             collect_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     **mp_run["stage_outputs"]["gene_annotation"],
                     "candidate_refs": {
-                        "gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3"),
-                        "gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3"),
+                        "gene_annotation.candidate.miniprot": str(
+                            _gene_work_path(tmpdir, "miniprot", "miniprot.gff3")
+                        ),
+                        "gene_annotation.candidate.augustus": str(
+                            _gene_work_path(tmpdir, "augustus", "augustus.gff3")
+                        ),
                     },
                     "candidate_gene_counts": {
                         "gene_annotation.candidate.miniprot": 0,
@@ -684,7 +715,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             self.assertIn("gene_annotation.candidate.miniprot", gene["executed_methods"])
 
             # Step 2: augustus freeze
-            aug_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            aug_state = _v2_state(tmpdir)
             aug_state["current_stage"] = "gene_annotation"
             aug_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -694,7 +725,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
             self.assertEqual(aug_freeze["stage_outputs"]["gene_annotation"]["status"], "augustus_frozen")
 
             # augustus run
-            run2 = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            run2 = _v2_state(tmpdir)
             run2["current_stage"] = "gene_annotation"
             run2["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -704,15 +735,19 @@ class MultiMethodExecutionTests(unittest.TestCase):
             self.assertEqual(aug_run["stage_outputs"]["gene_annotation"]["status"], "augustus_ran")
 
             # augustus collect
-            coll2 = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            coll2 = _v2_state(tmpdir)
             coll2["current_stage"] = "gene_annotation"
             coll2["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     **aug_run["stage_outputs"]["gene_annotation"],
                     "candidate_refs": {
-                        "gene_annotation.candidate.miniprot": str(Path(tmpdir) / "miniprot.gff3"),
-                        "gene_annotation.candidate.augustus": str(Path(tmpdir) / "augustus.gff3"),
+                        "gene_annotation.candidate.miniprot": gene["candidate_refs"][
+                            "gene_annotation.candidate.miniprot"
+                        ],
+                        "gene_annotation.candidate.augustus": str(
+                            _gene_work_path(tmpdir, "augustus", "augustus.gff3")
+                        ),
                     },
                     "candidate_gene_counts": {
                         "gene_annotation.candidate.miniprot": 2,

@@ -8,8 +8,11 @@ from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt
-from app.storage.publish import shell_publish_file
-from app.schemas.artifacts import ASSEMBLY_PARAMETER_COMMAND
+from app.storage.publish import publish_file, shell_publish_file
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_COMMAND,
+    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+)
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
@@ -20,15 +23,18 @@ from app.stages.assembly.method_application.lifecycle import (
     blocked_parameters,
     build_method_graph,
     collect_method_artifacts,
-    current_parameter_attempt,
+    current_recommended_parameters,
     fail_update,
+    load_frozen_attempt,
     positive_int,
+    persist_frozen_attempt,
     update_current_parameter_attempt,
     update_assembly_output,
     write_parameter_attempt_json_artifact,
 )
 from app.stages.assembly.parameter_catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir
+from app.storage.paths import SessionPaths
 
 
 LIFECYCLE = MethodLifecycle(
@@ -77,10 +83,15 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         return update_assembly_output(state, env_blocked)
 
     parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
-    attempt_scope = f"parameter_attempt_{parameter_attempt_id}"
-    working_dir = data_dir / "work" / "assembly" / session_id / attempt_scope / "nextdenovo"
+    paths = SessionPaths.from_run_dir(data_dir)
+    attempt_scope = f"{parameter_attempt_id:03d}"
+    working_dir = paths.work_path(
+        "assembly", "attempts", attempt_scope, "nextdenovo"
+    )
     nextdenovo_work_dir = working_dir / "nextdenovo_work"
-    artifact_dir = data_dir / "artifacts" / "assembly" / session_id / attempt_scope / "nextdenovo"
+    artifact_dir = paths.artifact_path(
+        "assembly", "attempts", attempt_scope, "outputs", "nextdenovo"
+    )
     working_dir.mkdir(parents=True, exist_ok=True)
     nextdenovo_work_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -90,7 +101,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     catalog, catalog_error = _load_catalog()
     if catalog_error:
         return fail_update(state, catalog_error)
-    recommended_params, recommended_error = _recommended_params(output)
+    recommended_params, recommended_error = _recommended_params(state, output)
     if recommended_error:
         return fail_update(state, recommended_error)
     try:
@@ -149,6 +160,20 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_PARAMETER_COMMAND,
         method_name=NEXTDENOVO_METHOD,
     )
+    frozen_parameters_ref = write_parameter_attempt_json_artifact(
+        state,
+        parameter_attempt_id,
+        "frozen_parameters.json",
+        {
+            "schema_version": 2,
+            "attempt_id": parameter_attempt_id,
+            "method_id": NEXTDENOVO_METHOD,
+            "parameter_sources": parameter_sources,
+            "rendered_parameters": params,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+        method_name=NEXTDENOVO_METHOD,
+    )
     attempt = build_frozen_attempt(
         attempt_id=f"{session_id}:assembly:nextdenovo:parameter_attempt_{parameter_attempt_id}",
         session_id=session_id,
@@ -175,14 +200,18 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
             "parameter_attempt_id": parameter_attempt_id,
         },
     )
+    frozen_attempt_ref = persist_frozen_attempt(
+        state,
+        parameter_attempt_id,
+        attempt,
+        method_name=NEXTDENOVO_METHOD,
+    )
     parameter_attempts, attempt_error = update_current_parameter_attempt(
         output,
         method_id=NEXTDENOVO_METHOD,
         label="NextDenovo",
         status="frozen",
-        parameter_sources=parameter_sources,
-        rendered_parameters=params,
-        argv=argv,
+        frozen_parameters_ref=frozen_parameters_ref.model_dump(mode="json"),
         command_ref=command_ref.model_dump(mode="json"),
     )
     if attempt_error:
@@ -191,7 +220,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         state,
         {
             "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: attempt.model_dump(mode="json"),
+            LIFECYCLE.frozen_attempt_key: frozen_attempt_ref.model_dump(mode="json"),
             "nextdenovo_run_cfg_path": str(run_cfg),
             "nextdenovo_work_dir": str(nextdenovo_work_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
@@ -202,16 +231,42 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
 
 def collect_nextdenovo_artifacts(state: TopLevelState) -> dict:
     output = assembly_output(state)
-    attempt_data = output.get(LIFECYCLE.frozen_attempt_key) or {}
-    metadata = dict(attempt_data.get("metadata") or {})
-    run_cfg = str(output.get("nextdenovo_run_cfg_path", ""))
-    return collect_method_artifacts(
+    attempt = load_frozen_attempt(state, output[LIFECYCLE.frozen_attempt_key])
+    metadata = dict(attempt.metadata or {})
+    run_cfg_value = output.get("nextdenovo_run_cfg_path")
+    if not run_cfg_value:
+        return fail_update(state, "NextDenovo run.cfg path is missing")
+    attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    durable_run_cfg = SessionPaths.from_run_dir(absolute_data_dir(state)).artifact_path(
+        "assembly",
+        "attempts",
+        f"{attempt_id:03d}",
+        "outputs",
+        "nextdenovo",
+        "run.cfg",
+    )
+    try:
+        publish_file(Path(str(run_cfg_value)), durable_run_cfg)
+    except (FileNotFoundError, FileExistsError, OSError) as exc:
+        return fail_update(state, f"NextDenovo run.cfg could not be published: {exc}")
+
+    collected = collect_method_artifacts(
         state,
         LIFECYCLE,
-        extra_artifacts=[(Path(run_cfg), "assembly.nextdenovo_run_cfg")],
-        bundle_logs={"run_cfg": run_cfg},
+        extra_artifacts=[(durable_run_cfg, "assembly.nextdenovo_run_cfg")],
+        bundle_logs={
+            "primary_log": str(durable_run_cfg),
+            "run_cfg": str(durable_run_cfg),
+        },
         bundle_metadata={key: metadata.get(key) for key in ("read_profile", "genome_size", "threads", "read_cutoff")},
     )
+    stage_outputs = dict(collected.get("stage_outputs") or {})
+    assembly = dict(stage_outputs.get("assembly") or {})
+    if assembly:
+        assembly["nextdenovo_run_cfg_path"] = str(durable_run_cfg)
+        stage_outputs["assembly"] = assembly
+        collected["stage_outputs"] = stage_outputs
+    return collected
 
 
 def _fofn(state: TopLevelState, input_ref: Any, input_type: Any) -> tuple[Path | None, list[Path], str | None]:
@@ -224,7 +279,11 @@ def _fofn(state: TopLevelState, input_ref: Any, input_type: Any) -> tuple[Path |
         paths = [Path(line.strip()) for line in fofn.read_text(encoding="utf-8").splitlines() if line.strip()]
     elif input_type == "clean_long_reads":
         paths = [Path(str(input_ref))]
-        fofn = absolute_data_dir(state) / "work" / "assembly" / state["session_id"] / "nextdenovo" / "input.fofn"
+        session_paths = SessionPaths.from_run_dir(absolute_data_dir(state))
+        attempt_id = int(assembly_output(state).get("current_parameter_attempt_id") or 0)
+        fofn = session_paths.work_path(
+            "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
+        )
         fofn.parent.mkdir(parents=True, exist_ok=True)
         fofn.write_text(str(paths[0]) + "\n", encoding="utf-8")
     else:
@@ -262,12 +321,16 @@ def _load_catalog():
         return None, f"NextDenovo parameter catalog is not usable: {exc}"
 
 
-def _recommended_params(output: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    attempt, error = current_parameter_attempt(output, method_id=NEXTDENOVO_METHOD, label="NextDenovo")
-    if error:
-        return {}, error
-    assert attempt is not None
-    return dict(attempt.execution_params), None
+def _recommended_params(
+    state: TopLevelState,
+    output: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    return current_recommended_parameters(
+        state,
+        output,
+        method_id=NEXTDENOVO_METHOD,
+        label="NextDenovo",
+    )
 
 
 def _merge_catalog_sources(parameter_sources: dict[str, dict[str, Any]], catalog) -> dict[str, Any]:

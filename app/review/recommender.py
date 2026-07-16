@@ -14,6 +14,7 @@ from app.llm.prompts import PROMPT_ROOT, load_prompt_bundle, render_prompt_messa
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import review_prompt_bundle
 from app.schemas.artifacts import ArtifactMeta
+from app.storage.paths import SessionPaths
 
 
 class RecommendationError(ValueError):
@@ -190,7 +191,7 @@ def _write_recommendation_artifact(
     data_dir: str | Path,
     payload: dict[str, Any],
 ) -> str:
-    out_dir = Path(data_dir) / "artifacts" / stage / session_id
+    out_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir(stage)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{stage}_review_recommendation.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

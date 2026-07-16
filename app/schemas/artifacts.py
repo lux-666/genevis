@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from hashlib import sha256
-from pathlib import Path
-from typing import Annotated, Any, Literal
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     field_validator,
-    model_serializer,
     model_validator,
 )
+
+from app.storage.integrity import sha256_file
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
@@ -28,13 +27,20 @@ GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 ASSEMBLY_PARAMETER_INPUT_PROFILE = "assembly.parameter.input_profile"
-ASSEMBLY_PARAMETER_PROMPT_PAYLOAD = "assembly.parameter.prompt_payload"
+ASSEMBLY_PARAMETER_MODEL_REQUEST = "assembly.parameter.model_request"
+ASSEMBLY_PARAMETER_MODEL_RESPONSE = "assembly.parameter.model_response"
+ASSEMBLY_PARAMETER_BASIS = "assembly.parameter.basis_snapshot"
+ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST = "assembly.parameter.recommendation_manifest"
 ASSEMBLY_PARAMETER_RETRIEVAL_QUERY = "assembly.parameter.retrieval_query"
 ASSEMBLY_PARAMETER_RETRIEVAL_TRACE = "assembly.parameter.retrieval_trace"
 ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
-ASSEMBLY_PARAMETER_LLM_RESPONSE = "assembly.parameter.llm_response"
 ASSEMBLY_PARAMETER_VALIDATION = "assembly.parameter.validation"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
+ASSEMBLY_PARAMETER_FROZEN_PARAMETERS = "assembly.parameter.frozen_parameters"
+ASSEMBLY_PARAMETER_FROZEN_ATTEMPT = "assembly.parameter.frozen_attempt"
+ASSEMBLY_PARAMETER_EXECUTION = "assembly.parameter.execution"
+ASSEMBLY_PARAMETER_REVIEW = "assembly.parameter.review"
+ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST = "assembly.parameter.attempt_manifest"
 ASSEMBLY_PARAMETER_REVIEW_FAILURE = "assembly.parameter.review_failure"
 ASSEMBLY_PARAMETER_RECOMMENDATION = "assembly.parameter.recommendation"
 ASSEMBLY_PARAMETER_APPROVAL_DECISION = "assembly.parameter_approval.decision"
@@ -45,20 +51,27 @@ ASSEMBLY_REVIEW_QUAST_SUMMARY = "assembly_review.quast_summary"
 ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY = "assembly_review.busco_short_summary"
 ASSEMBLY_REVIEW_BUSCO_SUMMARY = "assembly_review.busco_summary"
 ASSEMBLY_REVIEW_ACTION = "assembly_review.action"
-ASSEMBLY_REVIEW_REPORT = "assembly_review.report"
-ASSEMBLY_REVIEW_REPORT_DATA = "assembly_review.report_data"
+ASSEMBLY_REVIEW_PACKET = "assembly_review.review_packet"
 ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK = "assembly_review.related_species_evidence_pack"
 ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK = "assembly_review.related_species_statistics_pack"
 ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK = "assembly_review.comparative_notebook"
 ASSEMBLY_CANDIDATE_COMPARISON = "assembly_review.candidate_comparison"
-ASSEMBLY_CANDIDATE_COMPARISON_REPORT = "assembly_review.candidate_comparison_report"
-HIC_SCAFFOLD_PLAN = "hic_scaffolding.plan"
 HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
 HIC_REVIEW_BUNDLE = "hic_scaffolding.review_bundle"
 HIC_QC_REPORT = "hic_scaffolding.qc_report"
 HIC_CONTACT_MAP = "hic_scaffolding.contact_map"
 HIC_ASSEMBLY_FILE = "hic_scaffolding.assembly"
 HIC_HTML_REPORT = "hic_scaffolding.html_report"
+HIC_PARAMETER_INPUT_PROFILE = "hic_scaffolding.parameter.input_profile"
+HIC_PARAMETER_BASIS = "hic_scaffolding.parameter.basis_snapshot"
+HIC_PARAMETER_MODEL_REQUEST = "hic_scaffolding.parameter.model_request"
+HIC_PARAMETER_MODEL_RESPONSE = "hic_scaffolding.parameter.model_response"
+HIC_PARAMETER_RECOMMENDATION = "hic_scaffolding.parameter.recommendation"
+HIC_PARAMETER_VALIDATION = "hic_scaffolding.parameter.validation"
+HIC_PARAMETER_RECOMMENDATION_MANIFEST = "hic_scaffolding.parameter.recommendation_manifest"
+HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
+HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
+HIC_PARAMETER_EXECUTION = "hic_scaffolding.parameter.execution"
 T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
 T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
 T2T_TELOMERIC_READS = "t2t.telomeric_reads"
@@ -74,13 +87,8 @@ REPEAT_SOFTMASKED_GENOME = "repeat_annotation.softmasked_genome"
 REPEAT_HARDMASKED_GENOME = "repeat_annotation.hardmasked_genome"
 
 
-def file_sha256(path: Path) -> str:
-    """Return a file SHA256 digest."""
-    digest = sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+# One exact-byte implementation is shared by producers and the index boundary.
+file_sha256 = sha256_file
 
 
 class ArtifactMeta(BaseModel):
@@ -110,7 +118,7 @@ class ArtifactMeta(BaseModel):
         return cls(
             artifact_id=f"{stage}:{method_name}:{path.name}",
             file_path=path,
-            file_hash=file_sha256(path),
+            file_hash=sha256_file(path),
             file_size_bytes=path.stat().st_size,
             artifact_type=artifact_type,
             stage=stage,
@@ -120,126 +128,134 @@ class ArtifactMeta(BaseModel):
 
 
 class ArtifactRef(BaseModel):
-    """Path ref plus integrity hash for a runtime artifact."""
+    """Portable, index-backed reference to one immutable run artifact."""
 
-    path_ref: str
-    sha256: str
-    artifact_type: str
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[2] = 2
+    artifact_id: str = Field(min_length=1)
+    path_ref: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+    artifact_type: str = Field(min_length=1)
+
+    @field_validator("path_ref")
+    @classmethod
+    def validate_path_ref(cls, value: str) -> str:
+        """Require a session-root-relative, POSIX artifact reference."""
+
+        if value.startswith("data/") or value.startswith("/"):
+            raise ValueError("artifact path_ref must be relative to the run root")
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("artifact path_ref must not escape the run root")
+        return value
+
+    @classmethod
+    def from_meta(cls, artifact: ArtifactMeta, *, path_ref: str) -> "ArtifactRef":
+        """Build the exact ref returned by the v2 artifact-index boundary."""
+
+        return cls(
+            artifact_id=artifact.artifact_id,
+            path_ref=path_ref,
+            sha256=artifact.file_hash,
+            size_bytes=artifact.file_size_bytes,
+            artifact_type=artifact.artifact_type,
+        )
 
 
 ParameterAttemptStatus = Literal[
     "recommended",
-    "validation_failed",
-    "parameters_recommended",
     "frozen",
     "execution_failed",
     "executed",
+    "review_failed",
+    "reviewed",
 ]
 ParameterAttemptTask = Literal[
     "recommend_initial",
     "retry_after_execution_failure",
     "retry_after_review_failure",
 ]
-ParameterFailureClass = Annotated[str, Field(min_length=1)]
+ParameterRecommendationStatus = Literal[
+    "validation_failed",
+    "pending_approval",
+    "approved",
+    "rejected",
+    "retry_stopped",
+    "expert_review",
+]
+
+
+class ParameterRecommendationCursor(BaseModel):
+    """Bounded checkpoint cursor for one immutable recommendation manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    recommendation_id: int = Field(ge=0)
+    method_id: str = Field(min_length=1)
+    task: ParameterAttemptTask
+    status: ParameterRecommendationStatus
+    previous_attempt_id: int | None = Field(default=None, ge=0)
+    manifest_ref: ArtifactRef
+    recommendation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_request_id: str | None = None
+    review_request_ref: ArtifactRef | None = None
+    previous_attempt_seal_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_manifest_hash(self) -> "ParameterRecommendationCursor":
+        if self.recommendation_hash != self.manifest_ref.sha256:
+            raise ValueError("recommendation_hash must match manifest_ref.sha256")
+        if self.review_request_ref is None and self.review_request_id is not None:
+            raise ValueError("review_request_id requires review_request_ref")
+        return self
 
 
 class ParameterAttempt(BaseModel):
-    """Compact replay record for one assembly parameter recommendation attempt."""
+    """Compact execution-attempt cursor; domain facts live in referenced artifacts."""
 
-    # Attempt artifacts are durable and can outlive the code that produced them.
-    # Preserve fields added by newer producers instead of silently dropping them
-    # during validation and sealing on an older runtime.
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] | None = None
+    schema_version: Literal[2] = 2
     attempt_id: int = Field(ge=0)
     method_id: str = Field(min_length=1)
     status: ParameterAttemptStatus
-    task: ParameterAttemptTask | None = None
-    input_profile_ref: ArtifactRef
-    prompt_payload_ref: ArtifactRef
-    retrieval_backend: str | None = None
-    retrieval_query_id: str | None = None
-    retrieval_candidate_case_ids: list[str] = Field(default_factory=list)
-    retrieval_eligible_case_count: int | None = Field(default=None, ge=0)
-    retrieval_warning: str | None = None
-    llm_response_ref: ArtifactRef | None = None
-    validation_ref: ArtifactRef | None = None
-    command_ref: ArtifactRef | None = None
-    review_failure_ref: ArtifactRef | None = None
-    catalog_ref: str | None = None
-    catalog_snapshot: dict[str, Any] | None = None
-    knowledge_pack_ref: str | None = None
-    selected_case_ids: list[str] = Field(default_factory=list)
-    recommended_params: dict[str, Any] = Field(default_factory=dict)
-    baseline_params: dict[str, Any] = Field(default_factory=dict)
-    effective_params: dict[str, Any] = Field(default_factory=dict)
-    execution_params: dict[str, Any] = Field(default_factory=dict)
-    parameter_reasoning: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    sample_diagnosis: dict[str, Any] = Field(default_factory=dict)
-    proposed_parameter_changes: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    recommendation_summary: str | None = None
-    parameter_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    rendered_parameters: dict[str, Any] = Field(default_factory=dict)
-    argv: list[str] = Field(default_factory=list)
-    validation: dict[str, Any] = Field(default_factory=dict)
-    reasoning: str | None = None
+    task: ParameterAttemptTask
     previous_attempt_id: int | None = Field(default=None, ge=0)
-    failure_signature: dict[str, Any] | None = None
-    execution_result: dict[str, Any] | None = None
-    failure_class: ParameterFailureClass | None = None
-    failure_log_tail: str | None = None
-    stderr_tail: str | None = None
-    stdout_tail: str | None = None
-    review_failure: dict[str, Any] | None = None
-    review_outcome: dict[str, Any] | None = None
-    attempt_kind: Literal["initial", "retry"] = "initial"
+    recommendation_manifest_ref: ArtifactRef
+    approval_decision_ref: ArtifactRef
+    frozen_parameters_ref: ArtifactRef | None = None
+    command_ref: ArtifactRef | None = None
+    execution_ref: ArtifactRef | None = None
+    review_ref: ArtifactRef | None = None
+    attempt_manifest_ref: ArtifactRef | None = None
     recommendation_contract: Literal["parameter_patch_v2", "literature_patch_v1"] = "parameter_patch_v2"
-    retry_origin: Literal["assembly_execution", "assembly_review"] | None = None
-    inherited_initial_attempt_id: int | None = Field(default=None, ge=0)
-    inherited_initial_snapshot_ref: str | None = None
-    inherited_profile_ref: ArtifactRef | None = None
-    previous_attempt_seal_hash: str | None = None
-    parameter_recommendation_ref: ArtifactRef | None = None
-    parameter_recommendation_hash: str | None = None
-    parameter_approval_decision_ref: ArtifactRef | None = None
-    parameter_approval_recommendation_hash: str | None = None
+    previous_attempt_seal_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     sealed_at: str | None = None
-    seal_hash: str | None = None
-
-    @model_serializer(mode="wrap")
-    def serialize_parameter_attempt(
-        self,
-        handler: SerializerFunctionWrapHandler,
-    ) -> dict[str, Any]:
-        """Keep unversioned legacy records unversioned during round trips."""
-
-        data: dict[str, Any] = handler(self)
-        if self.schema_version is None:
-            data.pop("schema_version", None)
-        return data
+    seal_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_attempt_kind_for_task(self) -> "ParameterAttempt":
-        """Reject explicit task/lifecycle contradictions without breaking legacy records."""
+        """Keep the immutable attempt chain consistent with its task."""
 
-        if self.task is None:
-            return self
-
-        expected_kind = "initial" if self.task == "recommend_initial" else "retry"
-        if "attempt_kind" in self.model_fields_set and self.attempt_kind != expected_kind:
-            raise ValueError(
-                f"task {self.task!r} requires attempt_kind {expected_kind!r}"
-            )
-
-        expected_origin = {
-            "retry_after_execution_failure": "assembly_execution",
-            "retry_after_review_failure": "assembly_review",
-        }.get(self.task)
-        if "retry_origin" in self.model_fields_set and self.retry_origin != expected_origin:
-            raise ValueError(
-                f"task {self.task!r} requires retry_origin {expected_origin!r}"
-            )
+        if self.task == "recommend_initial":
+            if self.attempt_id != 0 or self.previous_attempt_id is not None:
+                raise ValueError("initial parameter attempt must be attempt 0 without a predecessor")
+            if self.previous_attempt_seal_hash is not None:
+                raise ValueError("initial parameter attempt cannot bind a previous seal")
+        else:
+            if self.attempt_id == 0 or self.previous_attempt_id != self.attempt_id - 1:
+                raise ValueError("retry parameter attempt must bind the immediately preceding attempt")
+            if self.previous_attempt_seal_hash is None:
+                raise ValueError("retry parameter attempt requires previous_attempt_seal_hash")
         return self
 
 
@@ -248,6 +264,7 @@ class AssemblyParameterLoopState(BaseModel):
 
     current_parameter_attempt_id: int = 0
     parameter_attempts: list[ParameterAttempt] = Field(default_factory=list)
+    current_parameter_recommendation: ParameterRecommendationCursor | None = None
     retry_counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -362,27 +379,13 @@ class AssemblyReviewActionArtifact(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class HiCSkipRecord(BaseModel):
-    """Explicit non-blocking Hi-C skip record."""
-
-    session_id: str
-    mode: Literal["skipped_no_hic", "skipped_not_chromosome_level", "human_review_skip"]
-    skip_reason: Literal["no_hic_reads", "not_chromosome_level_requested", "human_review_skip"]
-    pre_hic_assembly_ref: str
-    final_assembly_for_annotation: str
-    hic_read_refs: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class HiCScaffoldDecisionArtifact(BaseModel):
-    """Human Hi-C scaffolding decision recorded without running tools."""
+    """Human adoption decision for the completed AutoHiC result."""
 
     session_id: str
     stage: Literal["hic_scaffolding"] = "hic_scaffolding"
-    decision: Literal["select_method", "accept_candidate", "skip", "stop_human_review"]
+    decision: Literal["accept_candidate", "keep_prior_assembly", "stop_human_review"]
     method_name: str | None = None
-    scaffold_plan_ref: str | None = None
     pre_hic_assembly_ref: str
     final_assembly_for_annotation: str
     hic_read_refs: list[str] = Field(default_factory=list)
@@ -415,21 +418,6 @@ class T2TFinishingBundle(BaseModel):
     mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
     patched_assembly_ref: str | None = None
     artifact_refs: dict[str, str] = Field(default_factory=dict)
-    notes: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class HiCScaffoldPlan(BaseModel):
-    """Planned Hi-C scaffolding bundle without running tools."""
-
-    session_id: str
-    status: Literal["planned"]
-    pre_hic_assembly_ref: str
-    fallback_assembly_ref: str
-    hic_read_refs: list[str] = Field(default_factory=list)
-    candidate_methods: list[str] = Field(default_factory=list)
-    expected_outputs: dict[str, str] = Field(default_factory=dict)
-    review_required: bool = True
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

@@ -21,9 +21,9 @@ from app.entrypoints.review_interactive import (
     run_interactive_review,
     _prompt_choice,
 )
-from app.execution.artifacts import append_artifact_records
 from app.review.base import ResumeReviewRequest
-from app.schemas.artifacts import ArtifactMeta
+from app.review.persistence import persist_review_request
+from tests.data_v2 import v2_run_dir
 
 
 def _write_fasta(tmp: str, name: str = "draft.fasta") -> str:
@@ -34,16 +34,22 @@ def _write_fasta(tmp: str, name: str = "draft.fasta") -> str:
 
 def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
     """Create a minimal blocked assembly_review session. Returns (session_id, data_dir)."""
-    data_dir = Path(tmp) / "data"
     session_id = "review-test-1"
-    review_dir = data_dir / "artifacts" / "assembly_review" / session_id
-    review_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = review_dir / "assembly_review_request.json"
+    data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+    draft_ref = "work/assembly/flye/draft.fasta"
+    draft_path = data_dir / draft_ref
+    draft_path.parent.mkdir(parents=True, exist_ok=True)
+    draft_path.write_text(">ctg1\nACGT\n", encoding="utf-8")
     payload = {
         "stage": "assembly_review",
+        "gate_id": "assembly_review",
         "reason": "assembly_review_human_decision_required",
         "candidates": [
-            {"candidate_id": "flye", "method_name": "assembly.candidate.flye", "final_assembly_ref": str(review_dir / "draft.fasta")},
+            {
+                "candidate_id": "flye",
+                "method_name": "assembly.candidate.flye",
+                "final_assembly_ref": draft_ref,
+            },
         ],
         "signals": [],
         "decisions_allowed": ["accept", "rerun", "stop_human_review"],
@@ -51,65 +57,62 @@ def _assembly_blocked_session(tmp: str) -> tuple[str, str]:
         "report_refs": {},
         "candidate_comparison_context": {},
     }
-    request_ref.write_text(json.dumps(payload), encoding="utf-8")
-    (review_dir / "draft.fasta").write_text(">ctg1\nACGT\n", encoding="utf-8")
-
-    append_artifact_records(
-        data_dir,
-        session_id,
-        [
-            ArtifactMeta.from_file(
-                request_ref,
-                stage="assembly_review",
-                method_name="assembly_review.contract",
-                artifact_type="assembly_review.request",
-            )
-        ],
+    state = {"session_id": session_id, "data_dir": str(data_dir)}
+    persisted = persist_review_request(
+        state,
+        stage="assembly_review",
+        gate_id="assembly_review",
+        reason=payload["reason"],
+        payload=payload,
+        method_name="assembly_review.contract",
+        artifact_type="assembly_review.request",
     )
     ledger = Ledger(data_dir)
-    ledger.create_session(session_id, "manifest.yaml")
+    ledger.create_session(session_id, "control/manifest.yaml")
     ledger.record_review_requested(
         session_id, "assembly_review",
         reason=payload["reason"],
         candidates=payload["candidates"],
+        review_request_artifact_ref=persisted.request_ref.model_dump(mode="json"),
+        review_request_id=persisted.review_request_id,
     )
     return session_id, str(data_dir)
 
 
 def _hic_blocked_session(tmp: str) -> tuple[str, str]:
     """Create a minimal blocked hic_scaffolding session. Returns (session_id, data_dir)."""
-    data_dir = Path(tmp) / "data"
     session_id = "review-test-hic"
-    hic_dir = data_dir / "artifacts" / "hic_scaffolding" / session_id
-    hic_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = hic_dir / "hic_scaffolding_review_request.json"
+    data_dir = v2_run_dir(Path(tmp) / "data", session_id)
     payload = {
         "stage": "hic_scaffolding",
-        "reason": "hic_scaffolding_human_decision_required",
+        "gate_id": "hic_scaffolding",
+        "reason": "autohic_adoption_review_required",
         "candidates": [{"method_name": "hic_scaffolding.candidate.autohic"}],
-        "decisions_allowed": ["select_method", "skip", "stop_human_review"],
+        "decisions_allowed": [
+            "accept_candidate",
+            "keep_prior_assembly",
+            "stop_human_review",
+        ],
         "notes": ["Hi-C reads available"],
     }
-    request_ref.write_text(json.dumps(payload), encoding="utf-8")
-
-    append_artifact_records(
-        data_dir,
-        session_id,
-        [
-            ArtifactMeta.from_file(
-                request_ref,
-                stage="hic_scaffolding",
-                method_name="hic_scaffolding.contract",
-                artifact_type="hic_scaffolding.request",
-            )
-        ],
+    state = {"session_id": session_id, "data_dir": str(data_dir)}
+    persisted = persist_review_request(
+        state,
+        stage="hic_scaffolding",
+        gate_id="hic_scaffolding",
+        reason=payload["reason"],
+        payload=payload,
+        method_name="hic_scaffolding.contract",
+        artifact_type="hic_scaffolding.review_request",
     )
     ledger = Ledger(data_dir)
-    ledger.create_session(session_id, "manifest.yaml")
+    ledger.create_session(session_id, "control/manifest.yaml")
     ledger.record_review_requested(
         session_id, "hic_scaffolding",
         reason=payload["reason"],
         candidates=payload["candidates"],
+        review_request_artifact_ref=persisted.request_ref.model_dump(mode="json"),
+        review_request_id=persisted.review_request_id,
     )
     return session_id, str(data_dir)
 
@@ -206,7 +209,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
     def test_accept_filters_missing_candidates_and_shows_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             flye = _write_fasta(tmp, "flye.fasta")
-            report = str(Path(tmp) / "assembly_candidate_comparison_report.md")
+            report = str(Path(tmp) / "assembly_review.md")
             metric = str(Path(tmp) / "quast_summary.json")
             requirements = {
                 "stage": "assembly_review",
@@ -217,7 +220,7 @@ class PromptAssemblyReviewTests(unittest.TestCase):
                     "nextdenovo": str(Path(tmp) / "missing.fasta"),
                 },
                 "candidate_report_refs": {"flye": [metric]},
-                "report_refs": {"assembly_candidate_comparison_report": report},
+                "report_refs": {"assembly_review_report": report},
             }
             inputs = iter(["1", ""])
             out = io.StringIO()
@@ -351,7 +354,11 @@ class PromptHicScaffoldingTests(unittest.TestCase):
     def test_accept_candidate_prompt_uses_operator_labels(self):
         requirements = {
             "stage": "hic_scaffolding",
-            "decisions_allowed": ["accept_candidate", "skip", "stop_human_review"],
+            "decisions_allowed": [
+                "accept_candidate",
+                "keep_prior_assembly",
+                "stop_human_review",
+            ],
             "executed_candidate_methods": ["hic_scaffolding.candidate.autohic"],
         }
         inputs = iter(["1", ""])
@@ -373,40 +380,37 @@ class PromptHicScaffoldingTests(unittest.TestCase):
         self.assertIn("accept scaffold result [accept_candidate]", rendered)
         self.assertIn("operator note (optional, audit only)", rendered)
 
-    def test_select_method_single_auto_selects(self):
+    def test_keep_prior_assembly_needs_no_method_selection(self):
         requirements = {
             "stage": "hic_scaffolding",
-            "decisions_allowed": ["select_method", "skip"],
-            "candidate_methods": ["hic_scaffolding.candidate.autohic"],
+            "decisions_allowed": ["accept_candidate", "keep_prior_assembly"],
         }
-        inputs = iter(["1", ""])
+        inputs = iter(["2", ""])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
             result = prompt_hic_scaffolding_decision(requirements)
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["decision"], "select_method")
-        self.assertEqual(result["method_name"], "hic_scaffolding.candidate.autohic")
+        self.assertEqual(result["decision"], "keep_prior_assembly")
+        self.assertNotIn("method_name", result)
 
-    def test_skip_decision(self):
+    def test_keep_prior_assembly_decision(self):
         requirements = {
             "stage": "hic_scaffolding",
-            "decisions_allowed": ["select_method", "skip"],
-            "candidate_methods": ["hic_scaffolding.candidate.autohic"],
+            "decisions_allowed": ["accept_candidate", "keep_prior_assembly"],
         }
         inputs = iter(["2", "no Hi-C data available"])
         with patch("builtins.input", side_effect=lambda _: next(inputs)):
             result = prompt_hic_scaffolding_decision(requirements)
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["decision"], "skip")
-        self.assertIsNone(result["method_name"])
+        self.assertEqual(result["decision"], "keep_prior_assembly")
+        self.assertNotIn("method_name", result)
         self.assertEqual(result["notes"], ["no Hi-C data available"])
 
     def test_cancel_returns_none(self):
         requirements = {
             "stage": "hic_scaffolding",
-            "decisions_allowed": ["select_method", "skip"],
-            "candidate_methods": [],
+            "decisions_allowed": ["accept_candidate", "keep_prior_assembly"],
         }
         with patch("builtins.input", side_effect=KeyboardInterrupt):
             result = prompt_hic_scaffolding_decision(requirements)
@@ -417,26 +421,26 @@ class PromptHicScaffoldingTests(unittest.TestCase):
 class RunInteractiveReviewTests(unittest.TestCase):
     def test_session_not_found_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
-            data_dir.mkdir()
-            code = run_interactive_review("nonexistent", str(data_dir))
+            session_id = "nonexistent"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+            code = run_interactive_review(session_id, str(data_dir))
             self.assertEqual(code, 1)
 
     def test_not_blocked_returns_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "completed-session"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
             ledger = Ledger(data_dir)
-            ledger.create_session(session_id, "manifest.yaml")
+            ledger.create_session(session_id, "control/manifest.yaml")
             code = run_interactive_review(session_id, str(data_dir))
             self.assertEqual(code, 1)
 
     def test_wrong_supervision_state_does_not_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "review-wrong-state"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_text("", encoding="utf-8")
             state = {
                 "session_id": session_id,
@@ -477,10 +481,10 @@ class RunInteractiveReviewTests(unittest.TestCase):
 
     def test_annotation_intake_cancel_does_not_resume_or_write_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "review-cancel-intake"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_text("", encoding="utf-8")
             state = {
                 "session_id": session_id,
@@ -520,19 +524,19 @@ class RunInteractiveReviewTests(unittest.TestCase):
             self.assertEqual(code, 1)
             intake_prompt.assert_called_once()
             resume_mock.assert_not_called()
-            decision_dir = data_dir / "artifacts" / "assembly_review" / session_id
-            self.assertFalse(list(decision_dir.glob("assembly_review_interactive_decision_*.json")) if decision_dir.exists() else [])
+            decision_dir = data_dir / "artifacts" / "reviews"
+            self.assertFalse(list(decision_dir.glob("*/decision.json")) if decision_dir.exists() else [])
             events = Ledger(data_dir).read_events(session_id)
             self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
 
     def test_update_state_failure_does_not_invoke_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "review-update-failure"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_text("", encoding="utf-8")
-            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            Ledger(data_dir).create_session(session_id, "control/manifest.yaml")
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
@@ -559,8 +563,12 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 final_assembly_ref="draft.fasta",
             )
             raw_decision = request.model_dump(mode="json")
+            decision_path = data_dir / "artifacts" / "reviews" / "review_test" / "decision.json"
+            decision_path.parent.mkdir(parents=True, exist_ok=True)
+            decision_path.write_text("{}\n", encoding="utf-8")
             with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
                  patch("app.entrypoints.run.build_graph", return_value=graph), \
+                 patch("app.entrypoints.review_interactive.applied_decision_artifact_path", return_value=decision_path), \
                  patch("app.review.annotation_intake.collect_annotation_intake_selection", return_value=None), \
                  patch("app.control.lifecycle.resume_review_state", return_value={"supervision_state": "running_stage"}):
                 code = run_interactive_review(session_id, str(data_dir))
@@ -571,12 +579,12 @@ class RunInteractiveReviewTests(unittest.TestCase):
 
     def test_annotation_intake_value_error_is_reported_without_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "review-intake-value-error"
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_text("", encoding="utf-8")
-            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            Ledger(data_dir).create_session(session_id, "control/manifest.yaml")
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
@@ -628,52 +636,48 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_dir = (
-                Path(data_dir) / "artifacts" / "assembly_review" / session_id
-            )
-            decisions = list(decision_dir.glob("assembly_review_interactive_decision_*.json"))
+            decision_dir = Path(data_dir) / "work" / "reviews"
+            decisions = list(decision_dir.glob("*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
             decision = json.loads(decisions[0].read_text(encoding="utf-8"))
             self.assertEqual(decision["decision"], "accept")
             self.assertEqual(decision["candidate_id"], "flye")
             self.assertEqual(decision["decided_by"], "human")
 
-    def test_hic_dry_run_skip(self):
+    def test_hic_dry_run_keep_prior(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_id, data_dir = _hic_blocked_session(tmp)
             inputs = iter(["2", "skipping scaffolding"])
             with patch("builtins.input", side_effect=lambda _: next(inputs)):
                 code = run_interactive_review(session_id, data_dir, dry_run=True)
             self.assertEqual(code, 0)
-            decision_dir = (
-                Path(data_dir) / "artifacts" / "hic_scaffolding" / session_id
-            )
-            decisions = list(decision_dir.glob("hic_scaffolding_interactive_decision_*.json"))
+            decision_dir = Path(data_dir) / "work" / "reviews"
+            decisions = list(decision_dir.glob("*/decision.preview.json"))
             self.assertEqual(len(decisions), 1)
             decision = json.loads(decisions[0].read_text(encoding="utf-8"))
-            self.assertEqual(decision["decision"], "skip")
+            self.assertEqual(decision["decision"], "keep_prior_assembly")
             self.assertEqual(decision["stage"], "hic_scaffolding")
 
     def test_collect_gate_decision_uses_checkpoint_blocked_state_before_ledger_inference(self):
         with tempfile.TemporaryDirectory() as tmp:
-            data_dir = Path(tmp) / "data"
             session_id = "inventory-blocked"
-            Ledger(data_dir).create_session(session_id, "manifest.yaml")
+            data_dir = v2_run_dir(Path(tmp) / "data", session_id)
+            Ledger(data_dir).create_session(session_id, "control/manifest.yaml")
             db_path = data_dir / "checkpoints" / "checkpoints.sqlite"
-            db_path.parent.mkdir(parents=True)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             db_path.write_text("", encoding="utf-8")
+            payload = {
+                "stage": "inventory",
+                "gate_id": "inventory_review",
+                "reason": "review_required",
+                "messages": ["raw_long_reads: platform unknown"],
+                "decisions_allowed": ["continue", "stop_human_review"],
+            }
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
                 "supervision_state": "blocked_human",
                 "current_stage": "inventory",
-                "active_interrupt": {
-                    "stage": "inventory",
-                    "gate_id": "inventory_review",
-                    "reason": "review_required",
-                    "messages": ["raw_long_reads: platform unknown"],
-                    "decisions_allowed": ["continue", "stop_human_review"],
-                },
                 "stage_outputs": {
                     "inventory": {
                         "status": "validated",
@@ -683,6 +687,18 @@ class RunInteractiveReviewTests(unittest.TestCase):
                 },
                 "route_trace": [],
             }
+            persisted = persist_review_request(
+                state,
+                stage="inventory",
+                gate_id="inventory_review",
+                reason=payload["reason"],
+                payload=payload,
+            )
+            state["active_interrupt"] = persisted.compact_interrupt(
+                stage="inventory",
+                gate_id="inventory_review",
+                reason=payload["reason"],
+            )
             graph = type(
                 "FakeGraph",
                 (),
@@ -784,8 +800,8 @@ class DecisionBriefTests(unittest.TestCase):
     def test_parameter_approval_brief_renders_diff_failure_and_top5_paper_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            prompt_path = root / "prompt_payload.json"
-            prompt_path.write_text(
+            basis_path = root / "basis_snapshot.json"
+            basis_path.write_text(
                 json.dumps(
                     {
                         "literature_cases": [
@@ -806,14 +822,22 @@ class DecisionBriefTests(unittest.TestCase):
             recommendation_path.write_text(
                 json.dumps(
                     {
-                        "attempt": {
-                            "attempt_id": 1,
-                            "task": "retry_after_execution_failure",
-                            "previous_attempt_id": 0,
-                            "recommended_params": {"purge_level": 2},
-                            "selected_case_ids": [f"paper-{index}" for index in range(5)],
-                            "prompt_payload_ref": {"path_ref": str(prompt_path)},
-                        }
+                        "schema_version": 2,
+                        "method_id": "hifiasm",
+                        "task": "retry_after_execution_failure",
+                        "recommendation": {"params": {"purge_level": 2}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_path = root / "recommendation_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "refs": {
+                            "basis_snapshot_ref": {"path_ref": str(basis_path)},
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -831,11 +855,12 @@ class DecisionBriefTests(unittest.TestCase):
                         "previous_attempt_id": 0,
                         "recommendation_hash": "d" * 64,
                     },
+                    "recommendation_manifest_ref": {"path_ref": str(manifest_path)},
                     "recommendation_ref": {"path_ref": str(recommendation_path)},
                     "parameter_diff": {"purge_level": {"from": 1, "to": 2}},
                     "rationale": "retry after OOM",
                     "failure_facts": {"signals": {"return_code": 137}},
-                    "evidence_refs": {"prompt_payload_ref": str(prompt_path)},
+                    "evidence_refs": {"basis_snapshot_ref": str(basis_path)},
                 },
                 "latest_review_request_artifact": None,
                 "next_action": {},

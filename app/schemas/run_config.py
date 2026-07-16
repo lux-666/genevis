@@ -413,13 +413,11 @@ class AssemblyReviewRunConfig(BaseModel):
 
 
 class AutoHiCRunParameters(BaseModel):
-    """Execution settings for the end-to-end AutoHiC pipeline."""
+    """Pinned runtime settings plus an optional enzyme hint for the LLM."""
 
     model_config = ConfigDict(extra="forbid")
 
     restriction_enzyme: str | None = None
-    error_model_ref: str | None = None
-    chromosome_model_ref: str | None = None
     threads: int = Field(default=10, gt=0)
     number_of_edit_rounds: int = Field(default=2, ge=0, le=10)
     translocation_adjust: bool = True
@@ -439,61 +437,12 @@ class AutoHiCRunParameters(BaseModel):
         return self
 
 
-HiCMethod = Literal["autohic"]
-
-
-class HiCScaffoldingPlanCandidate(BaseModel):
-    """A possibly incomplete Hi-C method candidate produced during planning.
-
-    This is deliberately not accepted by ``RunConfig``.  It records what the
-    TUI still needs to ask before a candidate becomes execution-ready.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    method: HiCMethod
-    autohic_parameters: AutoHiCRunParameters | None = None
-    status: Literal["needs_clarification", "ready_to_execute"] = "needs_clarification"
-    missing_fields: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _derive_readiness(self) -> "HiCScaffoldingPlanCandidate":
-        missing: list[str] = []
-        params = self.autohic_parameters
-        if not params or not params.restriction_enzyme:
-            missing.append("autohic_parameters.restriction_enzyme")
-        if not params or not params.error_model_ref:
-            missing.append("autohic_parameters.error_model_ref")
-        if not params or not params.chromosome_model_ref:
-            missing.append("autohic_parameters.chromosome_model_ref")
-        self.missing_fields = missing
-        self.status = "ready_to_execute" if not missing else "needs_clarification"
-        return self
-
-
 class HiCScaffoldingRunConfig(BaseModel):
-    """Strict, execution-ready Hi-C configuration consumed by ``gene-agent run``."""
+    """AutoHiC runtime configuration; method and enzyme approval are stage-owned."""
 
     model_config = ConfigDict(extra="forbid")
 
-    method: HiCMethod = "autohic"
-    methods: list[HiCMethod] | None = None
     autohic_parameters: AutoHiCRunParameters | None = None
-
-    @model_validator(mode="after")
-    def _require_ready_candidates(self) -> "HiCScaffoldingRunConfig":
-        methods = self.methods or [self.method]
-        for method in methods:
-            candidate = HiCScaffoldingPlanCandidate(
-                method=method,
-                autohic_parameters=self.autohic_parameters,
-            )
-            if candidate.status != "ready_to_execute":
-                raise ValueError(
-                    f"run_config: hic_scaffolding.{method} is not execution-ready; "
-                    f"missing {candidate.missing_fields}"
-                )
-        return self
 
 
 class FunctionAnnotationRunConfig(BaseModel):

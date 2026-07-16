@@ -17,8 +17,9 @@ from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.storage.publish import shell_publish_file
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 from app.schemas.artifacts import (
     REPEAT_ANNOTATION_BUNDLE,
     REPEAT_ANNOTATION_GFF3,
@@ -132,7 +133,7 @@ def plan_repeat_library(state: TopLevelState) -> dict:
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    library_ref = data_dir / "work" / "repeat_annotation" / session_id / "repeat_library.fa"
+    library_ref = stage_work_dir(state, "repeat_annotation", "repeat_library.fa")
     return _update_repeat_output(
         state,
         {
@@ -161,8 +162,8 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
-    work_dir = data_dir / "work" / "repeat_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "repeat_annotation")
+    work_dir = stage_work_dir(state, "repeat_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     expected_outputs = {
@@ -263,9 +264,8 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return _update_repeat_output(state, blocked)
 
-    safe_id = _safe_path_id(session_id)
-    working_dir = data_dir / "work" / "repeat_annotation" / session_id / "repeatmasker" / safe_id
-    artifact_dir = data_dir / "artifacts" / "repeat_annotation" / session_id / "repeatmasker" / safe_id
+    working_dir = stage_work_dir(state, "repeat_annotation", "repeatmasker")
+    artifact_dir = stage_artifacts_dir(state, "repeat_annotation", "repeatmasker")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     work_assembly = working_dir / "assembly.fasta"
@@ -426,7 +426,7 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
     repeat_out = _repeat_output(state)
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "repeat_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bundle = RepeatAnnotationBundle(
@@ -507,21 +507,16 @@ def block_mask_review(state: TopLevelState) -> dict:
         notes=repeat_out.get("notes", []),
         auto_decidable=True,
     )
-    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = out_dir / "mask_review_request.json"
-    request_ref.write_text(
-        json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    artifact = ArtifactMeta.from_file(
-        request_ref,
+    persisted_request = persist_review_request(
+        state,
         stage="repeat_annotation",
+        gate_id="mask_review",
+        reason="mask_review_traceability",
+        payload=payload,
         method_name=REPEAT_CONTRACT_METHOD,
         artifact_type="repeat_annotation.mask_review_request",
-        metadata={"auto_decidable": True},
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    request_ref = persisted_request.request_ref
 
     review_policy = repeat_out.get("review_policy") or {"mode": "auto"}
     outcome = evaluate("repeat_annotation", payload, review_policy)
@@ -532,7 +527,7 @@ def block_mask_review(state: TopLevelState) -> dict:
         "repeat_annotation",
         reason="mask_review_traceability",
         candidates=payload.candidates,
-        review_request_artifact_ref=str(request_ref),
+        review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=True,
         policy_mode=outcome.mode,
         pending_human_confirmation=pending_confirmation,
@@ -545,7 +540,7 @@ def block_mask_review(state: TopLevelState) -> dict:
                 "stage": "repeat_annotation",
                 "gate_id": "mask_review",
                 "max_blocked_seconds": outcome.max_blocked_seconds,
-                "review_request_artifact_ref": str(request_ref),
+                "review_request_artifact_ref": request_ref.model_dump(mode="json"),
                 "policy_mode": outcome.mode,
             },
         )
@@ -555,9 +550,11 @@ def block_mask_review(state: TopLevelState) -> dict:
             session_id=session_id,
             stage="repeat_annotation",
             gate_id="mask_review",
+            review_request_id=persisted_request.review_request_id,
+            review_request_hash=persisted_request.request_hash,
             decision="accept",
             decided_by="auto_rule",
-            rationale_artifact_ref=str(request_ref),
+            rationale_artifact_ref=request_ref.path_ref,
         )
         return apply_mask_review_decision(state, auto_request)
 
@@ -565,7 +562,7 @@ def block_mask_review(state: TopLevelState) -> dict:
     outputs["repeat_annotation"] = {
         **repeat_out,
         "status": "blocked_human",
-        "review_request_artifact_ref": str(request_ref),
+        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
         "review_policy_outcome": outcome.model_dump(mode="json"),
         "auto_decidable": True,
         "pending_human_confirmation": pending_confirmation,
@@ -574,22 +571,11 @@ def block_mask_review(state: TopLevelState) -> dict:
         "current_stage": "repeat_annotation",
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
-        "active_interrupt": {
-            "stage": "repeat_annotation",
-            "gate_id": "mask_review",
-            "reason": "mask_review_traceability",
-            "decisions_allowed": payload.decisions_allowed,
-            "auto_decidable": True,
-            "pending_human_confirmation": pending_confirmation,
-            "review_policy": review_policy,
-            "review_request_artifact_ref": str(request_ref),
-            "softmasked_genome_ref": repeat_out.get("softmasked_genome_ref"),
-            "repeat_percentage": repeat_out.get("repeat_percentage"),
-            "repeat_library_source": repeat_out.get("repeat_library_source"),
-            "final_assembly_for_annotation": repeat_out.get("final_assembly_for_annotation"),
-            "notes": repeat_out.get("notes", []),
-            "blocked_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "active_interrupt": persisted_request.compact_interrupt(
+            stage="repeat_annotation",
+            gate_id="mask_review",
+            reason="mask_review_traceability",
+        ),
     }
 
 
@@ -607,9 +593,6 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "repeat_annotation" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     notes = list(repeat_out.get("notes") or [])
     if request.decision == "skip":
         softmasked_genome_ref = repeat_out.get("final_assembly_for_annotation") or softmasked_genome_ref
@@ -628,28 +611,32 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
         "rationale_artifact_ref": request.rationale_artifact_ref,
         "metadata": request.metadata,
     }
-    decision_ref = out_dir / "mask_review_decision.json"
-    decision_ref.write_text(
-        json.dumps(decision_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    artifact = ArtifactMeta.from_file(
-        decision_ref,
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("mask_review decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        data_dir,
+        session_id=session_id,
+        review_request_id=review_request_id,
         stage="repeat_annotation",
+        gate_id="mask_review",
+        decision=decision_payload,
+        request_hash=review_request_hash,
         method_name=REPEAT_CONTRACT_METHOD,
         artifact_type="repeat_annotation.mask_review_decision",
-        metadata={"decision": request.decision},
     )
-    append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_review_decision(
         session_id,
         "repeat_annotation",
         decision=request.decision,
         notes=list(request.notes),
-        artifact_ref=str(artifact.file_path),
+        artifact_ref=decision_ref.model_dump(mode="json"),
         metadata=request.metadata,
         decided_by=request.decided_by,
         rationale_artifact_ref=request.rationale_artifact_ref,
+        review_request_id=review_request_id,
     )
 
     updated_repeat_out = {**repeat_out, "softmasked_genome_ref": softmasked_genome_ref, "notes": notes}
@@ -662,7 +649,7 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
     stage_outputs["repeat_annotation"] = {
         **stage_outputs.get("repeat_annotation", {}),
         "decision": request.decision,
-        "mask_review_decision_ref": str(artifact.file_path),
+        "mask_review_decision_ref": decision_ref.model_dump(mode="json"),
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
     }

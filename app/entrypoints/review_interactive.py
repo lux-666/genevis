@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from app.review.gates import find_review_gate, registered_review_stage_label
-from app.storage.paths import locate_session_data_dir
+from app.storage.paths import SessionPaths, locate_session_data_dir
 
 _MAX_INVALID_PROMPT_ATTEMPTS = 3
 
@@ -59,6 +59,7 @@ DECISION_LABELS = {
     "select_ont": "use ONT route",
     "select_hifi": "use HiFi route",
     "accept_candidate": "accept scaffold result",
+    "keep_prior_assembly": "keep prior contig assembly",
     "select_method": "choose result/method",
     "skip": "skip this stage",
     "stop_human_review": "stop workflow",
@@ -81,6 +82,7 @@ DECISION_HELP = {
     "select_ont": "use the ONT assembly route.",
     "select_hifi": "use the HiFi assembly route.",
     "accept_candidate": "use the reviewed scaffold result and continue to T2T/annotation.",
+    "keep_prior_assembly": "reject the AutoHiC result and continue with the prior contig assembly.",
     "select_method": "choose one available method/result for this gate.",
     "skip": "do not use this stage's result; continue with the previous assembly.",
     "stop_human_review": "stop the workflow here.",
@@ -185,7 +187,7 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
 
     interrupt = (summary.get("latest_review_request") or {}).get("payload", {})
     for key in ("pre_hic_assembly_ref", "final_assembly_for_annotation",
-                "scaffold_plan_ref", "hic_review_bundle_ref",
+                "hic_review_bundle_ref",
                 "chromosome_scaffolded_assembly_candidate_ref", "hic_qc_report_ref"):
         val = interrupt.get(key) or requirements.get(key)
         if val:
@@ -235,6 +237,8 @@ def _render_generic_gate(requirements: dict) -> None:
 
 def prompt_assembly_review_decision(
     requirements: dict[str, Any],
+    *,
+    data_dir: str | None = None,
 ) -> dict[str, Any] | None:
     """Prompt the operator for an assembly_review decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
@@ -255,7 +259,11 @@ def prompt_assembly_review_decision(
     if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence", "rerun"):
         selectable_candidates = list(candidate_ids)
         if decision in {"accept", "pass", "continue_low_confidence"}:
-            selectable_candidates = _materialized_assembly_candidates(candidate_ids, candidate_refs)
+            selectable_candidates = _materialized_assembly_candidates(
+                candidate_ids,
+                candidate_refs,
+                data_dir=data_dir,
+            )
             if len(selectable_candidates) != len(candidate_ids):
                 skipped = [cid for cid in candidate_ids if cid not in selectable_candidates]
                 print("\nunavailable_candidates:")
@@ -265,21 +273,36 @@ def prompt_assembly_review_decision(
             if not selectable_candidates:
                 print("error: no materialized assembly FASTA is available for accept", file=sys.stderr)
                 return None
-            _render_candidate_selection_evidence(requirements, selectable_candidates, candidate_refs)
+            _render_candidate_selection_evidence(
+                requirements,
+                selectable_candidates,
+                candidate_refs,
+                data_dir=data_dir,
+            )
 
         if len(selectable_candidates) == 1:
             candidate_id = selectable_candidates[0]
-            final_assembly_ref = candidate_refs.get(candidate_id)
+            final_assembly_ref = _execution_candidate_ref(
+                candidate_refs.get(candidate_id),
+                data_dir=data_dir,
+            )
             print(f"  using candidate: {candidate_id}")
         elif selectable_candidates:
             candidate_id = _prompt_choice(
                 "candidate",
                 selectable_candidates,
-                _candidate_choice_descriptions(selectable_candidates, candidate_refs),
+                _candidate_choice_descriptions(
+                    selectable_candidates,
+                    candidate_refs,
+                    data_dir=data_dir,
+                ),
             )
             if candidate_id is None:
                 return None
-            final_assembly_ref = candidate_refs.get(candidate_id)
+            final_assembly_ref = _execution_candidate_ref(
+                candidate_refs.get(candidate_id),
+                data_dir=data_dir,
+            )
         else:
             try:
                 candidate_id = input("candidate_id: ").strip()
@@ -325,18 +348,35 @@ def prompt_assembly_review_decision(
     return result
 
 
-def _materialized_assembly_candidates(candidate_ids: list[str], candidate_refs: dict[str, Any]) -> list[str]:
+def _materialized_assembly_candidates(
+    candidate_ids: list[str],
+    candidate_refs: dict[str, Any],
+    *,
+    data_dir: str | None = None,
+) -> list[str]:
     return [
         cid
         for cid in candidate_ids
-        if _looks_like_existing_fasta(candidate_refs.get(cid))
+        if _looks_like_existing_fasta(candidate_refs.get(cid), data_dir=data_dir)
     ]
 
 
-def _looks_like_existing_fasta(path: Any) -> bool:
+def _execution_candidate_ref(path: Any, *, data_dir: str | None) -> str | None:
+    if not path:
+        return None
+    ref = Path(str(path))
+    if ref.is_absolute() or data_dir is None:
+        return str(ref)
+    return str(SessionPaths.from_run_dir(data_dir).resolve_ref(ref.as_posix()))
+
+
+def _looks_like_existing_fasta(path: Any, *, data_dir: str | None = None) -> bool:
     if not path:
         return False
-    ref = Path(str(path))
+    resolved = _execution_candidate_ref(path, data_dir=data_dir)
+    if not resolved:
+        return False
+    ref = Path(resolved)
     if not ref.is_file():
         return False
     try:
@@ -354,24 +394,39 @@ def _render_candidate_selection_evidence(
     requirements: dict[str, Any],
     candidate_ids: list[str],
     candidate_refs: dict[str, Any],
+    *,
+    data_dir: str | None = None,
 ) -> None:
     if not candidate_ids:
         return
     print("\ncandidate_evidence:")
     for cid in candidate_ids:
         ref = candidate_refs.get(cid, "")
-        marker = "FASTA ok" if _looks_like_existing_fasta(ref) else "MISSING/invalid FASTA"
+        marker = (
+            "FASTA ok"
+            if _looks_like_existing_fasta(ref, data_dir=data_dir)
+            else "MISSING/invalid FASTA"
+        )
         print(f"  [{cid}] {marker}")
         if ref:
             print(f"    assembly: {ref}")
         _print_candidate_core_reports(requirements, cid, indent="    ")
 
 
-def _candidate_choice_descriptions(candidate_ids: list[str], candidate_refs: dict[str, Any]) -> dict[str, str]:
+def _candidate_choice_descriptions(
+    candidate_ids: list[str],
+    candidate_refs: dict[str, Any],
+    *,
+    data_dir: str | None = None,
+) -> dict[str, str]:
     descriptions: dict[str, str] = {}
     for cid in candidate_ids:
         ref = candidate_refs.get(cid, "")
-        marker = "FASTA ok" if _looks_like_existing_fasta(ref) else "MISSING/invalid FASTA"
+        marker = (
+            "FASTA ok"
+            if _looks_like_existing_fasta(ref, data_dir=data_dir)
+            else "MISSING/invalid FASTA"
+        )
         descriptions[cid] = f"{marker}; {ref}"
     return descriptions
 
@@ -395,17 +450,16 @@ def _candidate_core_report_refs(requirements: dict[str, Any], candidate_id: str)
     report_refs = requirements.get("report_refs") or {}
     if isinstance(report_refs, dict):
         for key in (
-            "assembly_candidate_comparison_report",
             "assembly_review_report",
             "candidate_comparison",
-            "assembly_review_report_data",
+            "review_packet",
         ):
             if report_refs.get(key):
                 refs.append((key, str(report_refs[key])))
 
     comparison = requirements.get("candidate_comparison_context") or {}
     if isinstance(comparison, dict):
-        for key in ("assembly_candidate_comparison_report_ref", "candidate_comparison_ref"):
+        for key in ("candidate_comparison_ref",):
             if comparison.get(key):
                 refs.append((key, str(comparison[key])))
 
@@ -432,37 +486,15 @@ def prompt_hic_scaffolding_decision(
 ) -> dict[str, Any] | None:
     """Prompt the operator for a hic_scaffolding decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
-    methods = requirements.get("candidate_methods") or []
-    executed = requirements.get("executed_candidate_methods") or []
-
     decision = _prompt_choice("decision", decisions, DECISION_HELP)
     if decision is None:
         return None
-
-    method_name = None
-    if decision in {"select_method", "accept_candidate"}:
-        choices = executed if decision == "accept_candidate" else methods
-        if len(choices) == 1:
-            method_name = choices[0]
-            print(f"  using method: {method_name}")
-        elif choices:
-            method_name = _prompt_choice("method", choices)
-            if method_name is None:
-                return None
-        else:
-            try:
-                method_name = input("method_name: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return None
-            if not method_name:
-                return None
 
     notes_raw = _prompt_notes()
 
     return {
         "stage": "hic_scaffolding",
         "decision": decision,
-        "method_name": method_name,
         "notes": [notes_raw] if notes_raw else ["interactive review"],
         "decided_by": "human",
     }
@@ -737,7 +769,11 @@ def build_decision_brief(
         brief["candidates"] = []
         brief["evidence"] = {}
     elif stage == "assembly_review":
-        brief["candidates"] = _brief_assembly_candidates(requirements, request_payload)
+        brief["candidates"] = _brief_assembly_candidates(
+            requirements,
+            request_payload,
+            data_dir=data_dir,
+        )
         brief["evidence"] = _brief_assembly_evidence(requirements, request_payload, data_dir, summary)
     elif stage == "hic_scaffolding":
         brief["candidates"] = _brief_hic_candidates(requirements, request_payload)
@@ -876,29 +912,40 @@ def _brief_parameter_approval(
 
     source = {**(request_payload or {}), **requirements}
     proposal = dict(source.get("resume_metadata") or {})
-    for key in ("recommendation_ref", "parameter_diff", "rationale", "failure_facts", "evidence_refs"):
+    for key in (
+        "recommendation_manifest_ref",
+        "recommendation_ref",
+        "parameter_diff",
+        "rationale",
+        "failure_facts",
+        "evidence_refs",
+    ):
         if source.get(key) is not None:
             proposal[key] = source.get(key)
 
     recommendation = _load_ref_payload(source.get("recommendation_ref"), data_dir)
-    attempt = recommendation.get("attempt") if isinstance(recommendation, dict) else None
-    if isinstance(attempt, dict):
-        proposal.setdefault("attempt_id", attempt.get("attempt_id"))
-        proposal.setdefault("task", attempt.get("task"))
-        proposal.setdefault("previous_attempt_id", attempt.get("previous_attempt_id"))
-        proposal["recommended_params"] = dict(attempt.get("recommended_params") or {})
-        proposal["selected_case_ids"] = list(attempt.get("selected_case_ids") or [])
-        prompt_payload = _load_ref_payload(attempt.get("prompt_payload_ref"), data_dir)
-        if isinstance(prompt_payload, dict):
-            proposal["literature_cases"] = [
-                {
-                    "case_id": case.get("case_id"),
-                    "doi": (case.get("source") or {}).get("doi"),
-                    "source_excerpts": list(case.get("source_excerpts") or []),
-                }
-                for case in (prompt_payload.get("literature_cases") or [])[:5]
-                if isinstance(case, dict)
-            ]
+    parsed = recommendation.get("recommendation") if isinstance(recommendation, dict) else None
+    if isinstance(parsed, dict):
+        proposal["recommended_params"] = dict(
+            parsed.get("execution_params") or parsed.get("params") or {}
+        )
+
+    manifest = _load_ref_payload(source.get("recommendation_manifest_ref"), data_dir)
+    manifest_refs = manifest.get("refs") if isinstance(manifest, dict) else None
+    basis = _load_ref_payload(
+        manifest_refs.get("basis_snapshot_ref") if isinstance(manifest_refs, dict) else None,
+        data_dir,
+    )
+    if isinstance(basis, dict):
+        proposal["literature_cases"] = [
+            {
+                "case_id": case.get("case_id"),
+                "doi": (case.get("source") or {}).get("doi"),
+                "source_excerpts": list(case.get("source_excerpts") or []),
+            }
+            for case in (basis.get("literature_cases") or [])[:5]
+            if isinstance(case, dict)
+        ]
     return proposal
 
 
@@ -931,6 +978,8 @@ def _load_ref_payload(ref: Any, data_dir: str) -> dict[str, Any] | None:
 def _brief_assembly_candidates(
     requirements: dict[str, Any],
     request_payload: dict[str, Any] | None,
+    *,
+    data_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
@@ -946,7 +995,11 @@ def _brief_assembly_candidates(
         if pc.get("status"):
             entry["status"] = pc["status"]
         ref_path = Path(entry["ref"]) if entry.get("ref") else None
-        entry["exists"] = _looks_like_existing_fasta(ref_path) if ref_path else False
+        entry["exists"] = (
+            _looks_like_existing_fasta(ref_path, data_dir=data_dir)
+            if ref_path
+            else False
+        )
         reports = _candidate_core_report_refs(requirements, cid)
         if reports:
             entry["reports"] = reports
@@ -1011,7 +1064,7 @@ def _brief_hic_evidence(
 
     interrupt_payload = (summary.get("latest_review_request") or {}).get("payload", {})
     refs: dict[str, str] = {}
-    for key in ("pre_hic_assembly_ref", "scaffold_plan_ref", "hic_review_bundle_ref"):
+    for key in ("pre_hic_assembly_ref", "hic_review_bundle_ref"):
         val = interrupt_payload.get(key) or requirements.get(key)
         if val:
             refs[key] = val
@@ -1069,9 +1122,8 @@ def collect_gate_decision(
     """Inspect a blocked session, prompt operator, validate request schema.
 
     Returns (ResumeReviewRequest, raw_decision_dict) on success,
-    or None on cancel/error. Does NOT persist the decision artifact —
-    callers should call persist_decision_artifact() after full resume
-    validation succeeds.
+    or None on cancel/error. The registered gate applier persists the sole
+    authoritative decision only after full resume validation succeeds.
     """
     from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
@@ -1104,7 +1156,7 @@ def collect_gate_decision(
     render_decision_brief(brief)
 
     if gate.prompt_adapter == "assembly_review":
-        raw_decision = prompt_assembly_review_decision(requirements)
+        raw_decision = prompt_assembly_review_decision(requirements, data_dir=data_dir)
     elif gate.prompt_adapter == "hic_scaffolding":
         raw_decision = prompt_hic_scaffolding_decision(requirements)
     elif gate.prompt_adapter == "t2t":
@@ -1118,6 +1170,11 @@ def collect_gate_decision(
 
     raw_decision["gate_id"] = requirements.get("gate_id") or gate.gate_id
     raw_decision["session_id"] = session_id
+    if requirements.get("review_request_id"):
+        raw_decision["review_request_id"] = requirements["review_request_id"]
+    request_hash = requirements.get("review_request_hash") or requirements.get("request_hash")
+    if request_hash:
+        raw_decision["review_request_hash"] = request_hash
     try:
         request = ResumeReviewRequest.model_validate(raw_decision)
     except Exception as exc:
@@ -1170,16 +1227,43 @@ def persist_decision_artifact(
     session_id: str,
     data_dir: str,
 ) -> Path:
-    """Write decision JSON with a timestamp suffix to avoid overwrites."""
-    decision_dir = Path(data_dir) / "artifacts" / stage / session_id
+    """Write a non-authoritative dry-run preview below the run work tree.
+
+    Applied decisions are persisted exactly once by the registered gate under
+    ``artifacts/reviews/<review_request_id>/decision.json``.  This helper is
+    retained for ``--dry-run`` only and deliberately does not register an
+    artifact or create a second source of truth.
+    """
+
+    review_request_id = raw_decision.get("review_request_id")
+    if not review_request_id:
+        raise ValueError("decision preview requires review_request_id")
+    decision_dir = SessionPaths.from_run_dir(data_dir).work_path(
+        "reviews", review_request_id
+    )
     decision_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-    decision_path = decision_dir / f"{stage}_interactive_decision_{ts}.json"
+    decision_path = decision_dir / "decision.preview.json"
     decision_path.write_text(
         json.dumps(raw_decision, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return decision_path
+
+
+def applied_decision_artifact_path(
+    request: "ResumeReviewRequest",
+    data_dir: str,
+) -> Path:
+    """Return the canonical decision written by a successful gate applier."""
+
+    if not request.review_request_id:
+        raise ValueError("applied decision requires review_request_id")
+    path = SessionPaths.from_run_dir(data_dir).artifact_path(
+        "reviews", request.review_request_id, "decision.json"
+    )
+    if not path.is_file():
+        raise FileNotFoundError(f"review gate did not persist its decision: {path}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1279,7 @@ def run_interactive_review(
 ) -> int:
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
     located = locate_session_data_dir(data_dir, session_id)
-    data_dir = str(located or Path(data_dir).expanduser().resolve(strict=False))
+    data_dir = str(located or SessionPaths(data_dir, session_id).run_dir)
     from app.control.lifecycle import (
         DurableResumeUnavailableError,
         ResumeValidationError,
@@ -1280,7 +1364,7 @@ def run_interactive_review(
         print(f"error: resume rejected: {exc}", file=sys.stderr)
         return 1
 
-    decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+    decision_path = applied_decision_artifact_path(request, data_dir)
     print(f"decision_artifact: {decision_path}")
     if intake is not None:
         print(f"annotation_intake_plan: {intake.artifact_ref}")
@@ -1288,7 +1372,7 @@ def run_interactive_review(
     ledger = Ledger(data_dir)
     resume_event_payload = {
         "source": "interactive_review",
-        "decision_artifact_ref": str(decision_path),
+        "decision_artifact_ref": SessionPaths.from_run_dir(data_dir).to_ref(decision_path),
         "decision": {
             "stage": request.stage,
             "decision": request.decision,

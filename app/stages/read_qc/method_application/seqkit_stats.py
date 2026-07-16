@@ -11,7 +11,7 @@ from app.execution.artifacts import append_artifact_records
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import READ_QC_LONG_READ_STATS, READ_QC_LONG_READ_SUMMARY, ArtifactMeta
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.read_qc.constants import METHOD_NAME
 from app.stages.read_qc.method_application.lifecycle import (
     ReadQCMethodLifecycle,
@@ -49,8 +49,8 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
     )
     if blocked is not None:
         return update_read_qc_output(state, blocked)
-    working_dir = data_dir / "work" / "read_qc" / session_id / "seqkit_stats"
-    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    working_dir = stage_work_dir(state, "read_qc", "seqkit_stats")
+    artifact_dir = stage_artifacts_dir(state, "read_qc")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output, "raw_long_reads_paths", "raw_long_reads_path")

@@ -1,8 +1,28 @@
+import ast
+import json
 from pathlib import Path
 import unittest
 
 
 class ProjectScaffoldTests(unittest.TestCase):
+    def test_committed_data_root_declares_v2_layout(self):
+        root = Path(__file__).resolve().parents[1]
+        marker = json.loads((root / "data" / "layout.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker, {"schema_version": 2})
+
+    def test_stage_modules_do_not_reconstruct_storage_layer_roots(self):
+        root = Path(__file__).resolve().parents[1]
+        forbidden = {"artifacts", "work", "reports", "ledger", "checkpoints"}
+        violations: list[str] = []
+        for path in sorted((root / "app" / "stages").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+                    continue
+                if isinstance(node.right, ast.Constant) and node.right.value in forbidden:
+                    violations.append(f"{path.relative_to(root)}:{node.lineno}:{node.right.value}")
+        self.assertEqual(violations, [], "stage code must use SessionPaths/stage path helpers")
+
     def test_domain_stage_order_matches_long_read_pipeline(self):
         from app.stages import STAGE_ORDER
 
@@ -44,6 +64,8 @@ class ProjectScaffoldTests(unittest.TestCase):
 
         expected_paths = [
             root / "docs" / "architecture.md",
+            root / "docs" / "architecture" / "README.md",
+            root / "docs" / "architecture" / "data-v2.md",
             root / "docs" / "descriptor_spec.md",
             root / "docs" / "stage_contracts.md",
             root / "docs" / "governance.md",

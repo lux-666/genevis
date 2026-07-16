@@ -16,6 +16,9 @@ from app.control.ledger import Ledger
 from app.schemas.assets import AssetRecord
 from app.schemas.manifest import InputManifest, validate_manifest
 from app.schemas.state import TopLevelState
+from app.review.persistence import persist_review_decision
+from app.stages.base import resolve_run_ref
+from app.storage.paths import SessionPaths
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest:
@@ -114,7 +117,7 @@ def _write_registry(
     session_id: str,
 ) -> Path:
     """Write the asset registry JSON artifact and return its path."""
-    registry_dir = data_dir / "artifacts" / "asset_registry" / session_id
+    registry_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir("asset_registry")
     registry_dir.mkdir(parents=True, exist_ok=True)
     registry_path = registry_dir / "registry.json"
     payload = {
@@ -149,7 +152,7 @@ def validate_inputs(state: TopLevelState) -> dict:
         }
 
     try:
-        manifest = _load_manifest(manifest_ref)
+        manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
     except Exception as exc:
         return {
             "stage_outputs": {
@@ -184,7 +187,7 @@ def register_assets(state: TopLevelState) -> dict:
         return {}
 
     manifest_ref = state["input_manifest_ref"]
-    manifest = _load_manifest(manifest_ref)
+    manifest = _load_manifest(str(resolve_run_ref(state, manifest_ref)))
     _apply_shared_platform_override(manifest, state)
     report = validate_manifest(manifest)
     inferred = report["inferred"]
@@ -257,6 +260,37 @@ def commit_inventory(state: TopLevelState) -> dict:
 
 def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
     """Apply a human inventory review decision."""
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = getattr(request, "review_request_id", None) or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = getattr(request, "review_request_hash", None) or active_interrupt.get(
+        "request_hash"
+    )
+    if not review_request_id or not review_request_hash:
+        raise ValueError("inventory review decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=review_request_id,
+        stage="inventory",
+        gate_id="inventory_review",
+        decision=request,
+        request_hash=review_request_hash,
+        method_name="inventory.contract",
+        artifact_type="inventory.review_decision",
+    )
+    Ledger(state["data_dir"]).record_review_decision(
+        state["session_id"],
+        "inventory",
+        decision=request.decision,
+        artifact_ref=decision_ref.model_dump(mode="json"),
+        notes=list(getattr(request, "notes", []) or []),
+        metadata=dict(getattr(request, "metadata", {}) or {}),
+        decided_by=getattr(request, "decided_by", "human"),
+        rationale_artifact_ref=getattr(request, "rationale_artifact_ref", None),
+        review_request_id=review_request_id,
+    )
     if request.decision in {"stop_human_review", "stop"}:
         return {
             "current_stage": "inventory",
@@ -267,11 +301,27 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[
     if request.decision not in {"continue", "accept"}:
         raise ValueError(f"unsupported inventory decision: {request.decision}")
 
-    register_update = register_assets(state)
-    registered_state = {**state, **register_update}
+    # The review gate temporarily changes the status to ``blocked_human``.
+    # Asset registration still consumes the already-validated inventory
+    # payload, so restore that control status before invoking it.  This is a
+    # state transition only; no validation or selection policy is repeated.
+    stage_outputs = dict(state.get("stage_outputs") or {})
+    stage_outputs["inventory"] = {
+        **dict(stage_outputs.get("inventory") or {}),
+        "status": "validated",
+    }
+    validated_state = {**state, "stage_outputs": stage_outputs}
+    register_update = register_assets(validated_state)
+    registered_state = {**validated_state, **register_update}
     commit_update = commit_inventory(registered_state)
+    outputs = dict(register_update.get("stage_outputs") or state.get("stage_outputs") or {})
+    outputs["inventory"] = {
+        **dict(outputs.get("inventory") or {}),
+        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+    }
     return {
         **register_update,
         **commit_update,
+        "stage_outputs": outputs,
         "active_interrupt": None,
     }

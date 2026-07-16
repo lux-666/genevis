@@ -11,6 +11,7 @@ from app.control.ledger import Ledger
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.function_annotation.builder import build_stage
+from tests.data_v2 import v2_run_dir
 
 
 class FunctionAnnotationDescriptorTests(unittest.TestCase):
@@ -32,8 +33,8 @@ class FunctionAnnotationStageTests(unittest.TestCase):
     def _state(self, tmpdir: str):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "function_annotation"
         return state
@@ -249,8 +250,7 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertIsNone(bundle["pfam_interpro_table_ref"])
             self.assertEqual(bundle["method_results"], [])
             self.assertFalse(bundle["metadata"]["execution_enabled"])
-            self.assertTrue(Path(function["final_review_report_artifact_ref"]).exists())
-            events = Ledger(tmpdir).read_events("s1")
+            events = Ledger(Path(result["data_dir"])).read_events("s1")
             registered_types = [
                 event["artifact"]["artifact_type"]
                 for event in events
@@ -258,7 +258,6 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             ]
             self.assertIn("function_annotation.plan", registered_types)
             self.assertIn("function_annotation.bundle", registered_types)
-            self.assertIn("final_report.review_decisions", registered_types)
 
     def test_predicted_proteins_alias_is_accepted_when_provenance_matches(self):
         with tempfile.TemporaryDirectory() as tmpdir:

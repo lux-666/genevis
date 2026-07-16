@@ -42,38 +42,18 @@ StageOutputs: TypeAlias = dict[DomainStage, StageOutput]
 
 
 class ActiveInterrupt(TypedDict, total=False):
-    """Compact, cross-stage contract for a pending human review.
-
-    Stage-specific interrupt payloads may carry additional data in their
-    originating stage output.  Fields read by shared lifecycle and reporting
-    code are declared here so those consumers do not receive an unstructured
-    ``dict[str, Any]`` from :class:`TopLevelState`.
-    """
+    """Bounded checkpoint pointer to an immutable human-review request."""
 
     stage: Required[DomainStage]
     gate_id: NotRequired[str | None]
     reason: NotRequired[str]
     blocked_at: NotRequired[str]
-    decisions_allowed: NotRequired[list[str]]
-    messages: NotRequired[list[str]]
-    notes: NotRequired[list[str]]
-    auto_decidable: NotRequired[bool]
-    pending_human_confirmation: NotRequired[bool]
-    review_request_artifact_ref: NotRequired[str]
-    review_policy: NotRequired[dict[str, Any]]
-    review_policy_outcome: NotRequired[dict[str, Any]]
-    candidates: NotRequired[list[dict[str, Any]]]
-    method_candidates: NotRequired[list[dict[str, Any]]]
-    signals: NotRequired[list[dict[str, Any]]]
-    report_refs: NotRequired[dict[str, str]]
-    candidate_comparison_context: NotRequired[dict[str, Any]]
-    recommended_assembly_selection: NotRequired[dict[str, Any]]
-    recommended_route: NotRequired[str]
-    recommendation_reasoning: NotRequired[dict[str, Any] | list[Any] | str]
+    review_request_id: NotRequired[str]
+    request_ref: NotRequired[dict[str, Any]]
+    request_hash: NotRequired[str]
     attempt_id: NotRequired[int]
     previous_attempt_id: NotRequired[int | None]
     task: NotRequired[str]
-    proposal_semantic_hash: NotRequired[str]
     recommendation_hash: NotRequired[str]
 
 

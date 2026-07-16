@@ -14,9 +14,22 @@ from app.stages.assembly_review.nodes import (
     _extract_target_metrics_from_signals,
     build_related_species_statistics_and_notebook,
 )
+from tests.data_v2 import v2_run_dir
 
 
 class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
+    def _state(self, tmpdir: str, session_id: str, manifest_text: str) -> dict:
+        run_dir = v2_run_dir(tmpdir, session_id)
+        (run_dir / "control" / "manifest.yaml").write_text(
+            manifest_text,
+            encoding="utf-8",
+        )
+        return initial_state(
+            session_id=session_id,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(run_dir),
+        )
+
     def test_statistics_and_notebook_node_with_unavailable_snapshot(self):
         """Node handles unavailable NCBI snapshot gracefully (no crash, writes valid unavailable pack + minimal notebook)."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -26,9 +39,11 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
             manifest_content = {"snapshot_date": "2024-01-01", "record_count": 0}
             (empty_ref_dir / "reference_manifest.json").write_text(json.dumps(manifest_content))
 
-            manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s1\nuser_metadata:\n  target_species: Test species\nassets: []\n", encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref=str(manifest), data_dir=tmpdir)
+            state = self._state(
+                tmpdir,
+                "s1",
+                "session_id: s1\nuser_metadata:\n  target_species: Test species\nassets: []\n",
+            )
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
@@ -61,9 +76,11 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
     def test_statistics_and_notebook_node_with_metrics_available(self):
         """Node extracts target metrics from signals and passes them to statistics pack for percentile computation."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s2\nuser_metadata:\n  target_species: Solea ovata\nassets: []\n", encoding="utf-8")
-            state = initial_state(session_id="s2", input_manifest_ref=str(manifest), data_dir=tmpdir)
+            state = self._state(
+                tmpdir,
+                "s2",
+                "session_id: s2\nuser_metadata:\n  target_species: Solea ovata\nassets: []\n",
+            )
             state["stage_outputs"] = {
                 "assembly_review": {
                     "status": "evaluated",
@@ -109,9 +126,7 @@ class AssemblyReviewStatisticsIntegrationTests(unittest.TestCase):
     def test_statistics_and_notebook_node_skips_when_status_failed(self):
         """Node returns empty update when assembly_review status is a fail status."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest = Path(tmpdir) / "manifest.yaml"
-            manifest.write_text("session_id: s3\nassets: []\n", encoding="utf-8")
-            state = initial_state(session_id="s3", input_manifest_ref=str(manifest), data_dir=tmpdir)
+            state = self._state(tmpdir, "s3", "session_id: s3\nassets: []\n")
             state["stage_outputs"] = {"assembly_review": {"status": "failed"}}
 
             update = build_related_species_statistics_and_notebook(state)

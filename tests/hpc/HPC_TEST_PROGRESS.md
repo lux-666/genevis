@@ -25,7 +25,7 @@
 | 03 genome_survey | Jellyfish/GenomeScope2、k-mer histogram、genome size 估计、缺工具 preflight | ✅ PASS | **22 pass / 0 fail** | ✅ **已修复！** 之前报告的 preflight 测试失败已解决。3-tuple 重构后测试通过。 |
 | 04 assembly_dedup | Flye assembly、purge_dups 去冗余、coverage/cutoff/self-alignment、handoff bundle | ✅ PASS | **42 pass / 0 fail** | ✅ **已修复！** 之前报告的 purge_dups segfault 和缺失产物问题已解决。完整 pipeline 现已稳定走通。 |
 | 05 assembly_review | QUAST、BUSCO、NCBI related species、review report、human gate | ✅ PASS | 26 pass / 0 fail；`assembly_review` 进入 `blocked_human` | ✅ 稳定通过。注意这是 review gate 的预期阻塞，不是失败。 |
-| 06 hic_scaffolding | Hi-C raw reads、Juicer/3D-DNA/YAHs 候选、Juicer site file、review gate、fallback | ⚠️ PASS (schema-only) | **12 pass / 0 fail**；但 Juicer 运行时缺失 | ⚠️ **schema 和单元测试通过，但 HPC 上缺少 Juicer 环境**。需要在 HPC 上配置 Juicer/3D-DNA 并运行 `gene-agent bootstrap`。本地已完整验证。 |
+| 06 hic_scaffolding | Hi-C raw reads、固定 AutoHiC 流程、限制酶推荐/批准 gate、结果 adoption gate | ⚠️ 待 HPC 重测 | 当前单元测试覆盖 AutoHiC-only、环境模型解析和两个人工 gate | AutoHiC 内部消费 Juicer/3D-DNA；不再有 YaHS 或 stage-local skip。HPC 需在 bootstrap 配置中声明工具与两个模型。 |
 | 07 t2t | T2T/端粒 finishing 草案 smoke | ✅ PASS (schema-only) | 16 pass / 0 fail；schema 验证通过 | ✅ T2T stage 已实现，schema 验证通过。完整流程待后续验证。 |
 
 **重要变化（2026-06-26 更新）**：
@@ -34,7 +34,7 @@
   1. fake EVM 脚本参数解析逻辑错误
   2. test_intent.py 环境变量污染导致 `test_entry_request_can_omit_session_id` 失败
   3. test_project_scaffold.py 缺少 t2t stage 导致 `test_domain_stage_order_matches_long_read_pipeline` 失败
-- ⚠️ Test 06 在 HPC 上缺少 Juicer 运行时环境（需要安装并配置）
+- ⚠️ Test 06 需按新的 AutoHiC-only 与双人工 gate 合同在 HPC 重测
 
 ## 2. Test 06 修复总结（2026-06-26）
 

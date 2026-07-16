@@ -8,6 +8,14 @@ files. For the doc map, read `docs/README.md`.
 
 ## Current Status
 
+Data Architecture v2 was accepted on 2026-07-15 and is documented in
+`docs/architecture/data-v2.md`. Implementation has not started. The cutover is
+intentionally incompatible with old sessions: each new run owns a
+session-relative audit package; checkpoints keep only the latest compact
+recovery frontier; reports are derived; and Assembly, future Hi-C, and future
+T2T parameter recommenders share one persistence contract. In this context,
+“planner” means parameter recommender, not method selection or `StagePlan`.
+
 Phases 0–3 and Phase 4 in-code (tasks 01, 02, 03, 05, 06, 07) are complete.
 Phase 5 task 01 (`genome_survey` env_dispatch wiring) is complete in code
 and has server/HPC validation evidence.

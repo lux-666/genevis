@@ -33,6 +33,23 @@ def _next_in_requested(current_stage: str, requested: list[str]) -> str:
     return TERMINAL_STAGE
 
 
+def skipped_stages_until_next(
+    current_stage: str,
+    requested_stages: list[str] | None,
+) -> list[str]:
+    """Return unrequested stages bypassed by an immediate resume handoff."""
+    if not requested_stages or current_stage not in STAGE_ORDER:
+        return []
+    next_stage = _next_in_requested(current_stage, requested_stages)
+    start = STAGE_ORDER.index(current_stage) + 1
+    stop = STAGE_ORDER.index(next_stage) if next_stage in STAGE_ORDER else len(STAGE_ORDER)
+    return [
+        stage
+        for stage in STAGE_ORDER[start:stop]
+        if stage not in requested_stages
+    ]
+
+
 def route_from_current_stage(state: TopLevelState) -> str:
     """Return the graph node name for the current stage."""
     supervision = state.get("supervision_state")
@@ -46,8 +63,19 @@ def route_from_current_stage(state: TopLevelState) -> str:
     return f"{current_stage}_stage"
 
 
-def next_stage_name(current_stage: str) -> str:
-    """Return the next domain stage, or done after the final stage."""
+def next_stage_name(
+    current_stage: str,
+    requested_stages: list[str] | None = None,
+) -> str:
+    """Return the next applicable domain stage, or ``done``.
+
+    Stage subgraphs normally hand control back through ``route_controller``,
+    which skips unrequested stages.  Resume updates can commit a gate outside
+    that node transition, so callers at a resume boundary may supply the saved
+    requested-stage set and get the same routing decision immediately.
+    """
+    if requested_stages:
+        return _next_in_requested(current_stage, requested_stages)
     if current_stage not in STAGE_ORDER:
         return TERMINAL_STAGE
     index = STAGE_ORDER.index(current_stage)

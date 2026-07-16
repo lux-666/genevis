@@ -11,6 +11,7 @@ from app.graph.checkpointer import (
     checkpoint_db_path,
     get_checkpointer,
 )
+from tests.data_v2 import v2_run_dir
 
 
 class CheckpointerFactoryTests(unittest.TestCase):
@@ -19,9 +20,10 @@ class CheckpointerFactoryTests(unittest.TestCase):
 
     def test_sqlite_backend_creates_db_under_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
-            saver = get_checkpointer("sqlite", data_dir=tmp)
+            run_dir = v2_run_dir(tmp, "s1")
+            saver = get_checkpointer("sqlite", data_dir=run_dir)
             try:
-                self.assertTrue(checkpoint_db_path(tmp).exists())
+                self.assertTrue(checkpoint_db_path(run_dir).exists())
                 from langgraph.checkpoint.sqlite import SqliteSaver
                 self.assertIsInstance(saver, SqliteSaver)
             finally:
@@ -38,8 +40,9 @@ class CheckpointerFactoryTests(unittest.TestCase):
             get_checkpointer("postgres")  # type: ignore[arg-type]
 
     def test_checkpoint_db_path_is_under_data_dir(self):
-        path = checkpoint_db_path("/tmp/example")
-        self.assertEqual(path, Path("/tmp/example/checkpoints/checkpoints.sqlite"))
+        run_dir = Path("/tmp/example/runs/s1").resolve()
+        path = checkpoint_db_path(run_dir)
+        self.assertEqual(path, run_dir / "checkpoints" / "checkpoints.sqlite")
 
 
 class SqliteSaverApiContractTests(unittest.TestCase):

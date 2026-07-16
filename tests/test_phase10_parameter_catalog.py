@@ -15,11 +15,25 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.execution.artifacts import read_artifact_records
-from app.schemas.artifacts import ParameterAttempt, file_sha256
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    ASSEMBLY_PARAMETER_BASIS,
+    ASSEMBLY_PARAMETER_EXECUTION,
+    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_MODEL_REQUEST,
+    ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    ASSEMBLY_PARAMETER_RECOMMENDATION,
+    ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    ASSEMBLY_PARAMETER_VALIDATION,
+    ParameterAttempt,
+    ParameterRecommendationCursor,
+    file_sha256,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
 from app.control.lifecycle import resume_review_state
 from app.review.base import ResumeReviewRequest
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
     build_command,
@@ -36,6 +50,13 @@ from app.stages.assembly.nodes import (
     recommend_assembly_parameters,
     _seal_parameter_attempt,
 )
+from app.stages.assembly.parameter_nodes import hydrate_parameter_attempt
+from app.stages.assembly.parameter_persistence import (
+    load_recommendation_bundle,
+    read_json_artifact,
+    write_attempt_json_artifact,
+    write_recommendation_json_artifact,
+)
 from app.stages.assembly.routing import route_after_method_subgraph
 from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
 from app.stages.assembly.parameter_catalog import (
@@ -49,6 +70,8 @@ from app.stages.assembly.parameter_profile import (
     flatten_profile_facts,
 )
 from app.stages.assembly.parameter_validation import validate_recommended_parameters
+from app.storage.paths import SessionPaths
+from tests.data_v2 import v2_run_dir
 
 
 class _FakeResponse:
@@ -96,12 +119,177 @@ def _project_hifiasm_min_version() -> tuple[int, int, int]:
     return _parse_semver_prefix(match.group(1))
 
 
-def _fake_artifact_ref(name: str) -> dict[str, str]:
-    return {
-        "path_ref": f"data/artifacts/assembly/s1/parameter_attempt_0/{name}.json",
-        "sha256": "0" * 64,
-        "artifact_type": f"assembly.parameter.{name}",
+def _v2_state(tmpdir: str, *, session_id: str = "s1") -> dict:
+    run_dir = v2_run_dir(tmpdir, session_id)
+    return initial_state(
+        session_id=session_id,
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(run_dir),
+    )
+
+
+def _ref_path(state: dict, ref: dict | str) -> Path:
+    if isinstance(ref, dict):
+        return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(ref["path_ref"])
+    return Path(ref)
+
+
+def _persist_parameter_attempt(
+    state: dict,
+    *,
+    method_id: str,
+    recommended_params: dict | None = None,
+    status: str = "recommended",
+    attempt_id: int = 0,
+    task: str = "recommend_initial",
+    previous_attempt: dict | None = None,
+    execution_result: dict | None = None,
+) -> dict:
+    """Publish a minimal valid recommendation bundle and return its compact cursor."""
+
+    params = dict(recommended_params or {})
+    catalog = load_parameter_catalog(method_id)
+    common = {
+        "state": state,
+        "recommendation_id": attempt_id,
+        "method_name": method_id,
     }
+    input_profile_ref = write_recommendation_json_artifact(
+        **common,
+        filename="input_profile.json",
+        payload={"schema_version": 2, "method_id": method_id},
+        artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    )
+    basis_ref = write_recommendation_json_artifact(
+        **common,
+        filename="basis_snapshot.json",
+        payload={
+            "schema_version": 2,
+            "method_id": catalog.method_id,
+            "catalog_snapshot": catalog.model_dump(mode="json"),
+            "rules": {},
+            "literature_selection": {},
+            "literature_cases": [],
+            "method_guidance": [],
+        },
+        artifact_type=ASSEMBLY_PARAMETER_BASIS,
+    )
+    model_request_ref = write_recommendation_json_artifact(
+        **common,
+        filename="model_request.json",
+        payload={"schema_version": 2, "messages": []},
+        artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+    )
+    model_response_ref = write_recommendation_json_artifact(
+        **common,
+        filename="model_response.json",
+        payload={"schema_version": 2, "validity": "parsed"},
+        artifact_type=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    )
+    recommendation_ref = write_recommendation_json_artifact(
+        **common,
+        filename="recommendation.json",
+        payload={
+            "schema_version": 2,
+            "method_id": catalog.method_id,
+            "task": task,
+            "recommendation": {
+                "params": params,
+                "execution_params": params,
+                "effective_params": params,
+                "baseline_params": {},
+            },
+        },
+        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION,
+    )
+    validation_ref = write_recommendation_json_artifact(
+        **common,
+        filename="validation.json",
+        payload={"schema_version": 2, "valid": True, "violations": [], "warnings": []},
+        artifact_type=ASSEMBLY_PARAMETER_VALIDATION,
+    )
+    refs = {
+        "input_profile_ref": input_profile_ref.model_dump(mode="json"),
+        "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
+        "model_request_ref": model_request_ref.model_dump(mode="json"),
+        "model_response_ref": model_response_ref.model_dump(mode="json"),
+        "recommendation_ref": recommendation_ref.model_dump(mode="json"),
+        "validation_ref": validation_ref.model_dump(mode="json"),
+    }
+    manifest_ref = write_recommendation_json_artifact(
+        **common,
+        filename="recommendation_manifest.json",
+        payload={
+            "schema_version": 2,
+            "recommendation_contract": "parameter_patch_v2",
+            "stage": "assembly",
+            "method_id": method_id,
+            "task": task,
+            "recommendation_id": attempt_id,
+            "status": "approved",
+            "previous_attempt_id": (
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            "previous_attempt_seal_hash": (
+                previous_attempt.get("seal_hash") if previous_attempt else None
+            ),
+            "refs": refs,
+        },
+        artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    )
+    persisted_request = persist_review_request(
+        state,
+        stage="assembly",
+        gate_id="parameter_approval",
+        reason="test_parameter_approval",
+        payload={
+            "attempt_id": attempt_id,
+            "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
+            "decisions_allowed": ["approve_parameters", "reject_parameters"],
+        },
+        bindings={"attempt_id": attempt_id, "task": task},
+    )
+    approval_ref = persist_review_decision(
+        state["data_dir"],
+        session_id=state["session_id"],
+        review_request_id=persisted_request.review_request_id,
+        stage="assembly",
+        gate_id="parameter_approval",
+        decision={"decision": "approve_parameters", "attempt_id": attempt_id},
+        request_ref=persisted_request.request_ref,
+        request_hash=persisted_request.request_hash,
+        artifact_type=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    )
+    execution_ref = None
+    if execution_result is not None:
+        execution_ref = write_attempt_json_artifact(
+            state,
+            attempt_id,
+            "execution.json",
+            {
+                "schema_version": 2,
+                "attempt_id": attempt_id,
+                "method_id": method_id,
+                "result": execution_result,
+            },
+            artifact_type=ASSEMBLY_PARAMETER_EXECUTION,
+            method_name=method_id,
+        )
+    return ParameterAttempt(
+        attempt_id=attempt_id,
+        method_id=method_id,
+        status=status,
+        task=task,
+        previous_attempt_id=(
+            previous_attempt.get("attempt_id") if previous_attempt else None
+        ),
+        recommendation_manifest_ref=manifest_ref,
+        approval_decision_ref=approval_ref,
+        execution_ref=execution_ref,
+        previous_attempt_seal_hash=(
+            previous_attempt.get("seal_hash") if previous_attempt else None
+        ),
+    ).model_dump(mode="json")
 
 
 
@@ -970,6 +1158,8 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 session_id=state["session_id"],
                 stage="assembly",
                 gate_id="parameter_approval",
+                review_request_id=interrupt["review_request_id"],
+                review_request_hash=interrupt["request_hash"],
                 decision="approve_parameters",
                 metadata={
                     key: interrupt.get(key)
@@ -981,7 +1171,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
 
     def _state(self, tmpdir: str):
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         state["shared_parameters"] = {"organism": "Example species", "target_level": "draft"}
         state["stage_outputs"] = {
             "read_qc": {"summary": {"n50": 30000, "effective_coverage_5kb": 42}},
@@ -1014,34 +1204,46 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             )
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
                 result = recommend_assembly_parameters(state)
-            artifact_records = read_artifact_records(Path(tmpdir), "s1")
+            artifact_records = read_artifact_records(Path(state["data_dir"]), "s1")
+            assembly = result["stage_outputs"]["assembly"]
+            cursor = ParameterRecommendationCursor.model_validate(
+                assembly["current_parameter_recommendation"]
+            )
+            bundle = load_recommendation_bundle(
+                {**state, "stage_outputs": result["stage_outputs"]},
+                cursor.manifest_ref,
+            )
 
-        assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "blocked_human")
         self.assertEqual(assembly.get("parameter_attempts") or [], [])
-        attempt = assembly["pending_parameter_recommendation"]
-        self.assertEqual(attempt["attempt_id"], 0)
-        self.assertEqual(attempt["method_id"], "assembly.candidate.hifiasm_ont")
-        self.assertEqual(attempt["recommendation_contract"], "parameter_patch_v2")
+        recommendation = bundle["recommendation"]["recommendation"]
+        self.assertEqual(cursor.recommendation_id, 0)
+        self.assertEqual(cursor.method_id, "assembly.candidate.hifiasm_ont")
         self.assertEqual(
-            attempt["recommended_params"],
+            bundle["manifest"]["recommendation_contract"],
+            "parameter_patch_v2",
+        )
+        self.assertEqual(
+            recommendation["params"],
             {"purge_level": 1, "read_length_cutoff": 3000},
         )
         self.assertEqual(
-            attempt["catalog_ref"],
-            "descriptors/knowledge_packs/assembly/methods/hifiasm_ont/params.yaml",
+            bundle["basis_snapshot"]["catalog_snapshot"]["method_id"],
+            "hifiasm_ont",
         )
-        self.assertTrue(attempt["validation"]["valid"])
-        self.assertIn("parameter_attempt_0/input_profile.json", attempt["input_profile_ref"]["path_ref"])
-        self.assertIn("parameter_attempt_0/prompt_payload.json", attempt["prompt_payload_ref"]["path_ref"])
-        self.assertIn("parameter_attempt_0/llm_response.json", attempt["llm_response_ref"]["path_ref"])
-        self.assertIn("parameter_attempt_0/validation.json", attempt["validation_ref"]["path_ref"])
+        self.assertTrue(bundle["validation"]["valid"])
+        refs = bundle["manifest"]["refs"]
+        self.assertIn("parameter_recommendations/000/input_profile.json", refs["input_profile_ref"]["path_ref"])
+        self.assertIn("parameter_recommendations/000/model_request.json", refs["model_request_ref"]["path_ref"])
+        self.assertIn("parameter_recommendations/000/model_response.json", refs["model_response_ref"]["path_ref"])
+        self.assertIn("parameter_recommendations/000/validation.json", refs["validation_ref"]["path_ref"])
         artifact_types = {
             record["artifact_type"]
             for record in artifact_records
         }
         self.assertIn("assembly.parameter.input_profile", artifact_types)
-        self.assertIn("assembly.parameter.prompt_payload", artifact_types)
+        self.assertIn("assembly.parameter.model_request", artifact_types)
+        self.assertIn("assembly.parameter.recommendation_manifest", artifact_types)
 
 
 
@@ -1053,12 +1255,22 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             state = self._state(tmpdir)
             with patch("app.stages.assembly.decision.build_chat_model", side_effect=RuntimeError("missing api key")):
                 result = recommend_assembly_parameters(state)
+            assembly = result["stage_outputs"]["assembly"]
+            cursor = ParameterRecommendationCursor.model_validate(
+                assembly["current_parameter_recommendation"]
+            )
+            bundle = load_recommendation_bundle(
+                {**state, "stage_outputs": result["stage_outputs"]},
+                cursor.manifest_ref,
+            )
 
-        assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "parameter_validation_failed")
-        attempt = assembly["failed_parameter_recommendation"]
-        self.assertEqual(attempt["status"], "validation_failed")
-        self.assertIn("missing api key", attempt["validation"]["violations"][0]["reason"])
+        self.assertEqual(cursor.status, "validation_failed")
+        self.assertIn(
+            "missing api key",
+            bundle["validation"]["violations"][0]["reason"],
+        )
+        self.assertEqual(assembly.get("parameter_attempts") or [], [])
 
     def test_invalid_level_recommendation_stops_before_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1066,43 +1278,55 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             payload = _parameter_patch_response(threads=64, purge_level=1)
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(payload)):
                 result = recommend_assembly_parameters(state)
+            assembly = result["stage_outputs"]["assembly"]
+            cursor = ParameterRecommendationCursor.model_validate(
+                assembly["current_parameter_recommendation"]
+            )
+            bundle = load_recommendation_bundle(
+                {**state, "stage_outputs": result["stage_outputs"]},
+                cursor.manifest_ref,
+            )
 
-        assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "parameter_validation_failed")
         self.assertIn(
             "non-L2 parameters",
-            assembly["failed_parameter_recommendation"]["validation"]["violations"][0]["reason"],
+            bundle["validation"]["violations"][0]["reason"],
         )
 
-    def test_execution_retry_gate_uses_last_100_stderr_lines(self):
+    def test_execution_retry_gate_keeps_stderr_in_execution_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             stderr = Path(tmpdir) / "stderr.log"
             stderr.write_text("\n".join(f"line {idx}" for idx in range(150)), encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml", data_dir=tmpdir)
+            state = _v2_state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                status="execution_failed",
+                execution_result={"return_code": 1, "stderr_path": str(stderr)},
+            )
             state["stage_outputs"] = {
                 "assembly": {
                     "status": "failed",
                     "current_parameter_attempt_id": 0,
-                    "parameter_attempts": [
-                        {
-                            "attempt_id": 0,
-                            "method_id": "assembly.candidate.hifiasm_ont",
-                            "status": "execution_failed",
-                            "execution_result": {"return_code": 1, "stderr_path": str(stderr)},
-                        }
-                    ],
+                    "parameter_attempts": [attempt],
                 }
             }
 
             result = execution_retry_gate(state)
+            assembly = result["stage_outputs"]["assembly"]
+            execution = read_json_artifact(
+                state,
+                assembly["parameter_retry_request"]["failure_ref"],
+                expected_type=ASSEMBLY_PARAMETER_EXECUTION,
+            )
 
-        assembly = result["stage_outputs"]["assembly"]
-        self.assertEqual(assembly["status"], "retry_parameters_after_execution_failure")
-        self.assertEqual(assembly["current_parameter_attempt_id"], 0)
-        self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
-        self.assertNotIn("line 49", assembly["execution_failure_log_tail"])
-        self.assertIn("line 149", assembly["execution_failure_log_tail"])
-        self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
+            self.assertEqual(assembly["status"], "retry_parameters_after_execution_failure")
+            self.assertEqual(assembly["current_parameter_attempt_id"], 0)
+            self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
+            self.assertNotIn("execution_failure_log_tail", assembly)
+            self.assertEqual(execution["result"]["stderr_path"], str(stderr))
+            self.assertIn("line 149", stderr.read_text(encoding="utf-8"))
+            self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
 
     def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(self):
         for method_id in (
@@ -1113,98 +1337,92 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             with self.subTest(method_id=method_id), tempfile.TemporaryDirectory() as tmpdir:
                 stderr = Path(tmpdir) / "stderr.log"
                 stderr.write_text("invalid parameter purge_level", encoding="utf-8")
-                state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml", data_dir=tmpdir)
+                state = _v2_state(tmpdir)
+                attempt = _persist_parameter_attempt(
+                    state,
+                    method_id=method_id,
+                    status="execution_failed",
+                    execution_result={"return_code": 2, "stderr_path": str(stderr)},
+                )
                 state["stage_outputs"] = {
                     "assembly": {
                         "status": "failed",
                         "current_parameter_attempt_id": 0,
-                        "parameter_attempts": [
-                            {
-                                "attempt_id": 0,
-                                "method_id": method_id,
-                                "status": "execution_failed",
-                                "execution_result": {
-                                    "return_code": 2,
-                                    "stderr_path": str(stderr),
-                                },
-                            }
-                        ],
+                        "parameter_attempts": [attempt],
                     }
                 }
                 result = execution_retry_gate(state)
                 attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
                 self.assertNotIn("failure_class", attempt)
                 self.assertNotIn("candidate_evidence_case_ref", attempt)
+                self.assertIsNotNone(
+                    result["stage_outputs"]["assembly"]["parameter_retry_request"]["failure_ref"]
+                )
 
     def test_execution_retry_gate_emits_no_candidate_and_binds_sealed_request(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             stderr = Path(tmpdir) / "stderr.log"
             stderr.write_text("invalid parameter purge_level", encoding="utf-8")
-            state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml", data_dir=tmpdir)
+            state = _v2_state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm",
+                status="execution_failed",
+                execution_result={
+                    "success": False,
+                    "return_code": 2,
+                    "status": "failed",
+                    "status_detail": "",
+                    "stderr_path": str(stderr),
+                },
+            )
             state["stage_outputs"] = {
                 "assembly": {
                     "status": "failed",
-                    "current_parameter_attempt_id": 1,
-                    "parameter_attempts": [
-                        {
-                            "attempt_id": 1,
-                            "method_id": "assembly.candidate.hifiasm",
-                            "task": "retry_after_execution_failure",
-                            "status": "execution_failed",
-                            "previous_attempt_id": 0,
-                            "rendered_parameters": {"purge_level": 2},
-                            "argv": ["hifiasm", "-l", "2"],
-                            "proposed_parameter_changes": {
-                                "purge_level": {"from": 1, "to": 2}
-                            },
-                            "execution_result": {
-                                "success": False,
-                                "return_code": 2,
-                                "status": "failed",
-                                "status_detail": "",
-                                "stderr_path": str(stderr),
-                            },
-                        }
-                    ],
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
                 }
             }
             result = execution_retry_gate(state)
             attempt = result["stage_outputs"]["assembly"]["parameter_attempts"][0]
             self.assertNotIn("candidate_evidence_case_ref", attempt)
             request = result["stage_outputs"]["assembly"]["parameter_retry_request"]
-            self.assertEqual(request["previous_attempt_id"], 1)
+            self.assertEqual(request["previous_attempt_id"], 0)
             self.assertEqual(request["previous_attempt_seal_hash"], attempt["seal_hash"])
+            self.assertEqual(request["failure_ref"], attempt["execution_ref"])
 
 
     def test_freeze_failure_without_execution_result_does_not_route_to_execution_retry(self):
-        state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
-        state["stage_outputs"] = {
-            "assembly": {
-                "status": "failed",
-                "current_parameter_attempt_id": 0,
-                "parameter_attempts": [
-                    {
-                        "attempt_id": 0,
-                        "method_id": "assembly.candidate.flye",
-                        "status": "recommended",
-                    }
-                ],
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _v2_state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.flye",
+            )
+            state["stage_outputs"] = {
+                "assembly": {
+                    "status": "failed",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
+                }
             }
-        }
 
-        self.assertEqual(route_after_method_subgraph(state), "fail")
-        self.assertEqual(execution_retry_gate(state), {})
+            self.assertEqual(route_after_method_subgraph(state), "fail")
+            self.assertEqual(execution_retry_gate(state), {})
 
     def test_review_quality_gate_classifies_under_purged_retry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml", data_dir=tmpdir)
+            state = _v2_state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                status="executed",
+            )
             state["stage_outputs"] = {
                 "assembly": {
                     "status": "draft_ready",
                     "current_parameter_attempt_id": 0,
-                    "parameter_attempts": [
-                        {"attempt_id": 0, "method_id": "assembly.candidate.hifiasm_ont", "status": "executed"}
-                    ],
+                    "parameter_attempts": [attempt],
                 },
                 "assembly_review": {
                     "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}
@@ -1215,14 +1433,17 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "retry_parameters_after_review_failure")
-            self.assertEqual(assembly["review_failure"]["failure_mode"], "under_purged")
+            self.assertEqual(assembly["quality_gate"]["failure_mode"], "under_purged")
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
-            review_ref = assembly["parameter_attempts"][0]["review_failure_ref"]
-            self.assertIn("parameter_attempt_0/review_failure.json", review_ref["path_ref"])
-            review_path = Path(tmpdir) / review_ref["path_ref"].removeprefix("data/")
+            review_ref = assembly["parameter_attempts"][0]["review_ref"]
+            self.assertIn("attempts/000/review.json", review_ref["path_ref"])
+            review_path = _ref_path(state, review_ref)
             self.assertTrue(review_path.exists())
             self.assertEqual(review_ref["sha256"], file_sha256(review_path))
+            review = read_json_artifact(state, review_ref)
+            self.assertEqual(review["diagnosis"]["failure_mode"], "under_purged")
+            self.assertNotIn("review_failure", assembly["parameter_attempts"][0])
 
     def test_review_retry_recommendation_can_adjust_ont_l2_parameters(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1239,9 +1460,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 first = recommend_assembly_parameters(state)
             state = self._approve(state, first)
             state["stage_outputs"]["assembly"]["status"] = "draft_ready"
-            state["stage_outputs"]["assembly"]["parameter_attempts"][0]["execution_result"] = {
-                "status": "succeeded", "return_code": 0
-            }
+            state["stage_outputs"]["assembly"]["parameter_attempts"][0]["status"] = "executed"
             state["stage_outputs"]["assembly_review"] = {
                 "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}
             }
@@ -1255,25 +1474,37 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             with patch("app.stages.assembly.decision.build_chat_model", return_value=_FakeModel(retry_payload)):
                 retry = recommend_assembly_parameters(state)
             state = self._approve(state, retry)
+            assembly = state["stage_outputs"]["assembly"]
+            attempts = {item["attempt_id"]: item for item in assembly["parameter_attempts"]}
+            hydrated = {
+                attempt_id: hydrate_parameter_attempt(state, attempt)
+                for attempt_id, attempt in attempts.items()
+            }
+            retry_bundle = load_recommendation_bundle(
+                state,
+                attempts[1]["recommendation_manifest_ref"],
+            )
 
-        assembly = state["stage_outputs"]["assembly"]
-        attempts = {item["attempt_id"]: item for item in assembly["parameter_attempts"]}
         self.assertEqual(assembly["status"], "parameters_approved")
         self.assertEqual(attempts[1]["previous_attempt_id"], 0)
-        self.assertEqual(attempts[1]["review_failure"]["failure_mode"], "under_purged")
-        self.assertEqual(attempts[0]["recommended_params"]["purge_level"], 1)
-        self.assertEqual(attempts[1]["recommended_params"]["purge_level"], 2)
-        self.assertEqual(attempts[0]["recommended_params"]["read_length_cutoff"], 3000)
-        self.assertEqual(attempts[1]["recommended_params"]["read_length_cutoff"], 5000)
-        self.assertEqual(attempts[0]["recommended_params"]["score_cutoff"], 10)
-        self.assertEqual(attempts[1]["recommended_params"]["score_cutoff"], 12)
+        self.assertEqual(hydrated[0]["review_failure"]["failure_mode"], "under_purged")
+        self.assertEqual(
+            retry_bundle["input_profile"]["assembly_review"]["failure_mode"],
+            "under_purged",
+        )
+        self.assertEqual(hydrated[0]["recommended_params"]["purge_level"], 1)
+        self.assertEqual(hydrated[1]["recommended_params"]["purge_level"], 2)
+        self.assertEqual(hydrated[0]["recommended_params"]["read_length_cutoff"], 3000)
+        self.assertEqual(hydrated[1]["recommended_params"]["read_length_cutoff"], 5000)
+        self.assertEqual(hydrated[0]["recommended_params"]["score_cutoff"], 10)
+        self.assertEqual(hydrated[1]["recommended_params"]["score_cutoff"], 12)
         argv = build_command(
             method_id="hifiasm_ont",
             catalog=load_parameter_catalog("hifiasm_ont"),
             parameter_sources={
                 "l0_fixed": {"output_prefix": "asm", "threads": 1, "input_reads": ["reads.fastq"], "ont_mode": True},
                 "l1_readonly": {},
-                "l2_recommended": attempts[1]["execution_params"],
+                "l2_recommended": hydrated[1]["execution_params"],
             },
         )
         self.assertEqual(argv[argv.index("-l") + 1], "2")
@@ -1287,24 +1518,17 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
 
 class MethodFreezeParameterFailureTests(unittest.TestCase):
-    def _parameter_attempt(self, *, method_name: str, recommended_params=None) -> dict:
-        return ParameterAttempt(
-            attempt_id=0,
+    def _parameter_attempt(self, state: dict, *, method_name: str, recommended_params=None) -> dict:
+        return _persist_parameter_attempt(
+            state,
             method_id=method_name,
-            status="parameters_recommended",
-            input_profile_ref=_fake_artifact_ref("profile"),
-            prompt_payload_ref=_fake_artifact_ref("prompt"),
-            llm_response_ref=_fake_artifact_ref("response"),
-            validation_ref=_fake_artifact_ref("validation"),
             recommended_params=dict(recommended_params or {}),
-            execution_params=dict(recommended_params or {}),
-            validation={"valid": True, "violations": []},
-        ).model_dump(mode="json")
+        )
 
     def _state(self, tmpdir: str, *, method: str, recommended_params=None, attempt_payload: dict | None = None):
         reads = Path(tmpdir) / "reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         if method == "hifiasm":
             status = "hifiasm_execution_planned"
             param_key = "hifiasm_parameters"
@@ -1328,7 +1552,11 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             assembly["parameter_attempts"] = [attempt_payload]
         elif recommended_params is not None:
             assembly["parameter_attempts"] = [
-                self._parameter_attempt(method_name=method_name, recommended_params=recommended_params)
+                self._parameter_attempt(
+                    state,
+                    method_name=method_name,
+                    recommended_params=recommended_params,
+                )
             ]
         state["stage_outputs"] = {"assembly": assembly}
         return state
@@ -1336,7 +1564,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
     def _nextdenovo_state(self, tmpdir: str, *, recommended_params=None, attempt_payload: dict | None = None):
         reads = Path(tmpdir) / "reads.fastq"
         reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         assembly = {
             "status": "nextdenovo_execution_planned",
             "input_ref": str(reads),
@@ -1356,6 +1584,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         elif recommended_params is not None:
             assembly["parameter_attempts"] = [
                 self._parameter_attempt(
+                    state,
                     method_name="assembly.candidate.nextdenovo",
                     recommended_params=recommended_params,
                 )
@@ -1379,9 +1608,9 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
 
     def test_corrupt_hifiasm_recommended_params_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            payload = self._parameter_attempt(method_name="assembly.candidate.hifiasm")
+            state = self._state(tmpdir, method="hifiasm", recommended_params={})
+            payload = state["stage_outputs"]["assembly"]["parameter_attempts"][0]
             payload["recommended_params"] = ["param1", "param2"]
-            state = self._state(tmpdir, method="hifiasm", attempt_payload=payload)
             with patch("app.stages.assembly.method_application.hifiasm.resolve_method_env", return_value=(None, [], None)):
                 result = freeze_hifiasm_attempt(state)
 
@@ -1406,9 +1635,9 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
 
     def test_corrupt_hifiasm_ont_recommended_params_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            payload = self._parameter_attempt(method_name="assembly.candidate.hifiasm_ont")
+            state = self._state(tmpdir, method="hifiasm_ont", recommended_params={})
+            payload = state["stage_outputs"]["assembly"]["parameter_attempts"][0]
             payload["recommended_params"] = "invalid"
-            state = self._state(tmpdir, method="hifiasm_ont", attempt_payload=payload)
             with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
                 result = freeze_hifiasm_ont_attempt(state)
 
@@ -1430,20 +1659,20 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "failed")
         self.assertIn("ParameterAttempt", assembly["reason"])
-        self.assertIn("input_profile_ref", assembly["reason"])
+        self.assertIn("task", assembly["reason"])
 
     def test_hifiasm_ont_freeze_writes_command_artifact_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm_ont", recommended_params={"purge_level": 1})
             with patch("app.stages.assembly.method_application.hifiasm_ont.resolve_method_env", return_value=(None, [], None)):
                 result = freeze_hifiasm_ont_attempt(state)
-            artifact_records = read_artifact_records(Path(tmpdir), "s1")
+            artifact_records = read_artifact_records(Path(state["data_dir"]), "s1")
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["status"], "hifiasm_ont_frozen")
             command_ref = assembly["parameter_attempts"][0]["command_ref"]
-            self.assertIn("parameter_attempt_0/command.json", command_ref["path_ref"])
-            command_path = Path(tmpdir) / command_ref["path_ref"].removeprefix("data/")
+            self.assertIn("attempts/000/command.json", command_ref["path_ref"])
+            command_path = _ref_path(state, command_ref)
             self.assertTrue(command_path.exists())
             self.assertEqual(command_ref["sha256"], file_sha256(command_path))
             command_payload = json.loads(command_path.read_text(encoding="utf-8"))
@@ -1468,13 +1697,16 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             with patch("app.stages.assembly.method_application.nextdenovo.resolve_method_env", return_value=(None, [], None)):
                 result = freeze_nextdenovo_attempt(state)
             run_cfg_text = Path(result["stage_outputs"]["assembly"]["nextdenovo_run_cfg_path"]).read_text(encoding="utf-8")
+            command = read_json_artifact(
+                state,
+                result["stage_outputs"]["assembly"]["parameter_attempts"][0]["command_ref"],
+            )
 
         assembly = result["stage_outputs"]["assembly"]
         self.assertEqual(assembly["status"], "nextdenovo_frozen")
-        attempt = assembly["parameter_attempts"][0]
-        self.assertEqual(attempt["parameter_sources"]["l2_recommended"]["read_cutoff"], 7777)
-        self.assertEqual(attempt["rendered_parameters"]["read_cutoff"], 7777)
-        self.assertEqual(attempt["rendered_parameters"]["nextgraph_a"], 2)
+        self.assertEqual(command["parameter_sources"]["l2_recommended"]["read_cutoff"], 7777)
+        self.assertEqual(command["rendered_parameters"]["read_cutoff"], 7777)
+        self.assertEqual(command["rendered_parameters"]["nextgraph_a"], 2)
         self.assertIn("read_cutoff = 7777", run_cfg_text)
         self.assertIn("nextgraph_options = -a 2", run_cfg_text)
 

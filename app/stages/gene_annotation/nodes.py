@@ -22,11 +22,12 @@ from app.review.annotation_intake import (
     rewrite_requested_stages_after_assembly_review,
 )
 from app.review.base import ResumeReviewRequest, ReviewPayload, ReviewSignal
+from app.review.persistence import PersistedReviewRequest, persist_review_decision, persist_review_request
 from app.review.policy import evaluate
 from app.schemas.artifacts import ArtifactMeta, CandidateBundle, GeneAnnotationBundle, GeneAnnotationPlan
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 
 GENE_CANDIDATE_METHODS = [
     "gene_annotation.candidate.augustus",
@@ -190,7 +191,7 @@ def plan_gene_methods(state: TopLevelState) -> dict:
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    work_dir = data_dir / "work" / "gene_annotation" / session_id
+    work_dir = stage_work_dir(state, "gene_annotation")
     expected_outputs = {
         "genes_gff3": str(work_dir / "genes.gff3"),
         "transcripts_fasta": str(work_dir / "transcripts.fa"),
@@ -223,7 +224,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
     review_required = bool(review_triggers)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "gene_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     plan = GeneAnnotationPlan(
         session_id=session_id,
@@ -313,7 +314,7 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "gene_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = gene_out["expected_outputs"]
     final_gff_ref, final_proteins_ref, final_cds_ref, final_error = _resolve_final_gene_set(gene_out)
@@ -387,7 +388,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
+    out_dir = stage_artifacts_dir(state, "gene_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
     review_triggers = list(gene_out.get("review_triggers") or [])
     bundle = GeneAnnotationBundle(
@@ -418,32 +419,11 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    artifacts = [
-        ArtifactMeta.from_file(
-            Path(gene_out["genes_gff3_ref"]),
-            stage="gene_annotation",
-            method_name=GENE_CONTRACT_METHOD,
-            artifact_type="gene_annotation.provided_gene_models",
-            metadata={"adoption_mode": "provided_gene_annotation"},
-        ),
-        ArtifactMeta.from_file(
-            Path(gene_out["predicted_proteins_ref"]),
-            stage="gene_annotation",
-            method_name=GENE_CONTRACT_METHOD,
-            artifact_type="gene_annotation.provided_predicted_proteins",
-            metadata={"adoption_mode": "provided_gene_annotation"},
-        ),
-    ]
-    if gene_out.get("transcripts_fasta_ref"):
-        artifacts.append(
-            ArtifactMeta.from_file(
-                Path(gene_out["transcripts_fasta_ref"]),
-                stage="gene_annotation",
-                method_name=GENE_CONTRACT_METHOD,
-                artifact_type="gene_annotation.provided_transcripts_fasta",
-                metadata={"adoption_mode": "provided_gene_annotation"},
-            )
-        )
+    # Manifest-provided annotation files remain inventory-owned external
+    # assets.  The artifact index only owns immutable files published inside
+    # this run; indexing the external sources would falsely transfer
+    # ownership and break portable run-relative references.
+    artifacts: list[ArtifactMeta] = []
     bundle_artifact = ArtifactMeta.from_file(
         bundle_ref,
         stage="gene_annotation",
@@ -510,25 +490,20 @@ def _gene_review_policy(state: TopLevelState) -> dict[str, Any]:
     return _gene_output(state).get("review_policy") or {"mode": "auto"}
 
 
-def _write_gene_gate_request(state: TopLevelState, gate_id: str, payload: ReviewPayload) -> str:
-    data_dir = absolute_data_dir(state)
-    session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    request_ref = out_dir / f"{gate_id}_request.json"
-    request_ref.write_text(
-        json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    artifact = ArtifactMeta.from_file(
-        request_ref,
+def _write_gene_gate_request(
+    state: TopLevelState,
+    gate_id: str,
+    payload: ReviewPayload,
+) -> PersistedReviewRequest:
+    return persist_review_request(
+        state,
         stage="gene_annotation",
+        gate_id=gate_id,
+        reason=payload.reason,
+        payload=payload,
         method_name=GENE_CONTRACT_METHOD,
         artifact_type=f"gene_annotation.{gate_id}_request",
-        metadata={"auto_decidable": payload.auto_decidable},
     )
-    append_artifact_records(data_dir, session_id, [artifact])
-    return str(request_ref)
 
 
 def _run_gene_gate(
@@ -543,7 +518,8 @@ def _run_gene_gate(
     """Write the request, evaluate policy, then auto-decide or block."""
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    request_ref = _write_gene_gate_request(state, gate_id, payload)
+    persisted_request = _write_gene_gate_request(state, gate_id, payload)
+    request_ref = persisted_request.request_ref
 
     review_policy = _gene_review_policy(state)
     outcome = evaluate("gene_annotation", payload, review_policy)
@@ -555,7 +531,7 @@ def _run_gene_gate(
         reason=reason,
         signals=[signal.model_dump(mode="json") for signal in payload.signals],
         candidates=payload.candidates,
-        review_request_artifact_ref=request_ref,
+        review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=payload.auto_decidable,
         policy_mode=outcome.mode,
         pending_human_confirmation=pending,
@@ -566,9 +542,11 @@ def _run_gene_gate(
             session_id=session_id,
             stage="gene_annotation",
             gate_id=gate_id,
+            review_request_id=persisted_request.review_request_id,
+            review_request_hash=persisted_request.request_hash,
             decision=auto_decision,
             decided_by="auto_rule",
-            rationale_artifact_ref=request_ref,
+            rationale_artifact_ref=request_ref.path_ref,
         )
         return applier(state, auto_request)
 
@@ -578,7 +556,7 @@ def _run_gene_gate(
         **gene_out,
         "status": "blocked_human",
         "active_gate_id": gate_id,
-        "review_request_artifact_ref": request_ref,
+        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
         "review_policy_outcome": outcome.model_dump(mode="json"),
         "auto_decidable": payload.auto_decidable,
         "pending_human_confirmation": pending,
@@ -587,19 +565,11 @@ def _run_gene_gate(
         "current_stage": "gene_annotation",
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
-        "active_interrupt": {
-            "stage": "gene_annotation",
-            "gate_id": gate_id,
-            "reason": reason,
-            "decisions_allowed": payload.decisions_allowed,
-            "auto_decidable": payload.auto_decidable,
-            "pending_human_confirmation": pending,
-            "review_policy": review_policy,
-            "review_request_artifact_ref": request_ref,
-            "candidates": payload.candidates,
-            "signals": [signal.model_dump(mode="json") for signal in payload.signals],
-            "blocked_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "active_interrupt": persisted_request.compact_interrupt(
+            stage="gene_annotation",
+            gate_id=gate_id,
+            reason=reason,
+        ),
     }
 
 
@@ -608,11 +578,9 @@ def _record_gene_gate_decision(
     gate_id: str,
     request: ResumeReviewRequest,
     payload_extra: dict[str, Any],
-) -> str:
+) -> dict[str, Any]:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "gene_annotation" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
     decision_payload = {
         "session_id": session_id,
         "stage": "gene_annotation",
@@ -624,31 +592,35 @@ def _record_gene_gate_decision(
         "metadata": request.metadata,
         **payload_extra,
     }
-    decision_ref = out_dir / f"{gate_id}_decision.json"
-    decision_ref.write_text(
-        json.dumps(decision_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    artifact = ArtifactMeta.from_file(
-        decision_ref,
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError(f"{gate_id} decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        data_dir,
+        session_id=session_id,
+        review_request_id=review_request_id,
         stage="gene_annotation",
+        gate_id=gate_id,
+        decision=decision_payload,
+        request_hash=review_request_hash,
         method_name=GENE_CONTRACT_METHOD,
         artifact_type=f"gene_annotation.{gate_id}_decision",
-        metadata={"decision": request.decision},
     )
-    append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_review_decision(
         session_id,
         "gene_annotation",
         decision=request.decision,
         notes=list(request.notes),
-        artifact_ref=str(artifact.file_path),
+        artifact_ref=decision_ref.model_dump(mode="json"),
         metadata=request.metadata,
         decided_by=request.decided_by,
         rationale_artifact_ref=request.rationale_artifact_ref,
         gate_id=gate_id,
+        review_request_id=review_request_id,
     )
-    return str(artifact.file_path)
+    return decision_ref.model_dump(mode="json")
 
 
 def _gene_gate_own_update(
@@ -656,7 +628,7 @@ def _gene_gate_own_update(
     gate_id: str,
     request: ResumeReviewRequest,
     gene_fields: dict[str, Any],
-    decision_ref: str,
+    decision_ref: dict[str, Any],
 ) -> dict:
     outputs = dict(state.get("stage_outputs") or {})
     outputs["gene_annotation"] = {
@@ -813,7 +785,7 @@ def prepare_gene_method_execution(state: TopLevelState) -> dict:
             "gene_annotation confirmed methods are not locally executable: "
             + ", ".join(sorted(unsupported)),
         )
-    work_dir = Path(state.get("data_dir", "data")) / "work" / "gene_annotation" / state["session_id"]
+    work_dir = stage_work_dir(state, "gene_annotation")
     candidate_refs = {m: str(work_dir / f"{m.split('.')[-1]}.gff3") for m in methods}
     return _update_gene_output(
         state,
@@ -1129,7 +1101,7 @@ def _materialize_candidate_proteins(
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    working_dir = data_dir / "work" / "gene_annotation" / session_id / suffix
+    working_dir = stage_work_dir(state, "gene_annotation", suffix)
     working_dir.mkdir(parents=True, exist_ok=True)
     proteins_fa = working_dir / "proteins.fa"
     cds_fa = working_dir / "cds.fa"
@@ -1192,7 +1164,7 @@ def _write_candidate_bundle(
     """Write minimal metrics/provenance and return a CandidateBundle dict."""
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    work_dir = data_dir / "work" / "gene_annotation" / session_id / suffix
+    work_dir = stage_work_dir(state, "gene_annotation", suffix)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_path = work_dir / "metrics.json"
@@ -1274,8 +1246,8 @@ def _freeze_gene_method_attempt(
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
-    working_dir = data_dir / "work" / "gene_annotation" / session_id / cfg["suffix"]
-    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / cfg["suffix"]
+    working_dir = stage_work_dir(state, "gene_annotation", cfg["suffix"])
+    artifact_dir = stage_artifacts_dir(state, "gene_annotation", cfg["suffix"])
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1363,18 +1335,19 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
         metadata={"attempt_id": attempt.attempt_id},
     )
     append_artifact_records(data_dir, session_id, [artifact])
+    published_gff3 = Path(artifact.file_path)
 
     Ledger(data_dir).record_attempt_succeeded(
         attempt.session_id, attempt,
-        artifacts=[{"path": str(output_gff3), "artifact_type": CANDIDATE_GFF_TYPE}],
+        artifacts=[{"path": str(published_gff3), "artifact_type": CANDIDATE_GFF_TYPE}],
     )
 
     candidate_refs = dict(gene_out.get("candidate_refs") or {})
-    candidate_refs[method_name] = str(output_gff3)
+    candidate_refs[method_name] = str(published_gff3)
 
     gene_count = 0
     try:
-        for line in output_gff3.read_text(encoding="utf-8").splitlines():
+        for line in published_gff3.read_text(encoding="utf-8").splitlines():
             if line.startswith("#") or not line.strip():
                 continue
             fields = line.split("\t")
@@ -1390,7 +1363,10 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
     # candidate is only valid with a structural GFF AND an on-disk proteins
     # FASTA; nothing may publish a fabricated protein path downstream.
     proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
-        state, method_name=method_name, suffix=cfg["suffix"], output_gff3=output_gff3,
+        state,
+        method_name=method_name,
+        suffix=cfg["suffix"],
+        output_gff3=published_gff3,
     )
     if mat_error:
         Ledger(data_dir).record_attempt_failed(
@@ -1402,7 +1378,7 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
         state,
         method_name=method_name,
         suffix=cfg["suffix"],
-        output_gff3=output_gff3,
+        output_gff3=published_gff3,
         proteins_fa=proteins_fa,
         cds_fa=cds_fa,
         gene_count=gene_count,
@@ -1423,7 +1399,7 @@ def _collect_gene_method_artifacts(state: TopLevelState, *, method_name: str, cf
             "candidate_refs": candidate_refs,
             "candidate_bundles": candidate_bundles,
             "candidate_gene_counts": candidate_gene_counts,
-            "candidate_gff_ref": str(output_gff3),
+            "candidate_gff_ref": str(published_gff3),
             f"{cfg['suffix']}_gene_count": gene_count,
             "executed_methods": executed,
         },
@@ -1581,8 +1557,8 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
     if not genome_ref:
         return _fail_update(state, "evm requires genome_input_ref")
 
-    working_dir = data_dir / "work" / "gene_annotation" / session_id / "evm"
-    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "evm"
+    working_dir = stage_work_dir(state, "gene_annotation", "evm")
+    artifact_dir = stage_artifacts_dir(state, "gene_annotation", "evm")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1791,8 +1767,8 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return _update_gene_output(state, blocked)
 
-    working_dir = data_dir / "work" / "gene_annotation" / session_id / "busco"
-    artifact_dir = data_dir / "artifacts" / "gene_annotation" / session_id / "busco"
+    working_dir = stage_work_dir(state, "gene_annotation", "busco")
+    artifact_dir = stage_artifacts_dir(state, "gene_annotation", "busco")
     working_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,52 +1,103 @@
-"""Small JSONL ledger for business execution facts."""
+"""Append-only Data Architecture v2 lifecycle ledger.
+
+The ledger owns causal ordering only.  Evidence bodies live in immutable
+artifacts and are referenced from the bounded event envelope written here.
+"""
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
+from uuid import uuid4
 
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.storage.paths import ledger_session_dir
+from app.storage.paths import SessionPaths, ensure_run_layout
 
 
-def _artifact_ref(artifact: dict[str, Any]) -> dict[str, Any]:
-    """Keep the ledger referential while the artifact index owns metadata."""
-    return {
-        key: artifact.get(key)
-        for key in ("artifact_id", "file_path", "artifact_type", "stage", "method_name")
+LEDGER_SCHEMA_VERSION = 2
+SUMMARY_MAX_BYTES = 12 * 1024
+MAX_REFS = 64
+MAX_LIST_ITEMS = 32
+MAX_ROUTE_ITEMS = 16
+MAX_TEXT_CHARS = 4096
+
+_COLLECTION_FACTS = frozenset({"artifacts", "assets", "candidates", "signals"})
+_RESERVED_PAYLOAD_KEYS = frozenset(
+    {
+        "schema_version",
+        "sequence",
+        "event_id",
+        "idempotency_key",
+        "session_id",
+        "timestamp",
+        "event_type",
+        "subject_id",
     }
+)
+_REF_KEYS = frozenset(
+    {
+        "artifact_ref",
+        "blocked_input_ref",
+        "bundle_ref",
+        "comparison_artifact_ref",
+        "decision_artifact_ref",
+        "draft_assembly_ref",
+        "input_manifest_ref",
+        "rationale_artifact_ref",
+        "registry_ref",
+        "review_request_artifact_ref",
+    }
+)
+
+
+class LedgerFormatError(ValueError):
+    """Raised when a ledger contains a non-v2 or malformed row."""
+
+
+class LedgerConflictError(RuntimeError):
+    """Raised when one idempotency key is reused for different facts."""
 
 
 class Ledger:
-    """Session-local ledger stored under data_dir/ledger."""
+    """One self-contained run's append-only causal event stream."""
 
-    def __init__(self, data_dir: Path | str = "data") -> None:
-        self.data_dir = Path(data_dir)
+    def __init__(self, data_dir: Path | str) -> None:
+        self.paths = SessionPaths.from_run_dir(data_dir)
+        self.data_dir = self.paths.run_dir
+
+    @property
+    def events_path(self) -> Path:
+        return self.paths.ledger_events_path
 
     def session_dir(self, session_id: str) -> Path:
-        """Return the ledger directory for a session."""
-        return ledger_session_dir(self.data_dir, session_id)
+        """Return the run-local ledger directory after identity validation."""
+        self.paths.require_session_id(session_id)
+        return self.paths.ledger_dir
 
     def create_session(self, session_id: str, input_manifest_ref: str) -> None:
-        """Create session metadata if it does not already exist."""
-        session_dir = self.session_dir(session_id)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        session_path = session_dir / "session.json"
-        if not session_path.exists():
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "session_id": session_id,
-                        "input_manifest_ref": input_manifest_ref,
-                        "created_at": _now(),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+        """Idempotently record creation in the event stream.
+
+        V2 deliberately has no ``ledger/session.json``.  ``session_created`` is
+        the sole durable owner of the session creation timestamp and manifest
+        reference, and :meth:`read_session` is its read-model projection.
+        """
+        self.paths.require_session_id(session_id)
+        refs = []
+        if input_manifest_ref:
+            refs.append(self._path_ref("input_manifest_ref", input_manifest_ref))
+        self.record_event(
+            session_id,
+            "session_created",
+            {},
+            subject_id=session_id,
+            refs=refs,
+            idempotency_key=f"session:{session_id}:created",
+        )
 
     def record_attempt(
         self,
@@ -57,33 +108,30 @@ class Ledger:
         artifacts: list[dict[str, Any]] | None = None,
         error: str | None = None,
     ) -> None:
-        """Append an attempt record."""
+        """Record an attempt status without copying its execution manifest."""
         self.record_event(
             session_id,
             "attempt_recorded",
             {
-                "attempt_id": attempt.attempt_id,
-                "stage": attempt.stage,
                 "method_name": attempt.method_name,
                 "status": status,
-                "script_path": str(attempt.script_path),
-                "working_dir": str(attempt.working_dir),
-                "artifacts": artifacts or [],
                 "error": error,
             },
+            stage=attempt.stage,
+            subject_id=attempt.attempt_id,
+            refs=self._artifact_refs(artifacts or []),
+            idempotency_key=f"attempt:{attempt.attempt_id}:recorded:{status}",
         )
 
     def record_attempt_started(self, session_id: str, attempt: FrozenAttemptSpec) -> None:
-        """Append an attempt-start event."""
+        """Append an idempotent attempt-start event."""
         self.record_event(
             session_id,
             "attempt_started",
-            {
-                "attempt_id": attempt.attempt_id,
-                "stage": attempt.stage,
-                "method_name": attempt.method_name,
-                "working_dir": str(attempt.working_dir),
-            },
+            {"method_name": attempt.method_name},
+            stage=attempt.stage,
+            subject_id=attempt.attempt_id,
+            idempotency_key=f"attempt:{attempt.attempt_id}:started",
         )
 
     def record_attempt_succeeded(
@@ -93,16 +141,15 @@ class Ledger:
         *,
         artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Append an attempt-success event."""
+        """Append an attempt-success event referring to its output evidence."""
         self.record_event(
             session_id,
             "attempt_succeeded",
-            {
-                "attempt_id": attempt.attempt_id,
-                "stage": attempt.stage,
-                "method_name": attempt.method_name,
-                "artifacts": [_artifact_ref(artifact) for artifact in artifacts or []],
-            },
+            {"method_name": attempt.method_name},
+            stage=attempt.stage,
+            subject_id=attempt.attempt_id,
+            refs=self._artifact_refs(artifacts or []),
+            idempotency_key=f"attempt:{attempt.attempt_id}:succeeded",
         )
 
     def record_attempt_failed(
@@ -113,34 +160,39 @@ class Ledger:
         return_code: int | None = None,
         error: str | None = None,
     ) -> None:
-        """Append an attempt-failure event."""
+        """Append an attempt-failure event with a bounded diagnostic summary."""
         self.record_event(
             session_id,
             "attempt_failed",
             {
-                "attempt_id": attempt.attempt_id,
-                "stage": attempt.stage,
                 "method_name": attempt.method_name,
                 "return_code": return_code,
                 "error": error,
             },
+            stage=attempt.stage,
+            subject_id=attempt.attempt_id,
+            idempotency_key=f"attempt:{attempt.attempt_id}:failed",
         )
 
     def record_artifact_registered(
         self,
         session_id: str,
-        artifact: dict[str, Any],
+        artifact: Any,
         *,
         attempt_id: str | None = None,
     ) -> None:
-        """Append an artifact-registration event."""
+        """Record the causal registration without copying index metadata."""
+        artifact_record = _as_mapping(artifact)
+        ref = self._artifact_ref(artifact_record)
+        artifact_id = str(ref.get("artifact_id") or ref.get("path_ref") or "unknown")
         self.record_event(
             session_id,
             "artifact_registered",
-            {
-                "attempt_id": attempt_id,
-                "artifact": _artifact_ref(artifact),
-            },
+            {"attempt_id": attempt_id},
+            stage=_optional_text(artifact_record.get("stage")),
+            subject_id=artifact_id,
+            refs=[ref],
+            idempotency_key=f"artifact:{artifact_id}:registered",
         )
 
     def record_assets_registered(
@@ -151,16 +203,17 @@ class Ledger:
         registry_ref: str,
         ambiguous: bool = False,
     ) -> None:
-        """Append an asset-registration event."""
+        """Record inventory cardinality and the authoritative registry ref."""
+        registry = self._path_ref("registry_ref", registry_ref)
+        subject_id = str(registry.get("path_ref") or registry_ref)
         self.record_event(
             session_id,
             "assets_registered",
-            {
-                "registry_ref": registry_ref,
-                "asset_count": len(assets),
-                "assets": assets,
-                "ambiguous": ambiguous,
-            },
+            {"asset_count": len(assets), "ambiguous": ambiguous},
+            stage="inventory",
+            subject_id=subject_id,
+            refs=[registry],
+            idempotency_key=f"asset-registry:{subject_id}:registered",
         )
 
     def record_review_requested(
@@ -171,27 +224,52 @@ class Ledger:
         reason: str,
         signals: list[dict[str, Any]] | None = None,
         candidates: list[dict[str, Any]] | None = None,
-        review_request_artifact_ref: str | None = None,
+        review_request_artifact_ref: Any = None,
         auto_decidable: bool | None = None,
         policy_mode: str | None = None,
         pending_human_confirmation: bool | None = None,
+        review_request_id: str | None = None,
     ) -> None:
-        """Append a review-requested event."""
+        """Record a request by ID; full signals/candidates remain in its artifact."""
+        refs: list[dict[str, Any]] = []
+        if review_request_artifact_ref:
+            request_ref = self._path_ref(
+                "review_request_artifact_ref", review_request_artifact_ref
+            )
+            refs.append(request_ref)
+        else:
+            request_ref = None
+        request_id = (
+            review_request_id
+            or _review_request_id_from_ref(request_ref)
+            or _stable_subject(
+                "review",
+                stage,
+                str((request_ref or {}).get("path_ref") or ""),
+                reason,
+            )
+        )
         payload: dict[str, Any] = {
-            "stage": stage,
             "reason": reason,
-            "signals": signals or [],
-            "candidates": candidates or [],
+            "signal_count": len(signals or []),
+            "candidate_count": len(candidates or []),
+            "review_request_id": request_id,
         }
-        if review_request_artifact_ref is not None:
-            payload["review_request_artifact_ref"] = review_request_artifact_ref
         if auto_decidable is not None:
             payload["auto_decidable"] = auto_decidable
         if policy_mode is not None:
             payload["policy_mode"] = policy_mode
         if pending_human_confirmation is not None:
             payload["pending_human_confirmation"] = pending_human_confirmation
-        self.record_event(session_id, "review_requested", payload)
+        self.record_event(
+            session_id,
+            "review_requested",
+            payload,
+            stage=stage,
+            subject_id=request_id,
+            refs=refs,
+            idempotency_key=f"review:{request_id}:requested",
+        )
 
     def record_review_decision(
         self,
@@ -204,52 +282,626 @@ class Ledger:
         rejected_candidates: list[str] | None = None,
         notes: list[str] | None = None,
         method_name: str | None = None,
-        artifact_ref: str | None = None,
+        artifact_ref: Any = None,
         metadata: dict[str, Any] | None = None,
         decided_by: str = "human",
-        rationale_artifact_ref: str | None = None,
+        rationale_artifact_ref: Any = None,
+        review_request_id: str | None = None,
     ) -> None:
-        """Append a review-decision event."""
+        """Record a bounded decision bound to the latest matching request ID."""
+        request_id = review_request_id or self._latest_open_review_request_id(stage)
+        if request_id is None:
+            request_id = _stable_subject(
+                "review",
+                stage,
+                gate_id or "",
+                _reference_identity(artifact_ref),
+            )
+        refs: list[dict[str, Any]] = []
+        if artifact_ref:
+            refs.append(self._path_ref("artifact_ref", artifact_ref))
+        if rationale_artifact_ref:
+            refs.append(self._path_ref("rationale_artifact_ref", rationale_artifact_ref))
+        payload = {
+            "review_request_id": request_id,
+            "gate_id": gate_id,
+            "decision": decision,
+            "candidate_id": candidate_id,
+            "rejected_candidates": rejected_candidates or [],
+            "rejected_candidate_count": len(rejected_candidates or []),
+            "note_count": len(notes or []),
+            "method_name": method_name,
+            "decided_by": decided_by,
+            "metadata": metadata or {},
+        }
         self.record_event(
             session_id,
             "review_decision",
-            {
-                "stage": stage,
-                "gate_id": gate_id,
-                "decision": decision,
-                "candidate_id": candidate_id,
-                "rejected_candidates": rejected_candidates or [],
-                "notes": notes or [],
-                "method_name": method_name,
-                "artifact_ref": artifact_ref,
-                "decided_by": decided_by,
-                "rationale_artifact_ref": rationale_artifact_ref,
-                "metadata": metadata or {},
-            },
+            payload,
+            stage=stage,
+            subject_id=request_id,
+            refs=refs,
+            idempotency_key=f"review:{request_id}:decision",
+        )
+
+    def record_stage_entered(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        route_node: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.record_event(
+            session_id,
+            "stage_entered",
+            {"route_node": route_node},
+            stage=stage,
+            subject_id=stage,
+            idempotency_key=idempotency_key,
+        )
+
+    def record_stage_skipped(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        reason: str,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.record_event(
+            session_id,
+            "stage_skipped",
+            {"reason": reason},
+            stage=stage,
+            subject_id=stage,
+            refs=refs,
+            idempotency_key=idempotency_key,
+        )
+
+    def record_stage_completed(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.record_event(
+            session_id,
+            "stage_completed",
+            {},
+            stage=stage,
+            subject_id=stage,
+            refs=refs,
+            idempotency_key=idempotency_key,
+        )
+
+    def record_session_terminal(
+        self,
+        session_id: str,
+        *,
+        outcome: str,
+        stage: str | None = None,
+        error: str | None = None,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.record_event(
+            session_id,
+            "session_terminal",
+            {"outcome": outcome, "error": error},
+            stage=stage,
+            subject_id=session_id,
+            refs=refs,
+            idempotency_key=idempotency_key or f"session:{session_id}:terminal:{outcome}",
         )
 
     def read_session(self, session_id: str) -> dict[str, Any] | None:
-        session_path = self.session_dir(session_id) / "session.json"
-        if not session_path.exists():
+        """Project session metadata from ``session_created``."""
+        self.paths.require_session_id(session_id)
+        created = next(
+            (row for row in self.read_events(session_id) if row["event_type"] == "session_created"),
+            None,
+        )
+        if created is None:
             return None
-        return json.loads(session_path.read_text(encoding="utf-8"))
+        return {
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "session_id": session_id,
+            "input_manifest_ref": created.get("input_manifest_ref"),
+            "created_at": created.get("timestamp"),
+            "created_event_id": created.get("event_id"),
+        }
+
+    def read_event_rows(self, session_id: str) -> list[dict[str, Any]]:
+        """Read and validate the exact v2 rows stored on disk."""
+        self.paths.require_session_id(session_id)
+        if not self.events_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        with self.events_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise LedgerFormatError(
+                        f"invalid JSON in {self.events_path}:{line_number}"
+                    ) from exc
+                self._validate_row(row, line_number)
+                rows.append(row)
+        return rows
 
     def read_events(self, session_id: str) -> list[dict[str, Any]]:
-        events_path = self.session_dir(session_id) / "events.jsonl"
-        if not events_path.exists():
-            return []
-        events: list[dict[str, Any]] = []
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                events.append(json.loads(line))
-        return events
+        """Return bounded query projections while preserving the v2 envelope."""
+        return [self._project_row(row) for row in self.read_event_rows(session_id)]
 
-    def record_event(self, session_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        """Append a business event."""
-        session_dir = self.session_dir(session_id)
-        session_dir.mkdir(parents=True, exist_ok=True)
-        with (session_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"event_type": event_type, "timestamp": _now(), **payload}) + "\n")
+    def last_sequence(self, session_id: str) -> int:
+        rows = self.read_event_rows(session_id)
+        return int(rows[-1]["sequence"]) if rows else 0
+
+    def record_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        stage: str | None = None,
+        subject_id: str | None = None,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one idempotent, bounded v2 event and return its exact row."""
+        self.paths.require_session_id(session_id)
+        if not event_type or not isinstance(event_type, str):
+            raise ValueError("event_type must be a non-empty string")
+        ensure_run_layout(self.paths)
+
+        raw = dict(payload or {})
+        reserved = sorted(set(raw) & _RESERVED_PAYLOAD_KEYS)
+        if reserved:
+            raise ValueError(
+                "ledger payload cannot override envelope fields: "
+                + ", ".join(reserved)
+            )
+        stage = stage or _optional_text(raw.pop("stage", None))
+        subject_id = subject_id or _subject_from_payload(raw)
+        explicit_refs = list(refs or [])
+        payload_refs, summary_input = self._split_payload(raw)
+        normalized_refs = self._normalize_refs([*explicit_refs, *payload_refs])
+        summary = _bounded_summary(summary_input)
+        semantic = {
+            "schema_version": LEDGER_SCHEMA_VERSION,
+            "session_id": session_id,
+            "event_type": event_type,
+            "stage": stage,
+            "subject_id": subject_id,
+            "refs": normalized_refs,
+            "summary": summary,
+        }
+        key = idempotency_key or _default_idempotency_key(semantic)
+        if len(key) > 256:
+            key = f"idem_{_sha256_text(key)}"
+
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.events_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                rows = self._rows_from_locked_handle(handle)
+                for existing in rows:
+                    if existing["idempotency_key"] != key:
+                        continue
+                    if _semantic_body(existing) != semantic:
+                        raise LedgerConflictError(
+                            f"idempotency key {key!r} already owns a different ledger fact"
+                        )
+                    return existing
+
+                sequence = int(rows[-1]["sequence"]) + 1 if rows else 1
+                row = {
+                    "schema_version": LEDGER_SCHEMA_VERSION,
+                    "sequence": sequence,
+                    "event_id": f"evt_{sequence:08d}_{uuid4().hex[:12]}",
+                    "idempotency_key": key,
+                    "session_id": session_id,
+                    "timestamp": _now(),
+                    "event_type": event_type,
+                    "stage": stage,
+                    "subject_id": subject_id,
+                    "refs": normalized_refs,
+                    "summary": summary,
+                }
+                handle.seek(0, os.SEEK_END)
+                handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                return row
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _rows_from_locked_handle(self, handle: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise LedgerFormatError(
+                    f"invalid JSON in {self.events_path}:{line_number}"
+                ) from exc
+            self._validate_row(row, line_number)
+            rows.append(row)
+        return rows
+
+    def _validate_row(self, row: Any, line_number: int) -> None:
+        required = {
+            "schema_version",
+            "sequence",
+            "event_id",
+            "idempotency_key",
+            "session_id",
+            "timestamp",
+            "event_type",
+            "stage",
+            "subject_id",
+            "refs",
+            "summary",
+        }
+        if not isinstance(row, dict) or not required.issubset(row):
+            raise LedgerFormatError(f"malformed v2 ledger row at line {line_number}")
+        if row["schema_version"] != LEDGER_SCHEMA_VERSION:
+            raise LedgerFormatError(
+                f"unsupported ledger schema at line {line_number}: {row['schema_version']!r}"
+            )
+        if row["session_id"] != self.paths.session_id:
+            raise LedgerFormatError(f"session mismatch in ledger row at line {line_number}")
+        if not isinstance(row["sequence"], int) or row["sequence"] < 1:
+            raise LedgerFormatError(f"invalid sequence in ledger row at line {line_number}")
+        if not isinstance(row["refs"], list) or not isinstance(row["summary"], dict):
+            raise LedgerFormatError(f"invalid refs/summary in ledger row at line {line_number}")
+        if _json_size(row["summary"]) > SUMMARY_MAX_BYTES:
+            raise LedgerFormatError(f"oversized summary in ledger row at line {line_number}")
+
+    def _split_payload(
+        self, payload: dict[str, Any]
+    ) -> tuple[list[Any], dict[str, Any]]:
+        refs: list[Any] = []
+        summary: dict[str, Any] = {}
+        supplied_refs = payload.pop("refs", None)
+        if isinstance(supplied_refs, list):
+            refs.extend(supplied_refs)
+        supplied_summary = payload.pop("summary", None)
+        if isinstance(supplied_summary, Mapping):
+            summary.update(dict(supplied_summary))
+
+        for key, value in payload.items():
+            if key == "artifact" and isinstance(value, Mapping):
+                refs.append({**dict(value), "role": "artifact"})
+                continue
+            if key in _COLLECTION_FACTS:
+                if key == "artifacts" and isinstance(value, list):
+                    for item in value:
+                        if hasattr(item, "model_dump"):
+                            item = item.model_dump(mode="json")
+                        if isinstance(item, Mapping):
+                            refs.append({**dict(item), "role": "artifact"})
+                summary[f"{key[:-1]}_count"] = len(value) if isinstance(value, list) else 0
+                continue
+            if _is_ref_key(key) and value:
+                refs.append(self._path_ref(key, value))
+                continue
+            if key == "relevant_refs":
+                extracted = self._refs_from_nested(value, role_prefix="relevant")
+                refs.extend(extracted)
+                summary["relevant_ref_count"] = len(extracted)
+                continue
+            summary[key] = value
+        return refs, summary
+
+    def _refs_from_nested(self, value: Any, *, role_prefix: str) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                role = f"{role_prefix}.{key}"
+                if isinstance(nested, (str, Path)) and _is_ref_key(str(key)):
+                    refs.append(self._path_ref(role, nested))
+                else:
+                    refs.extend(self._refs_from_nested(nested, role_prefix=role))
+        elif isinstance(value, list):
+            for index, nested in enumerate(value[:MAX_REFS]):
+                refs.extend(self._refs_from_nested(nested, role_prefix=f"{role_prefix}.{index}"))
+        return refs
+
+    def _normalize_refs(self, refs: Iterable[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for value in refs:
+            if len(normalized) >= MAX_REFS:
+                break
+            ref = self._normalize_ref(value)
+            if ref is None:
+                continue
+            identity = json.dumps(ref, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if identity in seen:
+                continue
+            normalized.append(ref)
+            seen.add(identity)
+        return normalized
+
+    def _normalize_ref(self, value: Any) -> dict[str, Any] | None:
+        if isinstance(value, (str, Path)):
+            return self._path_ref("artifact_ref", value)
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        if not isinstance(value, Mapping):
+            return None
+        ref = dict(value)
+        role = _optional_text(ref.get("role"))
+        path_value = ref.get("path_ref") or ref.get("file_path")
+        normalized: dict[str, Any] = {}
+        if role:
+            normalized["role"] = role
+        for key in ("artifact_id", "sha256", "artifact_type"):
+            if ref.get(key) is not None:
+                normalized[key] = _bounded_scalar(ref[key])
+        if "sha256" not in normalized and ref.get("file_hash") is not None:
+            normalized["sha256"] = _bounded_scalar(ref["file_hash"])
+        size = ref.get("size_bytes")
+        if size is None:
+            size = ref.get("file_size_bytes")
+        if size is not None:
+            normalized["size_bytes"] = int(size)
+        if path_value:
+            normalized["path_ref"] = self._normalize_path_ref(path_value)
+        elif ref.get("value") is not None:
+            normalized["value"] = _bounded_scalar(ref["value"])
+        return normalized or None
+
+    def _path_ref(self, role: str, value: Any) -> dict[str, Any]:
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        if isinstance(value, Mapping):
+            normalized = self._normalize_ref({**dict(value), "role": role})
+            if normalized is None or not normalized.get("path_ref"):
+                raise ValueError(f"{role} must contain a path_ref")
+            return normalized
+        return {"role": role, "path_ref": self._normalize_path_ref(value)}
+
+    def _normalize_path_ref(self, value: str | Path) -> str:
+        path = Path(value)
+        if path.is_absolute():
+            return self.paths.to_ref(path)
+        resolved = self.paths.resolve_ref(path)
+        return self.paths.to_ref(resolved)
+
+    def _artifact_ref(self, artifact: Any) -> dict[str, Any]:
+        return self._normalize_ref({**_as_mapping(artifact), "role": "artifact"}) or {}
+
+    def _artifact_refs(self, artifacts: Iterable[Any]) -> list[dict[str, Any]]:
+        return [self._artifact_ref(artifact) for artifact in artifacts]
+
+    def _latest_open_review_request_id(self, stage: str) -> str | None:
+        events = self.read_events(self.paths.session_id)
+        decided = {
+            str(event.get("review_request_id") or event.get("subject_id"))
+            for event in events
+            if event.get("event_type") == "review_decision"
+        }
+        for event in reversed(events):
+            if event.get("event_type") != "review_requested" or event.get("stage") != stage:
+                continue
+            request_id = str(event.get("review_request_id") or event.get("subject_id"))
+            if request_id not in decided:
+                return request_id
+        return None
+
+    @staticmethod
+    def _project_row(row: dict[str, Any]) -> dict[str, Any]:
+        projected = dict(row)
+        projected.update(row.get("summary") or {})
+        if row.get("subject_id"):
+            event_type = row.get("event_type")
+            if str(event_type).startswith("attempt_"):
+                projected.setdefault("attempt_id", row["subject_id"])
+            if event_type in {"review_requested", "review_decision"}:
+                projected.setdefault("review_request_id", row["subject_id"])
+        for ref in row.get("refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            role = ref.get("role")
+            value = ref.get("path_ref") or ref.get("value")
+            if role == "artifact":
+                projected.setdefault("artifact", ref)
+                projected.setdefault("artifacts", []).append(ref)
+            elif isinstance(role, str) and value is not None and "." not in role:
+                projected.setdefault(role, value)
+        return projected
+
+
+def _semantic_body(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: row.get(key)
+        for key in (
+            "schema_version",
+            "session_id",
+            "event_type",
+            "stage",
+            "subject_id",
+            "refs",
+            "summary",
+        )
+    }
+
+
+def _default_idempotency_key(semantic: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256(
+        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"event:{semantic['event_type']}:{digest[:32]}"
+
+
+def _subject_from_payload(payload: Mapping[str, Any]) -> str | None:
+    for key in (
+        "attempt_id",
+        "review_request_id",
+        "candidate_id",
+        "gate_id",
+        "artifact_id",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _bounded_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    candidate: dict[str, Any] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        bounded = _bounded_value(str(key), value)
+        if bounded is None:
+            continue
+        candidate[str(key)] = bounded
+    if _json_size(candidate) <= SUMMARY_MAX_BYTES:
+        return candidate
+
+    compact: dict[str, Any] = {
+        "summary_truncated": True,
+        "summary_sha256": _sha256_text(
+            json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ),
+    }
+    omitted: list[str] = []
+    priority = (
+        "outcome",
+        "status",
+        "reason",
+        "decision",
+        "gate_id",
+        "method_name",
+        "return_code",
+        "error",
+        "current_stage",
+        "supervision_state",
+    )
+    ordered = [key for key in priority if key in candidate]
+    ordered.extend(key for key in candidate if key not in ordered)
+    for key in ordered:
+        trial = {**compact, key: candidate[key]}
+        if _json_size(trial) <= SUMMARY_MAX_BYTES - 512:
+            compact[key] = candidate[key]
+        else:
+            omitted.append(key)
+    compact["omitted_fields"] = omitted[:MAX_LIST_ITEMS]
+    return compact
+
+
+def _bounded_value(key: str, value: Any) -> Any:
+    if isinstance(value, (str, Path)):
+        limit = MAX_TEXT_CHARS if key in {"error", "detail", "reason", "last_error"} else 1024
+        text = str(value)
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, list):
+        if key in {"notes", "signals", "candidates", "assets", "artifacts"}:
+            return len(value)
+        limit = MAX_ROUTE_ITEMS if key == "route_trace" else MAX_LIST_ITEMS
+        if all(isinstance(item, (str, bool, int, float, Path)) or item is None for item in value):
+            return [_bounded_scalar(item) for item in value[:limit] if item is not None]
+        ids = [
+            _bounded_scalar(item.get("candidate_id") or item.get("artifact_id") or item.get("id"))
+            for item in value[:limit]
+            if isinstance(item, Mapping)
+            and (item.get("candidate_id") or item.get("artifact_id") or item.get("id"))
+        ]
+        return {"item_count": len(value), "ids": ids}
+    if isinstance(value, Mapping):
+        if len(value) <= 8 and all(
+            isinstance(nested, (str, bool, int, float, Path)) or nested is None
+            for nested in value.values()
+        ):
+            return {
+                str(nested_key): _bounded_scalar(nested)
+                for nested_key, nested in value.items()
+                if nested is not None
+            }
+        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        return {
+            "item_count": len(value),
+            "keys": [str(nested_key) for nested_key in list(value)[:MAX_LIST_ITEMS]],
+            "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        }
+    return _bounded_scalar(value)
+
+
+def _bounded_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    return text if len(text) <= 1024 else text[:1023] + "…"
+
+
+def _is_ref_key(key: str) -> bool:
+    return key in _REF_KEYS or key.endswith("_ref") or key.endswith("_artifact_ref")
+
+
+def _optional_text(value: Any) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, Mapping):
+        raise TypeError(f"expected an artifact/ref mapping, got {type(value).__name__}")
+    return dict(value)
+
+
+def _reference_identity(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, Mapping):
+        return str(value.get("artifact_id") or value.get("path_ref") or value.get("file_path") or "")
+    return str(value)
+
+
+def _review_request_id_from_ref(ref: dict[str, Any] | None) -> str | None:
+    if not ref or not ref.get("path_ref"):
+        return None
+    parts = Path(str(ref["path_ref"])).parts
+    try:
+        reviews_index = parts.index("reviews")
+    except ValueError:
+        return None
+    if reviews_index + 1 >= len(parts):
+        return None
+    request_id = parts[reviews_index + 1]
+    return request_id if request_id.startswith("review_") else None
+
+
+def _stable_subject(*parts: str) -> str:
+    return f"{parts[0]}_{_sha256_text(':'.join(parts))[0:20]}"
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _json_size(value: Any) -> int:
+    return len(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
 
 
 def _now() -> str:

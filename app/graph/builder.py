@@ -11,6 +11,7 @@ from app.graph.checkpointer import (
 )
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.state import TopLevelState
+from app.stages import STAGE_ORDER, TERMINAL_STAGE
 from app.stages.assembly.builder import build_stage as build_assembly_stage
 from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
@@ -39,13 +40,84 @@ def build_graph(
     graph = StateGraph(TopLevelState)
 
     def operator_route_controller(state: TopLevelState) -> dict:
+        session_id = state.get("session_id")
+        runtime_data_dir = state.get("data_dir", data_dir)
         supervision = state.get("supervision_state")
-        if supervision in {"failed_terminal", "blocked_human"} and state.get("session_id"):
+        if session_id:
+            from app.control.ledger import Ledger
+
+            ledger = Ledger(runtime_data_dir)
+            for skipped_stage, reason in (state.get("skip_reasons") or {}).items():
+                if skipped_stage in STAGE_ORDER:
+                    ledger.record_stage_skipped(
+                        session_id,
+                        skipped_stage,
+                        reason=str(reason),
+                        idempotency_key=f"stage-skipped:{skipped_stage}",
+                    )
+            for trace_item in state.get("route_trace") or []:
+                if isinstance(trace_item, str) and trace_item.endswith("_stage"):
+                    completed_stage = trace_item[: -len("_stage")]
+                    if completed_stage in STAGE_ORDER:
+                        ledger.record_stage_completed(
+                            session_id,
+                            completed_stage,
+                            idempotency_key=f"stage-completed:{completed_stage}",
+                        )
+
+            if supervision == "failed_terminal":
+                ledger.record_session_terminal(
+                    session_id,
+                    outcome="failed",
+                    stage=state.get("current_stage"),
+                    error=state.get("last_error"),
+                    idempotency_key="session-terminal:failed",
+                )
+            elif supervision == "completed" or state.get("current_stage") == TERMINAL_STAGE:
+                ledger.record_session_terminal(
+                    session_id,
+                    outcome="completed",
+                    stage=state.get("current_stage"),
+                    idempotency_key="session-terminal:completed",
+                )
+            elif supervision != "blocked_human":
+                current = state.get("current_stage", "inventory")
+                requested = state.get("requested_stages")
+                if requested and current not in {"inventory", TERMINAL_STAGE} and current not in requested:
+                    start = STAGE_ORDER.index(current) if current in STAGE_ORDER else len(STAGE_ORDER)
+                    next_requested = next(
+                        (stage for stage in STAGE_ORDER[start + 1 :] if stage in requested),
+                        TERMINAL_STAGE,
+                    )
+                    stop = STAGE_ORDER.index(next_requested) if next_requested in STAGE_ORDER else len(STAGE_ORDER)
+                    for skipped_stage in STAGE_ORDER[start:stop]:
+                        ledger.record_stage_skipped(
+                            session_id,
+                            skipped_stage,
+                            reason="not_requested",
+                            idempotency_key=f"stage-skipped:{skipped_stage}",
+                        )
+                    if next_requested != TERMINAL_STAGE:
+                        ledger.record_stage_entered(
+                            session_id,
+                            next_requested,
+                            route_node="route_controller",
+                            idempotency_key=f"stage-entered:{next_requested}",
+                        )
+                elif current in STAGE_ORDER:
+                    ledger.record_stage_entered(
+                        session_id,
+                        current,
+                        route_node="route_controller",
+                        idempotency_key=f"stage-entered:{current}",
+                    )
+
+        if supervision in {"failed_terminal", "blocked_human"} and session_id:
             from app.reports.review_report import write_operator_report
 
             write_operator_report(
-                state.get("data_dir", data_dir),
-                state["session_id"],
+                runtime_data_dir,
+                session_id,
                 {**state, "checkpoint_persistence": backend},
             )
         return route_controller(state)

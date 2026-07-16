@@ -20,6 +20,8 @@ from app.stages.repeat_annotation.nodes import (
     _parse_tbl_repeat_percentage,
 )
 from app.review.base import ResumeReviewRequest
+from app.review.persistence import load_review_request
+from tests.data_v2 import v2_run_dir
 
 
 class RepeatAnnotationDescriptorTests(unittest.TestCase):
@@ -49,8 +51,8 @@ class RepeatAnnotationStageTests(unittest.TestCase):
     def _state(self, tmpdir: str, registry_ref: str | None):
         state = initial_state(
             session_id="s1",
-            input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-            data_dir=tmpdir,
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
         )
         state["current_stage"] = "repeat_annotation"
         state["asset_registry_ref"] = registry_ref
@@ -149,7 +151,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertFalse(repeat["execution_enabled"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
 
     def test_local_repeatmasker_runs_with_provided_library_and_registers_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -186,12 +188,12 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertEqual(bundle["status"], "executed")
             self.assertTrue(bundle["metadata"]["execution_enabled"])
             self.assertNotIn("execution_mode", bundle["metadata"])
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_index = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
             self.assertIn("repeat_annotation.softmasked_genome", artifact_types)
             self.assertIn("repeat_annotation.gff3", artifact_types)
             self.assertIn("command.stdout", artifact_types)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            events = [json.loads(line) for line in (Path(state["data_dir"]) / "ledger" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertIn("attempt_started", [event["event_type"] for event in events])
             self.assertIn("attempt_succeeded", [event["event_type"] for event in events])
 
@@ -207,7 +209,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 tmpdir,
                 assets=[{"asset_id": "s1:repeat_library:trusted", "asset_type": "repeat_library", "path": str(library)}],
             )
-            data_dir = root / "out"
+            data_dir = v2_run_dir(root / "out", "s1")
             state = self._state(tmpdir, str(registry))
             state["data_dir"] = os.path.relpath(data_dir, Path.cwd())
             state["stage_outputs"] = {
@@ -254,11 +256,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("RepeatMasker", result["last_error"])
-            artifact_index = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifact_index = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
-            events = [json.loads(line) for line in (Path(tmpdir) / "ledger" / "s1" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            events = [json.loads(line) for line in (Path(state["data_dir"]) / "ledger" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
             event_types = [event["event_type"] for event in events]
             self.assertIn("attempt_failed", event_types)
             self.assertIn("artifact_registered", event_types)
@@ -311,7 +313,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertEqual(repeat["strategy"], "de_novo")
             self.assertFalse(repeat["execution_enabled"])
-            self.assertFalse((Path(tmpdir) / "ledger" / "s1" / "events.jsonl").exists())
+            self.assertFalse((Path(state["data_dir"]) / "ledger" / "events.jsonl").exists())
 
     def test_fragmented_assembly_marks_low_confidence_but_continues(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -365,7 +367,11 @@ class MaskReviewGateTests(unittest.TestCase):
         return path
 
     def _state(self, tmpdir: str, registry_ref: str | None) -> dict:
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = initial_state(
+            session_id="s1",
+            input_manifest_ref="control/manifest.yaml",
+            data_dir=str(v2_run_dir(tmpdir, "s1")),
+        )
         state["current_stage"] = "repeat_annotation"
         state["asset_registry_ref"] = registry_ref
         return state
@@ -444,7 +450,7 @@ class MaskReviewGateTests(unittest.TestCase):
                 result["route_trace"].index("repeat_annotation_stage"),
             )
 
-            data_dir = Path(tmpdir)
+            data_dir = Path(result["data_dir"])
             artifact_types = {rec["artifact_type"] for rec in read_artifact_records(data_dir, "s1")}
             self.assertIn("repeat_annotation.mask_review_request", artifact_types)
             self.assertIn("repeat_annotation.mask_review_decision", artifact_types)
@@ -483,14 +489,17 @@ class MaskReviewGateTests(unittest.TestCase):
             interrupt = result["active_interrupt"]
             self.assertEqual(interrupt["stage"], "repeat_annotation")
             self.assertEqual(interrupt["gate_id"], "mask_review")
-            self.assertIn("accept", interrupt["decisions_allowed"])
+            request_payload = load_review_request(
+                result["data_dir"], interrupt["request_ref"]
+            )["payload"]
+            self.assertIn("accept", request_payload["decisions_allowed"])
 
     def test_resume_with_accept_completes_stage(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            Ledger(tmpdir).create_session("s1", "manifest.yaml")
             softmasked = Path(tmpdir) / "softmasked.fasta"
             softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
             state = self._state(tmpdir, None)
+            Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
             state["supervision_state"] = "blocked_human"
             state["stage_outputs"] = {
                 "repeat_annotation": {
@@ -507,17 +516,21 @@ class MaskReviewGateTests(unittest.TestCase):
                     "candidate_methods": [],
                     "notes": [],
                     "execution_enabled": True,
+                    "review_policy": {"mode": "strict"},
                 }
             }
+            blocked = {**state, **block_mask_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="repeat_annotation",
                 gate_id="mask_review",
                 decision="accept",
                 decided_by="human",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
-            result = apply_mask_review_decision(state, request)
+            result = apply_mask_review_decision(blocked, request)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertEqual(result["supervision_state"], "running_stage")
@@ -529,12 +542,12 @@ class MaskReviewGateTests(unittest.TestCase):
 
     def test_resume_with_skip_uses_unmasked_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            Ledger(tmpdir).create_session("s1", "manifest.yaml")
             unmasked = Path(tmpdir) / "unmasked.fasta"
             softmasked = Path(tmpdir) / "softmasked.fasta"
             unmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
             softmasked.write_text(">ctg1\nacgt\n", encoding="utf-8")
             state = self._state(tmpdir, None)
+            Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
             state["supervision_state"] = "blocked_human"
             state["stage_outputs"] = {
                 "repeat_annotation": {
@@ -551,17 +564,21 @@ class MaskReviewGateTests(unittest.TestCase):
                     "candidate_methods": [],
                     "notes": [],
                     "execution_enabled": True,
+                    "review_policy": {"mode": "strict"},
                 }
             }
+            blocked = {**state, **block_mask_review(state)}
             request = ResumeReviewRequest(
                 session_id="s1",
                 stage="repeat_annotation",
                 gate_id="mask_review",
                 decision="skip",
                 decided_by="human",
+                review_request_id=blocked["active_interrupt"]["review_request_id"],
+                review_request_hash=blocked["active_interrupt"]["request_hash"],
             )
 
-            result = apply_mask_review_decision(state, request)
+            result = apply_mask_review_decision(blocked, request)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]

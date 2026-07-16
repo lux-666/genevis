@@ -6,15 +6,15 @@
 #    1. AutoHiC method subgraph (internally Juicer + 3D-DNA)
 #    2. Hi-C shell script generation correctness
 #    3. RunConfig Hi-C schema validation
-#    4. AutoHiC-only method selection
-#    5. Interactive parameter collection for enzyme and pretrained models
+#    4. Fixed AutoHiC pipeline with no method selection
+#    5. LLM restriction-enzyme recommendation plus mandatory human approval
 #    6. Hi-C artifacts published to new layout
-#    7. Fallback to pre-Hi-C assembly on failure
+#    7. Distinct missing-requirements and execution-failure outcomes
 #    8. Unit tests pass
 #
 #  Prerequisites:
 #    - An assembly FASTA (from Test 04 or existing)
-#    - Hi-C paired reads plus AutoHiC error/chromosome models
+#    - Hi-C paired reads; model paths come from packages.autohic.models
 # ============================================================
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -90,77 +90,48 @@ import json
 rc_data = {
     'local_exec': ['hic_scaffolding'],
     'hic_scaffolding': {
-        'methods': ['autohic'],
         'autohic_parameters': {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-            'error_model_ref': '/tmp/error_model.pth',
-            'chromosome_model_ref': '/tmp/chr_model.pth',
             'threads': ${ASSEMBLY_THREADS},
         },
     },
 }
 rc = RunConfig.model_validate(rc_data)
 assert rc.hic_scaffolding is not None, 'hic_scaffolding config is None'
-assert 'autohic' in rc.hic_scaffolding.methods, 'method not in methods list'
-print(f'HiCScaffoldingRunConfig: methods={rc.hic_scaffolding.methods}')
+assert rc.hic_scaffolding.autohic_parameters.restriction_enzyme == '${HIC_RESTRICTION_ENZYME}'
+assert 'methods' not in HiCScaffoldingRunConfig.model_fields
+print('HiCScaffoldingRunConfig: fixed AutoHiC pipeline')
 print('Hi-C RunConfig validation: PASS')
 " 2>&1 && pass "HiCScaffoldingRunConfig schema validation" || fail "HiCScaffoldingRunConfig schema validation"
 
 python3 -c "
-from app.schemas.run_config import HiCScaffoldingPlanCandidate
-# Test: candidate readiness derivation
-cand = HiCScaffoldingPlanCandidate(
-    method='autohic',
-)
-print(f'Candidate status: {cand.status}')
-print(f'Missing fields: {cand.missing_fields}')
-# Without AutoHiC params, should show missing fields
-assert cand.status == 'needs_clarification', \
-    f'candidate should need clarification without params, got {cand.status}'
-assert len(cand.missing_fields) > 0, 'should have missing fields'
-print('Candidate readiness derivation: correct')
-" 2>&1 && pass "HiCScaffoldingPlanCandidate readiness derivation" || fail "HiCScaffoldingPlanCandidate readiness derivation"
+from app.schemas.run_config import AutoHiCRunParameters
+params = AutoHiCRunParameters()
+assert params.restriction_enzyme is None
+assert params.threads == 10
+assert 'error_model_ref' not in AutoHiCRunParameters.model_fields
+assert 'chromosome_model_ref' not in AutoHiCRunParameters.model_fields
+print('AutoHiC runtime defaults and external-model contract: correct')
+" 2>&1 && pass "AutoHiC runtime parameter contract" || fail "AutoHiC runtime parameter contract"
 
-# AutoHiC is the only allowed method.
+# The Hi-C stage rejects legacy method-selection fields.
 python3 -c "
 from app.schemas.run_config import HiCScaffoldingRunConfig
-rc = HiCScaffoldingRunConfig.model_validate({
-    'methods': ['autohic'],
-    'autohic_parameters': {
-        'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-        'error_model_ref': '/tmp/error_model.pth',
-        'chromosome_model_ref': '/tmp/chr_model.pth',
-        'threads': 4,
-    },
-})
-assert rc.methods == ['autohic']
-print('AutoHiC-only schema: PASS')
-" 2>&1 && pass "AutoHiC-only method schema" || fail "AutoHiC-only method schema"
-
-# ---- Test HiCMethod Literal type ----
-python3 -c "
-from app.schemas.run_config import HiCMethod
-import typing
-method_vals = typing.get_args(HiCMethod)
-print(f'HiCMethod values: {list(method_vals)}')
-assert method_vals == ('autohic',), method_vals
-print('Hi-C Literal types: PASS')
-" 2>&1 && pass "Hi-C Literal types valid" || fail "Hi-C Literal types"
+from pydantic import ValidationError
+try:
+    HiCScaffoldingRunConfig.model_validate({'methods': ['autohic']})
+except ValidationError:
+    print('legacy Hi-C method selection rejected')
+else:
+    raise AssertionError('legacy methods field must be rejected')
+" 2>&1 && pass "fixed AutoHiC schema" || fail "fixed AutoHiC schema"
 
 python3 -c "
-from app.schemas.run_config import HiCScaffoldingPlanCandidate
-
-candidate = HiCScaffoldingPlanCandidate(
-    method='autohic',
-    autohic_parameters={
-        'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-        'error_model_ref': '/tmp/error_model.pth',
-        'chromosome_model_ref': '/tmp/chr_model.pth',
-        'threads': 4,
-    },
-)
-assert candidate.status == 'ready_to_execute', candidate
-print('AutoHiC candidate is execution-ready')
+from app.stages.hic_scaffolding.parameter_catalog import load_autohic_parameter_catalog
+catalog = load_autohic_parameter_catalog()
+dynamic = {name for name, spec in catalog.parameters.items() if spec.level == 2}
+assert dynamic == {'restriction_enzyme'}, dynamic
+print('AutoHiC planner recommends only restriction_enzyme')
 " 2>&1 && pass "AutoHiC planning contract" || fail "AutoHiC planning contract"
 
 cd "${SCRIPT_DIR}"
@@ -217,6 +188,7 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     config = json.load(handle)
 config["requested_stages"] = ["hic_scaffolding"]
+config["hic_scaffolding"] = {"autohic_parameters": {"threads": 10}}
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2)
 PY
@@ -251,8 +223,8 @@ PY
 
     # Verify outputs
     RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-    HIC_ARTIFACT="${RUN_DIR}/artifacts/hic_scaffolding/${SID}"
-    HIC_WORK="${RUN_DIR}/work/hic_scaffolding/${SID}"
+    HIC_ARTIFACT="${RUN_DIR}/artifacts/hic_scaffolding/autohic"
+    HIC_WORK="${RUN_DIR}/work/hic_scaffolding/autohic"
 
     assert_dir_exists "$HIC_ARTIFACT" "Hi-C artifact dir"
 

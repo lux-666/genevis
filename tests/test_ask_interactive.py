@@ -283,71 +283,48 @@ class InteractiveLoopTests(unittest.TestCase):
         self.assertIsNotNone(response.shared_parameters)
         self.assertEqual(response.shared_parameters.read_type, "ont_raw")
 
-    def test_parameter_prompt_collects_autohic_inputs(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"defaults": {"hic_scaffolding.candidate.autohic": {"threads": 10, "debris_adjust": False}}},
-            required_fields=[
-                "hic_scaffolding.candidate.autohic.restriction_enzyme",
-                "hic_scaffolding.candidate.autohic.error_model_ref",
-                "hic_scaffolding.candidate.autohic.chromosome_model_ref",
-            ],
-            response_schema={},
-            next_action={},
-        )
+    def test_parameter_prompt_does_not_collect_autohic_inputs(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
             selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
         )
-        inputs = iter(["MboI", "/models/error_model.pth", "/models/chr_model.pth", ""])
-        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-             patch("builtins.input", side_effect=lambda _: next(inputs)):
-            response = _prompt_parameter_values(req, plan)
+        clarification = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(clarification.kind, "confirm")
 
-        assert response.method_parameters is not None
-        params = response.method_parameters["hic_scaffolding.candidate.autohic"]
-        self.assertEqual(params["restriction_enzyme"], "MboI")
-        self.assertEqual(params["error_model_ref"], "/models/error_model.pth")
-        self.assertEqual(params["chromosome_model_ref"], "/models/chr_model.pth")
-        self.assertEqual(params["threads"], 10)
-        self.assertFalse(params["debris_adjust"])
-
-    def test_parameter_prompt_uses_autohic_thread_default(self):
-        req = AskClarificationRequest(
-            status="clarification_required",
-            kind="parameter_values",
-            session_id="s1",
-            ask_plan_ref="/tmp/plan.json",
-            manifest_ref="test.yaml",
-            question="Parameters",
-            choices={"defaults": {"hic_scaffolding.candidate.autohic": {"threads": 40}}},
-            required_fields=[
-                "hic_scaffolding.candidate.autohic.restriction_enzyme",
-                "hic_scaffolding.candidate.autohic.error_model_ref",
-                "hic_scaffolding.candidate.autohic.chromosome_model_ref",
-            ],
-            response_schema={},
-            next_action={},
-        )
+    def test_parameter_prompt_does_not_ask_for_autohic_runtime_defaults(self):
         plan = _base_plan(
             selected_stages=["hic_scaffolding"],
             resolved_execution_order=["hic_scaffolding"],
             selected_methods={"hic_scaffolding": ["hic_scaffolding.candidate.autohic"]},
+            method_parameters={
+                "hic_scaffolding.candidate.autohic": {"threads": 40}
+            },
         )
-        inputs = iter(["DpnII", "/models/error.pth", "/models/chr.pth", ""])
-        with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), \
-             patch("builtins.input", side_effect=lambda _: next(inputs)):
-            response = _prompt_parameter_values(req, plan)
+        clarification = next_clarification(plan, ask_plan_ref="/tmp/plan.json")
+        self.assertEqual(clarification.kind, "confirm")
 
-        assert response.method_parameters is not None
-        params = response.method_parameters["hic_scaffolding.candidate.autohic"]
-        self.assertEqual(params["threads"], 40)
+    def test_hic_draft_hides_and_rejects_method_selection(self):
+        plan = _base_plan(
+            selected_stages=["hic_scaffolding"],
+            resolved_execution_order=["hic_scaffolding"],
+            selected_methods={
+                "hic_scaffolding": ["hic_scaffolding.candidate.autohic"]
+            },
+        )
+        with patch("builtins.input", side_effect=["m", "b"]), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout, patch(
+            "app.entrypoints.ask_interactive._edit_stage_methods"
+        ) as edit_methods:
+            updated = _edit_draft_stage(plan, "hic_scaffolding")
+
+        self.assertEqual(updated, plan)
+        edit_methods.assert_not_called()
+        rendered = stdout.getvalue()
+        self.assertNotIn("m      change method", rendered)
+        self.assertNotIn("methods:", rendered)
+        self.assertIn("fixed AutoHiC pipeline", rendered)
 
     def test_parameter_prompt_accepts_function_database_provenance_fields(self):
         req = AskClarificationRequest(
@@ -961,8 +938,9 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn(("assembly_review", "assembly_review"), points)
         self.assertEqual(
             points[("hic_scaffolding", "hic_scaffolding")]["parameter_recommendation_status"],
-            "not_implemented",
+            "implemented",
         )
+        self.assertIn(("hic_scaffolding", "parameter_approval"), points)
         self.assertEqual(
             points[("t2t", "t2t_review")]["parameter_recommendation_status"],
             "not_implemented",

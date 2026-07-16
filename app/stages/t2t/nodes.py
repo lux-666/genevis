@@ -20,6 +20,7 @@ from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     T2T_ASSEMBLY_TELOMERE_SCAN,
     T2TReviewDecisionArtifact,
@@ -35,7 +36,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_output, stage_work_dir, update_stage_output
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -104,8 +105,8 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
     reads_ref, reads_source = _ont_reads_ref(state, config.get("ont_reads_ref"))
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    out_dir = data_dir / "artifacts" / "t2t" / session_id / "t2t_finishing"
-    work_dir = data_dir / "work" / "t2t" / session_id / "t2t_finishing"
+    out_dir = stage_artifacts_dir(state, "t2t", "t2t_finishing")
+    work_dir = stage_work_dir(state, "t2t", "t2t_finishing")
     out_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     return _update(
@@ -515,7 +516,6 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         patch_records_ref = out.get("patch_records_ref")
         status = "failed_terminal" if request.decision == "stop_pipeline" else "completed"
 
-    decision_ref = Path(out["out_dir"]) / "t2t_review_decision.json"
     decision_payload = T2TReviewDecisionArtifact(
         session_id=session_id,
         decision=request.decision,
@@ -526,24 +526,32 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         notes=list(request.notes),
         metadata=request.metadata,
     )
-    decision_ref.write_text(json.dumps(decision_payload.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        decision_ref,
+    active_interrupt = state.get("active_interrupt") or {}
+    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
+    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    if not review_request_id or not review_request_hash:
+        raise ResumeValidationError("t2t review decision is missing review request binding")
+    decision_ref = persist_review_decision(
+        data_dir,
+        session_id=session_id,
+        review_request_id=review_request_id,
         stage="t2t",
+        gate_id="t2t_review",
+        decision=decision_payload,
+        request_hash=review_request_hash,
         method_name=T2T_CONTRACT_METHOD,
         artifact_type="t2t.review_decision",
-        metadata={"decision": request.decision},
     )
-    append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_review_decision(
         session_id,
         "t2t",
         decision=request.decision,
         notes=list(request.notes),
-        artifact_ref=str(artifact.file_path),
+        artifact_ref=decision_ref.model_dump(mode="json"),
         metadata=request.metadata,
         decided_by=request.decided_by,
         rationale_artifact_ref=request.rationale_artifact_ref,
+        review_request_id=review_request_id,
     )
 
     outputs = dict(state.get("stage_outputs") or {})
@@ -555,7 +563,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         "patched_assembly_ref": patched_assembly_ref,
         "patch_records_ref": patch_records_ref,
         "final_assembly_for_annotation": str(final_assembly_for_annotation),
-        "review_decision_artifact_ref": str(artifact.file_path),
+        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
         "notes": list(request.notes),
         "decided_by": request.decided_by,
         "rationale_artifact_ref": request.rationale_artifact_ref,
@@ -946,42 +954,42 @@ def _block_for_t2t_review(
         },
         notes=list(out.get("notes") or []),
     )
-    request_ref = Path(out["out_dir"]) / "t2t_review_request.json"
-    request_ref.write_text(json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
-    artifact = ArtifactMeta.from_file(
-        request_ref,
+    persisted_request = persist_review_request(
+        state,
         stage="t2t",
+        gate_id="t2t_review",
+        reason="t2t_patch_candidates_require_human_selection",
+        payload=payload,
         method_name=T2T_CONTRACT_METHOD,
         artifact_type="t2t.review_request",
-        metadata={"auto_decidable": False},
     )
+    request_ref = persisted_request.request_ref
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    append_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_review_requested(
         session_id,
         "t2t",
         reason="t2t_patch_candidates_require_human_selection",
         candidates=candidates,
-        review_request_artifact_ref=str(request_ref),
+        review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=False,
     )
     outputs = dict(state.get("stage_outputs") or {})
     outputs["t2t"] = {
         **out,
         "status": "blocked_human",
-        "review_request_artifact_ref": str(request_ref),
+        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
         "auto_decidable": False,
     }
     return {
         "current_stage": "t2t",
         "supervision_state": "blocked_human",
         "stage_outputs": outputs,
-        "active_interrupt": {
-            **payload.model_dump(mode="json"),
-            "review_request_artifact_ref": str(request_ref),
-            "blocked_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "active_interrupt": persisted_request.compact_interrupt(
+            stage="t2t",
+            gate_id="t2t_review",
+            reason="t2t_patch_candidates_require_human_selection",
+        ),
     }
 
 

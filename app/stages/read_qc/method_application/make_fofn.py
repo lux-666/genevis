@@ -10,6 +10,7 @@ from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
 from app.schemas.artifacts import READ_QC_FILTERED_LONG_READS_FOFN, READ_QC_LONG_READS_FOFN, ArtifactMeta
 from app.schemas.state import TopLevelState
+from app.stages.base import stage_artifacts_dir
 from app.stages.read_qc.constants import MAKE_FOFN_METHOD_NAME
 from app.stages.read_qc.method_application.lifecycle import read_paths_from_output, read_qc_output, update_read_qc_output
 
@@ -29,7 +30,7 @@ def make_fofn(state: TopLevelState) -> dict:
         return {}
     session_id = state["session_id"]
     data_dir = Path(state.get("data_dir", "data"))
-    artifact_dir = data_dir / "artifacts" / "read_qc" / session_id
+    artifact_dir = stage_artifacts_dir(state, "read_qc")
     artifact_dir.mkdir(parents=True, exist_ok=True)
     if output.get("filtered_long_reads_ref"):
         paths = read_paths_from_output(output, "filtered_long_reads_refs", "filtered_long_reads_ref")

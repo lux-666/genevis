@@ -18,6 +18,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.stages.assembly_review.method_application.lifecycle import (
     absolute_review_data_dir,
     build_method_graph,
@@ -78,8 +79,8 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
     for candidate in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
-        working_dir = data_dir / "work" / "assembly_review" / session_id / "quast" / safe_id
-        artifact_dir = data_dir / "artifacts" / "assembly_review" / session_id / "quast" / safe_id
+        working_dir = stage_work_dir(state, "assembly_review", "quast", safe_id)
+        artifact_dir = stage_artifacts_dir(state, "assembly_review", "quast", safe_id)
         working_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         script_path = working_dir / "run_quast.sh"

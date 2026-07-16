@@ -16,6 +16,21 @@ from app.stages.gene_annotation.nodes import (
     run_evm_attempt,
     run_gene_busco_attempt,
 )
+from tests.data_v2 import v2_run_dir
+
+
+def _v2_state(tmpdir: str) -> dict:
+    return initial_state(
+        session_id="s1",
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(v2_run_dir(tmpdir, "s1")),
+    )
+
+
+def _gene_work_path(tmpdir: str, *parts: str) -> Path:
+    path = v2_run_dir(tmpdir, "s1") / "work" / "gene_annotation" / Path(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _write_intake_plan(tmpdir: str) -> str:
@@ -58,11 +73,7 @@ def _merge_accepted_state(tmpdir: str, **gene_updates):
     """State as it stands after gate3 (merge_review) auto-decides."""
     softmasked = Path(tmpdir) / "softmasked.fa"
     softmasked.write_text(">ctg1\nACGT\n", encoding="utf-8")
-    state = initial_state(
-        session_id="s1",
-        input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"),
-        data_dir=tmpdir,
-    )
+    state = _v2_state(tmpdir)
     state["current_stage"] = "gene_annotation"
     state["stage_outputs"] = {
         "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -186,7 +197,7 @@ class EVMRunTests(unittest.TestCase):
             env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
             metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "candidate_refs": {}, "merge_weights": {}},
         )
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         state["stage_outputs"] = {
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -211,7 +222,7 @@ class EVMRunTests(unittest.TestCase):
 
 class EVMCollectTests(unittest.TestCase):
     def _collect_state(self, tmpdir: str, *, gff3_exists: bool = True):
-        output_gff3 = Path(tmpdir) / "evm_merged.gff3"
+        output_gff3 = _gene_work_path(tmpdir, "evm", "evm_merged.gff3")
         if gff3_exists:
             output_gff3.write_text("##gff-version 3\nctg1\tEVM\tgene\t1\t1000\t.\t+\t.\tID=g1\n", encoding="utf-8")
         attempt = FrozenAttemptSpec(
@@ -222,7 +233,7 @@ class EVMCollectTests(unittest.TestCase):
             expected_outputs=[output_gff3],
             metadata={"output_gff3": str(output_gff3), "genome_input_ref": str(Path(tmpdir) / "genome.fa"), "candidate_refs": {}, "merge_weights": {}},
         )
-        state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+        state = _v2_state(tmpdir)
         state["current_stage"] = "gene_annotation"
         genome = Path(tmpdir) / "genome.fa"
         genome.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -248,7 +259,7 @@ class EVMCollectTests(unittest.TestCase):
             self.assertEqual(gene["merge_method"], "evm")
             self.assertIn("final_gff_ref", gene)
 
-            artifacts_path = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifacts_path.read_text(encoding="utf-8").splitlines()]
             self.assertIn("gene_annotation.final_gff", artifact_types)
 
@@ -323,7 +334,7 @@ class GeneBUSBOTests(unittest.TestCase):
             busco_bin.write_text("#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8")
             busco_bin.chmod(0o755)
 
-            short_summary = Path(tmpdir) / "short_summary.txt"
+            short_summary = _gene_work_path(tmpdir, "busco", "short_summary.txt")
             script = Path(tmpdir) / "run_busco.sh"
             script.write_text("#!/bin/bash\nbusco -i input.fa -m proteins\n", encoding="utf-8")
             script.chmod(0o755)
@@ -336,7 +347,7 @@ class GeneBUSBOTests(unittest.TestCase):
                 env={"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
                 metadata={"short_summary_ref": str(short_summary), "busco_mode": "proteins", "busco_lineage": "/tmp/lineage", "busco_output_dir": str(tmpdir)},
             )
-            state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            state = _v2_state(tmpdir)
             state["current_stage"] = "gene_annotation"
             state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -350,7 +361,7 @@ class GeneBUSBOTests(unittest.TestCase):
 
     def test_collect_parses_busco_short_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            short_summary = Path(tmpdir) / "short_summary.txt"
+            short_summary = _gene_work_path(tmpdir, "busco", "short_summary.txt")
             short_summary.write_text(
                 "# BUSCO version 5.x\n"
                 "C:95.2%[S:90.1%,D:5.1%],F:2.1%,M:2.7%,n:3642\n"
@@ -370,7 +381,7 @@ class GeneBUSBOTests(unittest.TestCase):
                 expected_outputs=[short_summary],
                 metadata={"short_summary_ref": str(short_summary), "busco_mode": "proteins", "busco_lineage": "/tmp/l", "busco_output_dir": str(tmpdir)},
             )
-            state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            state = _v2_state(tmpdir)
             state["current_stage"] = "gene_annotation"
             state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -389,7 +400,7 @@ class GeneBUSBOTests(unittest.TestCase):
             self.assertEqual(gene["busco_metrics"]["complete_buscos"], 3467)
             self.assertEqual(gene["busco_metrics"]["missing_buscos"], 99)
 
-            artifacts_path = Path(tmpdir) / "artifacts" / "s1" / "artifacts.jsonl"
+            artifacts_path = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
             artifact_types = [json.loads(line)["artifact_type"] for line in artifacts_path.read_text(encoding="utf-8").splitlines()]
             self.assertIn("gene_annotation.busco_summary", artifact_types)
 
@@ -427,7 +438,7 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             self.assertEqual(gene["merge_method"], "single_candidate_passthrough")
 
             # Step 2: BUSCO freeze (has lineage → freeze)
-            busco_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            busco_state = _v2_state(tmpdir)
             busco_state["current_stage"] = "gene_annotation"
             busco_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
@@ -449,7 +460,7 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             attempt_dict["env"]["PATH"] = f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', os.environ.get('PATH', ''))}"
             updated_attempt = FrozenAttemptSpec.model_validate(attempt_dict)
 
-            run_state = initial_state(session_id="s1", input_manifest_ref=str(Path(tmpdir) / "manifest.yaml"), data_dir=tmpdir)
+            run_state = _v2_state(tmpdir)
             run_state["current_stage"] = "gene_annotation"
             run_state["stage_outputs"] = {
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},

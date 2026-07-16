@@ -10,6 +10,7 @@ from pathlib import Path
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 from app.review.base import ReviewPayload
 from app.review.recommender import RecommendationError, recommend_review_decision
+from tests.data_v2 import v2_run_dir
 
 
 class _Response:
@@ -51,6 +52,7 @@ class ReviewRecommenderTests(unittest.TestCase):
 
     def test_recommender_writes_artifact_and_returns_llm_request(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
                 stage="assembly_review",
                 reason="review",
@@ -74,14 +76,14 @@ class ReviewRecommenderTests(unittest.TestCase):
                 session_id="s1",
                 stage="assembly_review",
                 request=request,
-                data_dir=tmp,
+                data_dir=run_dir,
                 chat_model=chat,
             )
 
             self.assertEqual(decision.decided_by, "llm_provisional")
             self.assertTrue(decision.rationale_artifact_ref)
             self.assertTrue(Path(decision.rationale_artifact_ref or "").exists())
-            records = (Path(tmp) / "artifacts" / "s1" / "artifacts.jsonl").read_text(encoding="utf-8")
+            records = (run_dir / "artifacts" / "index.jsonl").read_text(encoding="utf-8")
             self.assertIn("assembly_review.review_recommendation", records)
             artifact_payload = json.loads(Path(decision.rationale_artifact_ref or "").read_text(encoding="utf-8"))
             self.assertEqual(artifact_payload["model"], "fake-model-v1")
@@ -102,6 +104,7 @@ class ReviewRecommenderTests(unittest.TestCase):
 
     def test_recommender_context_includes_related_species_evidence_pack(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
                 stage="assembly_review",
                 reason="review",
@@ -115,7 +118,7 @@ class ReviewRecommenderTests(unittest.TestCase):
             chat = _FakeChat(json.dumps({"decision": "stop_human_review"}))
 
             recommend_review_decision(
-                session_id="s1", stage="assembly_review", request=request, data_dir=tmp, chat_model=chat,
+                session_id="s1", stage="assembly_review", request=request, data_dir=run_dir, chat_model=chat,
             )
 
             self.assertIn("related_species_evidence_pack", chat.messages[1]["content"])
@@ -123,6 +126,7 @@ class ReviewRecommenderTests(unittest.TestCase):
 
     def test_recommender_normalizes_common_llm_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["stop_human_review"])
             chat = _FakeChat(
                 json.dumps(
@@ -137,7 +141,7 @@ class ReviewRecommenderTests(unittest.TestCase):
                 session_id="s1",
                 stage="assembly_review",
                 request=request,
-                data_dir=tmp,
+                data_dir=run_dir,
                 chat_model=chat,
             )
 
@@ -155,18 +159,20 @@ class ReviewRecommenderTests(unittest.TestCase):
                 raise RuntimeError("network down")
 
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["accept"])
             with self.assertRaisesRegex(RecommendationError, "LLM call failed"):
                 recommend_review_decision(
                     session_id="s1",
                     stage="assembly_review",
                     request=request,
-                    data_dir=tmp,
+                    data_dir=run_dir,
                     chat_model=_RaisingChat(),
                 )
 
     def test_recommender_rejects_disallowed_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(
                 stage="assembly_review",
                 reason="review",
@@ -187,12 +193,13 @@ class ReviewRecommenderTests(unittest.TestCase):
                     session_id="s1",
                     stage="assembly_review",
                     request=request,
-                    data_dir=tmp,
+                    data_dir=run_dir,
                     chat_model=chat,
                 )
 
     def test_recommender_rejects_invalid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
+            run_dir = v2_run_dir(tmp, "s1")
             request = ReviewPayload(stage="assembly_review", reason="review", decisions_allowed=["accept"])
 
             with self.assertRaisesRegex(RecommendationError, "not valid JSON"):
@@ -200,7 +207,7 @@ class ReviewRecommenderTests(unittest.TestCase):
                     session_id="s1",
                     stage="assembly_review",
                     request=request,
-                    data_dir=tmp,
+                    data_dir=run_dir,
                     chat_model=_FakeChat("not json"),
                 )
 

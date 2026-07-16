@@ -95,6 +95,7 @@ class PackageSpec(BaseModel):
     install_root: str
     canary_paths: list[str] = Field(default_factory=list)
     entrypoints: list[str] = Field(default_factory=list)
+    models: dict[str, str] = Field(default_factory=dict)
     conform_on_bootstrap: bool = False
     jar_root_ref: str | None = None
 
@@ -106,6 +107,16 @@ class PackageSpec(BaseModel):
 
     def resolved_canary(self, rel: str) -> Path:
         return Path(self.install_root) / rel
+
+    def model_path(self, name: str) -> Path | None:
+        """Return a configured model path, relative to ``install_root`` when needed."""
+        value = self.models.get(name)
+        if not value:
+            return None
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path
+        return Path(self.install_root).expanduser() / path
 
 
 class PackagePreflightResult(BaseModel):
@@ -201,11 +212,15 @@ class EnvResolver:
             install_root = entry.get("install_root")
             if not install_root:
                 raise ValueError(f"packages.{name} requires install_root")
+            models = entry.get("models") or {}
+            if not isinstance(models, dict):
+                raise ValueError(f"packages.{name}.models must be a mapping")
             packages[str(name)] = PackageSpec(
                 name=str(name),
                 install_root=str(install_root),
                 canary_paths=list(entry.get("canary_paths") or []),
                 entrypoints=list(entry.get("entrypoints") or []),
+                models={str(model_name): str(path) for model_name, path in models.items()},
                 conform_on_bootstrap=bool(entry.get("conform_on_bootstrap", False)),
                 jar_root_ref=str(entry["jar_root_ref"]) if entry.get("jar_root_ref") else None,
             )

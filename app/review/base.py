@@ -52,6 +52,8 @@ class ResumeReviewRequest(BaseModel):
     session_id: str
     stage: str
     gate_id: str | None = None
+    review_request_id: str | None = None
+    review_request_hash: str | None = None
     decision: str
     candidate_id: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
@@ -67,6 +69,10 @@ class ResumeReviewRequest(BaseModel):
     def _require_rationale_for_non_human(self) -> "ResumeReviewRequest":
         if self.decided_by != "human" and not self.rationale_artifact_ref:
             raise ValueError("rationale_artifact_ref is required when decided_by is not human")
+        if (self.review_request_id is None) != (self.review_request_hash is None):
+            raise ValueError(
+                "review_request_id and review_request_hash must be provided together"
+            )
         return self
 
 

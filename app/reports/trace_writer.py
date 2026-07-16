@@ -1,17 +1,4 @@
-"""Session run trace built from durable ledger and artifact records.
-
-The trace reconstructs a stage-by-stage explanation of what happened in a
-session using only durable records (``ledger/<session>/session.json``,
-``events.jsonl``, ``artifacts/<session>/artifacts.jsonl`` and the operator/
-final reports those produce). It never requires a live Python process or a
-checkpoint to reconstruct facts that already exist in ledger or artifacts.
-
-Where a fact cannot be reconstructed from durable records it is surfaced as a
-gap rather than fabricated. The most important known gap is the authoritative
-ordered ``route_trace``: it lives only in checkpoint/in-memory state, so the
-trace reconstructs an evidence-based stage path and marks the authoritative
-ordering as ``checkpoint_only``.
-"""
+"""Unified session-summary projection from ledger v2 and the artifact index."""
 
 from __future__ import annotations
 
@@ -21,10 +8,12 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import inspect_session
-from app.execution.artifacts import append_artifact_records, read_artifact_records
-from app.review.records import counts_by_origin, decision_records
-from app.schemas.artifacts import ArtifactMeta
+from app.execution.artifacts import read_artifact_records
+from app.reports._projection import atomic_write_text, source_watermark
+from app.reports.review_report import _pending_confirmations
+from app.review.records import counts_by_origin
 from app.stages import STAGE_ORDER
+from app.storage.paths import SessionPaths
 
 # Stable stage-status vocabulary. Keep this small and durable; the trace
 # JSON and any downstream tooling depend on these exact strings.
@@ -33,28 +22,23 @@ STAGE_STATUS_PLANNED_ONLY = "planned_only"
 STAGE_STATUS_BLOCKED_HUMAN = "blocked_human"
 STAGE_STATUS_FAILED = "failed"
 STAGE_STATUS_COMPLETED = "completed"
+STAGE_STATUS_SKIPPED = "skipped"
 STAGE_STATUS_NO_EVIDENCE = "no_durable_evidence"
 
 # Durable-record gap vocabulary. Each gap names a fact the trace could not
 # reconstruct and why, so operators do not mistake "unavailable" for "absent".
 GAP_UNAVAILABLE = "unavailable"  # no durable record carries this fact
-GAP_CHECKPOINT_ONLY = "checkpoint_only"  # only the checkpoint/in-memory state has it
-GAP_UNSUPPORTED = "unsupported"  # current records are too coarse to represent it
+GAP_CHECKPOINT_ONLY = "checkpoint_only"
+GAP_UNSUPPORTED = "unsupported"
 
-TRACE_JSON_ARTIFACT_TYPE = "run_trace.session"
-TRACE_MARKDOWN_ARTIFACT_TYPE = "run_trace.session_markdown"
-
-# The trace registers its own artifacts; exclude them from operator-facing
-# counts so re-running --trace does not inflate the workflow artifact total.
-_TRACE_ARTIFACT_PREFIX = "run_trace."
+SESSION_SUMMARY_JSON_FILENAME = "session_summary.json"
+SESSION_SUMMARY_MARKDOWN_FILENAME = "session_summary.md"
 
 # Artifact types that are workflow plumbing, not operator-facing evidence.
 _NOISE_ARTIFACT_TYPES = frozenset({"command.stdout", "command.stderr"})
 _ANNOTATION_INTAKE_ARTIFACT_TYPE = "annotation.intake_plan"
 # Artifact-type prefixes the operator should open first, in priority order.
 _OPEN_FIRST_PREFIXES = (
-    "operator_report.",
-    "final_report.",
     "annotation.",
     "function_annotation.",
     "assembly_review.",
@@ -64,43 +48,52 @@ _OPEN_FIRST_PREFIXES = (
 
 
 def build_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]:
-    """Reconstruct a structured run trace from durable session records."""
+    """Reconstruct the structured session-summary model from durable facts."""
 
-    ledger = Ledger(data_dir)
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(session_id)
+    ledger = Ledger(paths.run_dir)
     session = ledger.read_session(session_id)
     events = ledger.read_events(session_id)
-    artifacts = read_artifact_records(data_dir, session_id)
-    summary = inspect_session(session_id, data_dir)
+    artifacts = read_artifact_records(paths.run_dir, session_id)
+    summary = inspect_session(session_id, paths.run_dir)
 
-    decisions = decision_records(events)
-    workflow_artifacts = [
-        artifact
-        for artifact in artifacts
-        if not str(artifact.get("artifact_type", "")).startswith(_TRACE_ARTIFACT_PREFIX)
-    ]
-    stages = _build_stage_records(events, workflow_artifacts, summary)
+    decisions = [event for event in events if event.get("event_type") == "review_decision"]
+    stages = _build_stage_records(events, artifacts, summary)
     gaps = _build_gaps(session, events, decisions)
+    route = _route_records(events)
+    observed_path = [record["stage"] for record in route if record["event_type"] == "stage_entered"]
+    if not observed_path:
+        observed_path = [
+            stage["stage"]
+            for stage in stages
+            if stage["status"] != STAGE_STATUS_NO_EVIDENCE
+        ]
 
     trace: dict[str, Any] = {
+        "schema_version": 2,
+        "report_type": "session_summary",
         "session_id": session_id,
         "session_found": session is not None,
+        "source_watermark": source_watermark(paths, ledger),
         "input_manifest_ref": (session or {}).get("input_manifest_ref"),
-        "data_dir": str(data_dir),
         "created_at": (session or {}).get("created_at"),
         "supervision_state": summary.get("supervision_state"),
         "checkpoint_persistence": summary.get("checkpoint_persistence"),
         "durable_resume_available": summary.get("durable_resume_available"),
         "final_or_current_stage": _final_or_current_stage(stages, summary),
-        "stage_path_observed": [stage["stage"] for stage in stages if stage["status"] != STAGE_STATUS_NO_EVIDENCE],
+        "route": route,
+        "stage_path_observed": observed_path,
         "stages": stages,
         "decisions": [_decision_record(decision) for decision in decisions],
         "decisions_by_origin": counts_by_origin(decisions),
-        "open_first": _open_first_artifacts(workflow_artifacts),
+        "pending_human_confirmations": _pending_confirmations(events),
+        "open_first": _open_first_artifacts(artifacts),
         "failures": _failures(events),
         "blocked": _blocked_summary(summary),
         "next_action": summary.get("next_action"),
         "ledger_event_count": len(events),
-        "artifact_count": len(workflow_artifacts),
+        "artifact_count": len(artifacts),
         "gaps": gaps,
     }
     if session is None:
@@ -117,6 +110,7 @@ def _build_stage_records(
     artifacts_by_stage = _artifact_refs_by_stage(artifacts)
     candidate_methods_by_stage = _candidate_methods_by_stage(artifacts)
     review_by_stage = _review_events_by_stage(events)
+    lifecycle_by_stage = _stage_lifecycle_by_stage(events)
     blocked_stage = _blocked_stage(summary)
     failed_stage = _failed_stage(events, summary)
 
@@ -126,6 +120,7 @@ def _build_stage_records(
         stage_artifacts = artifacts_by_stage.get(stage, [])
         review = review_by_stage.get(stage)
         candidate_methods = candidate_methods_by_stage.get(stage, [])
+        lifecycle = lifecycle_by_stage.get(stage)
         status = _stage_status(
             stage,
             methods=methods,
@@ -134,18 +129,21 @@ def _build_stage_records(
             review=review,
             blocked_stage=blocked_stage,
             failed_stage=failed_stage,
+            lifecycle=lifecycle,
         )
         record: dict[str, Any] = {
             "stage": stage,
             "status": status,
             "methods": methods,
             "artifact_refs": _stage_artifacts_for_trace(stage_artifacts),
-            "timing": _stage_timing(methods, review),
+            "timing": _stage_timing(methods, review, lifecycle),
         }
         if candidate_methods:
             record["candidate_methods"] = candidate_methods
         if review:
             record["review"] = review
+        if lifecycle:
+            record["lifecycle"] = lifecycle
         records.append(record)
     return records
 
@@ -199,8 +197,8 @@ def _artifact_refs_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, list[d
         by_stage.setdefault(stage, []).append(
             {
                 "artifact_type": artifact_type,
-                "method_name": artifact.get("method_name"),
-                "file_path": artifact.get("file_path"),
+                "method_name": artifact.get("method_id") or artifact.get("method_name"),
+                "path_ref": artifact.get("path_ref") or artifact.get("file_path"),
             }
         )
     return by_stage
@@ -228,26 +226,32 @@ def _candidate_methods_by_stage(artifacts: list[dict[str, Any]]) -> dict[str, li
     for artifact in artifacts:
         if artifact.get("artifact_type") != "draft_assembly.candidate":
             continue
-        metadata = artifact.get("metadata") or {}
         by_stage.setdefault(str(artifact.get("stage", "")), []).append(
             {
-                "method_name": artifact.get("method_name"),
-                "candidate_id": metadata.get("candidate_id"),
-                "execution_enabled": metadata.get("execution_enabled"),
+                "method_name": artifact.get("method_id") or artifact.get("method_name"),
+                "candidate_id": artifact.get("candidate_id"),
+                "execution_enabled": (artifact.get("provenance") or {}).get(
+                    "execution_enabled"
+                ),
             }
         )
     return by_stage
 
 
 def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    by_stage: dict[str, dict[str, Any]] = {}
+    requests: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for event in events:
         event_type = event.get("event_type")
         stage = str(event.get("stage", ""))
         if not stage:
             continue
+        request_id = str(event.get("review_request_id") or event.get("subject_id") or "")
         if event_type == "review_requested":
-            entry = by_stage.setdefault(stage, {})
+            entry = requests.setdefault(request_id, {"stage": stage})
+            if request_id not in order:
+                order.append(request_id)
+            entry["review_request_id"] = request_id
             entry["requested_at"] = event.get("timestamp")
             entry["reason"] = event.get("reason")
             entry["review_request_artifact_ref"] = event.get("review_request_artifact_ref")
@@ -255,7 +259,9 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             entry["policy_mode"] = event.get("policy_mode")
             entry["pending_human_confirmation"] = event.get("pending_human_confirmation")
         elif event_type == "review_decision":
-            entry = by_stage.setdefault(stage, {})
+            entry = requests.setdefault(request_id, {"stage": stage, "review_request_id": request_id})
+            if request_id not in order:
+                order.append(request_id)
             entry["decided_at"] = event.get("timestamp")
             entry["decision"] = event.get("decision")
             entry["decided_by"] = event.get("decided_by") or "human"
@@ -263,6 +269,29 @@ def _review_events_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str,
             entry["method_name"] = event.get("method_name")
             entry["rationale_artifact_ref"] = event.get("rationale_artifact_ref")
             entry["decision_artifact_ref"] = event.get("artifact_ref")
+    by_stage: dict[str, dict[str, Any]] = {}
+    for request_id in order:
+        entry = requests[request_id]
+        by_stage[str(entry["stage"])] = entry
+    return by_stage
+
+
+def _stage_lifecycle_by_stage(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    by_stage: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") not in {"stage_entered", "stage_skipped", "stage_completed"}:
+            continue
+        stage = str(event.get("stage") or "")
+        if not stage:
+            continue
+        entry = by_stage.setdefault(stage, {})
+        if event["event_type"] == "stage_entered":
+            entry["entered_at"] = event.get("timestamp")
+        elif event["event_type"] == "stage_skipped":
+            entry["skipped_at"] = event.get("timestamp")
+            entry["skip_reason"] = event.get("reason")
+        else:
+            entry["completed_at"] = event.get("timestamp")
     return by_stage
 
 
@@ -275,8 +304,9 @@ def _stage_status(
     review: dict[str, Any] | None,
     blocked_stage: str | None,
     failed_stage: str | None,
+    lifecycle: dict[str, Any] | None,
 ) -> str:
-    if stage == failed_stage and any(method["outcome"] == "failed" for method in methods):
+    if stage == failed_stage:
         return STAGE_STATUS_FAILED
     if stage == blocked_stage:
         return STAGE_STATUS_BLOCKED_HUMAN
@@ -284,6 +314,10 @@ def _stage_status(
         return STAGE_STATUS_EXECUTED
     if any(method["outcome"] == "failed" for method in methods):
         return STAGE_STATUS_FAILED
+    if lifecycle and lifecycle.get("skipped_at"):
+        return STAGE_STATUS_SKIPPED
+    if lifecycle and lifecycle.get("completed_at"):
+        return STAGE_STATUS_COMPLETED
     if review and review.get("decision"):
         return STAGE_STATUS_COMPLETED
     if candidate_methods or stage_artifacts:
@@ -291,7 +325,11 @@ def _stage_status(
     return STAGE_STATUS_NO_EVIDENCE
 
 
-def _stage_timing(methods: list[dict[str, Any]], review: dict[str, Any] | None) -> dict[str, Any]:
+def _stage_timing(
+    methods: list[dict[str, Any]],
+    review: dict[str, Any] | None,
+    lifecycle: dict[str, Any] | None,
+) -> dict[str, Any]:
     timestamps = [method.get("started_at") for method in methods if method.get("started_at")]
     finished = [method.get("finished_at") for method in methods if method.get("finished_at")]
     timing: dict[str, Any] = {}
@@ -303,11 +341,16 @@ def _stage_timing(methods: list[dict[str, Any]], review: dict[str, Any] | None) 
         timing["review_requested_at"] = review["requested_at"]
     if review and review.get("decided_at"):
         timing["review_decided_at"] = review["decided_at"]
+    if lifecycle:
+        for key in ("entered_at", "skipped_at", "completed_at"):
+            if lifecycle.get(key):
+                timing[key] = lifecycle[key]
     return timing
 
 
 def _decision_record(decision: dict[str, Any]) -> dict[str, Any]:
     return {
+        "review_request_id": decision.get("review_request_id") or decision.get("subject_id"),
         "stage": decision.get("stage"),
         "gate_id": decision.get("gate_id"),
         "decision": decision.get("decision"),
@@ -332,7 +375,7 @@ def _open_first_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any
                 {
                     "artifact_type": artifact_type,
                     "stage": artifact.get("stage"),
-                    "file_path": artifact.get("file_path"),
+                    "path_ref": artifact.get("path_ref") or artifact.get("file_path"),
                 }
             )
             seen.add(artifact_type)
@@ -379,7 +422,10 @@ def _blocked_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
         "decisions_allowed": requirements.get("decisions_allowed") or [],
         "pending_human_action": next_action.get("summary"),
         "resume_command": next_action.get("resume_command"),
-        "review_request_artifact_ref": (summary.get("latest_review_request_artifact") or {}).get("file_path"),
+        "review_request_artifact_ref": (
+            summary.get("latest_review_request_artifact") or {}
+        ).get("path_ref")
+        or (summary.get("latest_review_request_artifact") or {}).get("file_path"),
     }
 
 
@@ -396,9 +442,8 @@ def _blocked_stage(summary: dict[str, Any]) -> str | None:
 def _failed_stage(events: list[dict[str, Any]], summary: dict[str, Any]) -> str | None:
     if summary.get("supervision_state") != "failed_terminal":
         return None
-    payload = summary.get("latest_operator_report_payload") or {}
-    if payload.get("current_stage"):
-        return str(payload["current_stage"])
+    if summary.get("current_stage"):
+        return str(summary["current_stage"])
     next_action = summary.get("next_action") or {}
     if next_action.get("stage"):
         return str(next_action["stage"])
@@ -409,15 +454,14 @@ def _failed_stage(events: list[dict[str, Any]], summary: dict[str, Any]) -> str 
 
 
 def _final_or_current_stage(stages: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
-    payload = summary.get("latest_operator_report_payload") or {}
-    if payload.get("current_stage"):
-        return {"stage": payload["current_stage"], "source": "operator_report"}
+    if summary.get("current_stage"):
+        return {"stage": summary["current_stage"], "source": "ledger"}
     last_active = None
     for stage in stages:
         if stage["status"] != STAGE_STATUS_NO_EVIDENCE:
             last_active = stage["stage"]
     if last_active:
-        return {"stage": last_active, "source": GAP_CHECKPOINT_ONLY}
+        return {"stage": last_active, "source": "durable_evidence"}
     return {"stage": None, "source": GAP_UNAVAILABLE}
 
 
@@ -426,44 +470,66 @@ def _build_gaps(
     events: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    gaps: list[dict[str, Any]] = [
-        {
-            "field": "route_trace",
-            "kind": GAP_CHECKPOINT_ONLY,
-            "detail": "The authoritative ordered route_trace lives only in checkpoint/in-memory state. The trace reconstructs an evidence-based stage path from ledger and artifact records instead.",
-        },
-        {
-            "field": "skip_reasons",
-            "kind": GAP_CHECKPOINT_ONLY,
-            "detail": "Per-stage skip reasons are state fields not persisted to the ledger. Stages without durable evidence are reported as no_durable_evidence rather than skipped-with-reason.",
-        },
-    ]
+    gaps: list[dict[str, Any]] = []
     if session is None:
         gaps.append(
             {
                 "field": "session",
                 "kind": GAP_UNAVAILABLE,
-                "detail": "No durable ledger session.json was found for this session id.",
+                "detail": "No session_created event was found for this run.",
             }
         )
-    if _has_multiple_requests_per_stage(events):
+    route_events = [
+        event
+        for event in events
+        if event.get("event_type") in {"stage_entered", "stage_skipped", "stage_completed"}
+    ]
+    if session is not None and len(events) > 1 and not route_events:
         gaps.append(
             {
-                "field": "review_requests",
-                "kind": GAP_UNSUPPORTED,
-                "detail": "A stage emitted more than one review_requested event. Durable records bind decisions at stage granularity, so multiple requests in one stage are not represented per-request.",
+                "field": "route",
+                "kind": GAP_UNAVAILABLE,
+                "detail": "No explicit stage_entered/stage_skipped/stage_completed events were recorded.",
+            }
+        )
+    request_ids = {
+        str(event.get("review_request_id") or event.get("subject_id"))
+        for event in events
+        if event.get("event_type") == "review_requested"
+    }
+    orphan_decisions = [
+        decision
+        for decision in decisions
+        if str(decision.get("review_request_id") or decision.get("subject_id")) not in request_ids
+    ]
+    if orphan_decisions:
+        gaps.append(
+            {
+                "field": "review_bindings",
+                "kind": GAP_UNAVAILABLE,
+                "detail": f"{len(orphan_decisions)} review decision event(s) have no matching request ID.",
             }
         )
     return gaps
 
 
-def _has_multiple_requests_per_stage(events: list[dict[str, Any]]) -> bool:
-    counts: dict[str, int] = {}
+def _route_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    route: list[dict[str, Any]] = []
     for event in events:
-        if event.get("event_type") == "review_requested":
-            stage = str(event.get("stage", ""))
-            counts[stage] = counts.get(stage, 0) + 1
-    return any(count > 1 for count in counts.values())
+        if event.get("event_type") not in {"stage_entered", "stage_skipped", "stage_completed"}:
+            continue
+        record = {
+            "sequence": event.get("sequence"),
+            "event_type": event.get("event_type"),
+            "stage": event.get("stage"),
+            "timestamp": event.get("timestamp"),
+        }
+        if event.get("reason"):
+            record["reason"] = event["reason"]
+        if event.get("route_node"):
+            record["route_node"] = event["route_node"]
+        route.append(record)
+    return route
 
 
 def _first_error_line(error: Any) -> str | None:
@@ -483,7 +549,7 @@ def _first_error_line(error: Any) -> str | None:
 
 def render_trace_markdown(trace: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append(f"# Run Trace: {trace.get('session_id')}")
+    lines.append(f"# Session Summary: {trace.get('session_id')}")
     lines.append("")
     if trace.get("error"):
         lines.append(f"> {trace['error']}: no durable ledger session was found.")
@@ -492,12 +558,17 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
     final_stage = trace.get("final_or_current_stage") or {}
     lines.append(f"- final_or_current_stage: {final_stage.get('stage')} (source: {final_stage.get('source')})")
     lines.append(f"- manifest: {trace.get('input_manifest_ref')}")
-    lines.append(f"- data_dir: {trace.get('data_dir')}")
     lines.append(f"- checkpoint_persistence: {trace.get('checkpoint_persistence')}")
     lines.append(f"- created_at: {trace.get('created_at')}")
     lines.append(f"- ledger_events: {trace.get('ledger_event_count')}, artifacts: {trace.get('artifact_count')}")
     by_origin = trace.get("decisions_by_origin") or {}
     lines.append(f"- decisions_by_origin: {by_origin}")
+    watermark = trace.get("source_watermark") or {}
+    lines.append(
+        "- source_watermark: "
+        f"ledger_sequence={watermark.get('last_ledger_sequence')}, "
+        f"artifact_index_sha256={watermark.get('artifact_index_sha256')}"
+    )
     lines.append("")
 
     lines.append("## Stages")
@@ -530,7 +601,7 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
                 if review.get(ref_key):
                     lines.append(f"  - {ref_key}: {review[ref_key]}")
         for ref in stage.get("artifact_refs", []):
-            lines.append(f"- artifact {ref.get('artifact_type')}: {ref.get('file_path')}")
+            lines.append(f"- artifact {ref.get('artifact_type')}: {ref.get('path_ref')}")
         lines.append("")
 
     blocked = trace.get("blocked")
@@ -561,7 +632,7 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
         lines.append("## Open First")
         lines.append("")
         for artifact in open_first:
-            lines.append(f"- {artifact.get('artifact_type')}: {artifact.get('file_path')}")
+            lines.append(f"- {artifact.get('artifact_type')}: {artifact.get('path_ref')}")
         lines.append("")
 
     gaps = trace.get("gaps") or []
@@ -576,18 +647,9 @@ def render_trace_markdown(trace: dict[str, Any]) -> str:
 
 
 def write_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]:
-    """Build and durably register the run trace as JSON and Markdown artifacts.
-
-    Regeneration is idempotent: unchanged trace content reuses the existing
-    artifact paths and does not append duplicate artifact-index rows or
-    ledger registration events.
-
-    A trace for a session with no durable ledger record is still built and
-    returned for display, but nothing is written to disk: there is no session
-    to attach artifacts to, so persisting files would only leave orphans under
-    ``artifacts/run_trace/<id>/``. In that case ``json_ref`` and
-    ``markdown_ref`` are ``None``.
-    """
+    """Regenerate JSON and Markdown views under ``reports/`` only."""
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(session_id)
     trace = build_session_trace(data_dir, session_id)
     markdown_text = render_trace_markdown(trace)
 
@@ -599,17 +661,11 @@ def write_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
             "markdown": markdown_text,
         }
 
-    out_dir = Path(data_dir) / "artifacts" / "run_trace" / session_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_ref = out_dir / "run_trace.json"
-    markdown_ref = out_dir / "run_trace.md"
-    json_text = json.dumps(trace, ensure_ascii=False, indent=2, default=str)
-
-    ledger = Ledger(data_dir)
-    ledger.create_session(session_id, str(trace.get("input_manifest_ref") or ""))
-
-    _write_trace_artifact(data_dir, session_id, json_ref, json_text, TRACE_JSON_ARTIFACT_TYPE, ledger)
-    _write_trace_artifact(data_dir, session_id, markdown_ref, markdown_text, TRACE_MARKDOWN_ARTIFACT_TYPE, ledger)
+    json_ref = paths.report_path(SESSION_SUMMARY_JSON_FILENAME)
+    markdown_ref = paths.report_path(SESSION_SUMMARY_MARKDOWN_FILENAME)
+    json_text = json.dumps(trace, ensure_ascii=False, indent=2, default=str) + "\n"
+    atomic_write_text(json_ref, json_text)
+    atomic_write_text(markdown_ref, markdown_text)
 
     return {
         "trace": trace,
@@ -617,48 +673,3 @@ def write_session_trace(data_dir: str | Path, session_id: str) -> dict[str, Any]
         "markdown_ref": str(markdown_ref),
         "markdown": markdown_text,
     }
-
-
-def _write_trace_artifact(
-    data_dir: str | Path,
-    session_id: str,
-    ref: Path,
-    text: str,
-    artifact_type: str,
-    ledger: Ledger,
-) -> None:
-    already_current = _path_has_same_content(ref, text) and _artifact_record_exists(
-        data_dir, session_id, artifact_type, ref
-    )
-    if already_current:
-        return
-    ref.write_text(text, encoding="utf-8")
-    if _artifact_record_exists(data_dir, session_id, artifact_type, ref):
-        # Content changed in place but the index row already points here;
-        # do not append a duplicate registration row.
-        return
-    artifact = ArtifactMeta.from_file(
-        ref,
-        stage="run_trace",
-        method_name=artifact_type,
-        artifact_type=artifact_type,
-        metadata={"session_id": session_id},
-    )
-    append_artifact_records(data_dir, session_id, [artifact])
-    ledger.record_artifact_registered(session_id, artifact.model_dump(mode="json"))
-
-
-def _artifact_record_exists(data_dir: str | Path, session_id: str, artifact_type: str, ref: Path) -> bool:
-    for record in read_artifact_records(data_dir, session_id):
-        if record.get("artifact_type") == artifact_type and Path(record.get("file_path", "")) == ref:
-            return True
-    return False
-
-
-def _path_has_same_content(path: Path, expected: str) -> bool:
-    if not path.exists():
-        return False
-    try:
-        return path.read_text(encoding="utf-8") == expected
-    except OSError:
-        return False
