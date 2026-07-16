@@ -60,15 +60,16 @@ from app.stages.assembly.parameter_persistence import (
     write_attempt_json_artifact,
     write_recommendation_json_artifact,
 )
+from app.stages.assembly.parameter_request import (
+    build_parameter_basis_snapshot,
+    build_parameter_request_dto,
+    previous_execution_overrides,
+)
 from app.stages.assembly.parameter_profile import (
     build_full_parameter_profile,
     flatten_profile_facts,
 )
 from app.stages.assembly.parameter_validation import validate_recommended_parameters
-from app.stages.assembly.prompt_payload import (
-    build_prompt_payload,
-    recommendation_basis_snapshot,
-)
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 
 
@@ -96,7 +97,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     try:
         if task == "recommend_initial":
             catalog = load_parameter_catalog(method_name)
-            initial_basis: dict[str, Any] | None = None
+            basis_snapshot: dict[str, Any] | None = None
             basis_ref: ArtifactRef | None = None
         else:
             if initial_attempt is None:
@@ -105,9 +106,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 state,
                 initial_attempt["recommendation_manifest_ref"],
             )
-            initial_basis = dict(initial_bundle["basis_snapshot"])
+            basis_snapshot = dict(initial_bundle["basis_snapshot"])
             catalog = MethodParameterCatalog.model_validate(
-                initial_basis["catalog_snapshot"]
+                basis_snapshot["catalog_snapshot"]
             )
             if catalog.method_id != method_name.rsplit(".", 1)[-1]:
                 return _retry_transition_failure(state, "policy_snapshot_hash_mismatch")
@@ -163,17 +164,28 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         assembly_review=hydrated_previous.get("review_failure"),
     )
     try:
-        prompt_payload = build_prompt_payload(
+        if task == "recommend_initial":
+            basis_snapshot = build_parameter_basis_snapshot(
+                method_id=catalog.method_id,
+                catalog=catalog,
+                full_profile=full_profile,
+                session_id=state["session_id"],
+                recommendation_id=recommendation_id,
+            )
+        assert basis_snapshot is not None
+        request_dto = build_parameter_request_dto(
             method_id=catalog.method_id,
             catalog=catalog,
             full_profile=full_profile,
             task=task,
-            session_id=state["session_id"],
-            attempt_id=recommendation_id,
-            initial_basis_snapshot=initial_basis,
+            basis_snapshot=basis_snapshot,
+        )
+        normalization_overrides = previous_execution_overrides(
+            full_profile,
+            task=task,
         )
     except Exception as exc:
-        return _fail_update(state, f"Assembly parameter prompt payload failed: {exc}")
+        return _fail_update(state, f"Assembly parameter request failed: {exc}")
 
     try:
         input_profile_ref = write_recommendation_json_artifact(
@@ -189,10 +201,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 state,
                 recommendation_id,
                 "basis_snapshot.json",
-                recommendation_basis_snapshot(
-                    catalog=catalog,
-                    prompt_payload=prompt_payload,
-                ),
+                basis_snapshot,
                 artifact_type=ASSEMBLY_PARAMETER_BASIS,
                 method_name="assembly.parameter_recommender",
             )
@@ -201,7 +210,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         decision_request = AssemblyDecisionRequest(
             kind="parameter_recommendation",
             session_id=state["session_id"],
-            prompt_payload=prompt_payload,
+            prompt_payload=request_dto,
             allow_default_on_error=bool(
                 _parameter_recommendation_config(state, assembly_out).get(
                     "allow_model_unavailable_defaults", False
@@ -221,7 +230,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 ),
                 "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
                 "prompt_template_sha256": parameter_prompt_bundle_hash(catalog.method_id),
-                "context_projection_schema_version": 1,
+                "parameter_request_schema_version": 1,
                 "messages": messages,
             },
             artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
@@ -232,7 +241,11 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
 
     # The persisted list above is the same object passed to invoke.  There is
     # no second render that could drift from the evidence on disk.
-    decision = make_assembly_decision(decision_request, messages=messages)
+    decision = make_assembly_decision(
+        decision_request,
+        messages=messages,
+        parameter_baseline_overrides=normalization_overrides,
+    )
     try:
         model_response_ref = write_recommendation_json_artifact(
             state,
@@ -272,7 +285,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             catalog=catalog,
             recommended_params=recommended_params,
             readonly_facts=flatten_profile_facts(full_profile),
-            rules=prompt_payload.get("rules") or {},
+            rules=dict(basis_snapshot.get("rules") or {}),
             full_profile=full_profile,
         )
     else:

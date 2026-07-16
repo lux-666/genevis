@@ -2,7 +2,7 @@
 
 Biological observations, mechanism guidance, and literature cases are inputs to
 the model.  The model only has to return parameter values; provenance remains
-in the prompt artifact and a human reviews every proposed patch.
+in immutable request/basis artifacts and a human reviews every proposed patch.
 """
 
 from __future__ import annotations
@@ -18,18 +18,20 @@ _RETRY_DISPOSITIONS = {"retry", "stop", "expert_review"}
 
 def normalize_parameter_recommendation(
     response: dict[str, Any],
-    prompt_payload: dict[str, Any],
+    request_dto: dict[str, Any],
+    *,
+    baseline_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate a sparse model patch and derive its effective parameter set."""
 
     if not isinstance(response, dict):
         raise ValueError("parameter recommendation response must be an object")
-    if prompt_payload.get("recommendation_contract") not in _ACCEPTED_CONTRACTS:
-        raise ValueError("prompt does not use a supported parameter-patch contract")
+    if request_dto.get("recommendation_contract") not in _ACCEPTED_CONTRACTS:
+        raise ValueError("request does not use a supported parameter-patch contract")
 
-    adjustable = prompt_payload.get("adjustable_params") or {}
+    adjustable = request_dto.get("adjustable_params") or {}
     if not isinstance(adjustable, dict):
-        raise ValueError("prompt adjustable_params must be an object")
+        raise ValueError("request adjustable_params must be an object")
     raw_patch = _extract_raw_patch(response, adjustable=set(adjustable))
     unexpected = sorted(set(raw_patch) - set(adjustable))
     if unexpected:
@@ -45,11 +47,12 @@ def normalize_parameter_recommendation(
     summary = _recommendation_summary(response, parameter_count=len(parameter_patch))
     diagnosis = _normalize_diagnosis(response.get("sample_diagnosis"), fallback_summary=summary)
 
-    baseline = prompt_payload.get("baseline_params") or {}
+    baseline = request_dto.get("baseline_params") or {}
     if not isinstance(baseline, dict):
         raise ValueError("baseline_params must be an object")
     effective_params = {**deepcopy(baseline), **deepcopy(parameter_patch)}
-    baseline_overrides = prompt_payload.get("baseline_overrides") or {}
+    if baseline_overrides is None:
+        baseline_overrides = {}
     if not isinstance(baseline_overrides, dict):
         raise ValueError("baseline_overrides must be an object")
     execution_params = {
@@ -59,7 +62,7 @@ def normalize_parameter_recommendation(
 
     retry_disposition = _normalize_retry_disposition(
         response.get("retry_disposition"),
-        task=prompt_payload.get("task"),
+        task=request_dto.get("task"),
         has_patch=bool(parameter_patch),
     )
 
@@ -80,10 +83,14 @@ def normalize_parameter_recommendation(
     }
 
 
-def default_parameter_recommendation(prompt_payload: dict[str, Any]) -> dict[str, Any]:
+def default_parameter_recommendation(
+    request_dto: dict[str, Any],
+    *,
+    baseline_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the conservative no-patch fallback for model unavailability."""
 
-    task = prompt_payload.get("task")
+    task = request_dto.get("task")
     response: dict[str, Any] = {
         "sample_diagnosis": {
             "effect_areas": [],
@@ -94,7 +101,11 @@ def default_parameter_recommendation(prompt_payload: dict[str, Any]) -> dict[str
     }
     if task != "recommend_initial":
         response["retry_disposition"] = "expert_review"
-    return normalize_parameter_recommendation(response, prompt_payload)
+    return normalize_parameter_recommendation(
+        response,
+        request_dto,
+        baseline_overrides=baseline_overrides,
+    )
 
 
 def _normalize_diagnosis(value: Any, *, fallback_summary: str) -> dict[str, Any]:

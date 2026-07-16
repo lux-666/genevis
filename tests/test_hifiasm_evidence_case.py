@@ -28,6 +28,11 @@ from app.knowledge.evidence_cases import (
     MAX_METHODS_FILE_BYTES,
 )
 from app.knowledge.packs import load_knowledge_pack
+from app.stages.assembly.parameter_catalog import load_parameter_catalog
+from app.stages.assembly.parameter_request import (
+    build_parameter_basis_snapshot,
+    build_parameter_request_dto,
+)
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +104,32 @@ def _initial_profile() -> dict:
         "previous_attempt": {},
         "assembly_review": {},
     }
+
+
+def _build_parameter_request(
+    full_profile: dict,
+    *,
+    knowledge_root: Path,
+    session_id: str | None = None,
+    recommendation_id: int | None = None,
+) -> tuple[dict, dict]:
+    catalog = load_parameter_catalog("hifiasm")
+    basis = build_parameter_basis_snapshot(
+        method_id="hifiasm",
+        catalog=catalog,
+        full_profile=full_profile,
+        knowledge_root=knowledge_root,
+        session_id=session_id,
+        recommendation_id=recommendation_id,
+    )
+    request = build_parameter_request_dto(
+        method_id="hifiasm",
+        catalog=catalog,
+        full_profile=full_profile,
+        task="recommend_initial",
+        basis_snapshot=basis,
+    )
+    return basis, request
 
 
 def _retrieval_query() -> dict:
@@ -852,9 +883,6 @@ def test_explicit_rationale_must_cite_methods_while_inference_remains_labeled(tm
 
 
 def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(tmp_path):
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.assembly.prompt_payload import build_prompt_payload
-
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     _write_case_pack(
@@ -868,10 +896,8 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
         enable_hifiasm_numeric=True,
     )
 
-    payload = build_prompt_payload(
-        method_id="hifiasm",
-        catalog=load_parameter_catalog("hifiasm"),
-        full_profile={
+    _, request = _build_parameter_request(
+        {
             "sample": {"sample_id": "case_match", "ploidy": 2},
             "assets": {"read_type": "hifi"},
             "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
@@ -879,24 +905,20 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
             "previous_attempt": {},
             "assembly_review": {},
         },
-        task="recommend_initial",
         knowledge_root=tmp_path,
     )
 
-    assert "selected_cases" not in payload
-    assert payload["literature_selection"]["selected_case_ids"] == ["case_001"]
-    assert [case["case_id"] for case in payload["literature_cases"]] == ["case_001"]
-    evidence_text = str(payload["literature_cases"][0])
+    assert "selected_cases" not in request
+    assert request["literature_selection"]["selected_case_ids"] == ["case_001"]
+    assert [case["case_id"] for case in request["literature_cases"]] == ["case_001"]
+    evidence_text = str(request["literature_cases"][0])
     assert "HiFi coverage was 30.0x" in evidence_text
     assert "Study body" not in evidence_text
-    assert "methods_path" not in payload["literature_cases"][0]
-    assert "evidence_spans" not in payload["literature_cases"][0]
+    assert "methods_path" not in request["literature_cases"][0]
+    assert "evidence_spans" not in request["literature_cases"][0]
 
 
-def test_hifiasm_selection_is_embedded_once_in_pure_prompt_context(tmp_path):
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.assembly.prompt_payload import build_prompt_payload
-
+def test_hifiasm_selection_identity_stays_in_basis_and_card_is_embedded_once(tmp_path):
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     _write_case_pack(
@@ -909,10 +931,8 @@ def test_hifiasm_selection_is_embedded_once_in_pure_prompt_context(tmp_path):
         {"cases": [case]},
         enable_hifiasm_numeric=True,
     )
-    payload = build_prompt_payload(
-        method_id="hifiasm",
-        catalog=load_parameter_catalog("hifiasm"),
-        full_profile={
+    basis, request = _build_parameter_request(
+        {
             "sample": {"sample_id": "case_match", "ploidy": 2},
             "assets": {"read_type": "hifi"},
             "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
@@ -920,22 +940,22 @@ def test_hifiasm_selection_is_embedded_once_in_pure_prompt_context(tmp_path):
             "previous_attempt": {},
             "assembly_review": {},
         },
-        task="recommend_initial",
         knowledge_root=tmp_path,
         session_id="session_a",
-        attempt_id=2,
+        recommendation_id=2,
     )
 
-    retrieval = payload["literature_selection"]
+    retrieval = basis["literature_selection"]
     assert "query" not in retrieval
     assert "trace" not in retrieval
     assert "query_ref" not in retrieval
     assert "trace_ref" not in retrieval
     assert retrieval["query_id"] == "session_a:parameter_attempt_2"
-    assert "retrieval_query_ref" not in payload
-    assert "retrieval_trace_ref" not in payload
-    assert [case["case_id"] for case in payload["literature_cases"]] == ["case_001"]
-    context_text = json.dumps(payload, ensure_ascii=False)
+    assert "query_id" not in request["literature_selection"]
+    assert "retrieval_query_ref" not in request
+    assert "retrieval_trace_ref" not in request
+    assert [case["case_id"] for case in request["literature_cases"]] == ["case_001"]
+    context_text = json.dumps(request, ensure_ascii=False)
     assert context_text.count('"case_id": "case_001"') == 1
     assert "methods_path" not in context_text
     assert "evidence_spans" not in context_text
@@ -985,9 +1005,6 @@ def test_v3_case_missing_source_tool_fails_closed(tmp_path):
 def test_hifiasm_v3_shard_requires_exact_integer_schema_version_full_chain(
     tmp_path, schema_version
 ):
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.assembly.prompt_payload import build_prompt_payload
-
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     case["schema_version"] = schema_version
@@ -1003,11 +1020,8 @@ def test_hifiasm_v3_shard_requires_exact_integer_schema_version_full_chain(
     )
 
     with pytest.raises(EvidenceCaseValidationError, match="v3 shard requires schema_version=3"):
-        build_prompt_payload(
-            method_id="hifiasm",
-            catalog=load_parameter_catalog("hifiasm"),
-            full_profile=_initial_profile(),
-            task="recommend_initial",
+        _build_parameter_request(
+            _initial_profile(),
             knowledge_root=tmp_path,
         )
 
@@ -1016,9 +1030,6 @@ def test_hifiasm_v3_shard_requires_exact_integer_schema_version_full_chain(
 def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_ids_full_chain(
     tmp_path, identifier_state
 ):
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.assembly.prompt_payload import build_prompt_payload
-
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     case.pop("schema_version")
@@ -1043,11 +1054,8 @@ def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_id
     )
 
     with pytest.raises(EvidenceCaseValidationError, match="v3 shard requires schema_version=3"):
-        build_prompt_payload(
-            method_id="hifiasm",
-            catalog=load_parameter_catalog("hifiasm"),
-            full_profile=_initial_profile(),
-            task="recommend_initial",
+        _build_parameter_request(
+            _initial_profile(),
             knowledge_root=tmp_path,
         )
 
@@ -1057,9 +1065,6 @@ def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_id
 def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
     tmp_path, field_path, identifier_state
 ):
-    from app.stages.assembly.parameter_catalog import load_parameter_catalog
-    from app.stages.assembly.prompt_payload import build_prompt_payload
-
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     section_name, field_name = field_path.split(".")
@@ -1079,11 +1084,8 @@ def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
     )
 
     with pytest.raises(EvidenceCaseValidationError, match=field_path.replace(".", r"\.")):
-        build_prompt_payload(
-            method_id="hifiasm",
-            catalog=load_parameter_catalog("hifiasm"),
-            full_profile=_initial_profile(),
-            task="recommend_initial",
+        _build_parameter_request(
+            _initial_profile(),
             knowledge_root=tmp_path,
         )
 

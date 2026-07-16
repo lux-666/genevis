@@ -7,11 +7,10 @@ import pytest
 from app.domains.assembly.parameter_recommendation import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.llm.assembly_parameter_context import build_assembly_parameter_context
 from app.llm.assembly_parameter_prompts import render_assembly_parameter_messages
 
 
-def _payload(method_id: str = "hifiasm") -> dict:
+def _request_dto(method_id: str = "hifiasm") -> dict:
     return {
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
@@ -24,7 +23,6 @@ def _payload(method_id: str = "hifiasm") -> dict:
                 "value": 0.01,
             }
         ],
-        "evidence_registry": {"pf_1": "genome_survey.heterozygosity"},
         "rules": {"rules": []},
         "recommendation_policy": {"output": "sparse_parameter_patch"},
         "method_guidance": [
@@ -46,11 +44,9 @@ def _payload(method_id: str = "hifiasm") -> dict:
             }
         },
         "baseline_params": {"purge_level": 2},
-        "baseline_overrides": {},
         "literature_selection": {
             "selected_case_ids": ["paper.1"],
             "selected_count": 1,
-            "query": {"internal": "not model facing"},
         },
         "literature_cases": [
             {
@@ -69,26 +65,21 @@ def _payload(method_id: str = "hifiasm") -> dict:
                 "numeric_match": {"numeric_similarity": 0.8},
             }
         ],
-        "prompt_payload_ref": "data/secret.json",
-        "prompt_payload_hash": "0" * 64,
     }
 
 
-def test_model_context_contains_each_literature_card_once_without_audit_envelope() -> None:
-    context = build_assembly_parameter_context(_payload())
+def test_renderer_serializes_the_direct_dto_without_a_second_projection() -> None:
+    request = _request_dto()
+    messages = render_assembly_parameter_messages(request)
+    rendered_request = json.loads(messages[1]["content"])
 
-    assert context["literature_cases"][0]["case_id"] == "paper.1"
-    assert "selected_cases" not in context
-    assert "evidence_cases" not in context
-    assert "methods_evidence" not in context
-    assert "evidence_registry" not in context
-    assert "prompt_payload_ref" not in context
-    assert "query" not in context["literature_selection"]
+    assert rendered_request == request
+    assert rendered_request["literature_cases"][0]["case_id"] == "paper.1"
 
 
 @pytest.mark.parametrize("method_id", ["flye", "nextdenovo", "hifiasm", "hifiasm_ont"])
 def test_prompt_is_one_system_user_pair_without_response_example(method_id: str) -> None:
-    messages = render_assembly_parameter_messages(_payload(method_id))
+    messages = render_assembly_parameter_messages(_request_dto(method_id))
 
     assert [message["role"] for message in messages] == ["system", "user"]
     model_payload = json.loads(messages[1]["content"])
@@ -100,14 +91,13 @@ def test_prompt_is_one_system_user_pair_without_response_example(method_id: str)
     assert "Do not return observation IDs" in messages[0]["content"]
 
 
-def test_retry_context_is_visible_but_internal_paths_are_removed() -> None:
-    payload = _payload()
-    payload["task"] = "retry_after_execution_failure"
-    payload["retry_context"] = {
-        "task": payload["task"],
+def test_retry_context_is_rendered_exactly_from_the_strict_dto() -> None:
+    request = _request_dto()
+    request["task"] = "retry_after_execution_failure"
+    request["retry_context"] = {
+        "task": request["task"],
         "previous_attempt": {
             "execution_status": "failed",
-            "stderr_ref": "data/private.stderr",
             "execution_params": {"purge_level": 1},
         },
         "assembly_review": {},
@@ -115,14 +105,12 @@ def test_retry_context_is_visible_but_internal_paths_are_removed() -> None:
         "signals": [
             {
                 "signal_id": "execution.status",
-                "path": "previous_attempt.execution_status",
                 "value": "failed",
             }
         ],
     }
 
-    context = build_assembly_parameter_context(payload)
+    messages = render_assembly_parameter_messages(request)
+    rendered_request = json.loads(messages[1]["content"])
 
-    assert context["retry_context"]["previous_attempt"]["execution_status"] == "failed"
-    assert "stderr_ref" not in context["retry_context"]["previous_attempt"]
-    assert "path" not in context["retry_context"]["signals"][0]
+    assert rendered_request == request

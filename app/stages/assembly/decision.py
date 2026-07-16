@@ -69,6 +69,7 @@ def make_assembly_decision(
     request: AssemblyDecisionRequest,
     *,
     messages: list[dict[str, str]] | None = None,
+    parameter_baseline_overrides: dict[str, Any] | None = None,
 ) -> AssemblyDecisionResult:
     """Invoke the model with one already-rendered request and validate its response."""
 
@@ -82,7 +83,10 @@ def make_assembly_decision(
     except Exception as exc:
         if request.kind == "parameter_recommendation" and request.allow_default_on_error:
             try:
-                fallback = default_parameter_recommendation(request.prompt_payload)
+                fallback = default_parameter_recommendation(
+                    request.prompt_payload,
+                    baseline_overrides=parameter_baseline_overrides,
+                )
                 return AssemblyDecisionResult(
                     kind=request.kind,
                     raw_response=json.dumps(fallback),
@@ -111,7 +115,11 @@ def make_assembly_decision(
         if request.kind == "route_selection":
             _validate_route_selection(parsed, request.allowed_actions)
         else:
-            parsed = normalize_parameter_recommendation(parsed, request.prompt_payload)
+            parsed = normalize_parameter_recommendation(
+                parsed,
+                request.prompt_payload,
+                baseline_overrides=parameter_baseline_overrides,
+            )
         return AssemblyDecisionResult(
             kind=request.kind,
             raw_response=raw_content,

@@ -106,7 +106,9 @@ already been fixed as the method and before any execution plan is frozen.
 It follows the assembly parameter-recommendation loop:
 
 ```text
-build input profile
+build full input profile and immutable basis
+  -> construct the strict model-facing DTO directly
+  -> render and persist the exact model request
   -> call LLM for a parameter recommendation
   -> validate the recommendation
   -> persist the recommendation
@@ -115,8 +117,10 @@ build input profile
 ```
 
 The LLM directly recommends `restriction_enzyme`. The recommendation may use
-the manifest, Hi-C library metadata, read information, and supported-enzyme
-catalog supplied in the prompt. Every proposal requires human approval.
+explicitly allowlisted manifest facts, Hi-C library facts, read information,
+and the supported-enzyme catalog supplied in the DTO. File locators, session
+identity, artifact metadata, and unrestricted library metadata are audit facts,
+not model input. Every proposal requires human approval.
 
 Even when the manifest already contains a restriction enzyme, the recommender
 still produces a proposal and every proposal goes through human approval. A

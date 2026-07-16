@@ -307,6 +307,7 @@ Each recommendation receives an immutable directory:
 ```text
 artifacts/<stage>/parameter_recommendations/<recommendation_id>/
 ├── input_profile.json
+├── basis_snapshot.json
 ├── model_request.json
 ├── model_response.json
 ├── recommendation.json
@@ -333,14 +334,27 @@ durable recommendation plus decision; it does not become an execution attempt.
 
 ### 10.3 Exact model request
 
-`model_request.json` records the actual rendered request passed to the model:
+The parameter recommender constructs one strict model-facing DTO directly from
+the input profile, immutable basis, and selected method catalog. It must not
+first assemble a richer prompt envelope and then remove audit fields in a
+second projection pass. Full profile facts remain owned by `input_profile.json`;
+catalog, rule, case, guidance, and selection-trace facts remain owned by
+`basis_snapshot.json`.
+
+The DTO is an in-memory semantic boundary. A deterministic prompt adapter
+renders it into the ordered messages accepted by the chat model.
+`model_request.json` records that exact rendered invocation:
 
 - ordered messages after template rendering;
 - prompt bundle ID and template hash;
-- context projection schema/version;
-- provider and model ID;
-- temperature, maximum tokens, timeout, and tool/output schema;
+- parameter-request DTO schema/version;
 - request correlation ID.
+
+The file is published before model invocation, and the same rendered messages
+object is passed to the model. The recommendation manifest binds this request
+to its exact input-profile and basis refs. Provider/model identity and runtime
+profile provenance must be owned once by the response or control/dependency
+record rather than copied speculatively into every request.
 
 It must not contain API keys, authorization headers, secret environment values,
 or credentials embedded in URLs.
@@ -666,7 +680,27 @@ code must not recreate or silently mix legacy data into the v2 root.
 | 7. Add storage audit, checkpoint compaction, work cleanup, and mark-and-sweep GC | Partial | Read-only storage audit and a pure dry-run cleanup manifest are implemented. Terminal checkpoint compaction, deletion-performing work cleanup/GC, artifact-index compaction after GC, and a unified `storage-audit` CLI are not implemented. |
 | 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. A final clean v2 end-to-end acceptance run remains outstanding. |
 
-## 22. Acceptance Criteria
+## 22. Confirmed Conformance Debt
+
+The following gaps were confirmed against the current implementation on
+2026-07-16. They are bounded follow-up work, not precedents for new stages.
+
+| Priority | Area | Confirmed gap | Required ownership boundary |
+|---|---|---|---|
+| P0 | Gene artifact collection | Artifact registration may move a work file before the collector finishes reading and publishing its old path. | Publication returns the durable ref/path explicitly; collectors stop using a source path after publication. |
+| P1 | Gene checkpoints | Full frozen attempts and execution results remain in `stage_outputs`. | Durable attempt/execution artifacts own the content; checkpoint state keeps status and refs only. |
+| P1 | AutoHiC model input | The current builder serializes a rich input profile, including locators and unrestricted library metadata, directly into messages. | Build a strict model DTO directly from the approved facts; do not add a rich-envelope projection shim. |
+| P1 | AutoHiC freeze/execution | Approved enzyme, fixed execution parameters, frozen attempt, execution result, and review bundle still have overlapping owners; some durable execution inputs live only in `work/`. | Freeze the complete execution definition once, publish it, and keep only refs plus bounded status summaries in state/review. |
+| P1 | Review recommendation | A recommendation artifact repeats the canonical review request and uses a stage-fixed filename. | Bind recommendation evidence to review request ID/ref/hash and publish it immutably per request. |
+| P2 | Review request identity | `stage`, `gate_id`, and `reason` occur in both the persisted request envelope and body. | The envelope is the sole identity owner; the body contains only gate-specific facts. |
+| P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
+| P2 | Session inspection | Inspection may use derived `current_status.json` content to classify a report even though lifecycle state comes from the ledger. | Ledger/artifacts determine classification; reports remain optional views only. |
+
+Reasonable dual representations remain allowed: raw output plus normalized
+summary, immutable artifact plus metadata-only index, compact ledger event plus
+artifact ref, and JSON report plus regenerable Markdown.
+
+## 23. Acceptance Criteria
 
 Data v2 is complete only when all of the following hold:
 
@@ -688,7 +722,7 @@ Data v2 is complete only when all of the following hold:
 - A storage-audit command reports bytes by layer, largest checkpoint fields,
   duplicate content, unreachable artifacts, and reclaimable work/report data.
 
-## 23. Non-Goals
+## 24. Non-Goals
 
 Data v2 does not provide:
 

@@ -14,8 +14,8 @@ was implemented and must not override an accepted architecture specification.
 | Specification | Status | Scope |
 |---|---|---|
 | [`data-v2.md`](data-v2.md) | Accepted; core implemented, operational cleanup pending | Run-owned data layout, fact ownership, artifact references, parameter-recommendation records, attempts, review records, checkpoints, ledger events, reports, retention, and cutover |
-| [`autohic-stage.md`](autohic-stage.md) | Accepted; implementation pending | Parent/Hi-C graph boundary, AutoHiC-only execution, and the restriction-enzyme parameter recommender |
-| [`bootstrap.md`](bootstrap.md) | Accepted; implementation pending | Minimal initialization of `.env` and `config/envs.yaml` |
+| [`autohic-stage.md`](autohic-stage.md) | Accepted; core implemented, conformance work pending | Parent/Hi-C graph boundary, AutoHiC-only execution, and the restriction-enzyme parameter recommender |
+| [`bootstrap.md`](bootstrap.md) | Accepted; implemented | Minimal initialization of `.env` and `config/envs.yaml` |
 
 ## Vocabulary Rule
 

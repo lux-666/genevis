@@ -168,7 +168,19 @@ def test_recommendation_persists_exact_request_and_keeps_checkpoint_compact(
         {**state, "stage_outputs": update["stage_outputs"]},
         cursor.manifest_ref,
     )
-    assert bundle["model_request"]["messages"] == model.messages
+    model_request = bundle["model_request"]
+    assert model_request["messages"] == model.messages
+    assert model_request["parameter_request_schema_version"] == 1
+    assert "context_projection_schema_version" not in model_request
+    user_message = model_request["messages"][1]["content"]
+    for internal_field in (
+        "prompt_profile",
+        "evidence_registry",
+        "baseline_overrides",
+        "input_profile_hash",
+        "payload_hash",
+    ):
+        assert internal_field not in user_message
     assert bundle["recommendation"]["recommendation"]["params"] == {
         "purge_level": 1,
         "read_length_cutoff": 3000,

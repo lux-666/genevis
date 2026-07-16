@@ -6,7 +6,6 @@ import json
 from hashlib import sha256
 from typing import Any, Mapping
 
-from app.llm.assembly_parameter_context import build_assembly_parameter_context
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
 
@@ -19,12 +18,11 @@ _BUNDLE_BY_METHOD = {
 
 
 def render_assembly_parameter_messages(
-    prompt_payload: Mapping[str, Any],
+    request_dto: Mapping[str, Any],
 ) -> list[dict[str, str]]:
-    """Render one instruction pair without response examples or duplicated cards."""
+    """Render the strict parameter DTO into one provider-neutral message pair."""
 
-    model_context = build_assembly_parameter_context(prompt_payload)
-    method_id = _normalized_method_id(model_context.get("method_id"))
+    method_id = _normalized_method_id(request_dto.get("method_id"))
     try:
         bundle_name = _BUNDLE_BY_METHOD[method_id]
     except KeyError as exc:
@@ -35,8 +33,8 @@ def render_assembly_parameter_messages(
         load_prompt_bundle(bundle_name),
         {
             "method_id": method_id,
-            "prompt_payload_json": json.dumps(
-                model_context,
+            "parameter_request_json": json.dumps(
+                dict(request_dto),
                 ensure_ascii=False,
                 indent=2,
             ),
