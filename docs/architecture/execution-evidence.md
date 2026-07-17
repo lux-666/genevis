@@ -4,6 +4,8 @@
 
 **Accepted:** 2026-07-16
 
+**Implementation:** Process-result boundary implemented
+
 ## Decision
 
 Process execution has one durable representation. Runtime code may use local
@@ -14,8 +16,8 @@ may persist those paths.
 LocalRunner -> ExecutionResult (runtime paths)
             -> publish/index stdout and stderr once
             -> ExecutionEvidence (ArtifactRef only)
-            -> execution.json
-            -> checkpoint stores only the execution.json ArtifactRef
+            -> immutable execution record
+            -> checkpoint stores its ArtifactRef and optional bounded projections
 ```
 
 `ExecutionResult` is a runtime value. Its `stdout_path`, `stderr_path`, and
@@ -33,6 +35,7 @@ or inspect files. It is never serialized directly into durable state.
   "status_detail": "",
   "error": "",
   "stdout_ref": {
+    "schema_version": 2,
     "artifact_id": "...",
     "artifact_type": "command.stdout",
     "path_ref": "artifacts/stage/logs/attempt-000.invocation.stdout.log",
@@ -40,6 +43,7 @@ or inspect files. It is never serialized directly into durable state.
     "size_bytes": 0
   },
   "stderr_ref": {
+    "schema_version": 2,
     "artifact_id": "...",
     "artifact_type": "command.stderr",
     "path_ref": "artifacts/stage/logs/attempt-000.invocation.stderr.log",
@@ -59,16 +63,39 @@ authoritative process output.
 - The shared method runner publishes stdout and stderr into the run layout and
   registers both index records immediately after execution, including failure.
 - The execution-evidence boundary converts those indexed logs to `ArtifactRef`
-  values and validates both refs before writing or loading `execution.json`.
+  values and validates both refs before writing or loading the immutable
+  execution record.
 - A stage may wrap the canonical result body in a stage-specific immutable
   record, but it may not change or extend the body schema.
-- Checkpoints carry only the `execution.json` `ArtifactRef` (or a bounded list
-  of such refs for multi-command methods).
+- For model-recommended parameterized execution after human approval, current
+  and historical execution-record refs live only on the corresponding
+  `ParameterAttempt`; the stage cursor selects an attempt by ID and does not
+  duplicate a method-specific execution cursor. Operator-directed Assembly
+  reruns remain bound through their review decision and candidate bundle. A
+  non-parameterized method may carry its execution-record `ArtifactRef` directly
+  (or a bounded list for a multi-command method). Small immutable projections
+  such as success, return code, or a bounded error may be used for routing and
+  display; the execution record remains authoritative.
 - Collect resolves refs only when it needs log bytes. It registers biological
   outputs, reports, and other stage-owned artifacts, but never registers the
   runner logs again.
 - Candidate and review records may project the log `path_ref` for display, but
   an absolute or work-directory path is never durable evidence.
+
+The frozen runner input is a separate pre-execution fact. Resume loads it from
+its immutable ref; it must not regenerate a command from current catalogs,
+configuration, or environment. The record contains the runner's paths,
+environment projection, expected outputs, and Conda selection. Its script path
+points into the retained run `work/` tree. If that file is manually removed,
+resume fails closed; no script hash, duplicate script artifact, or command
+regeneration is required. Data v2 owns that attempt boundary.
+
+For model-recommended Assembly and AutoHiC execution, the same
+`ParameterAttempt` owns both this `frozen_attempt_ref` and the later
+`execution_ref`. Sealing an attempt binds both refs into its immutable manifest,
+so advancing the current attempt during a retry cannot erase which runner input
+produced an earlier result. This ownership rule does not include an
+operator-directed Assembly review rerun.
 
 ## Cutover
 

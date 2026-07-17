@@ -1,10 +1,14 @@
 # Data Architecture v2
 
-**Status:** Accepted; core persistence, layout, review, report, and storage-audit
-implementation complete. Terminal checkpoint compaction, deletion-performing
-cleanup/GC, and a unified `storage-audit` CLI remain pending.
+**Status:** Accepted
 
 **Accepted:** 2026-07-15
+
+**Implementation:** Partial. The v2 run layout, immutable refs, ledger/report
+ownership, recommendation persistence, typed bounded stage cursors, universal
+frozen-attempt refs, and process-result evidence are in use. Whole-checkpoint
+budgets, terminal compaction, artifact GC, and a unified `storage-audit` CLI
+remain incomplete.
 
 **Scope:** New workflow sessions created after the v2 cutover
 
@@ -99,6 +103,11 @@ Checkpoint state stores the latest control frontier and immutable references.
 It is not an execution history, audit store, report cache, or parameter-attempt
 database.
 
+“Cursor” does not mean “insufficient to resume.” The checkpoint must identify
+every immutable record needed to continue. Freeze and recommendation decisions
+are loaded from those records; they are never recomputed from current code or
+configuration during resume.
+
 ### 4.5 Ledger is a causal event stream
 
 The ledger records what happened, in what order, and which immutable records
@@ -137,9 +146,9 @@ an object `compact` are not sufficient.
 | Response-shape parse result | `response_parse.json` | Ref, parsed/invalid status and parser error |
 | Human review request | immutable review request artifact | Request ID/ref/hash, gate ID |
 | Human decision | immutable decision artifact | Decision enum, actor, ref/hash |
-| Frozen parameters and command | frozen-parameter and command artifacts | Refs and attempt status |
-| Executed script bytes | script artifact | Ref and hash |
-| Execution result | `execution.json` | Ref, terminal status, return code |
+| Frozen runner input | immutable frozen-attempt record | Ref and attempt status |
+| Executed script/command identity | frozen-attempt record plus retained `work/` script | Attempt ref and status |
+| Execution result | immutable execution record | Ref, terminal status, return code |
 | stdout/stderr and tool outputs | immutable artifacts | Refs and compact counts |
 | Lifecycle ordering | ledger | Last event sequence in read models |
 | Artifact location and integrity metadata | artifact index | `ArtifactRef` |
@@ -150,6 +159,9 @@ An input profile is a decision snapshot derived from upstream evidence; it is
 not a new claim that replaces the manifest, raw inputs, or upstream results.
 
 ## 6. Physical Layout
+
+The tree below defines ownership roots. Child basenames are illustrative unless
+a dedicated specification declares one as part of its schema.
 
 ```text
 data/
@@ -205,8 +217,9 @@ Rules:
 - Stage directories never repeat `<session_id>`.
 - Numeric recommendation and attempt directories use zero-padded, stage-local
   IDs such as `000`, `001`, and `002`.
-- `work/` is mutable and disposable. A file becomes durable only after it is
-  published under `artifacts/`.
+- `work/` is mutable while an attempt is being prepared, then retained as part
+  of that run's resumable execution workspace. Built-in cleanup and GC do not
+  delete it.
 - `reports/` is outside `artifacts/` because reports are projections.
 - There is no `data/artifacts/` global runtime namespace and no global object
   store in the logical reference contract.
@@ -282,186 +295,82 @@ catalog, policy, or evidence set.
 Cross-run physical deduplication is an implementation detail only. Runtime code
 must not replace a session-relative snapshot ref with a global hash-only ref.
 
-## 10. Shared Parameter-Recommendation Contract
+## 10. Parameter-Recommendation Data Boundary
 
-### 10.1 Scope
+[`parameter-recommenders.md`](parameter-recommenders.md) is normative for the
+model DTO, prompt rendering, response parsing, approval, and stage/model
+responsibility split. Data v2 owns only the durable placement of those facts.
 
-A parameter recommender runs only after a method has already been selected. It
-may recommend adjustable parameters for that method. It must not:
+For a method that uses parameter recommendation:
 
-- choose or replace the method;
-- change requested stages or parent-graph routing;
-- substitute defaults or rewrite the model's parsed parameter mapping;
-- freeze or execute a command before the required approval;
-- write directly to checkpoint, ledger, or reports.
+- the exact model request is durable before invocation;
+- the raw response and parsed recommendation are different immutable facts;
+- the review request binds the immutable recommendation by ref and hash;
+- rejection or parse failure creates no execution attempt;
+- a retry binds the preceding sealed attempt and does not silently reload a new
+  evidence or policy basis.
 
-Assembly, Hi-C scaffolding, and T2T use this contract even when their profile
-fields and catalogs differ.
+A recommendation manifest groups the refs required to verify those facts.
+Checkpoint state carries its bounded cursor/ref, never the request, response,
+profile, basis, or recommendation bodies. Stage-specific DTOs and storage
+adapters are expected; a second fact-ownership model is not.
 
-### 10.2 Responsibility boundary
+## 11. Execution Attempt Data Boundary
 
-The persistence contract is shared; biological/model-input assembly is
-stage-specific. Assembly and AutoHiC use separate strict DTO builders under
-`app/llm/parameters/<stage>/` and reuse this section's evidence layout. T2T must follow the same
-division if and when its parameter recommender is implemented; this does not
-authorize adding its recommendation logic early.
+Freezing is completed before execution. If recommendation or approval applies,
+it must finish first; methods without those gates freeze directly from their
+validated deterministic inputs.
 
-The normative profile, basis, DTO, prompt-rendering, response parsing, and
-orchestration responsibilities are defined in
-[`parameter-recommenders.md`](parameter-recommenders.md). Data v2 owns their
-durable fact boundaries, not their biological field selection.
+The universal durable minimum is deliberately small:
 
-### 10.3 Recommendation directory
+1. a frozen-attempt record that identifies the exact runner input;
+2. the canonical execution record defined by
+   [`execution-evidence.md`](execution-evidence.md);
+3. immutable refs for collected business outputs when they are published.
 
-Each recommendation receives an immutable directory:
+The frozen-attempt record contains the complete normalized runner input needed
+for execution, including its `script_path`, `working_dir`, expected output
+paths, environment projection, and Conda selection, subject to the secrets
+policy. It is persisted before the runner starts.
 
-```text
-artifacts/<stage>/parameter_recommendations/<recommendation_id>/
-├── input_profile.json
-├── basis_snapshot.json
-├── model_request.json
-├── model_response.json
-├── recommendation.json
-├── response_parse.json
-└── recommendation_manifest.json
-```
+For a parameterized method execution that originates in the model
+recommendation/approval lifecycle, `ParameterAttempt` is the sole checkpoint
+relation owner for `frozen_parameters_ref`, `command_ref`,
+`frozen_attempt_ref`, `execution_ref`, and `review_ref`. The enclosing stage
+cursor stores the ordered attempt chain, `current_parameter_attempt_id`,
+lifecycle status, and only bounded routing projections. It must not duplicate
+those refs in method-specific keys such as `*_frozen_attempt_ref` or
+`*_execution_result`. A retry appends a new `ParameterAttempt` and advances the
+current ID; it never overwrites the refs on the preceding attempt. The sealed
+attempt manifest and terminal timeline include the same per-attempt refs,
+including the exact `frozen_attempt_ref` consumed by the runner.
 
-`recommendation_manifest.json` is written after all available recommendation
-facts are durable. It binds their refs and hashes and records:
+An operator-directed Assembly rerun at the review gate has a different
+parameter source and is outside that `ParameterAttempt` ownership rule. Its
+durable relation is `ReviewDecision -> FrozenAttempt -> ExecutionResult ->
+CandidateBundle`: the review decision owns the operator-supplied parameters,
+and the candidate bundle binds the exact frozen and execution refs. This path
+must not invoke the model again or synthesize recommendation/approval evidence
+solely to imitate the recommendation lifecycle.
 
-- stage, method, task, and recommendation ID;
-- input and snapshot refs;
-- previous sealed attempt ref for a retry;
-- parsed recommendation and response-parse refs;
-- recommendation status;
-- schema and contract versions.
+For a non-parameterized method, its typed stage cursor may own the frozen-attempt
+and execution-record refs directly. In both cases resume loads the frozen record
+and does not regenerate a command from current descriptors, catalogs,
+configuration, or environment.
 
-The manifest is sealed before any approval request is written and is immutable.
-When approval is required, `artifacts/reviews/<review_request_id>/request.json`
-binds the manifest ref and hash. The manifest does not point back to the request:
-immutable hash-addressed records form a directed acyclic graph and must never
-create a manifest/request hash cycle. A rejected recommendation remains a
-durable recommendation plus decision; it does not become an execution attempt.
+The referenced script remains under `work/`; the run retains that workspace so
+the same frozen input can be resumed without regenerating a command. Resume
+validates that the script still exists. If an operator manually deletes the
+referenced work file, that attempt is no longer resumable and recovery fails
+closed. Data v2 does not copy or hash the script solely to survive such manual
+deletion, and it never reconstructs the command from current configuration.
 
-### 10.4 Exact model request
-
-The parameter recommender constructs one strict model-facing DTO directly from
-the input profile, immutable basis, and selected method catalog. It must not
-first assemble a richer prompt envelope and then remove audit fields in a
-second projection pass. Full profile facts remain owned by `input_profile.json`;
-catalog, case, guidance, and selection-trace facts remain owned by
-`basis_snapshot.json`.
-
-The DTO is an in-memory semantic boundary. A deterministic prompt adapter
-renders it into the ordered messages accepted by the chat model.
-`model_request.json` records that exact rendered invocation:
-
-- ordered messages after template rendering;
-- prompt bundle ID and template hash;
-- parameter-request DTO schema/version.
-
-The run path, recommendation directory, and manifest already identify the
-request. `model_request.json` must not repeat session, request-correlation, or
-retrieval-query identity fields.
-
-The file is published before model invocation, and the same rendered messages
-object is passed to the model. The recommendation manifest binds this request
-to its exact input-profile and basis refs. Provider/model identity and runtime
-profile provenance must be owned once by the response or control/dependency
-record rather than copied speculatively into every request.
-
-It must not contain API keys, authorization headers, secret environment values,
-or credentials embedded in URLs.
-
-`model_response.json` preserves the raw response text and available provider
-metadata. `recommendation.json` contains the parsed domain result. These are
-different facts and must not be nested copies of one another.
-
-### 10.5 Response parsing and approval
-
-The parser checks the declared JSON response shape only. It does not validate
-catalog membership, parameter level, enum/range, or biological correctness and
-does not merge a patch with catalog or previous-attempt defaults. Human approval
-binds to the exact recommendation manifest hash. Successfully parsed parameter
-names and values are preserved for the reviewer.
-
-The review decision records:
-
-- review request ID and hash;
-- decision enum;
-- actor and timestamp;
-- recommendation manifest hash;
-- bounded notes or a notes artifact ref;
-- decision schema version.
-
-Only an approved recommendation may be frozen into an attempt. Rejection or a
-response-parse error consumes no retry budget and creates no attempt membership.
-
-### 10.6 Retry
-
-A retry recommendation may use only:
-
-- the initial immutable profile, catalog, policy, and evidence snapshots;
-- the immediately preceding sealed attempt manifest;
-- the preceding execution or review failure artifact;
-- the remaining retry budget for the owning failure domain.
-
-It must not reload changed policies or retrieve a new evidence basis unless a
-new run is started. The recommendation manifest records the previous attempt
-ref and seal hash.
-
-## 11. Execution Attempt Contract
-
-An execution attempt exists only after response parsing and required approval
-have succeeded.
-
-```text
-artifacts/<stage>/
-├── attempts/<attempt_id>/
-│   ├── frozen_parameters.json
-│   ├── command.json
-│   ├── run.sh                   # or another exact executed script
-│   ├── execution.json
-│   ├── outputs/
-│   ├── review.json              # when the attempt reaches stage review
-│   └── attempt_manifest.json    # written once when sealed
-└── logs/
-    ├── <runner_attempt>.<invocation>.stdout.log
-    └── <runner_attempt>.<invocation>.stderr.log
-```
-
-The structured command and executed script are both retained when the runner
-executes the script: one expresses command semantics; the other proves the
-exact bytes executed.
-
-`execution.json` owns the canonical process outcome defined by
-[`execution-evidence.md`](execution-evidence.md): attempt identity, success,
-return code, terminal status and detail, a bounded error summary, and indexed
-stdout/stderr refs. It never owns `stdout_path`, `stderr_path`, or
-`output_paths`. Runtime `ExecutionResult` paths end at the publish boundary and
-must not be serialized into an artifact or checkpoint.
-
-The shared runner publishes and indexes stdout/stderr exactly once, before the
-stage persists execution evidence. Collect resolves those refs only when log
-bytes are needed and never registers command logs again. Business outputs are
-not named in execution evidence; their refs are owned by collected
-candidate/output records and the sealed attempt manifest. Checkpoint and ledger
-do not embed execution results or log tails: they carry only the execution
-artifact ref or a bounded list of refs for a multi-command method.
-
-`attempt_manifest.json` is written once when the attempt reaches its sealed
-lifecycle boundary. It includes:
-
-- stage, method, and attempt ID;
-- approved recommendation and decision refs;
-- frozen-parameter, command, script, execution, output, and review refs;
-- previous attempt ref and seal hash for retries;
-- terminal attempt status and sealed timestamp;
-- a seal over the canonical manifest fields.
-
-Before sealing, the checkpoint carries only the current attempt cursor and the
-immutable refs already committed. Once sealed, historical state keeps only the
-attempt-manifest ref.
+A sealed attempt manifest is required only when a retry/review workflow needs
+to bind several independently published records into an immutable chain. A
+simple one-shot method does not need a ceremonial
+`frozen_parameters.json + command.json + run.sh + attempt_manifest.json` bundle.
+Basenames are implementation details; schemas, artifact types, hashes, and refs
+form the contract.
 
 ## 12. Review Contract
 
@@ -538,7 +447,8 @@ Checkpoint state may contain:
 - current stage and supervision state;
 - current stage status cursor;
 - current parameter-recommendation ref;
-- current attempt cursor or sealed attempt-manifest refs;
+- current parameter-attempt ID and compact ordered `ParameterAttempt` chain, or
+  direct attempt refs for a non-parameterized method;
 - compact active-interrupt ref;
 - current retry counters;
 - control/config refs;
@@ -662,14 +572,14 @@ Roots include:
 - control manifests and configuration refs;
 - ledger event refs;
 - the latest nonterminal checkpoint refs;
-- sealed recommendation and attempt manifests;
+- sealed recommendation manifests and any sealed attempt manifests that exist;
 - review requests and decisions;
 - retained externally delivered evidence exports.
 
 Policies:
 
-- `work/` may be removed after every required output has been published and
-  verified.
+- `work/` is outside automatic cleanup and GC. An operator may remove it only
+  by explicitly accepting that affected attempts can no longer resume.
 - `reports/` may be removed and regenerated.
 - intermediate checkpoints may be pruned according to section 14.
 - immutable artifacts are deleted only when unreachable from every root and
@@ -703,20 +613,21 @@ code must not recreate or silently mix legacy data into the v2 root.
 |---|---|---|
 | 1. Add `layout.json`, run-root paths, ArtifactRef v2, and immutable writers | Complete | The repository and runtime use the strict v2 layout and run-relative, hash-verifiable immutable artifact references. |
 | 2. Add ledger v2 envelope, event IDs, sequences, idempotency, and route events | Complete | Ledger v2 owns bounded lifecycle events and request-ID-bound review decisions. |
-| 3. Introduce compact stage cursors and remove embedded ParameterAttempt history from checkpoints | Complete for the current core | Parameter attempts are compact ref records; durable recommendation and execution facts live in artifacts. Terminal checkpoint compaction is still pending. |
+| 3. Introduce typed compact stage cursors and remove embedded attempt bodies from checkpoints | Complete | `stage_outputs` accepts only known stage keys and bounded recursive JSON cursors; the LangGraph channel rejects non-JSON values, oversized cursors, and embedded `FrozenAttemptSpec` bodies. Every resumable freeze/run lifecycle checkpoints the shared immutable attempt ref. Model-recommended Assembly/AutoHiC executions own it through `ParameterAttempt`; operator-directed Assembly review reruns bind it through `ReviewDecision` and `CandidateBundle`; non-parameterized lifecycles may own it directly. Same-node helper commands persist the same record before execution. |
 | 4. Extract the shared parameter-recommendation persistence contract | Complete for shared persistence, Assembly, and AutoHiC adoption | Future stage recommenders, including T2T, must reuse the same storage helper; this step does not authorize new recommendation behavior. |
 | 5. Persist exact model requests/responses and policy/knowledge references | Complete for the implemented parameter-recommendation path | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
 | 6. Move reports out of the artifact index and generate shared report views | Complete | `current_status.json`, `assembly_review.md`, and `session_summary.{json,md}` are derived projections rather than workflow truth. |
-| 7. Add storage audit, checkpoint compaction, work cleanup, and mark-and-sweep GC | Partial | Read-only storage audit and a pure dry-run cleanup manifest are implemented. Terminal checkpoint compaction, deletion-performing work cleanup/GC, artifact-index compaction after GC, and a unified `storage-audit` CLI are not implemented. |
+| 7. Add storage audit, checkpoint compaction, and mark-and-sweep artifact GC | Partial | Read-only storage audit and a pure dry-run cleanup manifest are implemented. Terminal checkpoint compaction, deletion-performing artifact GC, artifact-index compaction after GC, and a unified `storage-audit` CLI are not implemented. Work cleanup is intentionally outside the design. |
 | 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. A final clean v2 end-to-end acceptance run remains outstanding. |
 
 ## 22. Confirmed Conformance Debt
 
-The following gaps were confirmed against the current implementation on
-2026-07-16. They are bounded follow-up work, not precedents for new stages.
+The following gaps were confirmed against the current implementation through
+2026-07-17. They are bounded follow-up work, not precedents for new stages.
 
 | Priority | Area | Confirmed gap | Required ownership boundary |
 |---|---|---|---|
+| P1 | Whole-checkpoint budget | Stage cursor budgets are enforced, but the 64 KiB target for the complete serialized `TopLevelState` and the 4 KiB active-interrupt budget are not yet enforced at one boundary. | Add one whole-state checkpoint validator without reintroducing stage payload schemas or artifact bodies. |
 | P1 | Review recommendation | A recommendation artifact repeats the canonical review request and uses a stage-fixed filename. | Bind recommendation evidence to review request ID/ref/hash and publish it immutably per request. |
 | P2 | Review request identity | `stage`, `gate_id`, and `reason` occur in both the persisted request envelope and body. | The envelope is the sole identity owner; the body contains only gate-specific facts. |
 | P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
@@ -725,6 +636,11 @@ The following gaps were confirmed against the current implementation on
 The former Gene collection and checkpoint gaps were resolved on 2026-07-16:
 collection now returns and consumes the durable published path, and Gene
 checkpoints retain only immutable frozen-attempt and execution refs.
+
+The former Assembly/AutoHiC attempt-ownership gap was resolved on 2026-07-17:
+each `ParameterAttempt` now owns its exact frozen runner-input ref and execution
+ref; method-specific current-stage duplicates were removed, and sealed manifests
+retain those relations across retries.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus
@@ -750,7 +666,8 @@ Data v2 is complete only when all of the following hold:
 - Checkpoint size budgets are enforced in tests.
 - Reports can be deleted and regenerated without changing audit facts.
 - A storage-audit command reports bytes by layer, largest checkpoint fields,
-  duplicate content, unreachable artifacts, and reclaimable work/report data.
+  duplicate content, unreachable artifacts, retained work bytes, and
+  reclaimable report data.
 
 ## 24. Non-Goals
 

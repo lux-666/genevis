@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import persist_frozen_attempt
 from app.execution.method_runner import build_frozen_attempt
+from app.execution.parameter_attempts import (
+    ParameterAttemptStateError,
+    current_parameter_attempt,
+    update_current_parameter_attempt,
+)
 from app.schemas.artifacts import (
     HIC_ASSEMBLY_FILE,
     HIC_CONTACT_MAP,
@@ -17,8 +23,6 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.storage.publish import shell_publish_variable
-from app.storage.paths import SessionPaths
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     HiCMethodLifecycle,
@@ -26,9 +30,6 @@ from app.stages.hic_scaffolding.method_application.lifecycle import (
     collect_method_artifacts,
     hic_output,
     update_hic_output,
-)
-from app.stages.hic_scaffolding.parameters.workflow import (
-    load_approved_autohic_parameters,
 )
 from app.stages.hic_scaffolding.parameters.storage import (
     AUTOHIC_PARAMETER_COMMAND,
@@ -38,6 +39,11 @@ from app.stages.hic_scaffolding.parameters.storage import (
     publish_autohic_parameter_file,
     write_autohic_parameter_artifact,
 )
+from app.stages.hic_scaffolding.parameters.workflow import (
+    load_approved_autohic_parameters,
+)
+from app.storage.paths import SessionPaths
+from app.storage.publish import shell_publish_variable
 
 METHOD = "hic_scaffolding.candidate.autohic"
 LIFECYCLE = HiCMethodLifecycle(
@@ -45,8 +51,6 @@ LIFECYCLE = HiCMethodLifecycle(
     method_name=METHOD,
     frozen_status="autohic_frozen",
     ran_status="autohic_ran",
-    frozen_attempt_key="autohic_frozen_attempt",
-    execution_result_key="autohic_execution_result",
 )
 
 
@@ -115,7 +119,15 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     parameters["chromosome_model_ref"] = str(chromosome_model.resolve())
 
     try:
-        parameter_attempt = _approved_parameter_attempt(output)
+        parameter_attempt = current_parameter_attempt(
+            output,
+            method_id=METHOD,
+            label=LIFECYCLE.name,
+        )
+        if parameter_attempt.status != "recommended":
+            raise AutoHiCParameterPersistenceError(
+                "AutoHiC current parameter attempt is not approved for freeze"
+            )
         frozen_parameters_ref = write_autohic_parameter_artifact(
             state,
             parameter_attempt.attempt_id,
@@ -280,6 +292,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         },
     )
     try:
+        frozen_attempt_ref = persist_frozen_attempt(state, attempt)
         command_ref = write_autohic_parameter_artifact(
             state,
             parameter_attempt.attempt_id,
@@ -291,23 +304,26 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
                 "frozen_parameters_ref": frozen_parameters_ref.model_dump(mode="json"),
                 "config_ref": config_ref.model_dump(mode="json"),
                 "script_ref": script_ref.model_dump(mode="json"),
-                "frozen_attempt": attempt.model_dump(
-                    mode="json",
-                    exclude={"created_at"},
-                ),
             },
             artifact_type=AUTOHIC_PARAMETER_COMMAND,
             method_name=METHOD,
             scope="attempt",
         )
-        parameter_attempt = parameter_attempt.model_copy(
-            update={
-                "status": "frozen",
-                "frozen_parameters_ref": frozen_parameters_ref,
-                "command_ref": command_ref,
-            }
+        parameter_attempts = update_current_parameter_attempt(
+            output,
+            method_id=METHOD,
+            label=LIFECYCLE.name,
+            status="frozen",
+            frozen_parameters_ref=frozen_parameters_ref.model_dump(mode="json"),
+            command_ref=command_ref.model_dump(mode="json"),
+            frozen_attempt_ref=frozen_attempt_ref.model_dump(mode="json"),
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (
+        OSError,
+        ValueError,
+        AutoHiCParameterPersistenceError,
+        ParameterAttemptStateError,
+    ) as exc:
         return update_hic_output(
             state,
             {
@@ -320,8 +336,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         state,
         {
             "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: command_ref.model_dump(mode="json"),
-            "parameter_attempts": [parameter_attempt.model_dump(mode="json")],
+            "parameter_attempts": parameter_attempts,
         },
     )
 
@@ -376,25 +391,6 @@ def is_enabled(output: dict[str, Any]) -> bool:
         output.get("execution_mode") == "local"
         and output.get("status") == "parameters_approved"
     )
-
-
-def _approved_parameter_attempt(output: dict[str, Any]) -> ParameterAttempt:
-    current_id = int(output.get("current_parameter_attempt_id") or 0)
-    attempts = [
-        ParameterAttempt.model_validate(item)
-        for item in (output.get("parameter_attempts") or [])
-        if isinstance(item, dict) and item.get("attempt_id") == current_id
-    ]
-    if len(attempts) != 1:
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC freeze requires one current approved parameter attempt"
-        )
-    attempt = attempts[0]
-    if attempt.method_id != METHOD or attempt.status != "recommended":
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC current parameter attempt is not approved for freeze"
-        )
-    return attempt
 
 
 def _parameters(

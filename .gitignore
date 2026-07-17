@@ -5,7 +5,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.codegraph/
 
 .env
 .env.*
@@ -39,3 +38,4 @@ build/
 tests/hpc/hpc_env.sh
 data_hpc_test/
 .claude/
+.superpowers/

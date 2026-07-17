@@ -7,8 +7,23 @@ artifacts or ledger records. The checkpointed state stores control fields and
 references only.
 """
 
-from typing import Any, Literal, NotRequired, Required, TypeAlias, TypedDict
+import json
+import math
+from collections.abc import Mapping
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    NotRequired,
+    Required,
+    TypeAlias,
+    TypedDict,
+    TypeVar,
+    cast,
+    get_args,
+)
 
+from app.schemas.limits import STAGE_CURSOR_MAX_BYTES, STAGE_OUTPUTS_MAX_BYTES
 from app.schemas.shared_parameters import SharedParameters
 
 DomainStage = Literal[
@@ -37,8 +52,99 @@ SupervisionState = Literal[
     "failed_terminal",
 ]
 
-StageOutput: TypeAlias = dict[str, Any]
-StageOutputs: TypeAlias = dict[DomainStage, StageOutput]
+JsonScalar: TypeAlias = None | bool | int | float | str
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+StageCursor: TypeAlias = dict[str, JsonValue]
+StageOutputs: TypeAlias = dict[DomainStage, StageCursor]
+
+DOMAIN_STAGES: frozenset[str] = frozenset(get_args(DomainStage))
+
+_FROZEN_ATTEMPT_BODY_KEYS = frozenset(
+    {
+        "attempt_id",
+        "session_id",
+        "stage",
+        "method_name",
+        "script_path",
+        "working_dir",
+        "expected_outputs",
+    }
+)
+
+_StageKey = TypeVar("_StageKey", bound=str)
+
+
+def validate_stage_outputs(value: Mapping[_StageKey, object] | None) -> StageOutputs:
+    """Validate the bounded JSON cursor contract stored in checkpoints."""
+
+    if value is None:
+        return {}
+    unknown_stages = set(value).difference(DOMAIN_STAGES)
+    if unknown_stages:
+        names = ", ".join(sorted(unknown_stages))
+        raise ValueError(f"stage_outputs contains unknown stages: {names}")
+
+    outputs: dict[str, StageCursor] = {}
+    for stage, cursor in value.items():
+        if not isinstance(cursor, dict):
+            raise TypeError(f"stage_outputs.{stage} must be a JSON object")
+        _validate_json_value(cursor, path=f"stage_outputs.{stage}")
+        cursor_size = _canonical_json_size(cursor)
+        if cursor_size > STAGE_CURSOR_MAX_BYTES:
+            raise ValueError(
+                f"stage_outputs.{stage} exceeds {STAGE_CURSOR_MAX_BYTES} bytes"
+            )
+        outputs[stage] = cast(StageCursor, cursor)
+
+    total_size = _canonical_json_size(outputs)
+    if total_size > STAGE_OUTPUTS_MAX_BYTES:
+        raise ValueError(f"stage_outputs exceeds {STAGE_OUTPUTS_MAX_BYTES} bytes")
+    return cast(StageOutputs, outputs)
+
+
+def replace_stage_outputs(
+    _current: StageOutputs | None,
+    update: Mapping[str, object] | None,
+) -> StageOutputs:
+    """LangGraph reducer that validates every replacement before checkpointing."""
+
+    return validate_stage_outputs(update)
+
+
+def _validate_json_value(value: object, *, path: str) -> None:
+    if value is None or isinstance(value, (bool, int, str)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        if _FROZEN_ATTEMPT_BODY_KEYS <= value.keys():
+            raise ValueError(
+                f"{path} embeds a FrozenAttemptSpec; store its artifact ref instead"
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} contains a non-string JSON key")
+            _validate_json_value(item, path=f"{path}.{key}")
+        return
+    raise TypeError(f"{path} contains non-JSON value {type(value).__name__}")
+
+
+def _canonical_json_size(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
 class ActiveInterrupt(TypedDict, total=False):
@@ -95,7 +201,7 @@ class TopLevelState(TypedDict, total=False):
     route_trace: Required[list[str]]
 
     # Per-stage compact outputs. Large outputs must be represented by refs.
-    stage_outputs: Required[StageOutputs]
+    stage_outputs: Required[Annotated[StageOutputs, replace_stage_outputs]]
 
     # Stage skip reasons keyed by stage name.
     skip_reasons: Required[dict[DomainStage, str]]
@@ -125,6 +231,6 @@ def initial_state(
         last_error=None,
         review_notes=[],
         route_trace=[],
-        stage_outputs={},
+        stage_outputs=validate_stage_outputs({}),
         skip_reasons={},
     )

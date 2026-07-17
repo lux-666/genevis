@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -103,7 +102,6 @@ class FrozenAttemptSpec(BaseModel):
     conda_bin: str | None = None
     conda_env: str | None = None
     conda_prefix: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

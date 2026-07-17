@@ -26,6 +26,8 @@ from app.stages.assembly.method_application import nextdenovo as nextdenovo_grap
 from app.stages.assembly.method_application.flye import build_flye_graph
 from app.stages.assembly.method_application.hifiasm import build_hifiasm_graph
 from app.stages.assembly.method_application.nextdenovo import build_nextdenovo_graph
+from app.stages.assembly.nodes import infer_input_profile
+from app.stages.assembly.parameters.profile import build_full_parameter_profile
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -318,6 +320,44 @@ class AssemblyStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("clean_long_reads or long_reads.fofn", result["last_error"])
+
+    def test_rnaseq_registry_signal_reaches_typed_parameter_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            long_reads = Path(tmpdir) / "long.fastq"
+            rnaseq = Path(tmpdir) / "rna.fastq"
+            long_reads.write_text("@long\nACGT\n+\n!!!!\n", encoding="utf-8")
+            rnaseq.write_text("@rna\nACGT\n+\n!!!!\n", encoding="utf-8")
+            registry = self._write_registry(
+                tmpdir,
+                assets=[
+                    {
+                        "asset_id": "s1:clean_long_reads:long.fastq",
+                        "asset_type": "clean_long_reads",
+                        "path": str(long_reads),
+                        "platform": "cycloneseq",
+                    },
+                    {
+                        "asset_id": "s1:raw_rnaseq_reads:rna.fastq",
+                        "asset_type": "raw_rnaseq_reads",
+                        "path": str(rnaseq),
+                    },
+                ],
+            )
+            state = self._state(tmpdir, str(registry))
+            state["stage_outputs"]["assembly"] = {
+                "status": "resolved_extended",
+                "explicit_route": "cyclone",
+                "primary_long_reads_ref": str(long_reads),
+                "primary_long_read_platform": "cycloneseq",
+                "target_level": "draft",
+            }
+
+            update = infer_input_profile(state)
+            assembly = update["stage_outputs"]["assembly"]
+
+            self.assertTrue(assembly["input_profile"]["has_rnaseq"])
+            profile = build_full_parameter_profile(state, assembly_out=assembly)
+            self.assertTrue(profile["assets"]["has_rnaseq"])
 
     def test_plans_primary_and_one_fallback_from_fofn_and_genome_size_prior(self):
         with tempfile.TemporaryDirectory() as tmpdir:

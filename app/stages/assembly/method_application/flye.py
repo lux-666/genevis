@@ -7,35 +7,25 @@ from pathlib import Path
 from typing import Any
 
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.method_runner import build_frozen_attempt
-from app.schemas.artifacts import (
-    ASSEMBLY_PARAMETER_COMMAND,
-    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
-)
+from app.execution.parameter_attempts import load_current_frozen_attempt
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.storage.publish import shell_publish_file
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
 from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
-    assembly_output,
     blocked_parameters,
     build_method_graph,
     collect_method_artifacts,
-    current_recommended_parameters,
     fail_update,
-    load_frozen_attempt,
+    freeze_parameterized_attempt,
+    load_current_approved_recommendation,
     positive_int,
-    persist_frozen_attempt,
-    update_current_parameter_attempt,
-    update_assembly_output,
-    write_parameter_attempt_json_artifact,
 )
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.base import absolute_data_dir
+from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.storage.paths import SessionPaths
-
+from app.storage.publish import shell_publish_file
 
 LIFECYCLE = MethodLifecycle(
     name="flye",
@@ -43,8 +33,6 @@ LIFECYCLE = MethodLifecycle(
     planned_status="flye_execution_planned",
     frozen_status="flye_frozen",
     ran_status="flye_ran",
-    frozen_attempt_key="flye_frozen_attempt",
-    execution_result_key="flye_execution_result",
     draft_assembly_key="flye_draft_assembly_path",
     substep_key="flye_assembly",
 )
@@ -56,7 +44,7 @@ def build_flye_graph():
 
 def freeze_flye_attempt(state: TopLevelState) -> dict:
     """Freeze a local Flye attempt for the selected primary candidate."""
-    output = assembly_output(state)
+    output = stage_output(state, "assembly")
     if output.get("status") != LIFECYCLE.planned_status:
         return {}
     if FLYE_METHOD not in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods:
@@ -64,11 +52,10 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
 
     params, blocked = _parameters(output)
     if blocked:
-        return update_assembly_output(state, blocked)
+        return update_stage_output(state, "assembly", blocked)
     read_paths, error = _read_paths(output.get("input_ref"), output.get("input_type"))
     if error:
         return fail_update(state, error)
-
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, env_blocked = resolve_method_env(
@@ -80,9 +67,25 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if env_blocked is not None:
-        return update_assembly_output(state, env_blocked)
+        return update_stage_output(state, "assembly", env_blocked)
 
-    parameter_attempt_id = int(output.get("current_parameter_attempt_id") or 0)
+    catalog, catalog_error = _load_catalog()
+    if catalog_error:
+        return fail_update(state, catalog_error)
+    approved_attempt, recommended_params, recommendation_error = (
+        load_current_approved_recommendation(
+            state,
+            output,
+            method_id=FLYE_METHOD,
+            label="Flye",
+        )
+    )
+    if recommendation_error or approved_attempt is None:
+        return fail_update(
+            state,
+            recommendation_error or "Flye approved parameter attempt is missing",
+        )
+    parameter_attempt_id = approved_attempt.attempt_id
     paths = SessionPaths.from_run_dir(data_dir)
     attempt_scope = f"{parameter_attempt_id:03d}"
     working_dir = paths.work_path("assembly", "attempts", attempt_scope, "flye")
@@ -94,13 +97,6 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     draft = artifact_dir / "draft_assembly.fasta"
     script = working_dir / "run_flye.sh"
-    catalog, catalog_error = _load_catalog()
-    if catalog_error:
-        return fail_update(state, catalog_error)
-    recommended_params, recommended_error = _recommended_params(state, output)
-    if recommended_error:
-        return fail_update(state, recommended_error)
-
     try:
         parameter_sources = build_parameter_sources(
             method_id=FLYE_METHOD,
@@ -126,13 +122,17 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         encoding="utf-8",
     )
     script.chmod(0o755)
-    command_ref = write_parameter_attempt_json_artifact(
+    return freeze_parameterized_attempt(
         state,
-        parameter_attempt_id,
-        "command.json",
-        {
-            "attempt_id": parameter_attempt_id,
-            "method_id": FLYE_METHOD,
+        output,
+        LIFECYCLE,
+        label="Flye",
+        approved_attempt=approved_attempt,
+        script_path=script,
+        working_dir=working_dir,
+        expected_outputs=[draft],
+        env_spec=env_spec,
+        command_payload={
             "argv": argv,
             "command": command,
             "script_path": str(script),
@@ -141,33 +141,10 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "draft_assembly_path": str(draft),
             "parameter_sources": parameter_sources,
         },
-        artifact_type=ASSEMBLY_PARAMETER_COMMAND,
-        method_name=FLYE_METHOD,
-    )
-    frozen_parameters_ref = write_parameter_attempt_json_artifact(
-        state,
-        parameter_attempt_id,
-        "frozen_parameters.json",
-        {
-            "schema_version": 2,
-            "attempt_id": parameter_attempt_id,
-            "method_id": FLYE_METHOD,
+        frozen_parameters_payload={
             "parameter_sources": parameter_sources,
         },
-        artifact_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
-        method_name=FLYE_METHOD,
-    )
-    attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:flye:parameter_attempt_{parameter_attempt_id}",
-        session_id=session_id,
-        stage="assembly",
-        method_name=FLYE_METHOD,
-        script_path=script,
-        working_dir=working_dir,
-        expected_outputs=[draft],
-        env=output.get("env"),
-        env_spec=env_spec,
-        metadata={
+        frozen_attempt_metadata={
             "input_ref": output.get("input_ref"),
             "input_type": output.get("input_type"),
             "read_paths": [str(path) for path in read_paths],
@@ -180,42 +157,27 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
             "draft_assembly_path": str(draft),
             "parameter_attempt_id": parameter_attempt_id,
         },
-    )
-    frozen_attempt_ref = persist_frozen_attempt(
-        state,
-        parameter_attempt_id,
-        attempt,
-        method_name=FLYE_METHOD,
-    )
-    parameter_attempts, attempt_error = update_current_parameter_attempt(
-        output,
-        method_id=FLYE_METHOD,
-        label="Flye",
-        status="frozen",
-        frozen_parameters_ref=frozen_parameters_ref.model_dump(mode="json"),
-        command_ref=command_ref.model_dump(mode="json"),
-    )
-    if attempt_error:
-        return fail_update(state, attempt_error)
-    return update_assembly_output(
-        state,
-        {
-            "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: frozen_attempt_ref.model_dump(mode="json"),
+        stage_updates={
             "flye_output_dir": str(output_dir),
             LIFECYCLE.draft_assembly_key: str(draft),
-            "parameter_attempts": parameter_attempts,
         },
     )
 
 
 def collect_flye_artifacts(state: TopLevelState) -> dict:
-    output = assembly_output(state)
-    attempt = load_frozen_attempt(state, output[LIFECYCLE.frozen_attempt_key])
+    output = stage_output(state, "assembly")
+    attempt = load_current_frozen_attempt(
+        state,
+        output,
+        stage="assembly",
+        method_id=FLYE_METHOD,
+        label="Flye",
+    )
     metadata = dict(attempt.metadata or {})
     return collect_method_artifacts(
         state,
         LIFECYCLE,
+        attempt=attempt,
         extra_artifacts=[(Path(output.get("flye_output_dir", "")) / "flye.log", "assembly.flye_log")],
         bundle_logs={},
         bundle_metadata={
@@ -274,18 +236,6 @@ def _load_catalog():
         return load_parameter_catalog(FLYE_METHOD), None
     except (FileNotFoundError, ValueError) as exc:
         return None, f"Flye parameter catalog is not usable: {exc}"
-
-
-def _recommended_params(
-    state: TopLevelState,
-    output: dict[str, Any],
-) -> tuple[dict[str, Any], str | None]:
-    return current_recommended_parameters(
-        state,
-        output,
-        method_id=FLYE_METHOD,
-        label="Flye",
-    )
 
 
 def _build_flye_argv(catalog, parameter_sources: dict[str, dict[str, Any]], *, fallback_read_type: str) -> list[str]:

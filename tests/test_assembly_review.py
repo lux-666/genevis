@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.execution.evidence import load_frozen_attempt
 from app.review.persistence import load_review_request, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_COMPARISON,
@@ -1203,9 +1204,15 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     return_value=(EnvSpec(conda_env="env_geno_exec"), [], None),
                 ):
                     result = freeze_quast_attempts(state)
-                attempts = result.get("stage_outputs", {}).get("assembly_review", {}).get("quast_frozen_attempts", [])
+                attempts = result.get("stage_outputs", {}).get("assembly_review", {}).get("quast_frozen_attempt_refs", [])
                 self.assertTrue(attempts, "expected at least one frozen attempt")
-                script_path = Path(attempts[0]["script_path"])
+                attempt = load_frozen_attempt(
+                    {**state, **result},
+                    attempts[0],
+                    expected_stage="assembly_review",
+                    expected_method_name="assembly_review.eval.quast",
+                )
+                script_path = attempt.script_path
                 self.assertTrue(script_path.exists(), f"script not found: {script_path}")
                 script_text = script_path.read_text(encoding="utf-8")
                 expected_out_dir = run_dir / "artifacts" / "assembly_review" / "quast"

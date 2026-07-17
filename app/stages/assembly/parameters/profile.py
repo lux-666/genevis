@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from app.domains.assembly.selection import resolve_parameter_case_read_type
 from app.schemas.state import TopLevelState
-from app.stages.assembly.method_application.lifecycle import assembly_output
+from app.stages.base import stage_output
 
 ParameterPromptTask = Literal[
     "recommend_initial",
@@ -37,9 +37,7 @@ PROMPT_ASSET_FIELDS = (
     "read_format",
     "has_hifi",
     "has_ont",
-    "has_ultra_long",
     "has_hic",
-    "has_trio",
     "has_rnaseq",
 )
 EXECUTION_REPAIR_FIELDS = (
@@ -81,12 +79,12 @@ def build_full_parameter_profile(
 ) -> dict[str, Any]:
     """Build the complete replay/audit profile for parameter recommendation."""
 
-    assembly_out = assembly_out or assembly_output(state)
+    assembly_out = assembly_out or stage_output(state, "assembly")
     stage_outputs = state.get("stage_outputs") or {}
     genome_survey = _genome_survey_profile(stage_outputs.get("genome_survey") or {})
     return {
         "sample": _sample_profile(state, assembly_out),
-        "assets": _assets_profile(state, assembly_out),
+        "assets": _assets_profile(assembly_out),
         "read_qc": _read_qc_profile(
             stage_outputs.get("read_qc") or {},
             genome_survey=genome_survey,
@@ -150,7 +148,7 @@ def _sample_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[
     )
 
 
-def _assets_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[str, Any]:
+def _assets_profile(assembly_out: dict[str, Any]) -> dict[str, Any]:
     input_profile = dict(assembly_out.get("input_profile") or {})
     input_ref = assembly_out.get("input_ref") or input_profile.get("primary_long_reads_ref")
     selection = dict(assembly_out.get("assembly_selection") or {})
@@ -163,10 +161,8 @@ def _assets_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[
             "input_files": _input_files(input_ref),
             "has_hifi": _first_value(input_profile.get("has_hifi"), bool(assembly_out.get("hifi_reads_ref"))),
             "has_ont": _first_value(input_profile.get("has_ont"), bool(assembly_out.get("ont_reads_ref"))),
-            "has_ultra_long": _first_value(input_profile.get("has_ultra_long"), bool(assembly_out.get("ultra_long_reads_ref"))),
             "has_hic": _first_value(input_profile.get("has_hic"), bool(assembly_out.get("hic_reads_ref"))),
-            "has_trio": _first_value(input_profile.get("has_trio"), bool(assembly_out.get("trio_refs"))),
-            "has_rnaseq": _first_value(input_profile.get("has_rnaseq"), bool((state.get("stage_outputs") or {}).get("rnaseq"))),
+            "has_rnaseq": bool(input_profile.get("has_rnaseq")),
         }
     )
 

@@ -37,7 +37,6 @@ ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
 ASSEMBLY_PARAMETER_RESPONSE_PARSE = "assembly.parameter.response_parse"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
 ASSEMBLY_PARAMETER_FROZEN_PARAMETERS = "assembly.parameter.frozen_parameters"
-ASSEMBLY_PARAMETER_FROZEN_ATTEMPT = "assembly.parameter.frozen_attempt"
 ASSEMBLY_PARAMETER_EXECUTION = "assembly.parameter.execution"
 ASSEMBLY_PARAMETER_REVIEW = "assembly.parameter.review"
 ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST = "assembly.parameter.attempt_manifest"
@@ -231,6 +230,7 @@ class ParameterAttempt(BaseModel):
     approval_decision_ref: ArtifactRef
     frozen_parameters_ref: ArtifactRef | None = None
     command_ref: ArtifactRef | None = None
+    frozen_attempt_ref: ArtifactRef | None = None
     execution_ref: ArtifactRef | None = None
     review_ref: ArtifactRef | None = None
     attempt_manifest_ref: ArtifactRef | None = None
@@ -258,16 +258,20 @@ class ParameterAttempt(BaseModel):
                 raise ValueError("retry parameter attempt must bind the immediately preceding attempt")
             if self.previous_attempt_seal_hash is None:
                 raise ValueError("retry parameter attempt requires previous_attempt_seal_hash")
+        if self.status == "recommended" and self.frozen_attempt_ref is not None:
+            raise ValueError(
+                "a recommended parameter attempt cannot own frozen runner input"
+            )
+        if self.status != "recommended" and self.frozen_attempt_ref is None:
+            raise ValueError(
+                "a frozen or completed parameter attempt requires frozen_attempt_ref"
+            )
+        if (
+            self.frozen_attempt_ref is not None
+            and not self.frozen_attempt_ref.artifact_type.endswith(".frozen_attempt")
+        ):
+            raise ValueError("frozen_attempt_ref must reference frozen-attempt evidence")
         return self
-
-
-class AssemblyParameterLoopState(BaseModel):
-    """Typed compact state for Phase10 parameter-loop control."""
-
-    current_parameter_attempt_id: int = 0
-    parameter_attempts: list[ParameterAttempt] = Field(default_factory=list)
-    current_parameter_recommendation: ParameterRecommendationCursor | None = None
-    retry_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class GenomeSurveyResult(BaseModel):
@@ -623,9 +627,6 @@ class FunctionAnnotationBundle(BaseModel):
 
 ASSEMBLY_INPUT_PROFILE = "assembly.input_profile"
 ASSEMBLY_ROUTE_DECISION = "assembly.route_decision"
-ASSEMBLY_QC_SUMMARY = "assembly.qc_summary"
-ASSEMBLY_T2T_READINESS = "assembly.t2t_readiness"
-ASSEMBLY_REVIEW_TASKS = "assembly.review_tasks"
 
 
 class AssemblyInputProfile(BaseModel):
@@ -642,8 +643,8 @@ class AssemblyInputProfile(BaseModel):
     target_level: Literal["draft", "near_t2t", "strict_t2t"]
     has_hifi: bool = False
     has_hic: bool = False
+    has_rnaseq: bool = False
     recommended_route: Literal["cyclone", "ont", "hifi", "insufficient_data"]
-    recommendation_confidence: float
     recommendation_reasoning: str
     uncertainty_notes: list[str] = Field(default_factory=list)
     profile_source: Literal["manifest", "run_config", "run_config_explicit", "llm_inferred"]

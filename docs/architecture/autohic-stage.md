@@ -1,8 +1,11 @@
 # AutoHiC Hi-C Stage Architecture
 
-**Status:** Accepted; implemented
+**Status:** Accepted
 
 **Accepted:** 2026-07-15
+
+**Implementation:** Core stage implemented; cross-cutting Data v2 conformance is
+tracked by `data-v2.md`
 
 **Scope:** Parent-graph ownership, the AutoHiC-only Hi-C stage, and its
 parameter-recommendation gate
@@ -167,3 +170,8 @@ mode and does not reintroduce method selection.
 4. Keep missing-requirement blocking separate from AutoHiC execution failure.
 5. Update tests to cover parent bypass, missing requirements, mandatory
    parameter approval, execution failure, and final assembly adoption.
+
+The AutoHiC stage cursor owns `current_parameter_attempt_id` and the compact
+`parameter_attempts` chain. Each `ParameterAttempt` owns its own
+`frozen_attempt_ref` and `execution_ref`; there is no parallel
+`autohic_frozen_attempt_ref` or `autohic_execution_result` cursor.

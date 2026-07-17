@@ -15,12 +15,15 @@ durable process boundary is `docs/architecture/execution-evidence.md`.
 2. Keep stage boundaries stable and move method choice inside each stage.
 3. Store large biological files, logs, scripts, and metric tables outside graph state.
 4. Let descriptors and review rules express method compatibility.
-5. Generate frozen attempt scripts in stage nodes (via the shared `execution/method_runner` helpers) only after a parsed recommendation and required human approval.
+5. Freeze the complete runner input after any required recommendation and human
+   approval, persist that frozen record before execution, and resume it by ref
+   rather than rebuilding it from current configuration.
 6. Put human-in-the-loop gates at review boundaries, especially assembly evaluation and Hi-C review.
 7. Use one shared parameter-recommendation persistence contract after method
    selection; Assembly, Hi-C, and T2T must not invent separate audit layouts.
-8. Treat each session run directory as the data-ownership boundary and keep
-   checkpoints ref-only and bounded.
+8. Treat each session run directory as the data-ownership boundary. Keep
+   checkpoints bounded and ref-oriented: they identify the frozen input and
+   durable result needed to resume, but do not become a second owner of them.
 9. Keep local process paths inside runtime `ExecutionResult`; persist only the
    canonical, index-backed `ExecutionEvidence` body.
 
@@ -77,7 +80,7 @@ Module ownership:
 | `stages/` | Stage subgraphs, method selection/routing, parameter profiles and immutable recommendation bases | Provider prompt rendering or package-level script generation internals |
 | `llm/parameters/<stage>/` | Stage-specific strict request DTOs, deterministic message rendering, model invocation, and response-shape parsing | Full audit profiles, persistence, biological/catalog validation, approval, or execution |
 | `schemas/` | Cross-module contracts | Side effects |
-| `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), collecting declared outputs | In-agent remote orchestration (intentionally unsupported; see `docs/deployment/mac_dev_server_pull.md`) |
+| `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), and publishing process logs/evidence | Collecting stage-owned biological outputs or in-agent remote orchestration |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
 | `control/` | Ledger and lifecycle semantics | Starting tools or reading huge data files |
 | `reports/` | Trace and notebook/report rendering | Workflow control decisions |
@@ -98,6 +101,12 @@ control cursors, and verified references. It must not store FASTQ/FASTA
 contents, parameter catalogs, model payloads, candidate/signal tables, command
 logs, generated script bodies, execution results, full metric tables, or
 notebook bodies.
+
+This does not require recovery to reconstruct a command from incomplete state.
+Freezing happens first: the exact runner input is persisted as immutable
+evidence, then the checkpoint stores its verified ref. Resume loads that same
+record. Environment mappings, paths, and script identity may therefore exist in
+the frozen evidence without being embedded again in the checkpoint.
 
 Data-specific ownership, path, checkpoint-size, parameter-recommendation,
 attempt, review, report, and retention rules are normative in
@@ -151,7 +160,7 @@ When adding a real method:
    model request/response, response-parse result, and approval through the shared Data v2
    contract. The recommender does not select the method or workflow route.
 5. Generate or template a `FrozenAttemptSpec` only after successful response
-   parsing and approval.
+   parsing and approval, persist it before execution, and checkpoint its ref.
 6. Run through a runner boundary.
 7. Collect artifacts.
 8. Review outputs.

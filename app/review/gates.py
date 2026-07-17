@@ -156,7 +156,10 @@ register_review_gate(
         stage="assembly",
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
-        decision_applier="app.stages.assembly.nodes:apply_parameter_approval_decision",
+        decision_applier=(
+            "app.stages.assembly.parameters.workflow:"
+            "apply_parameter_approval_decision"
+        ),
         prompt_adapter="generic",
         proposal_kind="parameter_recommendation",
         proposal_label="Assembly parameter proposal",

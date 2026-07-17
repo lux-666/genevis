@@ -103,6 +103,34 @@ def test_initial_attempt_cannot_bind_a_predecessor() -> None:
         )
 
 
+def test_frozen_runner_input_has_one_parameter_attempt_owner() -> None:
+    frozen_ref = _ref("frozen", "assembly.frozen_attempt")
+
+    frozen = ParameterAttempt.model_validate(
+        _attempt_payload(
+            status="frozen",
+            frozen_attempt_ref=frozen_ref.model_dump(mode="json"),
+        )
+    )
+    assert frozen.frozen_attempt_ref == frozen_ref
+
+    with pytest.raises(ValidationError, match="requires frozen_attempt_ref"):
+        ParameterAttempt.model_validate(_attempt_payload(status="executed"))
+    with pytest.raises(ValidationError, match="cannot own frozen runner input"):
+        ParameterAttempt.model_validate(
+            _attempt_payload(
+                frozen_attempt_ref=frozen_ref.model_dump(mode="json"),
+            )
+        )
+    with pytest.raises(ValidationError, match="frozen-attempt evidence"):
+        ParameterAttempt.model_validate(
+            _attempt_payload(
+                status="frozen",
+                frozen_attempt_ref=_ref("dead").model_dump(mode="json"),
+            )
+        )
+
+
 def test_recommendation_cursor_binds_manifest_hash_and_request_ref() -> None:
     manifest = _ref("d", "assembly.parameter.recommendation_manifest")
     request = _ref("e", "assembly.parameter_approval.request")

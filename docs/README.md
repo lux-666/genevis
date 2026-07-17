@@ -7,13 +7,11 @@ side note.
 
 If you are taking over:
 
-1. `handoff.md` — current state, next best task, verification, risks.
-2. `governance.md` — coordinator responsibilities, source-of-truth order,
-   boundary rules.
-3. `architecture.md` — parent graph, modules, state categories.
-4. `architecture/README.md` — accepted cross-cutting specifications; start
-   with `architecture/data-v2.md` for run data and parameter-recommendation
-   persistence.
+1. `architecture/README.md` — specification registry, authority, and current
+   conformance status.
+2. `architecture.md` — parent graph, modules, and system boundaries.
+3. `handoff.md` — current work snapshot, open conformance gaps, and verification.
+4. `governance.md` — coordinator responsibilities and change rules.
 5. `stage_contracts.md` — stable inputs / outputs / planning rules per
    biological stage.
 6. `descriptor_spec.md` — descriptor registry, package and method
@@ -30,10 +28,10 @@ If you are setting this project up on a new host, read
 
 | File / Folder | Purpose |
 |---|---|
-| `handoff.md` | Current status, next task, verification, known risks, stop conditions |
+| `handoff.md` | Short-lived current work snapshot; never a normative architecture source |
 | `governance.md` | Coordinator responsibilities, source-of-truth order, boundary rules |
 | `architecture.md` | Parent graph, modules, state categories, extension rule |
-| `architecture/` | Accepted cross-cutting specifications; `data-v2.md` is normative for new run data |
+| `architecture/` | Accepted cross-cutting specifications and their implementation-conformance status |
 | `stage_contracts.md` | Stable inputs, outputs, planning rules, and review triggers per stage |
 | `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
 | `deployment/mac_dev_server_pull.md` | Mac-dev / server `git pull` workflow contract |
@@ -45,8 +43,7 @@ If you are setting this project up on a new host, read
 
 ## Update Rule
 
-When code behavior changes, update the closest matching document in the
-same work session. If the next agent needs different instructions,
-update `handoff.md` before stopping. Avoid restating in `handoff.md`
-what already lives in `README.md`, `stage_contracts.md`, or a phase doc
-— prefer one source of truth and a pointer.
+When code behavior changes, update the owning specification in the same work
+session. Keep `handoff.md` short and current; it should point to specifications,
+tests, or phase history rather than copying them. Design status and current
+implementation conformance must be recorded separately.

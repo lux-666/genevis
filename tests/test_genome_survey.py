@@ -352,7 +352,7 @@ class GenomeSurveyStageTests(unittest.TestCase):
             self.assertEqual(survey["substeps"]["genome_model"]["status"], "executed")
             self.assertNotIn("resolved_assets", survey)
             self.assertNotIn("survey_parameters", survey)
-            self.assertNotIn("jellyfish_frozen_attempt", survey)
+            self.assertNotIn("jellyfish_frozen_attempt_ref", survey)
             self.assertNotIn("genomescope2_execution_result", survey)
 
             artifact_events = [

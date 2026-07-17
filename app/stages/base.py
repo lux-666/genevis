@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from app.schemas.limits import ROUTE_TRACE_LIMIT
-from app.schemas.state import TopLevelState
+from app.schemas.state import (
+    DOMAIN_STAGES,
+    DomainStage,
+    JsonValue,
+    StageCursor,
+    TopLevelState,
+    validate_stage_outputs,
+)
 from app.storage.paths import SessionPaths
+
+
+def ordered_unique(values: list[str]) -> list[str]:
+    """Return strings in first-seen order with duplicates removed."""
+
+    return list(dict.fromkeys(values))
 
 
 def absolute_data_dir(state: TopLevelState) -> Path:
@@ -65,18 +79,24 @@ def resolve_run_ref(state: TopLevelState, path_ref: str | Path) -> Path:
 # ============================================================================
 
 
-def stage_output(state: TopLevelState, stage_name: str) -> dict[str, Any]:
+def stage_output(state: TopLevelState, stage_name: str) -> StageCursor:
     """Return a mutable copy of a stage's slot in stage_outputs."""
-    return dict((state.get("stage_outputs") or {}).get(stage_name, {}))
+    if stage_name not in DOMAIN_STAGES:
+        raise ValueError(f"unknown stage output slot: {stage_name}")
+    stage = cast(DomainStage, stage_name)
+    return dict((state.get("stage_outputs") or {}).get(stage, {}))
 
 
 def update_stage_output(
-    state: TopLevelState, stage_name: str, payload: dict[str, Any]
-) -> dict:
+    state: TopLevelState, stage_name: str, payload: dict[str, JsonValue]
+) -> dict[str, object]:
     """Merge payload into a stage's output slot and return the state delta."""
     outputs = dict(state.get("stage_outputs") or {})
-    outputs[stage_name] = {**stage_output(state, stage_name), **payload}
-    return {"stage_outputs": outputs}
+    outputs[cast(DomainStage, stage_name)] = {
+        **stage_output(state, stage_name),
+        **payload,
+    }
+    return {"stage_outputs": validate_stage_outputs(outputs)}
 
 
 def append_route_trace(state: TopLevelState, *items: str) -> list[str]:
@@ -232,7 +252,10 @@ def resolve_stage_resource(
             source_type="override",
         )
 
-    outputs = state.get("stage_outputs") or {}
+    outputs = cast(
+        Mapping[str, Mapping[str, JsonValue]],
+        state.get("stage_outputs") or {},
+    )
 
     # 2. Check preferred stages
     if resource_spec.prefer_stages:
@@ -268,7 +291,7 @@ def resolve_stage_resource(
 
 def _check_stage_output(
     stage: str,
-    outputs: dict[str, Any],
+    outputs: Mapping[str, Mapping[str, JsonValue]],
     spec: ResourceSpec,
 ) -> ResourceResolution | None:
     """Check if a stage output contains the resource."""

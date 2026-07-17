@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
-from app.domains.genome_size import resolve_genome_size
 from app.domains.assembly.selection import (
     AssemblySelection,
     compatible_methods,
@@ -22,13 +21,42 @@ from app.domains.assembly.selection import (
     resolve_read_type,
     route_from_read_type as _route_from_read_type,
 )
+from app.domains.genome_size import resolve_genome_size
 from app.execution.artifacts import append_artifact_records
+from app.execution.parameter_attempts import (
+    ParameterAttemptStateError,
+    current_parameter_attempt,
+)
 from app.graph.routing import next_stage_name
+from app.knowledge.packs import load_knowledge_pack
+from app.review.base import ResumeReviewRequest, ReviewPayload
+from app.review.persistence import (
+    ReviewPersistenceError,
+    load_review_request,
+    persist_review_decision,
+    persist_review_request,
+)
+from app.review.policy import evaluate
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ASSEMBLY_INPUT_PROFILE,
+    ASSEMBLY_ROUTE_DECISION,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+    AssemblyInputProfile,
+    AssemblyRouteDecision,
+)
+from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.plan import AssemblyCandidatePlan
+from app.schemas.shared_parameters import (
+    PLATFORM_TO_SHARED_READ_TYPE,
+    SHARED_TO_METHOD_READ_TYPE,
+)
+from app.schemas.state import TopLevelState
 from app.stages.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
     FLYE_METHOD,
-    FLYE_READ_TYPE_FLAGS as FLYE_READ_TYPE_FLAGS,
     GENOME_SIZE_REQUIRED,
     HIFIASM_METHOD,
     HIFIASM_ONT_METHOD,
@@ -38,44 +66,15 @@ from app.stages.assembly.decision import (
     AssemblyDecisionRequest,
     make_assembly_decision,
 )
-from app.knowledge.packs import load_knowledge_pack
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
+    load_assets_from_registry,
+    ordered_unique,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
     update_stage_output,
-)
-from app.schemas.artifacts import (
-    ASSEMBLY_INPUT_PROFILE,
-    ASSEMBLY_ROUTE_DECISION,
-    ASSEMBLY_CANDIDATE_BUNDLE,
-    ArtifactMeta,
-    AssemblyCandidateBundle,
-    AssemblyInputProfile,
-    AssemblyRouteDecision,
-)
-from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.persistence import (
-    ReviewPersistenceError,
-    load_review_request,
-    persist_review_decision,
-    persist_review_request,
-)
-from app.review.policy import evaluate
-from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.plan import AssemblyCandidatePlan
-from app.schemas.shared_parameters import PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
-from app.schemas.state import TopLevelState
-from app.stages.assembly.parameters.workflow import (
-    _seal_parameter_attempt,
-    _validate_parameter_attempt_chain,
-    apply_parameter_approval_decision,
-    build_parameter_attempt_timeline,
-    execution_retry_gate,
-    parameter_quality_gate,
-    recommend_assembly_parameters,
 )
 from app.storage.publish import publish_file
 
@@ -87,16 +86,10 @@ ROUTE_DECISION_MAP = {
 ROUTE_VALUES = {"cyclone", "ont", "hifi"}
 
 
-def _assembly_output(state: TopLevelState) -> dict[str, Any]:
-    return stage_output(state, "assembly")
-
-
-def _update_assembly_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
-    return update_stage_output(state, "assembly", payload)
-
-
 def _fail_update(state: TopLevelState, reason: str) -> dict:
-    return _update_assembly_output(state, {"status": "failed", "reason": reason})
+    return update_stage_output(
+        state, "assembly", {"status": "failed", "reason": reason}
+    )
 
 
 def enter_assembly(state: TopLevelState) -> dict:
@@ -106,7 +99,7 @@ def enter_assembly(state: TopLevelState) -> dict:
 
 def resolve_extended_inputs(state: TopLevelState) -> dict:
     """Resolve long-read, HiFi, Hi-C, platform, and route hints for assembly."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     read_qc_ref = _read_qc_assembly_input_ref(state)
     asset_long_ref = _asset_input_ref(state)
     long_read_platform = _long_read_platform(state)
@@ -156,8 +149,9 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     input_ref = primary_long_reads_ref
     input_type = "long_reads.fofn" if str(input_ref).endswith(".fofn") else "clean_long_reads"
 
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": "resolved_extended",
             "primary_long_reads_ref": primary_long_reads_ref,
@@ -185,7 +179,7 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
 
 def infer_input_profile(state: TopLevelState) -> dict:
     """Write an AssemblyInputProfile and recommendation/final selection."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     if assembly_out.get("status") != "resolved_extended":
         return {}
 
@@ -229,8 +223,9 @@ def infer_input_profile(state: TopLevelState) -> dict:
             method_name="assembly.route_selector",
         )
 
-        return _update_assembly_output(
+        return update_stage_output(
             state,
+            "assembly",
             {
                 "status": "profile_ready",
                 "input_profile": profile.model_dump(mode="json"),
@@ -279,8 +274,9 @@ def infer_input_profile(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_INPUT_PROFILE,
         method_name="assembly.input_profiler",
     )
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": "profile_ready",
             "input_profile": profile.model_dump(mode="json"),
@@ -292,11 +288,11 @@ def infer_input_profile(state: TopLevelState) -> dict:
 
 def select_route(state: TopLevelState) -> dict:
     """Confirm or block on the assembly selection recommendation."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     if assembly_out.get("status") != "profile_ready":
         return {}
     if assembly_out.get("assembly_selection"):
-        return _update_assembly_output(state, {"status": "route_selected"})
+        return update_stage_output(state, "assembly", {"status": "route_selected"})
 
     profile = dict(assembly_out.get("input_profile") or {})
     recommended_route = profile.get("recommended_route")
@@ -353,7 +349,7 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
     if selected_route not in ROUTE_VALUES:
         raise ResumeValidationError(f"unsupported assembly selection decision: {request.decision}")
 
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     read_type, read_type_source = _requested_read_type(request, assembly_out, selected_route)
     method = _requested_method(request, assembly_out, read_type)
     try:
@@ -480,7 +476,7 @@ def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, 
 
 def build_assembly_candidate_set(state: TopLevelState) -> dict:
     """Build compatible and rejected assembly candidates from descriptors."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     if assembly_out.get("status") not in {"resolved", "route_selected"}:
         return {}
 
@@ -518,8 +514,9 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
             ).model_dump(mode="json")
         )
 
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": "candidate_set_ready",
             "candidate_methods": planned_methods,
@@ -557,7 +554,7 @@ def _legacy_requested_methods(assembly_out: dict[str, Any]) -> list[str]:
 
 def select_primary_and_fallback(state: TopLevelState) -> dict:
     """Select one primary and at most one fallback candidate."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     if assembly_out.get("status") != "candidate_set_ready":
         return {}
 
@@ -599,8 +596,9 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
         fallback = next((method for method in compatible if method != primary), None)
 
     selected = [primary, *([fallback] if fallback else [])][:2]
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": "selected",
             "primary_method": primary,
@@ -612,13 +610,25 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
 
 def plan_candidate_attempts(state: TopLevelState) -> dict:
     """Write candidate bundles and select the optional local Flye route."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     if assembly_out.get("status") not in {"selected", "parameters_recommended", "parameters_approved"}:
         return {}
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
-    parameter_attempt_id = int(assembly_out.get("current_parameter_attempt_id") or 0)
+    parameter_attempt_id = 0
+    if assembly_out.get("status") == "parameters_approved":
+        method_id = assembly_out.get("primary_method")
+        if not isinstance(method_id, str) or not method_id:
+            return _fail_update(state, "approved Assembly parameters have no method")
+        try:
+            parameter_attempt_id = current_parameter_attempt(
+                assembly_out,
+                method_id=method_id,
+                label="Assembly",
+            ).attempt_id
+        except ParameterAttemptStateError as exc:
+            return _fail_update(state, str(exc))
     attempt_scope = f"{parameter_attempt_id:03d}"
     attempt_label = f"parameter_attempt_{parameter_attempt_id}"
     candidate_dir = stage_artifacts_dir(
@@ -740,8 +750,9 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         status = "hifiasm_ont_execution_planned"
     else:
         status = "planned"
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": status,
             "selected_candidate_refs": candidate_refs,
@@ -780,7 +791,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
 
 def commit_assembly_plan(state: TopLevelState) -> dict:
     """Route compact assembly candidate refs to assembly_review."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     committed_keys = [
         "artifact_refs",
         "candidate_artifact_refs",
@@ -824,7 +835,7 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
 
 def fail_assembly(state: TopLevelState) -> dict:
     """Stop workflow on assembly planning failure or preflight block."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     status = assembly_out.get("status", "failed")
     default_reason = {
         "blocked_env": "assembly blocked on missing conda environment",
@@ -840,7 +851,7 @@ def fail_assembly(state: TopLevelState) -> dict:
 
 def block_assembly_for_human(state: TopLevelState) -> dict:
     """Pause workflow for a human assembly planning decision."""
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     reason = assembly_out.get("block_reason", "assembly decision required")
     interrupt = dict(assembly_out.get("active_interrupt") or {})
     if interrupt:
@@ -868,11 +879,13 @@ def block_assembly_for_human(state: TopLevelState) -> dict:
 
 
 def _block_for_human(state: TopLevelState, reason: str) -> dict:
-    return _update_assembly_output(state, {"status": "blocked_human", "block_reason": reason})
+    return update_stage_output(
+        state, "assembly", {"status": "blocked_human", "block_reason": reason}
+    )
 
 
 def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     profile = dict(assembly_out.get("input_profile") or {})
     recommended_selection = dict(assembly_out.get("recommended_assembly_selection") or {})
 
@@ -935,8 +948,9 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
         reason=reason,
     )
 
-    return _update_assembly_output(
+    return update_stage_output(
         state,
+        "assembly",
         {
             "status": "blocked_human",
             "block_reason": reason,
@@ -952,7 +966,7 @@ def _available_routes(assembly_out: dict[str, Any]) -> list[str]:
         routes.extend(["cyclone", "ont"])
     if assembly_out.get("hifi_reads_ref") or assembly_out.get("has_hifi"):
         routes.append("hifi")
-    return _unique_refs(routes)
+    return ordered_unique(routes)
 
 
 def _selection_from_output(assembly_out: dict[str, Any]) -> AssemblySelection | None:
@@ -1141,8 +1155,13 @@ def _build_input_profile(
         target_level=assembly_out.get("target_level", "draft"),
         has_hifi=bool(assembly_out.get("hifi_reads_ref")),
         has_hic=bool(assembly_out.get("hic_reads_ref")),
+        has_rnaseq=bool(
+            load_assets_from_registry(
+                state,
+                ["raw_rnaseq_reads", "clean_rnaseq_reads"],
+            )
+        ),
         recommended_route=recommended_route,
-        recommendation_confidence=0.0,  # deprecated field, kept for schema compatibility
         recommendation_reasoning=reasoning,
         uncertainty_notes=uncertainty_notes,
         profile_source=profile_source,
@@ -1212,14 +1231,6 @@ def _route_selector_payload(
         },
     }
 
-def _unique_refs(refs: list[str]) -> list[str]:
-    unique = []
-    for ref in refs:
-        if ref not in unique:
-            unique.append(ref)
-    return unique
-
-
 def _read_qc_assembly_input_ref(state: TopLevelState) -> str | None:
     read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
     for key in ["assembly_input_ref", "filtered_long_reads_fofn_ref", "long_reads_fofn_ref"]:
@@ -1253,7 +1264,7 @@ def _genome_size_prior(state: TopLevelState) -> int | None:
 
 
 def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
-    assembly_out = _assembly_output(state)
+    assembly_out = stage_output(state, "assembly")
     selection = _selection_from_output(assembly_out)
     if selection:
         return {

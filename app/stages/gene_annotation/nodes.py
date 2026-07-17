@@ -1254,11 +1254,23 @@ def _materialize_candidate_proteins(
         env_spec=env_spec,
         metadata={"source_gff3": str(output_gff3), "candidate_method": method_name},
     )
+    attempt_ref = persist_gene_attempt(state, attempt)
+    attempt = load_gene_attempt(
+        state,
+        attempt_ref,
+        expected_method_name=GFFREAD_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
         input_manifest_ref=state.get("input_manifest_ref", ""),
         fail_label=f"{suffix} materialization",
+    )
+    persist_gene_execution(
+        state,
+        method_name=GFFREAD_METHOD,
+        result=outcome.result,
+        error=outcome.error,
     )
     if not outcome.success:
         return None, None, outcome.error or f"{suffix} protein materialization failed"

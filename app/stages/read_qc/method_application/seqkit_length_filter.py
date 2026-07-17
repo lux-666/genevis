@@ -8,7 +8,12 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import execution_log_paths, load_execution_evidence
+from app.execution.evidence import (
+    execution_log_paths,
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     READ_QC_FILTERED_LONG_READS,
@@ -16,7 +21,6 @@ from app.schemas.artifacts import (
     READ_QC_LONG_READ_SUMMARY,
     ArtifactMeta,
 )
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.read_qc.constants import (
@@ -40,7 +44,7 @@ LIFECYCLE = ReadQCMethodLifecycle(
     name="seqkit seq",
     frozen_status="length_filter_frozen",
     ran_status="length_filter_ran",
-    frozen_attempt_key="length_filter_frozen_attempt",
+    frozen_attempt_key="length_filter_frozen_attempt_ref",
     execution_result_key="length_filter_execution_result",
 )
 
@@ -78,14 +82,26 @@ def freeze_length_filter_attempt(state: TopLevelState) -> dict:
                   "filtered_long_reads_path": str(filtered_paths[0]), "filtered_long_reads_paths": [str(path) for path in filtered_paths],
                   "post_filter_stats_path": str(post_filter_stats_path), "thresholds": {"min_len": min_len}},
     )
-    return update_read_qc_output(state, {"status": LIFECYCLE.frozen_status, LIFECYCLE.frozen_attempt_key: attempt.model_dump(mode="json")})
+    attempt_ref = persist_frozen_attempt(state, attempt)
+    return update_read_qc_output(
+        state,
+        {
+            "status": LIFECYCLE.frozen_status,
+            LIFECYCLE.frozen_attempt_key: attempt_ref.model_dump(mode="json"),
+        },
+    )
 
 
 def collect_length_filter_artifacts(state: TopLevelState) -> dict:
     output = read_qc_output(state)
     if output.get("status") != LIFECYCLE.ran_status:
         return {}
-    attempt = FrozenAttemptSpec.model_validate(output[LIFECYCLE.frozen_attempt_key])
+    attempt = load_frozen_attempt(
+        state,
+        output[LIFECYCLE.frozen_attempt_key],
+        expected_stage="read_qc",
+        expected_method_name=LENGTH_FILTER_METHOD_NAME,
+    )
     result = load_execution_evidence(
         state,
         output[LIFECYCLE.execution_result_key],

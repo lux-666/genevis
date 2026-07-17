@@ -10,7 +10,11 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import load_execution_evidence
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
@@ -31,16 +35,15 @@ from app.stages.assembly_review.method_application.lifecycle import (
     rewrite_eval_bundle,
     run_attempts,
     safe_candidate_id,
-    unique_refs,
     update_review_output,
     update_signal,
 )
-from app.stages.base import stage_artifacts_dir, stage_work_dir
+from app.stages.base import ordered_unique, stage_artifacts_dir, stage_work_dir
 
 BUSCO_METHOD = "assembly_review.eval.busco"
 FROZEN_STATUS = "busco_frozen"
 RAN_STATUS = "busco_ran"
-ATTEMPTS_KEY = "busco_frozen_attempts"
+ATTEMPTS_KEY = "busco_frozen_attempt_refs"
 RESULTS_KEY = "busco_execution_results"
 
 
@@ -112,13 +115,14 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
                       "lineage_version": params["lineage_version"], "lineage_source": params["lineage_source"],
                       "mode": params["mode"], "threads": params["threads"]},
         )
-        attempts.append(attempt.model_dump(mode="json"))
+        attempts.append(persist_frozen_attempt(state, attempt).model_dump(mode="json"))
     return update_review_output(state, {"status": FROZEN_STATUS, "signals": signals, ATTEMPTS_KEY: attempts})
 
 
 def run_busco_attempts(state: TopLevelState) -> dict:
     return run_attempts(state, frozen_status=FROZEN_STATUS, attempts_key=ATTEMPTS_KEY,
-                        ran_status=RAN_STATUS, results_key=RESULTS_KEY, fail_label="BUSCO")
+                        ran_status=RAN_STATUS, results_key=RESULTS_KEY,
+                        method_name=BUSCO_METHOD, fail_label="BUSCO")
 
 
 def collect_busco_artifacts(state: TopLevelState) -> dict:
@@ -126,7 +130,15 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
     output = review_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
-    attempts = {payload["attempt_id"]: FrozenAttemptSpec.model_validate(payload) for payload in output.get(ATTEMPTS_KEY, [])}
+    attempts = {}
+    for payload in output.get(ATTEMPTS_KEY, []):
+        attempt = load_frozen_attempt(
+            state,
+            payload,
+            expected_stage="assembly_review",
+            expected_method_name=BUSCO_METHOD,
+        )
+        attempts[attempt.attempt_id] = attempt
     signals = list(output.get("signals") or [])
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
@@ -164,7 +176,7 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
         else:
             metadata.update({"return_code": result.return_code, "error": result.error})
             signals = update_signal(signals, signal_name="busco", method_name=BUSCO_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[], notes=["busco_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
-    update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": unique_refs(artifact_refs)}, status="evaluating")
+    update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": ordered_unique(artifact_refs)}, status="evaluating")
     outputs = update["stage_outputs"]
     outputs["assembly_review"] = {**outputs["assembly_review"], ATTEMPTS_KEY: [], RESULTS_KEY: []}
     return {"stage_outputs": outputs}

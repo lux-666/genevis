@@ -13,8 +13,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.control.lifecycle import ResumeValidationError, resume_review_state
+from app.execution.parameter_attempts import (
+    ParameterAttemptStateError,
+    current_parameter_attempt,
+    update_current_parameter_attempt,
+)
 from app.schemas.artifacts import ArtifactRef, ParameterAttempt
+from app.stages.assembly.parameters.storage import read_json_artifact
 from app.stages.assembly.parameters.workflow import (
     _seal_parameter_attempt,
     _validate_parameter_attempt_chain,
@@ -23,9 +31,9 @@ from app.stages.assembly.parameters.workflow import (
     recommend_assembly_parameters,
 )
 from tests.test_parameter_persistence_v2 import (
-    _Model,
     _blocked_state,
     _decision_request,
+    _Model,
     _response,
     _state,
 )
@@ -62,6 +70,11 @@ def _attempt(
         ),
         approval_decision_ref=_ref(
             f"b{attempt_id}", "assembly.parameter_approval.decision"
+        ),
+        frozen_attempt_ref=(
+            _ref(f"f{attempt_id}", "assembly.frozen_attempt")
+            if status != "recommended"
+            else None
         ),
         execution_ref=execution_ref,
     ).model_dump(mode="json")
@@ -139,6 +152,138 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
                 "stdout_tail",
             ):
                 self.assertNotIn(forbidden, serialized)
+
+    def test_retry_preserves_each_attempts_exact_frozen_runner_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = _state(Path(tmp))
+            initial = _seal_parameter_attempt(
+                state,
+                _attempt(
+                    0,
+                    task="recommend_initial",
+                    status="execution_failed",
+                    execution_ref=_ref("c0", "assembly.parameter.execution"),
+                ),
+            )
+            retry = _attempt(
+                1,
+                task="retry_after_execution_failure",
+                previous_attempt_id=0,
+                previous_attempt_seal_hash=initial["seal_hash"],
+            )
+            output = {
+                "current_parameter_attempt_id": 1,
+                "parameter_attempts": [initial, retry],
+            }
+
+            attempts = update_current_parameter_attempt(
+                output,
+                method_id="assembly.candidate.hifiasm_ont",
+                label="hifiasm-ont",
+                status="frozen",
+                frozen_parameters_ref=_ref(
+                    "d1", "assembly.parameter.frozen_parameters"
+                ).model_dump(mode="json"),
+                command_ref=_ref("e1", "assembly.parameter.command").model_dump(
+                    mode="json"
+                ),
+                frozen_attempt_ref=_ref(
+                    "f1", "assembly.frozen_attempt"
+                ).model_dump(mode="json"),
+            )
+
+            self.assertEqual(
+                attempts[0]["frozen_attempt_ref"],
+                initial["frozen_attempt_ref"],
+            )
+            self.assertNotEqual(
+                attempts[1]["frozen_attempt_ref"],
+                attempts[0]["frozen_attempt_ref"],
+            )
+            initial_manifest = read_json_artifact(
+                state,
+                initial["attempt_manifest_ref"],
+                expected_type="assembly.parameter.attempt_manifest",
+            )
+            self.assertEqual(
+                initial_manifest["frozen_attempt_ref"],
+                initial["frozen_attempt_ref"],
+            )
+            sealed_retry = _seal_parameter_attempt(state, attempts[1])
+            timeline = build_parameter_attempt_timeline(
+                state,
+                {
+                    "parameter_attempts": [initial, sealed_retry],
+                    "retry_counts": {"execution": 1, "review": 0},
+                },
+                status="failed",
+                reason="test",
+            )
+            self.assertEqual(
+                [entry["frozen_attempt_ref"] for entry in timeline["entries"]],
+                [
+                    initial["frozen_attempt_ref"],
+                    sealed_retry["frozen_attempt_ref"],
+                ],
+            )
+
+    def test_current_parameter_attempt_requires_strict_explicit_cursor(self):
+        attempt = _attempt(0, task="recommend_initial")
+        invalid_cursors = {
+            "missing": ...,
+            "none": None,
+            "string": "0",
+            "float": 0.0,
+            "false": False,
+            "true": True,
+            "negative": -1,
+        }
+
+        for name, cursor in invalid_cursors.items():
+            with self.subTest(cursor=name):
+                output = {"parameter_attempts": [attempt]}
+                if cursor is not ...:
+                    output["current_parameter_attempt_id"] = cursor
+                with self.assertRaisesRegex(
+                    ParameterAttemptStateError,
+                    "current_parameter_attempt_id must be an explicit non-negative integer",
+                ):
+                    current_parameter_attempt(
+                        output,
+                        method_id="assembly.candidate.hifiasm_ont",
+                        label="hifiasm-ont",
+                    )
+
+        selected = current_parameter_attempt(
+            {
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [attempt],
+            },
+            method_id="assembly.candidate.hifiasm_ont",
+            label="hifiasm-ont",
+        )
+        self.assertEqual(selected.attempt_id, 0)
+
+    def test_historical_attempt_validation_is_wrapped_as_state_error(self):
+        output = {
+            "current_parameter_attempt_id": 0,
+            "parameter_attempts": [
+                _attempt(0, task="recommend_initial"),
+                {"attempt_id": 1},
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ParameterAttemptStateError,
+            "historical parameter attempt at index 1 is invalid",
+        ) as raised:
+            update_current_parameter_attempt(
+                output,
+                method_id="assembly.candidate.hifiasm_ont",
+                label="hifiasm-ont",
+            )
+
+        self.assertIsInstance(raised.exception.__cause__, ValidationError)
 
     def test_sealed_chain_rejects_reorder_delete_and_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

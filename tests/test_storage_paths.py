@@ -19,7 +19,9 @@ from app.execution.evidence import (
     ExecutionEvidence,
     execution_log_paths,
     load_execution_evidence,
+    load_frozen_attempt,
     persist_execution_result,
+    persist_frozen_attempt,
     validate_execution_evidence,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
@@ -54,6 +56,37 @@ class SessionPathsTests(unittest.TestCase):
             "s1",
             paths.artifact_path("assembly", "outputs").relative_to(paths.run_dir).parts,
         )
+
+    def test_resume_requires_the_retained_work_script(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = SessionPaths(tmpdir, "s1")
+            ensure_run_layout(paths)
+            work_dir = paths.work_path("read_qc", "attempt")
+            work_dir.mkdir(parents=True)
+            script = work_dir / "run.sh"
+            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            attempt = build_frozen_attempt(
+                attempt_id="s1:read_qc:attempt",
+                session_id="s1",
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                script_path=script,
+                working_dir=work_dir,
+                expected_outputs=[],
+                env=None,
+                env_spec=None,
+            )
+            state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
+            attempt_ref = persist_frozen_attempt(state, attempt)
+            script.unlink()
+
+            with self.assertRaisesRegex(DataLayoutError, "work script is missing"):
+                load_frozen_attempt(
+                    state,
+                    attempt_ref,
+                    expected_stage="read_qc",
+                    expected_method_name=attempt.method_name,
+                )
 
     def test_from_run_dir_is_strict_and_validates_session_id(self):
         paths = SessionPaths("/tmp/gene-agent-data", "s1")

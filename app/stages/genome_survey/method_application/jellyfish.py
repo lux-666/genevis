@@ -6,9 +6,9 @@ import shlex
 from pathlib import Path
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_frozen_attempt, persist_frozen_attempt
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_KMER_DB, GENOME_SURVEY_KMER_HIST
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.genome_survey.method_application.lifecycle import (
@@ -25,7 +25,7 @@ METHOD_NAME = "genome_survey.kmer_count.jellyfish"
 FROZEN_STATUS = "jellyfish_frozen"
 RAN_STATUS = "jellyfish_ran"
 COLLECTED_STATUS = "jellyfish_collected"
-FROZEN_ATTEMPT_KEY = "jellyfish_frozen_attempt"
+FROZEN_ATTEMPT_KEY = "jellyfish_frozen_attempt_ref"
 EXECUTION_RESULT_KEY = "jellyfish_execution_result"
 
 
@@ -125,11 +125,12 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
             "kmer_hist_path": str(kmer_hist),
         },
     )
+    attempt_ref = persist_frozen_attempt(state, attempt)
     return update_genome_survey_output(
         state,
         {
             "status": FROZEN_STATUS,
-            FROZEN_ATTEMPT_KEY: attempt.model_dump(mode="json"),
+            FROZEN_ATTEMPT_KEY: attempt_ref.model_dump(mode="json"),
             "kmer_db_path": str(kmer_db),
             "kmer_hist_path": str(kmer_hist),
         },
@@ -153,7 +154,12 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
     if output.get("status") != RAN_STATUS:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[FROZEN_ATTEMPT_KEY])
+    attempt = load_frozen_attempt(
+        state,
+        output[FROZEN_ATTEMPT_KEY],
+        expected_stage="genome_survey",
+        expected_method_name=METHOD_NAME,
+    )
     validate_attempt_execution(state, attempt, output[EXECUTION_RESULT_KEY])
     artifacts = attempt_artifacts(
         attempt,

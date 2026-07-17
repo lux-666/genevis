@@ -16,7 +16,12 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
@@ -34,7 +39,7 @@ from app.schemas.artifacts import (
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -291,7 +296,15 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
         env_spec=env_spec,
         metadata={"paf_path": str(paf_path), "assembly_ref": out["input_assembly_ref"], "reads_ref": str(alignment_reads_ref)},
     )
-    return _update(state, {"status": "alignment_frozen", "alignment_attempt": attempt.model_dump(mode="json"), "alignment_paf_ref": str(paf_path)})
+    attempt_ref = persist_frozen_attempt(state, attempt)
+    return _update(
+        state,
+        {
+            "status": "alignment_frozen",
+            "alignment_attempt_ref": attempt_ref.model_dump(mode="json"),
+            "alignment_paf_ref": str(paf_path),
+        },
+    )
 
 
 def run_t2t_alignment(state: TopLevelState) -> dict:
@@ -299,7 +312,12 @@ def run_t2t_alignment(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") != "alignment_frozen":
         return {}
-    attempt = FrozenAttemptSpec.model_validate(out["alignment_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        out["alignment_attempt_ref"],
+        expected_stage="t2t",
+        expected_method_name=T2T_ALIGNMENT_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=absolute_data_dir(state),
@@ -325,7 +343,12 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         return {}
     if out.get("status") == "candidates_built":
         return {}
-    attempt = FrozenAttemptSpec.model_validate(out["alignment_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        out["alignment_attempt_ref"],
+        expected_stage="t2t",
+        expected_method_name=T2T_ALIGNMENT_METHOD,
+    )
     load_execution_evidence(
         state,
         out["alignment_result"],

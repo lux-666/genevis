@@ -5,20 +5,27 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
-from app.stages.assembly.method_application import build_flye_graph, build_hifiasm_graph, build_hifiasm_ont_graph, build_nextdenovo_graph
+from app.stages.assembly.method_application import (
+    build_flye_graph,
+    build_hifiasm_graph,
+    build_hifiasm_ont_graph,
+    build_nextdenovo_graph,
+)
 from app.stages.assembly.nodes import (
     block_assembly_for_human,
     build_assembly_candidate_set,
     commit_assembly_plan,
     enter_assembly,
-    execution_retry_gate,
     fail_assembly,
     infer_input_profile,
     plan_candidate_attempts,
-    recommend_assembly_parameters,
     resolve_extended_inputs,
     select_primary_and_fallback,
     select_route,
+)
+from app.stages.assembly.parameters.workflow import (
+    execution_retry_gate,
+    recommend_assembly_parameters,
 )
 from app.stages.assembly.routing import (
     route_after_candidate_set,

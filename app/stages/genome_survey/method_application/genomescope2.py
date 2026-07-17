@@ -6,9 +6,9 @@ import shlex
 from pathlib import Path
 
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.evidence import load_frozen_attempt, persist_frozen_attempt
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_MODEL_SUMMARY
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.genome_survey.method_application.lifecycle import (
@@ -25,7 +25,7 @@ METHOD_NAME = "genome_survey.model.genomescope2"
 FROZEN_STATUS = "genomescope2_frozen"
 RAN_STATUS = "genomescope2_ran"
 COLLECTED_STATUS = "genomescope2_collected"
-FROZEN_ATTEMPT_KEY = "genomescope2_frozen_attempt"
+FROZEN_ATTEMPT_KEY = "genomescope2_frozen_attempt_ref"
 EXECUTION_RESULT_KEY = "genomescope2_execution_result"
 
 
@@ -91,11 +91,12 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
             "summary_path": str(summary_path),
         },
     )
+    attempt_ref = persist_frozen_attempt(state, attempt)
     return update_genome_survey_output(
         state,
         {
             "status": FROZEN_STATUS,
-            FROZEN_ATTEMPT_KEY: attempt.model_dump(mode="json"),
+            FROZEN_ATTEMPT_KEY: attempt_ref.model_dump(mode="json"),
             "genomescope2_summary_path": str(summary_path),
             "genomescope2_output_dir": str(artifact_dir),
         },
@@ -119,7 +120,12 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
     if output.get("status") != RAN_STATUS:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[FROZEN_ATTEMPT_KEY])
+    attempt = load_frozen_attempt(
+        state,
+        output[FROZEN_ATTEMPT_KEY],
+        expected_stage="genome_survey",
+        expected_method_name=METHOD_NAME,
+    )
     validate_attempt_execution(state, attempt, output[EXECUTION_RESULT_KEY])
     artifacts = attempt_artifacts(
         attempt,

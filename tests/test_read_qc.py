@@ -243,7 +243,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(summary["avg_qual"], 18.5)
             self.assertNotIn("stats_table", result["stage_outputs"]["read_qc"])
             self.assertNotIn("raw_long_reads_path", result["stage_outputs"]["read_qc"])
-            self.assertNotIn("frozen_attempt", result["stage_outputs"]["read_qc"])
+            self.assertNotIn("frozen_attempt_ref", result["stage_outputs"]["read_qc"])
             self.assertNotIn("execution_result", result["stage_outputs"]["read_qc"])
             self.assertNotIn("stats_output_path", result["stage_outputs"]["read_qc"])
 

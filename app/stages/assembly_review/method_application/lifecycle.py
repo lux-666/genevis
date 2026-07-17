@@ -18,7 +18,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import persist_execution_result
+from app.execution.evidence import load_frozen_attempt, persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_EVAL_BUNDLE,
@@ -26,7 +26,7 @@ from app.schemas.artifacts import (
     AssemblyEvalBundle,
     AssemblyEvalSignal,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.storage.publish import publish_file
@@ -103,13 +103,27 @@ def safe_candidate_id(candidate_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate_id).strip("_") or "candidate"
 
 
-def run_attempts(state: TopLevelState, *, frozen_status: str, attempts_key: str, ran_status: str, results_key: str, fail_label: str) -> dict:
+def run_attempts(
+    state: TopLevelState,
+    *,
+    frozen_status: str,
+    attempts_key: str,
+    ran_status: str,
+    results_key: str,
+    method_name: str,
+    fail_label: str,
+) -> dict:
     output = review_output(state)
     if output.get("status") != frozen_status:
         return {}
     results = []
     for payload in output.get(attempts_key, []):
-        attempt = FrozenAttemptSpec.model_validate(payload)
+        attempt = load_frozen_attempt(
+            state,
+            payload,
+            expected_stage="assembly_review",
+            expected_method_name=method_name,
+        )
         outcome = run_frozen_attempt(
             attempt,
             data_dir=state.get("data_dir", "data"),
@@ -164,12 +178,6 @@ def mark_missing_signals(
             metadata={"draft_assembly_ref": candidate.get("final_assembly_ref")},
         )
     return updated
-
-
-def unique_refs(refs: list[str]) -> list[str]:
-    return list(dict.fromkeys(refs))
-
-
 def write_json_artifact(state: TopLevelState, filename: str, payload: dict[str, Any], *, artifact_type: str) -> str:
     data_dir = Path(state.get("data_dir", "data"))
     out_dir = stage_artifacts_dir(state, "assembly_review")

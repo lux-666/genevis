@@ -61,6 +61,9 @@ def _write_intake_plan(tmpdir: str) -> str:
 
 
 def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
+    attempt.script_path.parent.mkdir(parents=True, exist_ok=True)
+    if not attempt.script_path.exists():
+        attempt.script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     return persist_gene_attempt(state, attempt).model_dump(mode="json")
 
 

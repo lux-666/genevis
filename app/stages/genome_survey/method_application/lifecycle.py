@@ -9,7 +9,11 @@ from langgraph.graph import END, START, StateGraph
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+)
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -75,7 +79,11 @@ def run_method_attempt(
     if output.get("status") != frozen_status:
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(output[frozen_attempt_key])
+    attempt = load_frozen_attempt(
+        state,
+        output[frozen_attempt_key],
+        expected_stage="genome_survey",
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),

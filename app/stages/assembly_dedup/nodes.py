@@ -10,7 +10,12 @@ from typing import Any
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.schemas.artifacts import (
@@ -19,7 +24,7 @@ from app.schemas.artifacts import (
     ArtifactMeta,
     AssemblyCandidateBundle,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -200,6 +205,13 @@ def run_purge_dups(state: TopLevelState) -> dict:
             "dups_bed_ref": str(dups_bed),
         },
     )
+    attempt_ref = persist_frozen_attempt(state, attempt)
+    attempt = load_frozen_attempt(
+        state,
+        attempt_ref,
+        expected_stage="assembly_dedup",
+        expected_method_name=ASSEMBLY_DEDUP_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=data_dir,
@@ -215,8 +227,23 @@ def run_purge_dups(state: TopLevelState) -> dict:
         error=outcome.error,
     ).model_dump(mode="json")
     if not outcome.success:
-        return _update_output(state, {"status": "failed", "reason": outcome.error, "execution_result": result_ref})
-    return _update_output(state, {"status": "dedup_ran", "execution_result": result_ref, "frozen_attempt": attempt.model_dump(mode="json")})
+        return _update_output(
+            state,
+            {
+                "status": "failed",
+                "reason": outcome.error,
+                "execution_result": result_ref,
+                "frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
+            },
+        )
+    return _update_output(
+        state,
+        {
+            "status": "dedup_ran",
+            "execution_result": result_ref,
+            "frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
+        },
+    )
 
 
 def commit_assembly_dedup(state: TopLevelState) -> dict:
@@ -224,8 +251,14 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
     if dedup_out.get("status") not in {"dedup_ran", "skipped"}:
         return {}
 
+    attempt = None
     if dedup_out.get("status") == "dedup_ran":
-        attempt = FrozenAttemptSpec.model_validate(dedup_out["frozen_attempt"])
+        attempt = load_frozen_attempt(
+            state,
+            dedup_out["frozen_attempt_ref"],
+            expected_stage="assembly_dedup",
+            expected_method_name=ASSEMBLY_DEDUP_METHOD,
+        )
         load_execution_evidence(
             state,
             dedup_out["execution_result"],
@@ -250,7 +283,7 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
                 metadata={"candidate_ref": source_candidate_ref},
             )
         )
-    attempt_metadata = (dedup_out.get("frozen_attempt") or {}).get("metadata", {})
+    attempt_metadata = dict(attempt.metadata) if attempt is not None else {}
     for key, artifact_type in [
         ("read_bam_ref", "assembly_dedup.read_alignment_bam"),
         ("read_paf_ref", "assembly_dedup.read_alignment_paf"),
@@ -305,10 +338,8 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
     append_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
-    attempt_payload = dedup_out.get("frozen_attempt")
     attempt_id = None
-    if dedup_out.get("status") == "dedup_ran" and attempt_payload:
-        attempt = FrozenAttemptSpec.model_validate(attempt_payload)
+    if attempt is not None:
         attempt_id = attempt.attempt_id
         ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
     for artifact in artifact_payloads:

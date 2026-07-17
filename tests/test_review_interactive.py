@@ -1003,7 +1003,7 @@ class DecisionBriefTests(unittest.TestCase):
                 "label": "Assembly result and evidence review",
                 "parameter_recommendation_status": "mixed",
                 "related_parameter_gate": {"stage": "assembly", "gate_id": "parameter_approval"},
-                "parameter_recommendation_notes": ["Human rerun remains a legacy manual path."],
+                "parameter_recommendation_notes": ["Operator-directed rerun is a supported manual path outside parameter recommendation."],
                 "human_confirmation_required": True,
             },
             "candidates": [

@@ -10,9 +10,11 @@ from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import persist_execution_result
+from app.execution.evidence import (
+    load_frozen_attempt,
+    persist_execution_result,
+)
 from app.execution.method_runner import run_frozen_attempt
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.manifest import _detect_format
 from app.schemas.state import TopLevelState
 
@@ -86,7 +88,11 @@ def run_method_attempt(state: TopLevelState, lifecycle: ReadQCMethodLifecycle) -
     output = read_qc_output(state)
     if output.get("status") != lifecycle.frozen_status:
         return {}
-    attempt = FrozenAttemptSpec.model_validate(output[lifecycle.frozen_attempt_key])
+    attempt = load_frozen_attempt(
+        state,
+        output[lifecycle.frozen_attempt_key],
+        expected_stage="read_qc",
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),

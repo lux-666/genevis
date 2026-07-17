@@ -121,6 +121,7 @@ def persist_frozen_attempt(
 
     if attempt.session_id != state.get("session_id"):
         raise DataLayoutError("frozen attempt session does not match the run state")
+    _require_retained_attempt_work(attempt)
     payload = {
         "schema_version": 2,
         "record_type": "frozen_attempt",
@@ -157,17 +158,35 @@ def load_frozen_attempt(
     if payload.get("record_type") != "frozen_attempt":
         raise DataLayoutError("attempt evidence has the wrong record type")
     attempt = FrozenAttemptSpec.model_validate(payload.get("attempt"))
+    if attempt.attempt_id != payload.get("attempt_id"):
+        raise DataLayoutError("attempt evidence identity mismatch")
+    if payload.get("stage") != expected_stage or payload.get(
+        "method_name"
+    ) != attempt.method_name:
+        raise DataLayoutError("attempt evidence identity mismatch")
     if (
-        attempt.attempt_id != payload.get("attempt_id")
-        or attempt.session_id != state.get("session_id")
+        attempt.session_id != state.get("session_id")
         or attempt.stage != expected_stage
-        or payload.get("stage") != expected_stage
-        or payload.get("method_name") != attempt.method_name
     ):
         raise DataLayoutError("attempt evidence identity mismatch")
-    if expected_method_name is not None and attempt.method_name != expected_method_name:
+    if (
+        expected_method_name is not None
+        and attempt.method_name != expected_method_name
+    ):
         raise DataLayoutError("attempt evidence has the wrong method identity")
+    _require_retained_attempt_work(attempt)
     return attempt
+
+
+def _require_retained_attempt_work(attempt: FrozenAttemptSpec) -> None:
+    if not attempt.working_dir.exists() or not attempt.working_dir.is_dir():
+        raise DataLayoutError(
+            f"frozen attempt working directory is missing: {attempt.working_dir}"
+        )
+    if not attempt.script_path.exists() or not attempt.script_path.is_file():
+        raise DataLayoutError(
+            f"frozen attempt work script is missing: {attempt.script_path}"
+        )
 
 
 def persist_execution_result(

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.control.lifecycle import ResumeValidationError
+from app.execution.evidence import load_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
@@ -646,15 +647,16 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             hic = frozen_state["stage_outputs"]["hic_scaffolding"]
 
             self.assertEqual(hic["status"], "autohic_frozen")
-            command_cursor = ArtifactRef.model_validate(hic["autohic_frozen_attempt"])
-            replay_cursor = ArtifactRef.model_validate(
-                replay_update["stage_outputs"]["hic_scaffolding"][
-                    "autohic_frozen_attempt"
-                ]
+            attempt = ParameterAttempt.model_validate(hic["parameter_attempts"][0])
+            replay_attempt = ParameterAttempt.model_validate(
+                replay_update["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][0]
             )
-            self.assertEqual(replay_cursor, command_cursor)
+            frozen_cursor = attempt.frozen_attempt_ref
+            replay_cursor = replay_attempt.frozen_attempt_ref
+            self.assertIsNotNone(frozen_cursor)
+            self.assertEqual(replay_cursor, frozen_cursor)
             self.assertEqual(
-                set(hic["autohic_frozen_attempt"]),
+                set(frozen_cursor.model_dump(mode="json")),
                 {
                     "schema_version",
                     "artifact_id",
@@ -664,13 +666,20 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     "artifact_type",
                 },
             )
-            attempt = ParameterAttempt.model_validate(hic["parameter_attempts"][0])
             self.assertEqual(attempt.status, "frozen")
-            self.assertEqual(attempt.command_ref, command_cursor)
+            self.assertIsNotNone(attempt.command_ref)
             self.assertIsNotNone(attempt.frozen_parameters_ref)
+            self.assertNotIn("autohic_frozen_attempt_ref", hic)
+            self.assertNotIn("autohic_execution_result", hic)
+            frozen_attempt = load_frozen_attempt(
+                frozen_state,
+                frozen_cursor,
+                expected_stage="hic_scaffolding",
+                expected_method_name=AUTOHIC_METHOD,
+            )
 
             command = json.loads(
-                (Path(frozen_state["data_dir"]) / command_cursor.path_ref).read_text(
+                (Path(frozen_state["data_dir"]) / attempt.command_ref.path_ref).read_text(
                     encoding="utf-8"
                 )
             )
@@ -679,7 +688,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 attempt.frozen_parameters_ref.path_ref,
             )
             self.assertEqual(
-                command["frozen_attempt"]["script_path"],
+                str(frozen_attempt.script_path),
                 str(
                     Path(frozen_state["data_dir"])
                     / "work"
@@ -688,6 +697,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     / "run_autohic.sh"
                 ),
             )
+            self.assertNotIn("frozen_attempt_ref", command)
             for ref_name in ("config_ref", "script_ref"):
                 ref = ArtifactRef.model_validate(command[ref_name])
                 self.assertTrue(
@@ -754,8 +764,12 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 executed_attempt["execution_ref"]["path_ref"],
                 "artifacts/hic_scaffolding/attempts/000/execution.json",
             )
-            self.assertIsNone(hic.get("autohic_frozen_attempt"))
-            self.assertIsNone(hic.get("autohic_execution_result"))
+            self.assertEqual(
+                executed_attempt["frozen_attempt_ref"]["artifact_type"],
+                "hic_scaffolding.frozen_attempt",
+            )
+            self.assertNotIn("autohic_frozen_attempt_ref", hic)
+            self.assertNotIn("autohic_execution_result", hic)
             for key in (
                 "scaffold_fasta",
                 "contact_map",

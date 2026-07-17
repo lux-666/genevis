@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.control.lifecycle import resume_review_state
+from app.execution.evidence import load_frozen_attempt
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
@@ -353,7 +354,16 @@ class T2TStageTests(unittest.TestCase):
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["read_count"], 3)
             self.assertEqual(t2t["telomeric_read_count"], 2)
-            self.assertEqual(t2t["alignment_attempt"]["metadata"]["reads_ref"], t2t["telomeric_reads_fasta_ref"])
+            attempt = load_frozen_attempt(
+                result,
+                t2t["alignment_attempt_ref"],
+                expected_stage="t2t",
+                expected_method_name="t2t.alignment.minimap2",
+            )
+            self.assertEqual(
+                attempt.metadata["reads_ref"],
+                t2t["telomeric_reads_fasta_ref"],
+            )
             self.assertNotIn("not_telomeric", Path(t2t["telomeric_reads_fasta_ref"]).read_text(encoding="utf-8"))
 
     def test_scan_read_telomeres_streams_outputs_without_bulk_tsv_writes(self):

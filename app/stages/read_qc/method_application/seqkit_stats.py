@@ -8,7 +8,11 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
-from app.execution.evidence import load_execution_evidence
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     READ_QC_LONG_READ_STATS,
@@ -33,7 +37,7 @@ LIFECYCLE = ReadQCMethodLifecycle(
     name="seqkit stats",
     frozen_status="frozen",
     ran_status="ran",
-    frozen_attempt_key="frozen_attempt",
+    frozen_attempt_key="frozen_attempt_ref",
     execution_result_key="execution_result",
 )
 
@@ -74,16 +78,27 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
                   "raw_long_reads_path": str(input_paths[0]), "raw_long_reads_paths": [str(path) for path in input_paths],
                   "stats_path": str(stats_path)},
     )
-    return update_read_qc_output(state, {"status": LIFECYCLE.frozen_status, "frozen_attempt": attempt.model_dump(mode="json"), "stats_output_path": str(stats_path)})
+    attempt_ref = persist_frozen_attempt(state, attempt)
+    return update_read_qc_output(
+        state,
+        {
+            "status": LIFECYCLE.frozen_status,
+            LIFECYCLE.frozen_attempt_key: attempt_ref.model_dump(mode="json"),
+            "stats_output_path": str(stats_path),
+        },
+    )
 
 
 def collect_seqkit_artifacts(state: TopLevelState) -> dict:
     output = read_qc_output(state)
     if output.get("status") != LIFECYCLE.ran_status:
         return {}
-    from app.schemas.descriptors import FrozenAttemptSpec
-
-    attempt = FrozenAttemptSpec.model_validate(output["frozen_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        output[LIFECYCLE.frozen_attempt_key],
+        expected_stage="read_qc",
+        expected_method_name=METHOD_NAME,
+    )
     stats_path = Path(output["stats_output_path"])
     load_execution_evidence(
         state,

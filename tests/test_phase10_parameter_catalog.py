@@ -34,6 +34,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
     ASSEMBLY_PARAMETER_RESPONSE_PARSE,
     ArtifactMeta,
+    ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
     file_sha256,
@@ -52,11 +53,6 @@ from app.stages.assembly.method_application.hifiasm_ont import (
     freeze_hifiasm_ont_attempt,
 )
 from app.stages.assembly.method_application.nextdenovo import freeze_nextdenovo_attempt
-from app.stages.assembly.nodes import (
-    execution_retry_gate,
-    parameter_quality_gate,
-    recommend_assembly_parameters,
-)
 from app.stages.assembly.parameters.catalog import (
     lint_parameter_catalogs,
     load_parameter_catalog,
@@ -72,7 +68,12 @@ from app.stages.assembly.parameters.storage import (
     write_attempt_json_artifact,
     write_recommendation_json_artifact,
 )
-from app.stages.assembly.parameters.workflow import hydrate_parameter_attempt
+from app.stages.assembly.parameters.workflow import (
+    execution_retry_gate,
+    hydrate_parameter_attempt,
+    parameter_quality_gate,
+    recommend_assembly_parameters,
+)
 from app.stages.assembly.routing import route_after_method_subgraph
 from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
@@ -139,6 +140,17 @@ def _ref_path(state: dict, ref: dict | str) -> Path:
     if isinstance(ref, dict):
         return SessionPaths.from_run_dir(state["data_dir"]).resolve_ref(ref["path_ref"])
     return Path(ref)
+
+
+def _frozen_attempt_ref(attempt_id: int) -> ArtifactRef:
+    marker = f"{attempt_id:x}"[-1]
+    return ArtifactRef(
+        artifact_id=f"art_{marker * 32}",
+        path_ref=f"artifacts/assembly/attempts/{attempt_id:03d}/frozen_attempt.json",
+        sha256=marker * 64,
+        size_bytes=1,
+        artifact_type="assembly.frozen_attempt",
+    )
 
 
 def _persist_parameter_attempt(
@@ -334,6 +346,9 @@ def _persist_parameter_attempt(
         ),
         recommendation_manifest_ref=manifest_ref,
         approval_decision_ref=approval_ref,
+        frozen_attempt_ref=(
+            _frozen_attempt_ref(attempt_id) if status != "recommended" else None
+        ),
         execution_ref=execution_ref,
         previous_attempt_seal_hash=(
             previous_attempt.get("seal_hash") if previous_attempt else None
@@ -684,6 +699,8 @@ class ParameterProfileTests(unittest.TestCase):
         self.assertEqual(full_profile["assets"]["assembly_route"], "ont")
         self.assertEqual(full_profile["assets"]["read_type"], "ont")
         self.assertEqual(full_profile["assets"]["input_files"], ["reads.fastq"])
+        self.assertNotIn("has_ultra_long", full_profile["assets"])
+        self.assertNotIn("has_trio", full_profile["assets"])
         self.assertEqual(full_profile["read_qc"]["read_n50"], 30000)
         self.assertEqual(full_profile["read_qc"]["read_count"], 100)
         self.assertEqual(full_profile["read_qc"]["read_mean"], 25000)
@@ -792,6 +809,8 @@ class ParameterProfileTests(unittest.TestCase):
         self.assertIn("genome_survey", initial)
         self.assertNotIn("previous_attempt", initial)
         self.assertNotIn("input_files", initial["assets"])
+        self.assertNotIn("has_ultra_long", initial["assets"])
+        self.assertNotIn("has_trio", initial["assets"])
 
         execution_repair = build_prompt_profile(full_profile, "retry_after_execution_failure")
         self.assertNotIn("stderr_tail", execution_repair["previous_attempt"])
@@ -1356,6 +1375,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             state = self._approve(state, first)
             state["stage_outputs"]["assembly"]["status"] = "draft_ready"
             state["stage_outputs"]["assembly"]["parameter_attempts"][0]["status"] = "executed"
+            state["stage_outputs"]["assembly"]["parameter_attempts"][0][
+                "frozen_attempt_ref"
+            ] = _frozen_attempt_ref(0).model_dump(mode="json")
             state["stage_outputs"]["assembly_review"] = {
                 "metrics": {"busco_complete": 0.94, "busco_duplicate": 0.21, "assembly_size_ratio": 1.35}
             }
@@ -1501,6 +1523,29 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         self.assertEqual(assembly["status"], "failed")
         self.assertIn("parameter catalog is not usable", assembly["reason"])
 
+    def test_hifiasm_freeze_rejects_loose_attempt_cursor_before_work_scope(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                method="hifiasm",
+                recommended_params={"purge_level": 1},
+            )
+            state["stage_outputs"]["assembly"]["current_parameter_attempt_id"] = "0"
+            work_dir = SessionPaths.from_run_dir(state["data_dir"]).work_path(
+                "assembly", "attempts", "000", "hifiasm"
+            )
+
+            with patch(
+                "app.stages.assembly.method_application.hifiasm.resolve_method_env",
+                return_value=(None, [], None),
+            ):
+                result = freeze_hifiasm_attempt(state)
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "failed")
+        self.assertIn("explicit non-negative integer", assembly["reason"])
+        self.assertFalse(work_dir.exists())
+
     def test_corrupt_hifiasm_recommended_params_returns_structured_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir, method="hifiasm", recommended_params={})
@@ -1555,6 +1600,29 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         self.assertEqual(assembly["status"], "failed")
         self.assertIn("ParameterAttempt", assembly["reason"])
         self.assertIn("task", assembly["reason"])
+
+    def test_hifiasm_ont_freeze_wraps_corrupt_historical_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(
+                tmpdir,
+                method="hifiasm_ont",
+                recommended_params={"purge_level": 1},
+            )
+            state["stage_outputs"]["assembly"]["parameter_attempts"].append(
+                {"attempt_id": 1}
+            )
+            with patch(
+                "app.stages.assembly.method_application.hifiasm_ont.resolve_method_env",
+                return_value=(None, [], None),
+            ):
+                result = freeze_hifiasm_ont_attempt(state)
+
+        assembly = result["stage_outputs"]["assembly"]
+        self.assertEqual(assembly["status"], "failed")
+        self.assertIn(
+            "historical parameter attempt at index 1 is invalid",
+            assembly["reason"],
+        )
 
     def test_hifiasm_ont_freeze_writes_command_artifact_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,7 +1,10 @@
 # Stage Parameter Recommenders
 
-**Status:** Accepted and implemented for Assembly and AutoHiC
+**Status:** Accepted
+
 **Accepted:** 2026-07-16
+
+**Implementation:** Assembly and AutoHiC implemented
 
 ## Definition
 
@@ -133,6 +136,16 @@ declared response shape parsed and, on failure, the parser error.
 The recommendation manifest binds those records by immutable refs/hashes.
 Checkpoint state contains bounded cursors and refs, not the request/response
 bodies. No execution attempt is added before human approval.
+
+After approval, the compact `ParameterAttempt` is the only relation owner for
+the approved parameters, constructed command, frozen runner input, execution,
+and review evidence. Stage cursors select the current attempt by ID; they do not
+mirror those refs in method-specific keys.
+
+Assembly input-presence signals come from the asset registry and are snapshotted
+into the typed `AssemblyInputProfile`. For example, raw or clean RNA-seq assets
+set `has_rnaseq`; a synthetic `stage_outputs["rnaseq"]` entry is neither a valid
+stage nor an input signal.
 
 ## Conformance rules
 

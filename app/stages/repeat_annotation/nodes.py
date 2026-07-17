@@ -12,7 +12,12 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.graph.routing import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
@@ -28,11 +33,12 @@ from app.schemas.artifacts import (
     RepeatAnnotationBundle,
     RepeatAnnotationPlan,
 )
-from app.schemas.descriptors import DescriptorRegistry, FrozenAttemptSpec
+from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
+    ordered_unique,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
@@ -309,11 +315,12 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
             "hardmasked_genome": str(hardmasked_genome),
         },
     )
+    attempt_ref = persist_frozen_attempt(state, attempt)
     return _update_repeat_output(
         state,
         {
             "status": "repeatmasker_frozen",
-            "repeatmasker_frozen_attempt": attempt.model_dump(mode="json"),
+            "repeatmasker_frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
         },
     )
 
@@ -324,7 +331,12 @@ def run_repeatmasker_attempt(state: TopLevelState) -> dict:
     if repeat_out.get("status") != "repeatmasker_frozen":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        repeat_out["repeatmasker_frozen_attempt_ref"],
+        expected_stage="repeat_annotation",
+        expected_method_name=REPEAT_MASKING_METHOD,
+    )
     outcome = run_frozen_attempt(
         attempt,
         data_dir=state.get("data_dir", "data"),
@@ -357,7 +369,12 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
     if repeat_out.get("status") != "repeatmasker_ran":
         return {}
 
-    attempt = FrozenAttemptSpec.model_validate(repeat_out["repeatmasker_frozen_attempt"])
+    attempt = load_frozen_attempt(
+        state,
+        repeat_out["repeatmasker_frozen_attempt_ref"],
+        expected_stage="repeat_annotation",
+        expected_method_name=REPEAT_MASKING_METHOD,
+    )
     load_execution_evidence(
         state,
         repeat_out.get("repeatmasker_execution_result") or {},
@@ -401,8 +418,19 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
 
     tbl_path = Path(attempt.working_dir) / "assembly.fasta.tbl"
     repeat_percentage = _parse_tbl_repeat_percentage(tbl_path)
-    artifact_refs = _unique_refs([*repeat_out.get("artifact_refs", []), *[str(artifact.file_path) for artifact in artifacts]])
-    notes = _unique_refs([*repeat_out.get("notes", []), "repeatmasker_executed"])
+    artifact_refs = ordered_unique(
+        [
+            ref
+            for ref in [
+                *repeat_out.get("artifact_refs", []),
+                *[str(artifact.file_path) for artifact in artifacts],
+            ]
+            if ref
+        ]
+    )
+    notes = ordered_unique(
+        [ref for ref in [*repeat_out.get("notes", []), "repeatmasker_executed"] if ref]
+    )
     return _update_repeat_output(
         state,
         {
@@ -415,7 +443,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
             "notes": notes,
             "execution_enabled": True,
             "repeatmasker_attempt_id": attempt.attempt_id,
-            "repeatmasker_frozen_attempt": None,
+            "repeatmasker_frozen_attempt_ref": None,
             "repeatmasker_execution_result": None,
         },
     )
@@ -699,16 +727,6 @@ def _validate_repeat_methods(methods: list[str]) -> str | None:
 def _safe_path_id(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
     return safe or "repeatmasker"
-
-
-def _unique_refs(refs: list[str]) -> list[str]:
-    unique = []
-    for ref in refs:
-        if ref and ref not in unique:
-            unique.append(ref)
-    return unique
-
-
 def _parse_tbl_repeat_percentage(tbl_path: Path) -> float | None:
     if not tbl_path.exists():
         return None

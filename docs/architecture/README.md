@@ -1,23 +1,37 @@
 # Architecture Specifications
 
-This directory contains accepted, cross-cutting architecture specifications for
-Gene Agent. These documents define contracts that multiple stages must share;
-they are not implementation retrospectives or phase history.
+This directory contains the accepted cross-cutting contracts for Gene Agent.
+It is deliberately small: a topic belongs to one normative specification, and
+other documents link to that owner instead of restating its schema or flow.
 
-The system overview remains in [`docs/architecture.md`](../architecture.md).
-When a topic has a dedicated specification here, that specification is the
-normative source for that topic. Phase documents describe how an earlier change
-was implemented and must not override an accepted architecture specification.
+[`docs/architecture.md`](../architecture.md) is the system overview, not a
+second source of detailed contracts. Code and tests show present conformance;
+[`docs/handoff.md`](../handoff.md) is only a current work snapshot; phase
+documents are history.
 
-## Accepted Specifications
+## Specification Registry
 
-| Specification | Status | Scope |
-|---|---|---|
-| [`data-v2.md`](data-v2.md) | Accepted; core implemented, operational cleanup pending | Run-owned data layout, fact ownership, artifact references, parameter-recommendation records, attempts, review records, checkpoints, ledger events, reports, retention, and cutover |
-| [`execution-evidence.md`](execution-evidence.md) | Accepted | Runtime/durable execution boundary, canonical result body, indexed log ownership, checkpoint cursors, and path-free cutover |
-| [`parameter-recommenders.md`](parameter-recommenders.md) | Accepted; implemented for Assembly and AutoHiC | Stage-specific profile/basis/DTO/render/normalize/validate responsibilities without a universal parameter payload |
-| [`autohic-stage.md`](autohic-stage.md) | Accepted; core implemented, conformance work pending | Parent/Hi-C graph boundary, AutoHiC-only execution, and the restriction-enzyme parameter recommender |
-| [`bootstrap.md`](bootstrap.md) | Accepted; implemented | Minimal initialization of `.env` and `config/envs.yaml` |
+Design acceptance and implementation conformance are separate facts.
+
+| Specification | Design | Current conformance | Owns |
+|---|---|---|---|
+| [`data-v2.md`](data-v2.md) | Accepted | Partial | Run ownership, durable fact placement, artifact refs, checkpoint bounds, ledger/report authority, retention, and cutover |
+| [`execution-evidence.md`](execution-evidence.md) | Accepted | Implemented for process results | Runtime `ExecutionResult`, durable `ExecutionEvidence`, log ownership, and result cursors |
+| [`parameter-recommenders.md`](parameter-recommenders.md) | Accepted | Assembly and AutoHiC implemented | Model-boundary DTOs, exact request/response flow, parsing, approval, and recommender responsibilities |
+| [`autohic-stage.md`](autohic-stage.md) | Accepted | Core implemented; Data v2 gaps tracked by Data v2 | Parent/Hi-C boundary, AutoHiC-only execution, and restriction-enzyme recommendation |
+| [`bootstrap.md`](bootstrap.md) | Accepted | Implemented | Minimal initialization of `.env` and `config/envs.yaml` |
+
+## Ownership Boundaries
+
+- Data v2 decides **where durable facts live** and what checkpoints may point to.
+- Execution Evidence decides **what a durable process result contains**.
+- Parameter Recommenders decides **how an already selected method receives an
+  approved parameter recommendation**.
+- Stage specifications decide **domain flow and biological behavior**.
+
+A frozen attempt is created and made durable before execution. A checkpoint
+does not recreate it from current configuration; it carries the immutable ref
+needed to load the same runner input.
 
 ## Vocabulary Rule
 

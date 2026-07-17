@@ -26,7 +26,12 @@ from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.artifacts import append_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
@@ -274,7 +279,7 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
         ar_out["metrics"] = metrics
         stage_outputs["assembly_review"] = ar_out
 
-    from app.stages.assembly.nodes import (
+    from app.stages.assembly.parameters.workflow import (
         parameter_quality_gate as assembly_parameter_quality_gate,
     )
 
@@ -1023,7 +1028,7 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
 
 def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
     """Execute a Flye rerun with adjusted parameters and re-enter assembly_review."""
-    from app.stages.assembly.nodes import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
+    from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
 
     stage_outputs = dict(state.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get("assembly_review") or {})
@@ -1195,6 +1200,13 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "source_candidate_id": request.candidate_id,
         },
     )
+    frozen_attempt_ref = persist_frozen_attempt(state, attempt)
+    attempt = load_frozen_attempt(
+        state,
+        frozen_attempt_ref,
+        expected_stage="assembly",
+        expected_method_name=FLYE_METHOD,
+    )
 
     # Rerun is a resume-path special case: it reuses the shared run core (so
     # attempt_started/attempt_failed bookkeeping matches normal runs) but adds a
@@ -1279,6 +1291,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "source_candidate_id": request.candidate_id,
             "rerun_reason": request.metadata.get("rerun_reason"),
             "execution_ref": execution_ref.model_dump(mode="json"),
+            "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
         },
     )
     candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -1304,6 +1317,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         "parameters": params,
         "draft_assembly_ref": str(draft_assembly),
         "bundle_ref": str(bundle_path),
+        "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
     })
 
     preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}

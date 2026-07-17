@@ -6,6 +6,10 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
+from app.execution.parameter_attempts import (
+    ParameterAttemptStateError,
+    current_parameter_attempt,
+)
 from app.llm.parameters.hic.recommender import (
     PROMPT_BUNDLE,
     autohic_parameter_prompt_hash,
@@ -523,13 +527,15 @@ def load_approved_autohic_parameters(state: TopLevelState) -> dict[str, Any]:
     """Load the approved recommendation consumed by the freeze node."""
 
     hic_out = _hic_output(state)
-    attempts = hic_out.get("parameter_attempts") or []
-    if len(attempts) != 1:
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC execution requires one approved parameter attempt"
+    try:
+        attempt = current_parameter_attempt(
+            hic_out,
+            method_id=AUTOHIC_METHOD,
+            label="AutoHiC",
         )
-    attempt = ParameterAttempt.model_validate(attempts[0])
-    if attempt.method_id != AUTOHIC_METHOD or attempt.status != "recommended":
+    except ParameterAttemptStateError as exc:
+        raise AutoHiCParameterPersistenceError(str(exc)) from exc
+    if attempt.status != "recommended":
         raise AutoHiCParameterPersistenceError(
             "AutoHiC parameter attempt is not approved and awaiting freeze"
         )

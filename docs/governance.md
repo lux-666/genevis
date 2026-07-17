@@ -29,19 +29,24 @@ The coordinator should avoid these behaviors:
 - Do not make a top-level graph edge for every biological tool.
 - Do not let an LLM write routing, checkpoint, ledger, or lifecycle core logic.
 
-## Source Of Truth Order
+## Sources of Truth
 
-When instructions conflict, use this order:
+Do not force design authority, current implementation state, biological
+rationale, and coordination procedure into one linear ranking:
 
-1. Direct user instruction in the current conversation.
-2. `CLAUDE.md`.
-3. `deep-research-report.md`.
-4. `docs/architecture.md` and accepted topic specifications under
-   `docs/architecture/`; within a topic, the dedicated accepted specification
-   is authoritative.
-5. `docs/stage_contracts.md`.
-6. `docs/phases/phase_completion_plan.md`.
-7. Existing code and tests.
+- Direct user instruction governs the current task.
+- Accepted topic specifications under `docs/architecture/` govern intended
+  cross-cutting behavior; `docs/architecture.md` is only the system overview.
+- `docs/stage_contracts.md` and descriptor specifications govern stable domain
+  boundaries.
+- Code and tests are the evidence for what is implemented now. They do not
+  silently amend an accepted design; a mismatch is recorded as conformance
+  debt.
+- `CLAUDE.md` and this document govern engineering/coordination procedure.
+- `deep-research-report.md` supplies biological rationale, not runtime storage
+  or software-state facts.
+- `docs/handoff.md` is a current work snapshot. Phase documents and Git history
+  are implementation history, not normative contracts.
 
 Reference project files under `/Users/a1/Documents/BGIwork/rna_agent` are
 examples, not source of truth. Reuse patterns, not single-cell business names.
@@ -84,7 +89,7 @@ Ledger stores business execution facts:
 
 - attempt ID
 - method name
-- frozen spec path
+- immutable frozen-attempt ref when it is needed to prove the transition
 - status
 - error summary
 - immutable artifact refs needed to prove a transition
@@ -137,7 +142,9 @@ generation and freezing must not mutate:
 - lifecycle commands
 - descriptor registry loader
 
-The runner consumes only `FrozenAttemptSpec`.
+The frozen spec is persisted before execution. The runner consumes that exact
+spec (or its verified in-memory hydration), and resume reloads it by ref rather
+than regenerating it.
 
 ## Review Gate Policy
 

@@ -1,8 +1,10 @@
 # Project Bootstrap Architecture
 
-**Status:** Accepted; implemented
+**Status:** Accepted
 
 **Accepted:** 2026-07-15
+
+**Implementation:** Implemented
 
 **Scope:** Minimal initialization of project-owned configuration consumed by
 Gene Agent

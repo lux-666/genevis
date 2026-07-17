@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from app.control.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, resume_review_state
+from app.knowledge.packs import load_knowledge_pack
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
@@ -23,7 +24,6 @@ from app.schemas.artifacts import (
     AssemblyT2TReadiness,
 )
 from app.schemas.state import initial_state
-from app.knowledge.packs import load_knowledge_pack
 from app.stages.assembly.nodes import (
     apply_route_decision,
     block_assembly_for_human,
@@ -41,7 +41,6 @@ class Phase8SchemaTests(unittest.TestCase):
             session_id="s1",
             target_level="draft",
             recommended_route="hifi",
-            recommendation_confidence=0.9,
             recommendation_reasoning="HiFi reads available",
             uncertainty_notes=["coverage not estimated"],
             profile_source="llm_inferred",
@@ -206,7 +205,6 @@ class InputProfilerTests(unittest.TestCase):
             "status": "profile_ready",
             "input_profile": {
                 "recommended_route": recommended_route,
-                "recommendation_confidence": 0.95,
                 "recommendation_reasoning": f"{recommended_route} recommendation",
                 "uncertainty_notes": [],
             },
@@ -417,7 +415,6 @@ class InputProfilerTests(unittest.TestCase):
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["input_profile"]["recommended_route"], "insufficient_data")
-            self.assertEqual(assembly["input_profile"]["recommendation_confidence"], 0.0)
             self.assertNotIn("route_selector_prompt", assembly)
             self.assertNotIn("route_selector_source", assembly)
 

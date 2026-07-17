@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,6 +17,12 @@ from app.execution.evidence import (
     validate_execution_evidence,
 )
 from app.execution.method_runner import run_frozen_attempt
+from app.execution.parameter_attempts import (
+    ParameterAttemptStateError,
+    current_parameter_attempt,
+    load_current_frozen_attempt,
+    update_current_parameter_attempt,
+)
 from app.schemas.artifacts import (
     HIC_PARAMETER_EXECUTION,
     HIC_QC_REPORT,
@@ -25,18 +30,19 @@ from app.schemas.artifacts import (
     HIC_SCAFFOLDED_ASSEMBLY,
     ArtifactMeta,
     ArtifactRef,
-    ParameterAttempt,
 )
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    ordered_unique,
+    stage_output,
+    update_stage_output,
+)
 from app.stages.hic_scaffolding.parameters.storage import (
-    AUTOHIC_PARAMETER_COMMAND,
     AutoHiCParameterPersistenceError,
     read_autohic_parameter_artifact,
     write_autohic_parameter_artifact,
 )
-from app.storage.paths import SessionPaths
 
 
 @dataclass(frozen=True)
@@ -47,8 +53,6 @@ class HiCMethodLifecycle:
     method_name: str
     frozen_status: str
     ran_status: str
-    frozen_attempt_key: str
-    execution_result_key: str
 
 
 def build_method_graph(
@@ -100,11 +104,14 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
     if output.get("status") != lifecycle.frozen_status:
         return {}
     try:
-        attempt = _load_frozen_attempt(
+        attempt = load_current_frozen_attempt(
             state,
-            output.get(lifecycle.frozen_attempt_key),
+            output,
+            stage="hic_scaffolding",
+            method_id=lifecycle.method_name,
+            label=lifecycle.name,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (OSError, ValueError, ParameterAttemptStateError) as exc:
         return update_hic_output(
             state,
             {
@@ -126,14 +133,19 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
         error=outcome.error,
     )
     try:
-        parameter_attempts, execution_ref = _record_parameter_execution(
+        parameter_attempts = _record_parameter_execution(
             state,
             output,
             lifecycle=lifecycle,
             result=result,
             succeeded=outcome.success,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (
+        OSError,
+        ValueError,
+        AutoHiCParameterPersistenceError,
+        ParameterAttemptStateError,
+    ) as exc:
         return update_hic_output(
             state,
             {
@@ -146,12 +158,6 @@ def run_method_attempt(state: TopLevelState, lifecycle: HiCMethodLifecycle) -> d
         state,
         {
             "status": lifecycle.ran_status,
-            lifecycle.execution_result_key: {
-                "execution_ref": execution_ref.model_dump(mode="json"),
-                "success": result.success,
-                "return_code": result.return_code,
-                "error": _bounded_text(result.error),
-            },
             "parameter_attempts": parameter_attempts,
         },
     )
@@ -164,25 +170,19 @@ def _record_parameter_execution(
     lifecycle: HiCMethodLifecycle,
     result: ExecutionEvidence,
     succeeded: bool,
-) -> tuple[list[dict[str, Any]], ArtifactRef]:
+) -> list[dict[str, Any]]:
     """Attach immutable execution evidence to the approved parameter attempt."""
 
-    current_id = int(output.get("current_parameter_attempt_id") or 0)
-    attempts = list(output.get("parameter_attempts") or [])
-    matches = [
-        item
-        for item in attempts
-        if isinstance(item, dict) and item.get("attempt_id") == current_id
-    ]
-    if len(matches) != 1:
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC execution requires one current parameter attempt"
-        )
-    current = ParameterAttempt.model_validate(matches[0])
-    if current.method_id != lifecycle.method_name or current.status != "frozen":
+    current = current_parameter_attempt(
+        output,
+        method_id=lifecycle.method_name,
+        label=lifecycle.name,
+    )
+    if current.status != "frozen":
         raise AutoHiCParameterPersistenceError(
             "AutoHiC current parameter attempt is not the approved frozen attempt"
         )
+    current_id = current.attempt_id
     execution_ref = write_autohic_parameter_artifact(
         state,
         current_id,
@@ -197,20 +197,13 @@ def _record_parameter_execution(
         method_name=lifecycle.method_name,
         scope="attempt",
     )
-    updated = ParameterAttempt.model_validate(
-        {
-            **current.model_dump(mode="json"),
-            "status": "executed" if succeeded else "execution_failed",
-            "execution_ref": execution_ref.model_dump(mode="json"),
-        }
-    ).model_dump(mode="json")
-    updated_attempts = [
-        updated
-        if isinstance(item, dict) and item.get("attempt_id") == current_id
-        else ParameterAttempt.model_validate(item).model_dump(mode="json")
-        for item in attempts
-    ]
-    return updated_attempts, execution_ref
+    return update_current_parameter_attempt(
+        output,
+        method_id=lifecycle.method_name,
+        label=lifecycle.name,
+        status="executed" if succeeded else "execution_failed",
+        execution_ref=execution_ref.model_dump(mode="json"),
+    )
 
 
 def collect_method_artifacts(
@@ -226,9 +219,12 @@ def collect_method_artifacts(
         return {}
 
     try:
-        attempt = _load_frozen_attempt(
+        attempt = load_current_frozen_attempt(
             state,
-            output.get(lifecycle.frozen_attempt_key),
+            output,
+            stage="hic_scaffolding",
+            method_id=lifecycle.method_name,
+            label=lifecycle.name,
         )
         execution_ref, result = _load_execution_evidence(
             state,
@@ -236,7 +232,12 @@ def collect_method_artifacts(
             lifecycle=lifecycle,
             expected_attempt_id=attempt.attempt_id,
         )
-    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+    except (
+        OSError,
+        ValueError,
+        AutoHiCParameterPersistenceError,
+        ParameterAttemptStateError,
+    ) as exc:
         return update_hic_output(
             state,
             {
@@ -374,7 +375,7 @@ def collect_method_artifacts(
                 ),
             ]
         )
-        notes = unique_refs(
+        notes = ordered_unique(
             [
                 *notes,
                 f"{lifecycle.name}_executed",
@@ -403,7 +404,7 @@ def collect_method_artifacts(
             "method_candidates": candidates,
         }
     else:
-        notes = unique_refs([*notes, f"{lifecycle.name}_execution_failed"])
+        notes = ordered_unique([*notes, f"{lifecycle.name}_execution_failed"])
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {
             "status": "failed",
@@ -436,49 +437,14 @@ def collect_method_artifacts(
         state,
         {
             **update,
-            "artifact_refs": unique_refs(
+            "artifact_refs": ordered_unique(
                 [
                     *list(output.get("artifact_refs") or []),
                     *[str(a.file_path) for a in artifacts],
                 ]
             ),
-            lifecycle.frozen_attempt_key: None,
-            lifecycle.execution_result_key: None,
         },
     )
-
-
-def unique_refs(refs: list[str]) -> list[str]:
-    return list(dict.fromkeys(refs))
-
-
-def _load_frozen_attempt(
-    state: TopLevelState,
-    value: Any,
-) -> FrozenAttemptSpec:
-    command_ref = ArtifactRef.model_validate(value)
-    command = read_autohic_parameter_artifact(
-        state,
-        command_ref,
-        expected_type=AUTOHIC_PARAMETER_COMMAND,
-    )
-    frozen_attempt = command.get("frozen_attempt")
-    if not isinstance(frozen_attempt, dict):
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC command artifact has no frozen attempt"
-        )
-    frozen_attempt = dict(frozen_attempt)
-    if "created_at" not in frozen_attempt:
-        command_path = SessionPaths.from_run_dir(absolute_data_dir(state)).resolve_ref(
-            command_ref.path_ref
-        )
-        frozen_attempt["created_at"] = datetime.fromtimestamp(
-            command_path.stat().st_mtime,
-            tz=timezone.utc,
-        )
-    return FrozenAttemptSpec.model_validate(frozen_attempt)
-
-
 def _load_execution_evidence(
     state: TopLevelState,
     output: dict[str, Any],
@@ -486,22 +452,17 @@ def _load_execution_evidence(
     lifecycle: HiCMethodLifecycle,
     expected_attempt_id: str,
 ) -> tuple[ArtifactRef, ExecutionEvidence]:
-    cursor = output.get(lifecycle.execution_result_key)
-    if not isinstance(cursor, dict):
+    attempt = current_parameter_attempt(
+        output,
+        method_id=lifecycle.method_name,
+        label=lifecycle.name,
+    )
+    if attempt.execution_ref is None:
         raise AutoHiCParameterPersistenceError(
-            "AutoHiC execution checkpoint has no compact cursor"
+            "AutoHiC current parameter attempt has no execution_ref"
         )
-    execution_ref = ArtifactRef.model_validate(cursor.get("execution_ref"))
-    current_id = int(output.get("current_parameter_attempt_id") or 0)
-    attempts = [
-        ParameterAttempt.model_validate(item)
-        for item in (output.get("parameter_attempts") or [])
-        if isinstance(item, dict) and item.get("attempt_id") == current_id
-    ]
-    if len(attempts) != 1 or attempts[0].execution_ref != execution_ref:
-        raise AutoHiCParameterPersistenceError(
-            "AutoHiC execution ref is not bound to the current parameter attempt"
-        )
+    execution_ref = attempt.execution_ref
+    current_id = attempt.attempt_id
     record = read_autohic_parameter_artifact(
         state,
         execution_ref,
