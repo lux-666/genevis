@@ -234,10 +234,6 @@ def infer_input_profile(state: TopLevelState) -> dict:
                 "route_decision_ref": decision_ref,
                 "assembly_selection": selection.model_dump(mode="json"),
                 "selected_route": _route_from_read_type(selection.read_type),
-                "method_decision": _resolve_method_decision(
-                    assembly_out.get("method_decision"),
-                    _legacy_method_decision(selection),
-                ),
             },
         )
 
@@ -411,10 +407,6 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
         "route_decision_ref": decision_ref.model_dump(mode="json"),
         "assembly_selection": selection.model_dump(mode="json"),
         "selected_route": selected_route,
-        "method_decision": _resolve_method_decision(
-            assembly_out.get("method_decision"),
-            _legacy_method_decision(selection),
-        ),
     }
     return {
         "current_stage": "assembly",
@@ -485,7 +477,7 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
         return _fail_update(state, "assembly_selection is required before candidate planning")
 
     registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-    planned_methods = _planned_candidate_methods(assembly_out, selection)
+    planned_methods = _planned_candidate_methods(selection)
     missing = [method for method in planned_methods if method not in registry.methods]
     if missing:
         return _fail_update(state, f"assembly descriptors missing: {missing}")
@@ -526,29 +518,10 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
     )
 
 
-def _planned_candidate_methods(assembly_out: dict[str, Any], selection: AssemblySelection) -> list[str]:
+def _planned_candidate_methods(selection: AssemblySelection) -> list[str]:
     methods = list(dict.fromkeys([selection.primary_method, *ASSEMBLY_AUTO_CANDIDATES]))
     if selection.fallback_method and selection.fallback_method not in methods:
         methods.append(selection.fallback_method)
-    for legacy_method in _legacy_requested_methods(assembly_out):
-        if legacy_method not in methods:
-            methods.append(legacy_method)
-    return methods
-
-
-def _legacy_requested_methods(assembly_out: dict[str, Any]) -> list[str]:
-    decision = dict(assembly_out.get("method_decision") or {})
-    methods: list[str] = []
-    for key in ("primary", "fallback"):
-        raw = decision.get(key)
-        if not raw:
-            continue
-        try:
-            method = normalize_method_id(str(raw))
-        except ValueError:
-            continue
-        if method not in methods:
-            methods.append(method)
     return methods
 
 
@@ -978,27 +951,6 @@ def _selection_from_output(assembly_out: dict[str, Any]) -> AssemblySelection | 
             return AssemblySelection.model_validate(payload)
         except ValueError:
             return None
-    legacy = dict(assembly_out.get("method_decision") or {})
-    legacy_primary = legacy.get("primary")
-    read_type = resolve_read_type(
-        ("normalized_read_type", assembly_out.get("normalized_read_type")),
-        ("read_type", assembly_out.get("read_type")),
-        ("explicit_route", assembly_out.get("explicit_route")),
-        ("read_type_prior", _normalized_read_type_from_prior(assembly_out.get("read_type_prior"))),
-        context="assembly.selection_from_output",
-    )
-    if legacy_primary and read_type:
-        try:
-            return AssemblySelection(
-                read_type=read_type,
-                primary_method=str(legacy_primary),
-                fallback_method=legacy.get("fallback"),
-                source="run_config" if _is_run_config_explicit_method_decision(legacy) else "recommendation",
-                rationale="legacy method_decision adapted to assembly_selection",
-                metadata={"legacy_method_decision": legacy},
-            )
-        except ValueError:
-            return None
     return None
 
 
@@ -1011,27 +963,8 @@ def _selection_from_route(route: str | None, *, source: str, rationale: str) -> 
         primary_method=default_primary_method(read_type),
         source=source,
         rationale=rationale,
-        metadata={"legacy_route": route},
+        metadata={"route": route},
     )
-
-
-def _legacy_method_decision(selection: AssemblySelection) -> dict[str, str]:
-    source = "run_config_explicit" if selection.source == "run_config" else "assembly_selection"
-    payload = {"primary": selection.primary_method, "source": source}
-    if selection.fallback_method:
-        payload["fallback"] = selection.fallback_method
-    return payload
-
-
-def _resolve_method_decision(existing: Any, route_derived: dict[str, str]) -> dict[str, str]:
-    existing_decision = dict(existing or {})
-    if _is_run_config_explicit_method_decision(existing_decision):
-        return existing_decision
-    return route_derived
-
-
-def _is_run_config_explicit_method_decision(decision: Any) -> bool:
-    return isinstance(decision, dict) and decision.get("source") == "run_config_explicit"
 
 
 def _requested_read_type(request: ResumeReviewRequest, assembly_out: dict[str, Any], selected_route: str) -> tuple[str, str]:

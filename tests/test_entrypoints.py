@@ -20,14 +20,14 @@ from app.execution.artifacts import read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
 from app.entrypoints.tui import _tui_main, run_tui
-from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _build_assembly_selection, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import PersistedReviewRequest, load_review_request, persist_review_request
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.entry import EntryRequest
 from app.schemas.ask_plan import AskPlanState, save_ask_plan
-from app.schemas.run_config import LocalExecStage
-from app.storage.paths import SessionPaths, locate_session_data_dir
+from app.schemas.run_config import AssemblyRunConfig, LocalExecStage
+from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
 from tests.data_v2 import v2_run_dir
 
 
@@ -409,6 +409,17 @@ class EntrypointTests(unittest.TestCase):
             session_id = generate_session_id(Path(tmp) / "data", now=datetime(2026, 5, 8, 10, 0, 0))
 
         self.assertEqual(session_id, "gene-20260508-000001")
+
+    def test_build_assembly_selection_materializes_assembly_route_as_canonical_selection(self):
+        selection = _build_assembly_selection(
+            assembly=AssemblyRunConfig(assembly_route="ont"),
+            shared_parameters=None,
+        )
+
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection.model_dump(mode="json")["primary_method"], "assembly.candidate.hifiasm_ont")
+        self.assertEqual(selection.model_dump(mode="json")["read_type"], "ont_raw")
+        self.assertEqual(selection.model_dump(mode="json")["source"], "run_config")
 
     def test_structured_run_generates_session_id_when_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1271,7 +1282,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
             self.assertEqual(assembly_out["execution_mode"], "local")
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
+            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(assembly_out["assembly_selection"]["read_type"], "ont_raw")
+            self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
+            self.assertNotIn("method_decision", assembly_out)
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
 
     def test_run_config_explicit_assembly_method_without_read_type_fails_before_graph(self):
@@ -1348,7 +1362,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm_ont", "source": "run_config_explicit"})
+            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(assembly_out["assembly_selection"]["read_type"], "ont_raw")
+            self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
+            self.assertNotIn("method_decision", assembly_out)
             self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
 
     def test_run_config_inferrs_hifiasm_method_from_single_parameter_block(self):
@@ -1391,7 +1408,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["method_decision"], {"primary": "assembly.candidate.hifiasm", "source": "run_config_explicit"})
+            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm")
+            self.assertEqual(assembly_out["assembly_selection"]["read_type"], "pacbio_hifi")
+            self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
+            self.assertNotIn("method_decision", assembly_out)
             self.assertEqual(assembly_out["hifiasm_parameters"], {"read_type": "hifi", "threads": 4})
 
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
@@ -1434,6 +1454,31 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 self.assertTrue(directory.exists(), directory)
             self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
             self.assertEqual(paths.run_config_path.read_text(encoding="utf-8"), config_path.read_text(encoding="utf-8"))
+
+    def test_run_session_materialization_is_safe_when_sources_are_canonical_destinations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            paths = SessionPaths(data_dir, "s1")
+            ensure_run_layout(paths)
+            paths.manifest_path.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            paths.run_config_path.write_text(json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8")
+            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(paths.manifest_path),
+                        data_dir=str(data_dir),
+                        run_config=str(paths.run_config_path),
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), "session_id: s1\nassets: []\n")
+            self.assertEqual(json.loads(paths.run_config_path.read_text(encoding="utf-8")), {"local_exec": ["read_qc"]})
 
     def test_run_session_invoke_exception_writes_durable_failed_terminal_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1524,9 +1569,12 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
             self.assertEqual(assembly_out["execution_mode"], "local")
             self.assertEqual(
-                assembly_out["method_decision"],
-                {"primary": "assembly.candidate.nextdenovo", "source": "run_config_explicit"},
+                assembly_out["assembly_selection"]["primary_method"],
+                "assembly.candidate.nextdenovo",
             )
+            self.assertEqual(assembly_out["assembly_selection"]["read_type"], "ont_raw")
+            self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
+            self.assertNotIn("method_decision", assembly_out)
             self.assertEqual(
                 assembly_out["nextdenovo_parameters"],
                 {"read_type": "ont", "genome_size": 2_000_000, "threads": 4, "read_cutoff": 1000},

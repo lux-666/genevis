@@ -332,7 +332,7 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["route_decision"]["selected_route"], "hifi")
             self.assertTrue(self._ref_path(state, assembly["input_profile_ref"]).exists())
 
-    def test_explicit_cyclone_route_defaults_to_flye_method_decision(self):
+    def test_explicit_cyclone_route_defaults_to_flye_assembly_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reads = Path(tmpdir) / "reads.fastq"
             reads.write_text("@r\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -347,9 +347,13 @@ class InputProfilerTests(unittest.TestCase):
 
             assembly = result["stage_outputs"]["assembly"]
             self.assertEqual(assembly["selected_route"], "cyclone")
-            self.assertEqual(assembly["assembly_selection"]["read_type"], "cyclone")
-            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.flye")
-            self.assertEqual(assembly["assembly_selection"]["source"], "run_config")
+            selection = assembly["assembly_selection"]
+            self.assertEqual(selection["read_type"], "cyclone")
+            self.assertEqual(selection["primary_method"], "assembly.candidate.flye")
+            self.assertIsNone(selection["fallback_method"])
+            self.assertEqual(selection["source"], "run_config")
+            self.assertEqual(selection["rationale"], "run_config explicitly selected cyclone read type")
+            self.assertNotIn("method_decision", assembly)
 
     def test_explicit_ont_route_preserves_ont_selection(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,8 +372,13 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(assembly["selected_route"], "ont")
             self.assertEqual(assembly["route_decision"]["selected_route"], "ont")
             self.assertEqual(assembly["input_profile"]["recommended_route"], "ont")
-            self.assertEqual(assembly["assembly_selection"]["read_type"], "ont_raw")
-            self.assertEqual(assembly["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
+            selection = assembly["assembly_selection"]
+            self.assertEqual(selection["read_type"], "ont_raw")
+            self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertIsNone(selection["fallback_method"])
+            self.assertEqual(selection["source"], "run_config")
+            self.assertEqual(selection["rationale"], "run_config explicitly selected ont read type")
+            self.assertNotIn("method_decision", assembly)
 
     def test_infer_input_profile_llm_prompt_receives_skill_text(self):
         class FakeModel:
@@ -496,35 +505,43 @@ class InputProfilerTests(unittest.TestCase):
 
             self.assertEqual(result["stage_outputs"]["assembly"]["selected_route"], "cyclone")
 
-    def test_route_decision_maps_to_method_decision(self):
-        """P1 fix: route decisions should map to the intended methods."""
+    def test_route_decision_maps_to_assembly_selection(self):
+        """Route decisions write the complete canonical assembly selection."""
         cases = [
             {
-                "name": "test_route_decision_maps_to_method_decision_hifi",
+                "name": "hifi",
                 "decision": "select_hifi",
                 "selected_route": "hifi",
                 "assembly_selection": {
                     "read_type": "pacbio_hifi",
                     "primary_method": "assembly.candidate.hifiasm",
+                    "fallback_method": None,
                     "source": "human",
+                    "rationale": "human selected hifi read type",
                 },
             },
             {
-                "name": "test_route_decision_maps_to_method_decision_ont",
+                "name": "ont",
                 "decision": "select_ont",
                 "selected_route": "ont",
                 "assembly_selection": {
                     "read_type": "ont_raw",
                     "primary_method": "assembly.candidate.hifiasm_ont",
+                    "fallback_method": None,
+                    "source": "human",
+                    "rationale": "human selected ont read type",
                 },
             },
             {
-                "name": "test_route_decision_maps_to_method_decision_cyclone",
+                "name": "cyclone",
                 "decision": "select_cyclone",
                 "selected_route": "cyclone",
                 "assembly_selection": {
                     "read_type": "cyclone",
                     "primary_method": "assembly.candidate.flye",
+                    "fallback_method": None,
+                    "source": "human",
+                    "rationale": "human selected cyclone read type",
                 },
             },
         ]
@@ -540,13 +557,9 @@ class InputProfilerTests(unittest.TestCase):
                     assembly = result["stage_outputs"]["assembly"]
 
                     self.assertEqual(assembly["selected_route"], case["selected_route"])
-                    for key, expected in case.get("assembly_selection", {}).items():
+                    for key, expected in case["assembly_selection"].items():
                         self.assertEqual(assembly["assembly_selection"][key], expected)
-                    if "method_decision_primary" in case:
-                        self.assertEqual(
-                            assembly["method_decision"]["primary"],
-                            case["method_decision_primary"],
-                        )
+                    self.assertNotIn("method_decision", assembly)
 
     def test_route_selection_includes_review_policy_outcome(self):
         """P1 fix: route selection should call evaluate() and include policy outcome"""
@@ -585,8 +598,8 @@ class InputProfilerTests(unittest.TestCase):
             self.assertEqual(outcome["action"], "BLOCK_INDEFINITE")
             self.assertIsNone(outcome["max_blocked_seconds"])
 
-    def test_explicit_route_maps_to_method_decision(self):
-        """P1 fix: explicit route from run_config should also set method_decision"""
+    def test_explicit_route_maps_to_assembly_selection(self):
+        """An explicit run-config route writes the canonical assembly selection."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(tmpdir)
             state["stage_outputs"] = {
@@ -602,10 +615,13 @@ class InputProfilerTests(unittest.TestCase):
 
             self.assertEqual(assembly["status"], "profile_ready")
             self.assertEqual(assembly["selected_route"], "hifi")
-            self.assertIn("method_decision", assembly)
-            self.assertEqual(assembly["method_decision"]["primary"], "assembly.candidate.hifiasm")
-            self.assertEqual(assembly["assembly_selection"]["read_type"], "pacbio_hifi")
-            self.assertEqual(assembly["assembly_selection"]["source"], "run_config")
+            selection = assembly["assembly_selection"]
+            self.assertEqual(selection["read_type"], "pacbio_hifi")
+            self.assertEqual(selection["primary_method"], "assembly.candidate.hifiasm")
+            self.assertIsNone(selection["fallback_method"])
+            self.assertEqual(selection["source"], "run_config")
+            self.assertEqual(selection["rationale"], "run_config explicitly selected hifi read type")
+            self.assertNotIn("method_decision", assembly)
 
     def test_route_decision_honors_explicit_resume_method_and_read_type(self):
         """Selector V2 uses method_name plus metadata.read_type for human intent."""

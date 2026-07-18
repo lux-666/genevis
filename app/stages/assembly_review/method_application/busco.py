@@ -10,6 +10,7 @@ from typing import Any
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
     load_frozen_attempt,
@@ -24,12 +25,10 @@ from app.schemas.artifacts import (
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
 from app.stages.assembly_review.method_application.lifecycle import (
-    absolute_review_data_dir,
     build_method_graph,
     local_execution_enabled,
     mark_missing_signals,
     materialized_candidates,
-    resolve_review_method_env,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
@@ -38,7 +37,7 @@ from app.stages.assembly_review.method_application.lifecycle import (
     update_review_output,
     update_signal,
 )
-from app.stages.base import ordered_unique, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, ordered_unique, stage_artifacts_dir, stage_work_dir
 
 BUSCO_METHOD = "assembly_review.eval.busco"
 FROZEN_STATUS = "busco_frozen"
@@ -74,9 +73,9 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
     if not materialized:
         return rewrite_eval_bundle(state, {**output, "signals": signals}, status="evaluating")
     session_id = state["session_id"]
-    data_dir = absolute_review_data_dir(state)
-    env_spec, _packages, blocked = resolve_review_method_env(
-        output, BUSCO_METHOD, session_id=session_id, data_dir=data_dir,
+    data_dir = absolute_data_dir(state)
+    env_spec, _packages, blocked = resolve_method_env(
+        output, stage="assembly_review", method_name=BUSCO_METHOD, session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:

@@ -62,6 +62,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import TopLevelState
+from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
 from app.stages.assembly_review.method_application.lifecycle import (
     read_eval_bundle as _read_eval_bundle,
 )
@@ -1140,8 +1141,10 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         "source_candidate_id": request.candidate_id,
     })
 
-    read_paths, read_error = _rerun_read_paths(input_ref, input_type)
-    if read_error:
+    try:
+        read_paths = resolve_assembly_read_paths(input_ref, input_type)
+    except AssemblyInputError as exc:
+        read_error = f"rerun {exc}"
         ledger.record_event(session_id, "rerun_failed", {
             "candidate_id": candidate_id, "error": read_error,
         })
@@ -1444,26 +1447,6 @@ def _load_completed_rerun_bundle_if_matching(
     if not draft_ref or not Path(str(draft_ref)).exists():
         raise ResumeValidationError(f"existing rerun bundle is incomplete; draft assembly missing: {draft_ref}")
     return bundle
-
-
-def _rerun_read_paths(input_ref: Any, input_type: Any) -> tuple[list[Path], str | None]:
-    if not input_ref:
-        return [], "rerun requires assembly input_ref"
-    if input_type == "long_reads.fofn":
-        fofn = Path(str(input_ref))
-        if not fofn.exists():
-            return [], f"rerun FOFN not found: {fofn}"
-        paths = [Path(line.strip()) for line in fofn.read_text(encoding="utf-8").splitlines() if line.strip()]
-    elif input_type == "clean_long_reads":
-        paths = [Path(str(input_ref))]
-    else:
-        return [], f"rerun does not support input_type: {input_type}"
-    if not paths:
-        return [], "rerun requires at least one read path"
-    missing = [str(p) for p in paths if not p.exists()]
-    if missing:
-        return [], f"rerun read paths not found: {missing}"
-    return paths, None
 
 
 def generate_candidate_comparison(state: TopLevelState) -> dict:

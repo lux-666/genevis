@@ -261,7 +261,12 @@ class EnvResolver:
 
     def packages_for_spec(self, spec: EnvSpec) -> list[PackageSpec]:
         """Return the PackageSpecs referenced by a resolved method spec's package_tools."""
-        return [self.packages[name] for name in spec.package_tools if name in self.packages]
+        missing = [name for name in spec.package_tools if name not in self.packages]
+        if missing:
+            raise ValueError(
+                "env spec references undefined package_tools: " + ", ".join(missing)
+            )
+        return [self.packages[name] for name in spec.package_tools]
 
 
 def check_conda_available(conda_bin: str = "conda") -> bool:

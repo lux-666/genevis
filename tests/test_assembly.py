@@ -50,6 +50,23 @@ def _attempt_execution(state: dict, attempt: dict) -> dict:
     return _ref_json(state, attempt["execution_ref"])
 
 
+def _assembly_selection(
+    *,
+    read_type: str,
+    primary_method: str,
+    fallback_method: str | None = None,
+    source: str = "run_config",
+    rationale: str = "test fixture explicitly selects the assembly method",
+) -> dict:
+    return {
+        "read_type": read_type,
+        "primary_method": primary_method,
+        "fallback_method": fallback_method,
+        "source": source,
+        "rationale": rationale,
+    }
+
+
 class _ParameterResponse:
     def __init__(self, parameters: dict) -> None:
         self.content = json.dumps(
@@ -380,10 +397,11 @@ class AssemblyStageTests(unittest.TestCase):
                 },
                 "assembly": {
                     "assembly_route": "cyclone",
-                    "method_decision": {
-                        "primary": "assembly.candidate.flye",
-                        "fallback": "assembly.candidate.nextdenovo",
-                    }
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.flye",
+                        fallback_method="assembly.candidate.nextdenovo",
+                    ),
                 },
             }
 
@@ -417,9 +435,10 @@ class AssemblyStageTests(unittest.TestCase):
                 },
                 "assembly": {
                     "assembly_route": "cyclone",
-                    "method_decision": {
-                        "primary": "assembly.candidate.nextdenovo",
-                    }
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.nextdenovo",
+                    ),
                 },
             }
 
@@ -473,7 +492,7 @@ class AssemblyStageTests(unittest.TestCase):
                 "assembly.candidate.nextdenovo",
             })
 
-    def test_explicit_hifiasm_request_remains_allowed_as_compatibility_route(self):
+    def test_explicit_hifiasm_selection_is_allowed_for_hifi_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             clean_reads = Path(tmpdir) / "clean.fastq"
             clean_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -492,9 +511,10 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly": {
                     "assembly_route": "hifi",
-                    "method_decision": {
-                        "primary": "assembly.candidate.hifiasm",
-                    }
+                    "assembly_selection": _assembly_selection(
+                        read_type="pacbio_hifi",
+                        primary_method="assembly.candidate.hifiasm",
+                    ),
                 }
             }
 
@@ -525,9 +545,10 @@ class AssemblyStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "assembly": {
                     "assembly_route": "hifi",
-                    "method_decision": {
-                        "primary": "assembly.candidate.hifiasm",
-                    },
+                    "assembly_selection": _assembly_selection(
+                        read_type="pacbio_hifi",
+                        primary_method="assembly.candidate.hifiasm",
+                    ),
                 }
             }
 
@@ -826,10 +847,11 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "method_decision": {
-                        "primary": "assembly.candidate.flye",
-                        "fallback": "assembly.candidate.nextdenovo",
-                    },
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.flye",
+                        fallback_method="assembly.candidate.nextdenovo",
+                    ),
                     "parameter_recommendation": {
                         "max_execution_retries": 0,
                     },
@@ -982,7 +1004,10 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "hifi",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "method_decision": {"primary": "assembly.candidate.hifiasm"},
+                    "assembly_selection": _assembly_selection(
+                        read_type="pacbio_hifi",
+                        primary_method="assembly.candidate.hifiasm",
+                    ),
                     "hifiasm_parameters": {"read_type": "hifi", "threads": 0},
                 }
             }
@@ -1077,7 +1102,10 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "method_decision": {"primary": "assembly.candidate.nextdenovo"},
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.nextdenovo",
+                    ),
                     "nextdenovo_parameters": {
                         "read_type": "ont",
                         "genome_size": 2_000_000,
@@ -1148,7 +1176,10 @@ class AssemblyStageTests(unittest.TestCase):
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
                     "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                    "method_decision": {"primary": "assembly.candidate.nextdenovo"},
+                    "assembly_selection": _assembly_selection(
+                        read_type="cyclone",
+                        primary_method="assembly.candidate.nextdenovo",
+                    ),
                     "nextdenovo_parameters": {
                         "read_type": "ont",
                         "genome_size": 2_000_000,

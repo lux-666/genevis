@@ -430,4 +430,8 @@ def _long_reads_ref(state: TopLevelState, assembly_out: dict[str, Any]) -> str |
 
 def _read_mapping_preset(assembly_out: dict[str, Any]) -> str:
     platform = str(assembly_out.get("primary_long_read_platform") or assembly_out.get("platform") or "").lower()
-    return "map-pb" if platform in {"pacbio_clr", "clr", "pacbio"} else "map-ont"
+    if platform in {"pacbio_hifi", "hifi"}:
+        return "map-hifi"
+    if platform in {"pacbio_clr", "clr", "pacbio"}:
+        return "map-pb"
+    return "map-ont"

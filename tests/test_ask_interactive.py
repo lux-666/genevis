@@ -643,6 +643,41 @@ class InteractiveLoopTests(unittest.TestCase):
             with patch("app.stages.inventory.nodes.validate_inputs", side_effect=RuntimeError("boom")):
                 self.assertTrue(_attempt_preflight_validation(plan))
 
+    def test_preflight_validation_isolated_from_shared_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shared_data = root / "data"
+            reads = root / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            manifest = root / "manifest.yaml"
+            manifest.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                f"    paths: [{reads!s}]\n"
+                "    platform: ont\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            plan = _base_plan(
+                data_dir=str(shared_data),
+                manifest_ref=str(manifest),
+                selected_stages=["read_qc"],
+            )
+            captured = {}
+            from app.stages.inventory.nodes import register_assets as real_register_assets
+
+            def capture_register(state):
+                captured["data_dir"] = Path(state["data_dir"])
+                return real_register_assets(state)
+
+            with patch("app.stages.inventory.nodes.register_assets", side_effect=capture_register):
+                self.assertFalse(_attempt_preflight_validation(plan))
+
+            self.assertIn("data_dir", captured)
+            self.assertFalse(captured["data_dir"].exists())
+            self.assertFalse(shared_data.exists())
+
 
 class ResumeTests(unittest.TestCase):
     def test_resume_loads_existing_plan(self):

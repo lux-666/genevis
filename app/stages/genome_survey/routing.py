@@ -38,12 +38,18 @@ def route_after_full_plan(state: TopLevelState) -> str:
 
 def route_after_jellyfish(state: TopLevelState) -> str:
     """Route after the Jellyfish method subgraph returns."""
-    return "genomescope2" if _output(state).get("status") == "jellyfish_collected" else "fail"
+    status = _output(state).get("status")
+    if is_fail_status(status):
+        return "fail"
+    return "genomescope2" if status == "jellyfish_collected" else "fail"
 
 
 def route_after_genomescope2(state: TopLevelState) -> str:
     """Route after the GenomeScope2 method subgraph returns."""
-    return "write_result" if _output(state).get("status") == "genomescope2_collected" else "fail"
+    status = _output(state).get("status")
+    if is_fail_status(status):
+        return "fail"
+    return "write_result" if status == "genomescope2_collected" else "fail"
 
 
 def route_after_plan(state: TopLevelState) -> str:

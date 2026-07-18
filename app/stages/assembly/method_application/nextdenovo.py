@@ -15,6 +15,7 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
 from app.stages.assembly.constants import NEXTDENOVO_METHOD
+from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
     blocked_parameters,
@@ -252,27 +253,18 @@ def _fofn(
     *,
     attempt_id: int,
 ) -> tuple[Path | None, list[Path], str | None]:
-    if not input_ref:
-        return None, [], "NextDenovo local execution requires assembly input_ref"
-    if input_type == "long_reads.fofn":
-        fofn = Path(str(input_ref))
-        if not fofn.exists():
-            return None, [], f"NextDenovo local execution FOFN not found: {fofn}"
-        paths = [Path(line.strip()) for line in fofn.read_text(encoding="utf-8").splitlines() if line.strip()]
-    elif input_type == "clean_long_reads":
-        paths = [Path(str(input_ref))]
-        session_paths = SessionPaths.from_run_dir(absolute_data_dir(state))
-        fofn = session_paths.work_path(
-            "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
-        )
-        fofn.parent.mkdir(parents=True, exist_ok=True)
-        fofn.write_text(str(paths[0]) + "\n", encoding="utf-8")
-    else:
-        return None, [], f"NextDenovo local execution does not support input_type: {input_type}"
-    if not paths:
-        return None, [], "NextDenovo local execution requires at least one read path"
-    missing = [str(path) for path in paths if not path.exists()]
-    return (None, [], f"NextDenovo local execution read paths not found: {missing}") if missing else (fofn, paths, None)
+    try:
+        paths = resolve_assembly_read_paths(input_ref, input_type)
+    except AssemblyInputError as exc:
+        return None, [], f"NextDenovo local execution {exc}"
+
+    session_paths = SessionPaths.from_run_dir(absolute_data_dir(state))
+    fofn = session_paths.work_path(
+        "assembly", "attempts", f"{attempt_id:03d}", "nextdenovo", "input.fofn"
+    )
+    fofn.parent.mkdir(parents=True, exist_ok=True)
+    fofn.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")
+    return fofn, paths, None
 
 
 def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:

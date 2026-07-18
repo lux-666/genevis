@@ -1098,8 +1098,9 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 "input_type": "clean_long_reads",
                 "input_profile": {"recommended_route": "ont", "has_ont": True, "has_hifi": False},
                 "assembly_selection": {
-                    "read_type": "ont",
+                    "read_type": "ont_raw",
                     "primary_method": "assembly.candidate.hifiasm_ont",
+                    "fallback_method": None,
                     "source": "recommendation",
                     "rationale": "test",
                     "metadata": {},
@@ -1461,7 +1462,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             "input_ref": str(reads),
             "input_type": "clean_long_reads",
             "env": {},
-            "method_decision": {"primary": method_name},
+            "assembly_selection": {
+                "read_type": "pacbio_hifi" if method == "hifiasm" else "ont_raw",
+                "primary_method": method_name,
+                "fallback_method": None,
+                "source": "run_config",
+                "rationale": "test fixture explicitly selects the assembly method",
+            },
             param_key: {"read_type": read_type, "threads": 1},
             "current_parameter_attempt_id": 0,
         }
@@ -1487,7 +1494,13 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             "input_ref": str(reads),
             "input_type": "clean_long_reads",
             "env": {},
-            "method_decision": {"primary": "assembly.candidate.nextdenovo"},
+            "assembly_selection": {
+                "read_type": "ont_raw",
+                "primary_method": "assembly.candidate.nextdenovo",
+                "fallback_method": None,
+                "source": "run_config",
+                "rationale": "test fixture explicitly selects the assembly method",
+            },
             "nextdenovo_parameters": {"read_type": "ont", "genome_size": 2_000_000, "threads": 1},
             "resolved_genome_size": {
                 "value_bp": 2_000_000,

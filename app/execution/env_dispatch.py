@@ -31,7 +31,7 @@ def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
     Existing fake-binary stage tests inject PATH into
     ``stage_outputs[<stage>].env`` to make the planned command run against a
     stubbed bin directory. When that happens this dispatcher steps aside on
-    the conda side so the legacy shell execution path in :class:`LocalRunner`
+    the conda side so the PATH-driven shell execution path in :class:`LocalRunner`
     stays intact. Package preflight still runs (it is filesystem-only and
     independent of conda/PATH).
     """
@@ -64,9 +64,9 @@ def resolve_method_env(
         # PATH override: skip conda preflight, but still resolve and preflight
         # external packages (filesystem-only, independent of conda/PATH) so the
         # Juicer method can locate entry scripts from the declared roots. When
-        # the env-config is absent (e.g. tests that drive the legacy bypass with
+        # the env-config is absent (e.g. tests that drive the PATH-only bypass with
         # a PATH-only stage output) there are no packages to preflight, fall
-        # through to the legacy ``(None, [], None)`` bypass.
+        # through to the ``(None, [], None)`` PATH-only bypass.
         config_path = config_path or env_resolver.active_config_path()
         if config_path and Path(config_path).exists():
             resolver = EnvResolver(config_path)
@@ -75,13 +75,17 @@ def resolve_method_env(
             for package in packages:
                 check = package_preflight(package)
                 if check.status != "ok":
-                    return None, [], {
-                        "status": "missing_tool",
-                        "reason": check.detail,
-                        "env_target": package.install_root,
-                        "missing_tools": check.missing_paths,
-                        "method_name": method_name,
-                    }
+                    return None, [], _record_preflight_block(
+                        data_dir=data_dir,
+                        session_id=session_id,
+                        input_manifest_ref=input_manifest_ref,
+                        stage=stage,
+                        method_name=method_name,
+                        status="missing_tool",
+                        env_target=package.install_root,
+                        missing_tools=check.missing_paths,
+                        detail=check.detail,
+                    )
             return None, packages, None
         return None, [], None
 
@@ -90,27 +94,17 @@ def resolve_method_env(
     spec = resolver.resolve(stage=stage, method_name=method_name)
     conda_result = preflight(spec)
     if conda_result.status != "ok":
-        ledger = Ledger(Path(data_dir))
-        ledger.create_session(session_id, input_manifest_ref)
-        ledger.record_event(
-            session_id,
-            "env_preflight_blocked",
-            {
-                "stage": stage,
-                "method_name": method_name,
-                "status": conda_result.status,
-                "env_target": conda_result.env_target,
-                "missing_tools": conda_result.missing_tools,
-                "detail": conda_result.detail,
-            },
+        return None, [], _record_preflight_block(
+            data_dir=data_dir,
+            session_id=session_id,
+            input_manifest_ref=input_manifest_ref,
+            stage=stage,
+            method_name=method_name,
+            status=conda_result.status,
+            env_target=conda_result.env_target,
+            missing_tools=conda_result.missing_tools,
+            detail=conda_result.detail,
         )
-        return None, [], {
-            "status": conda_result.status,
-            "reason": conda_result.detail,
-            "env_target": conda_result.env_target,
-            "missing_tools": conda_result.missing_tools,
-            "method_name": method_name,
-        }
 
     packages = resolver.packages_for_spec(spec)
     missing_by_package: list[tuple[str, PackagePreflightResult]] = []
@@ -120,43 +114,56 @@ def resolve_method_env(
             missing_by_package.append((package.name, result))
 
     if missing_by_package:
-        all_missing = [rel for _, result in missing_by_package for rel in result.missing_paths]
+        all_missing = [
+            rel
+            for _, result in missing_by_package
+            for rel in result.missing_paths
+        ]
         detail = "; ".join(
             f"{name}: {result.detail}" for name, result in missing_by_package
         )
-        ledger = Ledger(Path(data_dir))
-        ledger.create_session(session_id, input_manifest_ref)
-        ledger.record_event(
-            session_id,
-            "env_preflight_blocked",
-            {
-                "stage": stage,
-                "method_name": method_name,
-                "status": "missing_tool",
-                "env_target": packages[0].install_root if packages else "",
-                "missing_tools": all_missing,
-                "detail": detail,
-            },
+        return None, [], _record_preflight_block(
+            data_dir=data_dir,
+            session_id=session_id,
+            input_manifest_ref=input_manifest_ref,
+            stage=stage,
+            method_name=method_name,
+            status="missing_tool",
+            env_target=packages[0].install_root,
+            missing_tools=all_missing,
+            detail=detail,
         )
-        return None, [], {
-            "status": "missing_tool",
-            "reason": detail,
-            "env_target": packages[0].install_root if packages else "",
-            "missing_tools": all_missing,
-            "method_name": method_name,
-        }
 
     return spec, packages, None
 
 
-def attach_conda_fields(
-    spec: EnvSpec | None,
-    attempt_kwargs: dict[str, Any],
+def _record_preflight_block(
+    *,
+    data_dir: str | Path,
+    session_id: str,
+    input_manifest_ref: str,
+    stage: str,
+    method_name: str,
+    status: str,
+    env_target: str,
+    missing_tools: list[str],
+    detail: str,
 ) -> dict[str, Any]:
-    """Merge ``spec``'s conda bin/env/prefix into a FrozenAttemptSpec kwargs dict."""
-    if spec is None:
-        return attempt_kwargs
-    attempt_kwargs["conda_bin"] = spec.conda_bin
-    attempt_kwargs["conda_env"] = spec.conda_env
-    attempt_kwargs["conda_prefix"] = spec.conda_prefix
-    return attempt_kwargs
+    event = {
+        "stage": stage,
+        "method_name": method_name,
+        "status": status,
+        "env_target": env_target,
+        "missing_tools": missing_tools,
+        "detail": detail,
+    }
+    ledger = Ledger(Path(data_dir))
+    ledger.create_session(session_id, input_manifest_ref)
+    ledger.record_event(session_id, "env_preflight_blocked", event)
+    return {
+        "status": status,
+        "reason": detail,
+        "env_target": env_target,
+        "missing_tools": missing_tools,
+        "method_name": method_name,
+    }

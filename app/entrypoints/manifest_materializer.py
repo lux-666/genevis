@@ -9,7 +9,7 @@ import yaml
 
 from app.schemas.entry import EntryRequest
 from app.schemas.manifest import _detect_format, _detect_platform
-from app.storage.paths import SessionPaths
+from app.storage.paths import SessionPaths, ensure_run_layout
 
 _MANIFEST_SUFFIXES = {".yaml", ".yml", ".json"}
 _SUPPORTED_SOURCE_SUFFIXES = {
@@ -42,8 +42,9 @@ def materialize_entry_manifest(request: EntryRequest) -> EntryRequest:
         return request.model_copy(update={"manifest": str(source_paths[0])})
 
     assets = _build_asset_specs(source_paths, request)
-    manifest_path = SessionPaths(request.data_dir, request.session_id).manifest_path
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    paths = SessionPaths(request.data_dir, request.session_id)
+    ensure_run_layout(paths)
+    manifest_path = paths.manifest_path
     payload: dict[str, Any] = {
         "session_id": request.session_id,
         "assets": assets,

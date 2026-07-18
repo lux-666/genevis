@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -10,12 +11,12 @@ def _output(state: TopLevelState) -> dict:
 
 
 def route_after_enter(state: TopLevelState) -> str:
-    return "fail" if _output(state).get("status") == "failed" else "plan"
+    return "fail" if is_fail_status(_output(state).get("status")) else "plan"
 
 
 def route_after_plan(state: TopLevelState) -> str:
     status = _output(state).get("status")
-    if status == "failed":
+    if is_fail_status(status):
         return "fail"
     if status == "ready_to_run":
         return "run"
@@ -23,4 +24,4 @@ def route_after_plan(state: TopLevelState) -> str:
 
 
 def route_after_run(state: TopLevelState) -> str:
-    return "fail" if _output(state).get("status") == "failed" else "commit"
+    return "fail" if is_fail_status(_output(state).get("status")) else "commit"

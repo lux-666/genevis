@@ -9,7 +9,6 @@ from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 
-from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_frozen_attempt,
     persist_execution_result,
@@ -69,19 +68,6 @@ def update_read_qc_output(state: TopLevelState, payload: dict[str, Any]) -> dict
 
 def fail_update(state: TopLevelState, reason: str) -> dict:
     return update_read_qc_output(state, {"status": "failed", "reason": reason})
-
-
-def resolve_read_qc_method_env(
-    output: dict[str, Any], method_name: str, *, session_id: str, data_dir: Path, input_manifest_ref: str
-):
-    return resolve_method_env(
-        output,
-        stage="read_qc",
-        method_name=method_name,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=input_manifest_ref,
-    )
 
 
 def run_method_attempt(state: TopLevelState, lifecycle: ReadQCMethodLifecycle) -> dict:

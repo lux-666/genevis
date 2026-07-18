@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from app.domains.assembly.selection import (
     resolve_read_type,
 )
 from app.control.ledger import Ledger
+from app.entrypoints.run_materializer import materialize_run_layout
 from app.schemas.entry import EntryRequest
 from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
@@ -39,15 +41,10 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
-from app.storage.paths import (
-    SessionPaths,
-    default_data_root,
-    ensure_data_layout,
-    ensure_run_layout,
-    locate_session_data_dir,
-)
+from app.storage.paths import SessionPaths, default_data_root, locate_session_data_dir
 
 if TYPE_CHECKING:
+    from app.review.base import ResumeReviewRequest
     from app.schemas.ask_plan import AskPlanState
 
 
@@ -129,7 +126,7 @@ def _build_assembly_selection(
         read_type=read_type,
         primary_method=default_primary_method(read_type),
         source="run_config",
-        rationale="run_config provided legacy assembly_route read-type hint",
+        rationale="run_config provided assembly_route read-type hint",
         metadata={"assembly_route": assembly.assembly_route},
     )
 
@@ -450,7 +447,7 @@ def _run_session(args: argparse.Namespace) -> int:
     # directory.  Stage code can therefore keep its existing relative
     # artifact/work layout without spilling files into the shared root.
     paths = SessionPaths(data_dir, request.session_id)
-    _materialize_run_layout(
+    materialize_run_layout(
         paths,
         manifest_path=manifest_path,
         run_config_path=Path(run_config_path) if run_config_path else None,
@@ -503,10 +500,6 @@ def _run_session(args: argparse.Namespace) -> int:
             return 1
         if selection:
             assembly_out["assembly_selection"] = selection.model_dump(mode="json")
-            assembly_out["method_decision"] = {
-                "primary": selection.primary_method,
-                "source": "run_config_explicit",
-            }
         if run_config.assembly.flye_parameters:
             assembly_out["flye_parameters"] = _assembly_parameter_dump(run_config.assembly, "flye")
         if run_config.assembly.nextdenovo_parameters:
@@ -650,20 +643,6 @@ def _run_session(args: argparse.Namespace) -> int:
     return 0
 
 
-def _materialize_run_layout(
-    paths: SessionPaths,
-    *,
-    manifest_path: Path,
-    run_config_path: Path | None,
-) -> None:
-    """Create the per-session storage contract before stage execution starts."""
-    ensure_data_layout(paths.data_root)
-    ensure_run_layout(paths)
-    shutil.copy2(manifest_path, paths.manifest_path)
-    if run_config_path is not None:
-        shutil.copy2(run_config_path, paths.run_config_path)
-
-
 def _interactive_gate_loop(
     graph: Any,
     config: dict,
@@ -775,7 +754,7 @@ def _run_ask(args: argparse.Namespace) -> int:
         save_plan_to_default_path,
         write_ask_run_config,
     )
-    from app.schemas.ask_plan import AskPlanState, load_ask_clarification_response, load_ask_plan
+    from app.schemas.ask_plan import load_ask_clarification_response, load_ask_plan
 
     if getattr(args, "run_config", None):
         return _run_ask_with_explicit_config(args)
@@ -1072,6 +1051,37 @@ def _candidate_dotenv_paths() -> list[Path]:
     return list(dict.fromkeys([cwd / ".env", repo_root / ".env"]))
 
 
+def _snapshot_resume_decision(
+    source: Path,
+    paths: SessionPaths,
+    decision: "ResumeReviewRequest",
+) -> Path:
+    """Return a run-local decision path, snapshotting external input once."""
+    source = source.expanduser().resolve(strict=False)
+    try:
+        source.relative_to(paths.run_dir)
+    except ValueError:
+        source_bytes = source.read_bytes()
+        token = str(
+            getattr(decision, "review_request_id", None)
+            or getattr(decision, "review_request_hash", None)
+            or "decision"
+        )
+        token = re.sub(r"[^A-Za-z0-9_.-]+", "_", token).strip("_") or "decision"
+        digest = hashlib.sha256(source_bytes).hexdigest()[:16]
+        destination = paths.control_dir / "resume_decisions" / f"{token}.{digest}.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if destination.read_bytes() != source_bytes:
+                raise ValueError(
+                    f"run-local resume decision already exists with different content: {destination}"
+                )
+        else:
+            shutil.copy2(source, destination)
+        return destination
+    return source
+
+
 def _run_resume(args: argparse.Namespace) -> int:
     from app.control.lifecycle import (
         DurableResumeUnavailableError,
@@ -1152,11 +1162,20 @@ def _run_resume(args: argparse.Namespace) -> int:
     state = snapshot.values
 
     ledger = Ledger(data_dir)
+    try:
+        paths = SessionPaths.from_run_dir(data_dir)
+        decision_path = _snapshot_resume_decision(
+            Path(args.decision_file), paths, decision
+        )
+        decision_ref = paths.to_ref(decision_path)
+    except (OSError, ValueError) as exc:
+        print(f"error: resume decision could not be materialized: {exc}", file=sys.stderr)
+        return 1
     resume_event_payload = {
         "source": "cli",
         "checkpointer": backend,
         "data_dir": str(data_dir),
-        "decision_file_ref": str(args.decision_file),
+        "decision_file_ref": decision_ref,
         "max_blocked_seconds": getattr(args, "max_blocked_seconds", None),
         "decision": {
             "stage": decision.stage,

@@ -6,8 +6,7 @@ import os
 import shlex
 import subprocess
 
-from app.execution.results import CollectResult, ExecutionResult
-from app.schemas.artifacts import ArtifactMeta
+from app.execution.results import ExecutionResult
 from app.schemas.descriptors import FrozenAttemptSpec
 
 
@@ -17,8 +16,8 @@ class LocalRunner:
     When the frozen attempt declares `conda_env` or `conda_prefix`, the command
     is dispatched through `conda run` so the method sees the configured
     environment's tools regardless of the outer shell. When neither is set the
-    runner keeps the legacy PATH-driven shell path used by existing stage
-    scripts and fake-binary tests.
+    runner keeps the PATH-driven shell path used by stage scripts and
+    fake-binary tests.
     """
 
     def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
@@ -76,23 +75,3 @@ class LocalRunner:
             output_paths=spec.expected_outputs,
             status="ok" if success else "failed",
         )
-
-    def collect(self, result: ExecutionResult, spec: FrozenAttemptSpec) -> CollectResult:
-        if not result.success:
-            raise RuntimeError(f"attempt {spec.attempt_id} failed with code {result.return_code}")
-
-        artifacts: list[ArtifactMeta] = []
-        for path in spec.expected_outputs:
-            if not path.exists():
-                raise FileNotFoundError(f"expected output missing: {path}")
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
-                    stage=spec.stage,
-                    method_name=spec.method_name,
-                    artifact_type=f"{spec.stage}.output",
-                    metadata={"attempt_id": spec.attempt_id},
-                )
-            )
-
-        return CollectResult(attempt_id=spec.attempt_id, artifacts=artifacts)

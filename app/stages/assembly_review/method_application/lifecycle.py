@@ -17,7 +17,6 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 
 from app.execution.artifacts import append_artifact_records
-from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import load_frozen_attempt, persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
@@ -28,7 +27,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.storage.publish import publish_file
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
@@ -68,21 +67,6 @@ def update_review_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly_review"] = {**review_output(state), **payload}
     return {"stage_outputs": outputs}
-
-
-def absolute_review_data_dir(state: TopLevelState) -> Path:
-    return absolute_data_dir(state)
-
-
-def resolve_review_method_env(output: dict[str, Any], method_name: str, *, session_id: str, data_dir: Path, input_manifest_ref: str):
-    return resolve_method_env(
-        output,
-        stage="assembly_review",
-        method_name=method_name,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=input_manifest_ref,
-    )
 
 
 def review_methods_error(methods: list[str]) -> str | None:

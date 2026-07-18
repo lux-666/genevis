@@ -1,7 +1,7 @@
 """Execution result data models.
 
-Direct outcomes of running and collecting a frozen attempt, shared by the
-local runner and the method-runner helpers.
+Direct outcomes of running a frozen attempt, shared by the local runner and
+the method-runner helpers.
 """
 
 from __future__ import annotations
@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
-
-from app.schemas.artifacts import ArtifactMeta
 
 
 ExecutionStatus = Literal["ok", "failed", "blocked_env", "missing_tool"]
@@ -33,10 +31,3 @@ class ExecutionResult(BaseModel):
     output_paths: list[Path] = Field(default_factory=list)
     status: ExecutionStatus = "ok"
     status_detail: str = ""
-
-
-class CollectResult(BaseModel):
-    """Collected artifacts after a successful attempt."""
-
-    attempt_id: str
-    artifacts: list[ArtifactMeta]

@@ -19,7 +19,6 @@ from typing import Any, Protocol
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import register_artifact_records
-from app.execution.env_dispatch import attach_conda_fields
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
 from app.execution.results import ExecutionResult
@@ -61,7 +60,12 @@ def build_frozen_attempt(
         "env": {str(k): str(v) for k, v in (env or {}).items()},
         "metadata": metadata or {},
     }
-    attach_conda_fields(env_spec, attempt_kwargs)
+    if env_spec is not None:
+        attempt_kwargs.update(
+            conda_bin=env_spec.conda_bin,
+            conda_env=env_spec.conda_env,
+            conda_prefix=env_spec.conda_prefix,
+        )
     return FrozenAttemptSpec(**attempt_kwargs)
 
 

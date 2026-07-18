@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.control.ledger import Ledger
 from app.execution.artifacts import append_artifact_records
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
     load_frozen_attempt,
@@ -29,7 +30,6 @@ from app.stages.read_qc.method_application.lifecycle import (
     parse_seqkit_summary,
     read_paths_from_output,
     read_qc_output,
-    resolve_read_qc_method_env,
     update_read_qc_output,
 )
 
@@ -52,8 +52,8 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
         return {}
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    env_spec, _packages, blocked = resolve_read_qc_method_env(
-        output, METHOD_NAME, session_id=session_id, data_dir=data_dir,
+    env_spec, _packages, blocked = resolve_method_env(
+        output, stage="read_qc", method_name=METHOD_NAME, session_id=session_id, data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:

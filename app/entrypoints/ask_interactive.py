@@ -6,6 +6,7 @@ import argparse
 import logging
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -1706,34 +1707,44 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
     Returns False if validation passed.
     """
     try:
-        # Load manifest and run inventory to get asset registry
+        # Load the manifest and run inventory in a disposable session layout.
         from app.stages.inventory.nodes import register_assets, validate_inputs
+        from app.entrypoints.run_materializer import materialize_run_layout
         from app.schemas.state import initial_state
         from app.stages.preflight import validate_execution_plan
+        from app.storage.paths import SessionPaths
 
         manifest_path = Path(plan.manifest_ref)
         if not manifest_path.exists():
             print(f"\nPreflight validation could not run: manifest not found: {manifest_path}", file=sys.stderr)
             return True
 
-        # Create initial state and run inventory to get asset_registry_ref
-        state = initial_state(
-            session_id=plan.session_id,
-            input_manifest_ref=plan.manifest_ref,
-            data_dir=plan.data_dir,
-        )
+        with tempfile.TemporaryDirectory(prefix="gene-agent-preflight-") as temp_root:
+            paths = SessionPaths(temp_root, plan.session_id)
+            materialize_run_layout(
+                paths,
+                manifest_path=manifest_path,
+                run_config_path=None,
+            )
 
-        # Run the inventory nodes needed to populate asset_registry_ref.
-        for inventory_step in (validate_inputs, register_assets):
-            update = inventory_step(state)
-            if update:
-                state = {**state, **update}
+            # Create initial state and run inventory to get asset_registry_ref.
+            state = initial_state(
+                session_id=plan.session_id,
+                input_manifest_ref=paths.to_ref(paths.manifest_path),
+                data_dir=str(paths.run_dir),
+            )
 
-        # Now validate with the populated state
-        validation = validate_execution_plan(
-            state=state,
-            requested_stages=plan.selected_stages or [],
-        )
+            # Run the inventory nodes needed to populate asset_registry_ref.
+            for inventory_step in (validate_inputs, register_assets):
+                update = inventory_step(state)
+                if update:
+                    state = {**state, **update}
+
+            # Now validate with the populated state.
+            validation = validate_execution_plan(
+                state=state,
+                requested_stages=plan.selected_stages or [],
+            )
 
         if not validation.valid:
             _render_validation_errors(validation)

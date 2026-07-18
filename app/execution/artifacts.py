@@ -342,9 +342,9 @@ def artifact_ref_for_path(
     """Return and verify the canonical indexed ref for one durable path."""
 
     paths = _session_paths(data_dir, session_id, require_layout=True)
+    path_ref = paths.to_ref(path)
     ref = _indexed_artifact_ref_for_path(paths, session_id, path)
     if ref is None:
-        path_ref = paths.to_ref(path)
         raise DataLayoutError(f"artifact path is not present in the index: {path_ref}")
     if expected_type is not None and ref.artifact_type != expected_type:
         raise DataLayoutError(

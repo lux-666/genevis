@@ -12,6 +12,7 @@ from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
 from app.stages.assembly.constants import HIFIASM_ONT_METHOD, HIFIASM_ONT_READ_TYPE_FLAGS
+from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
     blocked_parameters,
@@ -54,9 +55,20 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     params, blocked = _parameters(output)
     if blocked:
         return update_stage_output(state, "assembly", blocked)
-    read_paths, error = _read_paths(output.get("input_ref"), output.get("input_type"))
-    if error:
-        return fail_update(state, error)
+    try:
+        read_paths = resolve_assembly_read_paths(output.get("input_ref"), output.get("input_type"))
+    except AssemblyInputError as exc:
+        return fail_update(state, f"Hifiasm ONT local execution {exc}")
+    non_fastq = [
+        str(path)
+        for path in read_paths
+        if not str(path).endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz"))
+    ]
+    if non_fastq:
+        return fail_update(
+            state,
+            f"Hifiasm ONT mode requires FASTQ format (not FASTA). Non-FASTQ files: {non_fastq}",
+        )
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, env_blocked = resolve_method_env(
@@ -193,32 +205,6 @@ def collect_hifiasm_ont_artifacts(state: TopLevelState) -> dict:
             "threads": metadata.get("threads"),
         },
     )
-
-
-def _read_paths(input_ref: Any, input_type: Any) -> tuple[list[Path], str | None]:
-    if not input_ref:
-        return [], "Hifiasm ONT local execution requires assembly input_ref"
-    if input_type == "long_reads.fofn":
-        fofn = Path(str(input_ref))
-        if not fofn.exists():
-            return [], f"Hifiasm ONT local execution FOFN not found: {fofn}"
-        paths = [Path(line.strip()) for line in fofn.read_text(encoding="utf-8").splitlines() if line.strip()]
-    elif input_type == "clean_long_reads":
-        paths = [Path(str(input_ref))]
-    else:
-        return [], f"Hifiasm ONT local execution does not support input_type: {input_type}"
-    if not paths:
-        return [], "Hifiasm ONT local execution requires at least one read path"
-    missing = [str(path) for path in paths if not path.exists()]
-    if missing:
-        return [], f"Hifiasm ONT local execution read paths not found: {missing}"
-
-    # Validate FASTQ format requirement for ONT mode
-    non_fastq = [str(path) for path in paths if not (str(path).endswith(('.fastq', '.fq', '.fastq.gz', '.fq.gz')))]
-    if non_fastq:
-        return [], f"Hifiasm ONT mode requires FASTQ format (not FASTA). Non-FASTQ files: {non_fastq}"
-
-    return paths, None
 
 
 def _parameters(output: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
