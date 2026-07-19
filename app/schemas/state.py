@@ -24,6 +24,7 @@ from typing import (
 )
 
 from app.schemas.limits import STAGE_CURSOR_MAX_BYTES, STAGE_OUTPUTS_MAX_BYTES
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.shared_parameters import SharedParameters
 
 DomainStage = Literal[
@@ -203,6 +204,10 @@ class TopLevelState(TypedDict, total=False):
     # Per-stage compact outputs. Large outputs must be represented by refs.
     stage_outputs: Required[Annotated[StageOutputs, replace_stage_outputs]]
 
+    # Central resource reference table for cross-stage resource handoff.
+    # Maps logical resource names to their current locations and metadata.
+    resource_refs: NotRequired[dict[str, dict[str, Any]]]
+
     # Stage skip reasons keyed by stage name.
     skip_reasons: Required[dict[DomainStage, str]]
 
@@ -232,5 +237,6 @@ def initial_state(
         review_notes=[],
         route_trace=[],
         stage_outputs=validate_stage_outputs({}),
+        resource_refs={},
         skip_reasons={},
     )
