@@ -6,8 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from app.config import default_data_root
 from app.schemas.manifest import Platform
-from app.storage.paths import default_data_root
 from app.schemas.run_config import RequestableStage
 
 EntryAssetTypeHint = Literal[

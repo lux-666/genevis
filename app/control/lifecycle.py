@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
     apply_review_gate_decision,

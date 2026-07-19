@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import (
+from app.storage.ledger import (
     LEDGER_SCHEMA_VERSION,
     SUMMARY_MAX_BYTES,
     Ledger,

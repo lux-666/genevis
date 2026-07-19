@@ -22,10 +22,11 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.execution.env_dispatch import resolve_method_env
+from app.workflow import is_terminal_failure
 from app.execution.evidence import (
     load_execution_evidence,
     load_frozen_attempt,
@@ -62,7 +63,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import TopLevelState
-from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
+from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.stages.assembly_review.method_application.lifecycle import (
     read_eval_bundle as _read_eval_bundle,
 )
@@ -77,7 +78,6 @@ from app.stages.assembly_review.notebook import (
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
-    is_fail_status,
     resolve_run_ref,
     session_paths,
     stage_artifacts_dir,
@@ -323,7 +323,7 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
     """Build non-blocking local NCBI evidence for the review report and LLM."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = dict(stage_outputs.get("assembly_review") or {})
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return {}
 
     species_name = _target_species_name(state)
@@ -384,7 +384,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     """Build statistics pack and comparative notebook for assembly review."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = dict(stage_outputs.get("assembly_review") or {})
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return {}
 
     species_name = _target_species_name(state)
@@ -421,7 +421,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
                     artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
                     metadata={"session_id": session_id},
                 )
-                append_artifact_records(data_dir, session_id, [notebook_artifact])
+                publish_artifact_records(data_dir, session_id, [notebook_artifact])
 
                 figure_artifacts = [
                     ArtifactMeta.from_file(
@@ -434,7 +434,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
                     for logical_name, abs_path in comparative_figures.items()
                 ]
                 if figure_artifacts:
-                    append_artifact_records(data_dir, session_id, figure_artifacts)
+                    publish_artifact_records(data_dir, session_id, figure_artifacts)
 
                 return {}
 
@@ -465,7 +465,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
             )
         )
     if figure_artifacts:
-        append_artifact_records(data_dir, session_id, figure_artifacts)
+        publish_artifact_records(data_dir, session_id, figure_artifacts)
 
     out_dir = stage_artifacts_dir(state, "assembly_review")
     statistics_pack_relpath = "related_species_statistics_pack.json"
@@ -491,7 +491,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
         metadata={"session_id": session_id, "figure_count": len(figure_paths)},
     )
-    append_artifact_records(data_dir, session_id, [notebook_artifact])
+    publish_artifact_records(data_dir, session_id, [notebook_artifact])
 
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = {
@@ -707,7 +707,7 @@ def human_review_gate(state: TopLevelState) -> dict:
 
 def commit_assembly_review(state: TopLevelState) -> dict:
     """Commit the assembly review decision and advance routing."""
-    from app.graph.routing import next_stage_name, skipped_stages_until_next
+    from app.workflow import next_stage_name, skipped_stages_until_next
 
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
@@ -1029,7 +1029,8 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
 
 def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
     """Execute a Flye rerun with adjusted parameters and re-enter assembly_review."""
-    from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
+    from app.domains.assembly.constants import FLYE_METHOD
+    from app.stages.assembly.method_application.flye import FLYE_READ_TYPE_FLAGS
 
     stage_outputs = dict(state.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get("assembly_review") or {})
@@ -1263,7 +1264,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id, "rerun_index": rerun_index},
         )
     ]
-    append_artifact_records(data_dir, session_id, artifacts)
+    publish_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [a.model_dump(mode="json") for a in artifacts]
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
     for a in artifact_payloads:
@@ -1307,7 +1308,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
         metadata={"candidate_id": candidate_id, "execution_enabled": True, "rerun_index": rerun_index},
     )
-    append_artifact_records(data_dir, session_id, [bundle_artifact])
+    publish_artifact_records(data_dir, session_id, [bundle_artifact])
     ledger.record_artifact_registered(session_id, bundle_artifact.model_dump(mode="json"), attempt_id=attempt.attempt_id)
 
     bundle_ref = str(bundle_path)

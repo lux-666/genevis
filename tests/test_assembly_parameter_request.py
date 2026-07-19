@@ -16,6 +16,7 @@ from app.llm.parameters.assembly.request import (
 )
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
+from app.stages.assembly.parameters.profile import build_prompt_profile
 
 
 def _full_profile(*, previous_attempt: dict | None = None) -> dict:
@@ -53,12 +54,12 @@ def _initial_request() -> tuple[dict, dict]:
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=profile,
+        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
     )
     request = build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=profile,
+        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
         task="recommend_initial",
         basis_snapshot=basis,
     )
@@ -144,7 +145,7 @@ def test_retry_reuses_basis_and_exposes_previous_recommendation_as_context_only(
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=initial_profile,
+        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
     )
     previous = {
         "attempt_id": 0,
@@ -158,7 +159,10 @@ def test_retry_reuses_basis_and_exposes_previous_recommendation_as_context_only(
     retry = build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=retry_profile,
+        prompt_profile=build_prompt_profile(
+            retry_profile,
+            "retry_after_execution_failure",
+        ),
         task="retry_after_execution_failure",
         basis_snapshot=basis,
     )
@@ -166,7 +170,7 @@ def test_retry_reuses_basis_and_exposes_previous_recommendation_as_context_only(
     assert retry["literature_cases"] == build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=initial_profile,
+        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
         task="recommend_initial",
         basis_snapshot=basis,
     )["literature_cases"]
@@ -185,7 +189,7 @@ def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=initial_profile,
+        prompt_profile=build_prompt_profile(initial_profile, "recommend_initial"),
     )
     retry_profile = _full_profile(
         previous_attempt={
@@ -203,7 +207,10 @@ def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
     request = build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=retry_profile,
+        prompt_profile=build_prompt_profile(
+            retry_profile,
+            "retry_after_execution_failure",
+        ),
         task="retry_after_execution_failure",
         basis_snapshot=basis,
     )
@@ -222,12 +229,12 @@ def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators(
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=profile,
+        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
     )
     request = build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=profile,
+        prompt_profile=build_prompt_profile(profile, "recommend_initial"),
         task="recommend_initial",
         basis_snapshot=basis,
     )
@@ -246,12 +253,12 @@ def test_methods_without_guidance_or_cases_produce_serializable_dtos() -> None:
         basis = build_parameter_basis_snapshot(
             method_id=method_id,
             catalog=catalog,
-            full_profile=profile,
+            prompt_profile=build_prompt_profile(profile, "recommend_initial"),
         )
         request = build_parameter_request_dto(
             method_id=method_id,
             catalog=catalog,
-            full_profile=profile,
+            prompt_profile=build_prompt_profile(profile, "recommend_initial"),
             task="recommend_initial",
             basis_snapshot=basis,
         )

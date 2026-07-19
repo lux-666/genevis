@@ -141,7 +141,7 @@ def resolve_current_assembly(
                 return str(stage_out["final_assembly_for_downstream"]), stage
     
     # Check all stages in reverse STAGE_ORDER
-    from app.stages import STAGE_ORDER
+    from app.workflow import STAGE_ORDER
     for stage in reversed(STAGE_ORDER):
         stage_out = outputs.get(stage) or {}
         if stage_out.get("final_assembly_for_downstream"):

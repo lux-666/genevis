@@ -12,7 +12,7 @@ from typing import Any, TextIO
 from uuid import NAMESPACE_URL, uuid5
 
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
-from app.storage.integrity import sha256_file
+from app.integrity import sha256_file
 from app.storage.paths import (
     DataLayoutError,
     SessionPaths,
@@ -80,17 +80,12 @@ def read_artifact_records(
     return records
 
 
-def append_artifact_records(
+def publish_artifact_records(
     data_dir: Path | str,
     session_id: str,
     artifacts: list[ArtifactMeta],
 ) -> list[ArtifactRef]:
-    """Compatibility facade that publishes then registers artifact metadata.
-
-    New code that needs the durable post-move path should call
-    :func:`publish_artifact_record`.  The strict index boundary is
-    :func:`register_artifact_records`, which never moves files.
-    """
+    """Publish and register a batch of artifact metadata records."""
 
     paths = _session_paths(data_dir, session_id)
     ensure_run_layout(paths)

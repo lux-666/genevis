@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request

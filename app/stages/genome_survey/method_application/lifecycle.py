@@ -7,8 +7,8 @@ from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.execution.evidence import (
     load_execution_evidence,
     load_frozen_attempt,
@@ -152,7 +152,7 @@ def record_attempt_success(
 ) -> None:
     """Register method artifacts and append successful-attempt ledger events."""
     data_dir = Path(state.get("data_dir", "data"))
-    append_artifact_records(data_dir, attempt.session_id, artifacts)
+    publish_artifact_records(data_dir, attempt.session_id, artifacts)
     ledger = Ledger(data_dir)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)

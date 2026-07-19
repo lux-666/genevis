@@ -62,13 +62,16 @@ metrics.
 
 ```text
 app/
+  workflow.py  canonical stage order, navigation, and failure-boundary vocabulary
+  domains/     stage-neutral biological rules and shared input contracts
   graph/       parent graph, route controller, checkpoint factory
   stages/      domain subgraphs and method-family routes
   llm/         stage-specific request DTOs, prompt rendering, model adapters
   schemas/     state, asset, plan, descriptor, artifact contracts
   execution/   local subprocess runner + shared freeze/run helpers (no in-agent remote execution)
+  storage/     run layout, ledger, artifact publication/index, durable evidence
   review/      rule checks and interrupt-backed human gates
-  control/     ledger and lifecycle commands
+  control/     lifecycle commands
   reports/     JSONL trace and user/developer reports
 ```
 
@@ -77,12 +80,15 @@ Module ownership:
 | Module | Owns | Must Not Own |
 |---|---|---|
 | `graph/` | Parent LangGraph wiring, routing, checkpoint factory | Tool execution, biological method choice |
+| `workflow.py` | Canonical stage order, navigation, and terminal-failure routing vocabulary | Stage implementation or persistence |
+| `domains/` | Stage-neutral biological decisions and shared input parsing | Workflow side effects |
 | `stages/` | Stage subgraphs, method selection/routing, parameter profiles and immutable recommendation bases | Provider prompt rendering or package-level script generation internals |
 | `llm/parameters/<stage>/` | Stage-specific strict request DTOs, deterministic message rendering, model invocation, and response-shape parsing | Full audit profiles, persistence, biological/catalog validation, approval, or execution |
 | `schemas/` | Cross-module contracts | Side effects |
 | `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), and publishing process logs/evidence | Collecting stage-owned biological outputs or in-agent remote orchestration |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
-| `control/` | Ledger and lifecycle semantics | Starting tools or reading huge data files |
+| `storage/` | Run layout, immutable artifact publication/index, parameter evidence, and Ledger persistence | Biological method choice |
+| `control/` | Lifecycle semantics | Durable storage implementation, starting tools, or reading huge data files |
 | `reports/` | Trace and notebook/report rendering | Workflow control decisions |
 
 ## Server Execution

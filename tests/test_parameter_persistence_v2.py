@@ -9,15 +9,15 @@ from unittest.mock import patch
 import pytest
 
 from app.control.lifecycle import resume_review_state
-from app.execution.artifacts import read_artifact_records
+from app.storage.artifacts import read_artifact_records
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
-    file_sha256,
 )
+from app.integrity import sha256_file
 from app.schemas.state import initial_state
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.storage import (
@@ -396,7 +396,7 @@ def test_parameter_read_requires_exact_index_membership(tmp_path: Path) -> None:
     unindexed_ref = ArtifactRef(
         artifact_id="art_" + "f" * 32,
         path_ref=paths.to_ref(unindexed_path),
-        sha256=file_sha256(unindexed_path),
+        sha256=sha256_file(unindexed_path),
         size_bytes=unindexed_path.stat().st_size,
         artifact_type="assembly.parameter.test",
     )

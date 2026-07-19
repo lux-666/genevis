@@ -2,26 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from app.domains.assembly.selection import resolve_parameter_case_read_type
+from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_output
 
-ParameterPromptTask = Literal[
-    "recommend_initial",
-    "retry_after_execution_failure",
-    "retry_after_review_failure",
-]
-
-PROFILE_SECTIONS = (
-    "sample",
-    "assets",
-    "read_qc",
-    "genome_survey",
-    "previous_attempt",
-    "assembly_review",
-)
 
 INITIAL_SAMPLE_FIELDS = (
     "organism",
@@ -69,7 +56,6 @@ QUALITY_REVIEW_FIELDS = (
     "quast_metrics",
 )
 
-
 def build_full_parameter_profile(
     state: TopLevelState,
     *,
@@ -95,14 +81,11 @@ def build_full_parameter_profile(
     }
 
 
-def build_prompt_profile(full_profile: dict[str, Any], task: ParameterPromptTask) -> dict[str, Any]:
-    """Return explicitly allowed task facts for the Assembly request builder.
-
-    The full profile remains the audit owner.  This selection deliberately
-    excludes attempt identity, command/file locators, log refs, and evidence
-    bookkeeping so the LLM layer never receives a rich audit envelope that it
-    must clean up later.
-    """
+def build_prompt_profile(
+    full_profile: dict[str, Any],
+    task: ParameterAttemptTask,
+) -> dict[str, Any]:
+    """Return explicitly allowed task facts for the Assembly request builder."""
 
     if task == "recommend_initial":
         return {
@@ -113,15 +96,27 @@ def build_prompt_profile(full_profile: dict[str, Any], task: ParameterPromptTask
         }
     if task == "retry_after_execution_failure":
         return {
-            "sample": _pick(full_profile.get("sample") or {}, ("organism", "clade", "target_level")),
+            "sample": _pick(
+                full_profile.get("sample") or {},
+                ("organism", "clade", "target_level"),
+            ),
             "assets": _pick(full_profile.get("assets") or {}, PROMPT_ASSET_FIELDS),
-            "previous_attempt": _pick(full_profile.get("previous_attempt") or {}, EXECUTION_REPAIR_FIELDS),
+            "previous_attempt": _pick(
+                full_profile.get("previous_attempt") or {},
+                EXECUTION_REPAIR_FIELDS,
+            ),
         }
     if task == "retry_after_review_failure":
         return {
             "sample": _pick(full_profile.get("sample") or {}, INITIAL_SAMPLE_FIELDS),
-            "previous_attempt": _pick(full_profile.get("previous_attempt") or {}, QUALITY_REPLAN_PREVIOUS_FIELDS),
-            "assembly_review": _pick(full_profile.get("assembly_review") or {}, QUALITY_REVIEW_FIELDS),
+            "previous_attempt": _pick(
+                full_profile.get("previous_attempt") or {},
+                QUALITY_REPLAN_PREVIOUS_FIELDS,
+            ),
+            "assembly_review": _pick(
+                full_profile.get("assembly_review") or {},
+                QUALITY_REVIEW_FIELDS,
+            ),
         }
     raise ValueError(f"Unknown parameter prompt task: {task}")
 
@@ -326,12 +321,12 @@ def _assembly_review_profile(assembly_review: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _pick(values: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
-    return _drop_empty({key: values.get(key) for key in keys})
-
-
 def _drop_empty(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _pick(values: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return _drop_empty({key: values.get(key) for key in keys})
 
 
 def _first_value(*values: Any) -> Any:

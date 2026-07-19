@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.entrypoints.ask_interactive import _UserAbort, _prompt_confirm, _prompt_for_answer, _render_plan_summary
 from app.entrypoints.ask_planner import (
     _auto_fill_inferred_defaults,
@@ -23,11 +23,11 @@ from app.entrypoints.ask_planner import (
     build_run_config_payload,
     merge_clarification_response,
 )
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
 from app.schemas.state import TopLevelState
-from app.stages import STAGE_ORDER
+from app.workflow import STAGE_ORDER
 from app.stages.base import resolve_run_ref
 from app.storage.paths import SessionPaths
 
@@ -242,7 +242,7 @@ def persist_annotation_intake_plan(
             "decision": request.decision,
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
 
     stage_outputs = dict(update.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get(ASSEMBLY_REVIEW_STAGE) or {})

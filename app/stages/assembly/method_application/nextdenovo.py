@@ -6,6 +6,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.parameter_attempts import (
     current_parameter_attempt,
@@ -14,8 +15,7 @@ from app.execution.parameter_attempts import (
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
-from app.stages.assembly.constants import NEXTDENOVO_METHOD
-from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
+from app.domains.assembly.constants import NEXTDENOVO_METHOD
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
     blocked_parameters,

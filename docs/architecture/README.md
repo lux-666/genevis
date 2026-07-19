@@ -20,6 +20,7 @@ Design acceptance and implementation conformance are separate facts.
 | [`parameter-recommenders.md`](parameter-recommenders.md) | Accepted | Assembly and AutoHiC implemented | Model-boundary DTOs, exact request/response flow, parsing, approval, and recommender responsibilities |
 | [`autohic-stage.md`](autohic-stage.md) | Accepted | Core implemented; Data v2 gaps tracked by Data v2 | Parent/Hi-C boundary, AutoHiC-only execution, and restriction-enzyme recommendation |
 | [`bootstrap.md`](bootstrap.md) | Accepted | Implemented | Minimal initialization of `.env` and `config/envs.yaml` |
+| [`refactor-repair-manual.md`](refactor-repair-manual.md) | In Progress | Not Started | Architecture convergence: execution authorization, method selection, resource handoff, and authority boundaries |
 
 ## Ownership Boundaries
 

@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.execution.evidence import load_frozen_attempt, persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
@@ -189,7 +189,7 @@ def write_json_artifact(state: TopLevelState, filename: str, payload: dict[str, 
     finally:
         temporary.unlink(missing_ok=True)
     artifact = ArtifactMeta.from_file(path, stage="assembly_review", method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD, artifact_type=artifact_type)
-    append_artifact_records(data_dir, state["session_id"], [artifact])
+    publish_artifact_records(data_dir, state["session_id"], [artifact])
     return str(path)
 
 

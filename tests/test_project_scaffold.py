@@ -24,7 +24,7 @@ class ProjectScaffoldTests(unittest.TestCase):
         self.assertEqual(violations, [], "stage code must use SessionPaths/stage path helpers")
 
     def test_domain_stage_order_matches_long_read_pipeline(self):
-        from app.stages import STAGE_ORDER
+        from app.workflow import STAGE_ORDER
 
         self.assertEqual(
             STAGE_ORDER,

@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.execution.artifacts import register_artifact_records
-from app.execution.results import ExecutionResult
+from app.storage.artifacts import register_artifact_records
+from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import initial_state

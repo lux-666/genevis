@@ -2,7 +2,7 @@
 import unittest
 from pathlib import Path
 from app.schemas.descriptors import DescriptorRegistry
-from app.stages.assembly.constants import ASSEMBLY_CANDIDATES
+from app.domains.assembly.constants import ASSEMBLY_CANDIDATES
 from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
 from app.stages.function_annotation.nodes import FUNCTION_EXECUTABLE_METHODS
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS

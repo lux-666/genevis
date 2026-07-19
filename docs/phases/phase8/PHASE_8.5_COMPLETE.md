@@ -44,7 +44,8 @@ resolve_stage_resource(
 3. reverse `STAGE_ORDER` 中的所有 stage outputs。
 4. Asset registry。
 
-`resolve_current_assembly()` 继续保留，用于向后兼容。
+Assembly consumers 直接使用 `resolve_stage_resource()` 和
+`assembly_resource_spec(...)`；旧 wrapper 已删除。
 
 ### Resource Specs Registry
 

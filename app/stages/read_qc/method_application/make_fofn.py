@@ -6,8 +6,8 @@ from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.schemas.artifacts import READ_QC_FILTERED_LONG_READS_FOFN, READ_QC_LONG_READS_FOFN, ArtifactMeta
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_artifacts_dir
@@ -43,7 +43,7 @@ def make_fofn(state: TopLevelState) -> dict:
     fofn_path.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")
     artifact = ArtifactMeta.from_file(fofn_path, stage="read_qc", method_name=MAKE_FOFN_METHOD_NAME, artifact_type=artifact_type,
                                       metadata={"source_read_ref": str(paths[0]), "source_read_refs": [str(path) for path in paths]})
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, state.get("input_manifest_ref", ""))
     ledger.record_artifact_registered(session_id, artifact.model_dump(mode="json"))

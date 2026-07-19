@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.base import is_fail_status
 
 
 _REQUIREMENT_STATUSES = {
@@ -30,7 +30,7 @@ def route_after_resolve(state: TopLevelState) -> str:
     status = _output(state).get("status")
     if status in _REQUIREMENT_STATUSES:
         return "requirements"
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
     return "recommend"
 
@@ -48,7 +48,7 @@ def route_after_autohic(state: TopLevelState) -> str:
     status = _output(state).get("status")
     if status in _REQUIREMENT_STATUSES:
         return "requirements"
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
     return "review"
 

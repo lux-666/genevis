@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.stages.assembly.input_files import (
+from app.domains.read_inputs import (
     AssemblyInputError,
     resolve_assembly_read_paths,
 )
@@ -43,7 +43,7 @@ class AssemblyFofnResolutionTests(unittest.TestCase):
 
             missing = root / "missing.fofn"
             missing.write_text("reads.fastq\n", encoding="utf-8")
-            with self.assertRaisesRegex(AssemblyInputError, "read paths not found"):
+            with self.assertRaisesRegex(AssemblyInputError, "read files not found"):
                 resolve_assembly_read_paths(missing, "long_reads.fofn")
 
     def test_nextdenovo_materializes_resolved_paths_in_attempt_fofn(self):

@@ -8,9 +8,9 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -19,7 +19,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
@@ -226,7 +226,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
             "execution_enabled": execution_enabled,
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
     return _update_repeat_output(
         state,
         {
@@ -409,7 +409,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
                 metadata={"attempt_id": attempt.attempt_id},
             )
         )
-    append_artifact_records(data_dir, session_id, artifacts)
+    publish_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
@@ -494,7 +494,7 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
             "execution_enabled": bool(repeat_out.get("execution_enabled")),
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["repeat_annotation"] = {

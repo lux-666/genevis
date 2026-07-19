@@ -15,7 +15,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.control.lifecycle import resume_review_state
-from app.execution.artifacts import (
+from app.storage.artifacts import (
     publish_artifact_record,
     read_artifact_records,
     resolve_artifact_ref,
@@ -37,8 +37,8 @@ from app.schemas.artifacts import (
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
-    file_sha256,
 )
+from app.integrity import sha256_file
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
@@ -47,7 +47,7 @@ from app.stages.assembly.command_builder import (
     build_parameter_sources,
     format_hifiasm_hg_size,
 )
-from app.stages.assembly.constants import FLYE_READ_TYPE_FLAGS
+from app.stages.assembly.method_application.flye import FLYE_READ_TYPE_FLAGS
 from app.stages.assembly.method_application.hifiasm import freeze_hifiasm_attempt
 from app.stages.assembly.method_application.hifiasm_ont import (
     freeze_hifiasm_ont_attempt,
@@ -1355,7 +1355,7 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             self.assertIn("attempts/000/review.json", review_ref["path_ref"])
             review_path = _ref_path(state, review_ref)
             self.assertTrue(review_path.exists())
-            self.assertEqual(review_ref["sha256"], file_sha256(review_path))
+            self.assertEqual(review_ref["sha256"], sha256_file(review_path))
             review = read_json_artifact(state, review_ref)
             self.assertEqual(review["diagnosis"]["failure_mode"], "under_purged")
             self.assertNotIn("review_failure", assembly["parameter_attempts"][0])
@@ -1650,7 +1650,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
             self.assertIn("attempts/000/command.json", command_ref["path_ref"])
             command_path = _ref_path(state, command_ref)
             self.assertTrue(command_path.exists())
-            self.assertEqual(command_ref["sha256"], file_sha256(command_path))
+            self.assertEqual(command_ref["sha256"], sha256_file(command_path))
             command_payload = json.loads(command_path.read_text(encoding="utf-8"))
             self.assertEqual(command_payload["method_id"], "assembly.candidate.hifiasm_ont")
             self.assertIn("--ont", command_payload["argv"])

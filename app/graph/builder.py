@@ -11,7 +11,12 @@ from app.graph.checkpointer import (
 )
 from app.graph.routing import route_controller, route_from_current_stage
 from app.schemas.state import TopLevelState
-from app.stages import STAGE_ORDER, TERMINAL_STAGE
+from app.workflow import (
+    STAGE_ORDER,
+    TERMINAL_STAGE,
+    next_requested_stage,
+    unrequested_stages_from_current,
+)
 from app.stages.assembly.builder import build_stage as build_assembly_stage
 from app.stages.assembly_dedup.builder import build_stage as build_assembly_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_assembly_review_stage
@@ -44,7 +49,7 @@ def build_graph(
         runtime_data_dir = state.get("data_dir", data_dir)
         supervision = state.get("supervision_state")
         if session_id:
-            from app.control.ledger import Ledger
+            from app.storage.ledger import Ledger
 
             ledger = Ledger(runtime_data_dir)
             for skipped_stage, reason in (state.get("skip_reasons") or {}).items():
@@ -84,13 +89,11 @@ def build_graph(
                 current = state.get("current_stage", "inventory")
                 requested = state.get("requested_stages")
                 if requested and current not in {"inventory", TERMINAL_STAGE} and current not in requested:
-                    start = STAGE_ORDER.index(current) if current in STAGE_ORDER else len(STAGE_ORDER)
-                    next_requested = next(
-                        (stage for stage in STAGE_ORDER[start + 1 :] if stage in requested),
-                        TERMINAL_STAGE,
-                    )
-                    stop = STAGE_ORDER.index(next_requested) if next_requested in STAGE_ORDER else len(STAGE_ORDER)
-                    for skipped_stage in STAGE_ORDER[start:stop]:
+                    next_requested = next_requested_stage(current, requested)
+                    for skipped_stage in unrequested_stages_from_current(
+                        current,
+                        requested,
+                    ):
                         ledger.record_stage_skipped(
                             session_id,
                             skipped_stage,

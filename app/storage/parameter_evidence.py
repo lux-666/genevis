@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 from uuid import uuid4
 
-from app.execution.artifacts import (
+from app.storage.artifacts import (
     publish_artifact_record,
     recover_published_artifact,
     resolve_artifact_ref,

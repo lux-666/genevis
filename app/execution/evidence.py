@@ -11,12 +11,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.execution.artifacts import (
+from app.storage.artifacts import (
     artifact_ref_for_path,
     publish_artifact_record,
     resolve_artifact_ref,
 )
-from app.execution.results import ExecutionResult, ExecutionStatus
+from app.schemas.execution import ExecutionResult, ExecutionStatus
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout

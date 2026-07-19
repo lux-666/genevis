@@ -7,10 +7,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.domains.genome_size import resolve_explicit_genome_size
-from app.execution.artifacts import append_artifact_records
-from app.graph.routing import next_stage_name
+from app.domains.read_inputs import AssemblyInputError, parse_fofn_paths
+from app.storage.artifacts import publish_artifact_records
+from app.workflow import next_stage_name
 from app.schemas.artifacts import (
     ArtifactMeta,
     GenomeSurveyResult,
@@ -203,34 +204,15 @@ def _read_qc_long_read_paths(read_qc_out: dict[str, Any]) -> tuple[list[Path], s
             continue
         candidate = Path(str(value)).expanduser()
         if candidate.suffix == ".fofn" or candidate.name.endswith(".fofn"):
-            if not candidate.exists():
-                return [], f"read_qc {key} FOFN not found: {candidate}"
-            paths = _paths_from_fofn(candidate)
+            try:
+                paths = parse_fofn_paths(candidate)
+            except AssemblyInputError as exc:
+                return [], f"read_qc {key} {exc}"
             if not paths:
                 return [], f"read_qc {key} FOFN is empty or unreadable: {candidate}"
             return paths, None
         return [candidate], None
     return [], None
-
-
-def _paths_from_fofn(fofn_path: Path) -> list[Path]:
-    if not fofn_path.exists():
-        return []
-    try:
-        lines = fofn_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    base = fofn_path.parent
-    paths: list[Path] = []
-    for line in lines:
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        path = Path(entry).expanduser()
-        if not path.is_absolute():
-            path = (base / path).resolve(strict=False)
-        paths.append(path)
-    return paths
 
 
 def select_survey_mode(state: TopLevelState) -> dict:
@@ -607,7 +589,7 @@ def _record_result(
             "skip_reason": result.skip_reason,
         },
     )
-    append_artifact_records(data_dir, state["session_id"], [artifact])
+    publish_artifact_records(data_dir, state["session_id"], [artifact])
     Ledger(data_dir).record_artifact_registered(state["session_id"], artifact.model_dump(mode="json"))
     artifact_refs = [str(artifact.file_path)]
     if preserve_artifact_refs:

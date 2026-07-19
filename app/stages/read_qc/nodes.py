@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (

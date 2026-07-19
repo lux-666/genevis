@@ -138,7 +138,8 @@ Enhancements belong under:
 app/stages/hic_scaffolding/
 ```
 
-`hic_scaffolding` should expose a final assembly ref that `t2t` can consume. If code already uses `final_assembly_for_annotation`, add an alias only when needed and keep backward compatibility.
+`hic_scaffolding` exposes `final_assembly_for_annotation`; `t2t` consumes it
+through the shared assembly resource spec. Do not add parallel alias keys.
 
 ## Review Gates
 

@@ -6,19 +6,16 @@ patched FASTA。
 
 ## Input and routing
 
-输入 assembly 依次取自 Hi-C 的 `final_assembly_for_downstream`（统一 contract）、
-legacy fallback keys（`final_assembly_for_annotation`、
-`chromosome_scaffolded_assembly_candidate_ref`），以及 assembly review 的 
-`final_assembly_for_downstream`、legacy fallback keys（
-`final_assembly_for_scaffolding_or_annotation`、`final_assembly_ref`）。
+输入 assembly 通过 `assembly_resource_spec(...)` 解析：优先读取 Hi-C 的
+`final_assembly_for_annotation`，其次读取 assembly review 的
+`final_assembly_for_scaffolding_or_annotation` / `final_assembly_ref`。
 
 ONT reads 优先使用 `clean_long_reads`，缺失时回退 `raw_long_reads`。
 没有 Hi-C 或 long reads 不会阻断 annotation：stage 写明 warning/skip reason 后
 交接原 assembly。
 
-**Implementation note (2026-06-28)**: 统一 contract key `final_assembly_for_downstream` 
-已添加到所有 assembly-producing stages。T2T 的 `_assembly_ref()` 优先搜索统一 key，
-然后 fallback 到 legacy keys 以保持向后兼容。
+**Implementation note**: 旧的 `final_assembly_for_downstream` alias 已删除；
+stage-specific canonical keys 的映射集中在 resource spec 中。
 
 所有 assembly 都会路由到 `t2t`。只有 run config 或 CLI 将 `t2t` 放入
 `local_exec` 时才执行 minimap2 以及 auto-patch；否则是可追溯的 candidate-only

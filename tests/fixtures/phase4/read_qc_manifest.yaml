@@ -4,7 +4,7 @@ target_assembly_level: contig
 assets:
   - asset_type: raw_long_reads
     paths:
-      - tests/fixtures/phase4/smoke.fastq
+      - smoke.fastq
     platform: cycloneseq
     layout: single
     format: fastq

@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.execution.evidence import (
     build_execution_evidence,
     persist_frozen_attempt,
@@ -435,7 +435,7 @@ def collect_method_artifacts(
         )
     )
 
-    append_artifact_records(
+    publish_artifact_records(
         state.get("data_dir", "data"), attempt.session_id, artifacts
     )
     ledger = Ledger(state.get("data_dir", "data"))

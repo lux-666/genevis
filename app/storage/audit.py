@@ -18,7 +18,8 @@ from typing import Any, Iterable, Mapping
 import yaml
 from pydantic import BaseModel
 
-from app.storage.integrity import sha256_file
+from app.integrity import sha256_file
+from app.storage.artifacts import read_artifact_records
 from app.storage.paths import DataLayoutError, SessionPaths, validate_data_layout
 
 
@@ -96,11 +97,6 @@ def audit_run_storage(
         largest_checkpoint_fields=largest_checkpoint_fields,
     )
     warnings.extend(checkpoint["warnings"])
-
-    # Imported lazily because artifact publication itself imports storage
-    # primitives; keeping this edge out of module initialization avoids a
-    # package cycle while still using the canonical index reader.
-    from app.execution.artifacts import read_artifact_records
 
     records = read_artifact_records(paths.run_dir, paths.session_id)
     artifact_index = _audit_artifact_index(

@@ -168,7 +168,7 @@ def validate_execution_plan(
     Returns:
         PlanValidation with overall status, per-stage checks, suggestions
     """
-    from app.stages import STAGE_ORDER
+    from app.workflow import STAGE_ORDER
     import copy
 
     # Build a simulated state that accumulates resources from planned stages

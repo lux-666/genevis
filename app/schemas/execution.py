@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+ExecutionFailureStatus = Literal["failed", "blocked_env", "missing_tool"]
 ExecutionStatus = Literal["ok", "failed", "blocked_env", "missing_tool"]
 
 

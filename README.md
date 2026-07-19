@@ -74,12 +74,15 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 
 ```text
 app/
+  workflow.py   canonical stage order, navigation, and terminal failure routing
+  domains/      stage-neutral biological rules and shared input parsing
   graph/        parent LangGraph, route controller, checkpoint factory
   stages/       one subgraph per biological workflow stage
   schemas/      typed contracts for state, assets, plans, descriptors, artifacts
-  execution/    env resolution, frozen attempts, local runner, artifact collection
+  execution/    env resolution, frozen attempts, local runner, process evidence
+  storage/      run layout, artifact publication/index, parameter evidence, ledger
   review/       review gate registry, policies, recommendation/resume helpers
-  control/      durable ledger and lifecycle inspection
+  control/      lifecycle and resume semantics
   reports/      operator reports and run traces
   entrypoints/  CLI, ask flow, TUI, review/resume commands
 

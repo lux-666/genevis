@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
 from app.execution.evidence import validate_execution_evidence
@@ -62,7 +62,10 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.assembly.parameters.profile import build_full_parameter_profile
+from app.stages.assembly.parameters.profile import (
+    build_full_parameter_profile,
+    build_prompt_profile,
+)
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
     load_recommendation_bundle,
@@ -172,18 +175,19 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         previous_attempt=hydrated_previous,
         assembly_review=hydrated_previous.get("review_failure"),
     )
+    prompt_profile = build_prompt_profile(full_profile, task)
     try:
         if task == "recommend_initial":
             basis_snapshot = build_parameter_basis_snapshot(
                 method_id=catalog.method_id,
                 catalog=catalog,
-                full_profile=full_profile,
+                prompt_profile=prompt_profile,
             )
         assert basis_snapshot is not None
         request_dto = build_parameter_request_dto(
             method_id=catalog.method_id,
             catalog=catalog,
-            full_profile=full_profile,
+            prompt_profile=prompt_profile,
             task=task,
             basis_snapshot=basis_snapshot,
         )

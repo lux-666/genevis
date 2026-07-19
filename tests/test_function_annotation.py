@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
 from app.stages.function_annotation.builder import build_stage

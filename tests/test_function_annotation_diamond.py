@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.execution.artifacts import read_artifact_records, resolve_artifact_ref
+from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
 from app.execution.evidence import load_execution_evidence, load_frozen_attempt
 from app.schemas.state import initial_state
 from app.stages.function_annotation.nodes import (

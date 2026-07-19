@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -19,7 +19,8 @@ from app.review.persistence import (
 from app.schemas.artifacts import ArtifactRef, HiCScaffoldDecisionArtifact
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, append_route_trace
+from app.stages.base import absolute_data_dir, append_route_trace, resolve_stage_resource
+from app.stages.resource_specs import assembly_resource_spec
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     hic_output as _hic_output,
 )
@@ -40,12 +41,11 @@ def enter_hic_scaffolding(state: TopLevelState) -> dict:
 def resolve_hic_inputs(state: TopLevelState) -> dict:
     """Resolve and validate everything required before recommending parameters."""
 
-    from app.stages.base import resolve_current_assembly
-
-    final_assembly_ref, source = resolve_current_assembly(
+    assembly = resolve_stage_resource(
         state,
-        prefer_stages=["assembly_review"],
+        resource_spec=assembly_resource_spec("assembly_review"),
     )
+    final_assembly_ref, source = assembly.path, assembly.source
     hic_assets = _hic_assets(state)
     hic_read_refs = [
         str(asset.get("asset_id")) for asset in hic_assets if asset.get("asset_id")
@@ -58,7 +58,6 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
         **existing,
         "pre_hic_assembly_ref": final_assembly_ref,
         "final_assembly_for_annotation": final_assembly_ref,
-        "final_assembly_for_downstream": final_assembly_ref,
         "hic_read_refs": hic_read_refs,
         "hic_read_paths": hic_read_paths,
         "hic_library_metadata": [
@@ -350,7 +349,6 @@ def apply_hic_scaffolding_resume_decision(
         "selected_method_name": AUTOHIC_METHOD,
         "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
         "final_assembly_for_annotation": final_assembly,
-        "final_assembly_for_downstream": final_assembly,
         "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
         "notes": list(request.notes),
         "decided_by": request.decided_by,

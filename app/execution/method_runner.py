@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import register_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import register_artifact_records
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
-from app.execution.results import ExecutionResult
+from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.publish import publish_execution_logs

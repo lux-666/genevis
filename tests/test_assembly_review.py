@@ -1413,7 +1413,7 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def _renew_review_request(self, state: dict, marker: str) -> dict:
         """Model a new human-gate cycle after the prior request was decided."""
-        from app.control.ledger import Ledger
+        from app.storage.ledger import Ledger
 
         current = load_review_request(state["data_dir"], state["active_interrupt"]["request_ref"])
         payload = dict(current["payload"])
@@ -1537,9 +1537,9 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_replay_reuses_existing_completed_bundle_without_side_effects(self):
         """Replaying stale checkpoint state reuses the completed rerun bundle."""
-        from app.control.ledger import Ledger
+        from app.storage.ledger import Ledger
         from app.control.lifecycle import resume_review_state
-        from app.execution.artifacts import read_artifact_records
+        from app.storage.artifacts import read_artifact_records
 
         with tempfile.TemporaryDirectory() as tmpdir:
             success_bin = self._fake_flye_bin(tmpdir, name="bin_success")
@@ -1726,8 +1726,8 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_candidate_comparison_replay_reuses_existing_artifact(self):
         """Comparison generation is idempotent when candidates and signals are unchanged."""
-        from app.control.ledger import Ledger
-        from app.execution.artifacts import read_artifact_records
+        from app.storage.ledger import Ledger
+        from app.storage.artifacts import read_artifact_records
         from app.stages.assembly_review.nodes import generate_candidate_comparison
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1760,7 +1760,7 @@ class AssemblyRerunTests(unittest.TestCase):
             self.assertEqual(Ledger(state["data_dir"]).read_events(state["session_id"]), events_before)
 
     def test_review_report_replay_does_not_duplicate_artifact_records(self):
-        from app.execution.artifacts import read_artifact_records
+        from app.storage.artifacts import read_artifact_records
         from app.stages.assembly_review.nodes import human_review_gate
 
         with tempfile.TemporaryDirectory() as tmpdir:

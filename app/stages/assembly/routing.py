@@ -6,17 +6,20 @@ from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
+from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.assembly.constants import EXTRA_FAIL_STATUSES
-from app.stages.base import is_fail_status, stage_output
+from app.stages.base import stage_output
+
+EXTRA_FAIL_STATUSES = frozenset({"blocked_param"})
 
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving assembly inputs."""
     return (
         "fail"
-        if is_fail_status(
-            stage_output(state, "assembly").get("status"), EXTRA_FAIL_STATUSES
+        if is_terminal_failure(
+            stage_output(state, "assembly").get("status"),
+            extra_statuses=EXTRA_FAIL_STATUSES,
         )
         else "infer_profile"
     )
@@ -37,7 +40,7 @@ def route_after_enter(state: TopLevelState) -> str:
 def route_after_infer_profile(state: TopLevelState) -> str:
     """Route after writing the input profile."""
     status = stage_output(state, "assembly").get("status")
-    if is_fail_status(status, EXTRA_FAIL_STATUSES):
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     return "select_route"
 
@@ -47,14 +50,21 @@ def route_after_select_route(state: TopLevelState) -> str:
     status = stage_output(state, "assembly").get("status")
     if status == "blocked_human":
         return "block"
-    if is_fail_status(status, EXTRA_FAIL_STATUSES):
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     return "build"
 
 
 def route_after_candidate_set(state: TopLevelState) -> str:
     """Route after building candidate compatibility records."""
-    return "fail" if is_fail_status(stage_output(state, "assembly").get("status"), EXTRA_FAIL_STATUSES) else "select"
+    return (
+        "fail"
+        if is_terminal_failure(
+            stage_output(state, "assembly").get("status"),
+            extra_statuses=EXTRA_FAIL_STATUSES,
+        )
+        else "select"
+    )
 
 
 def route_after_select(state: TopLevelState) -> str:
@@ -62,7 +72,7 @@ def route_after_select(state: TopLevelState) -> str:
     status = stage_output(state, "assembly").get("status")
     if status == "blocked_human":
         return "block"
-    if is_fail_status(status, EXTRA_FAIL_STATUSES):
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     return "recommend"
 
@@ -74,7 +84,7 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
         return "block"
     if status in {"parameter_retry_stopped", "parameter_retry_expert_review"}:
         return "fail"
-    if is_fail_status(status, EXTRA_FAIL_STATUSES) or status in {
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES) or status in {
         "parameter_response_invalid",
         "parameter_recommendation_failed",
     }:
@@ -85,7 +95,7 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
 def route_after_plan(state: TopLevelState) -> str:
     """Route after writing planned candidate bundles."""
     status = stage_output(state, "assembly").get("status")
-    if is_fail_status(status, EXTRA_FAIL_STATUSES):
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "fail"
     if status == "flye_execution_planned":
         return "flye"
@@ -102,7 +112,7 @@ def route_after_method_subgraph(state: TopLevelState) -> str:
     """Route after a method-specific assembly subgraph returns."""
     output = stage_output(state, "assembly")
     status = output.get("status")
-    if is_fail_status(status, EXTRA_FAIL_STATUSES):
+    if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES):
         return "retry_gate" if _current_attempt_has_execution_result(output) else "fail"
     return "commit"
 

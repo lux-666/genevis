@@ -15,8 +15,8 @@ from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
 from app.entrypoints.tui import _tui_main, run_tui
@@ -1453,7 +1453,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             ):
                 self.assertTrue(directory.exists(), directory)
             self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
-            self.assertEqual(paths.run_config_path.read_text(encoding="utf-8"), config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                json.loads(paths.run_config_path.read_text(encoding="utf-8")),
+                config_payload,
+            )
 
     def test_run_session_materialization_is_safe_when_sources_are_canonical_destinations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1479,6 +1482,25 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), "session_id: s1\nassets: []\n")
             self.assertEqual(json.loads(paths.run_config_path.read_text(encoding="utf-8")), {"local_exec": ["read_qc"]})
+
+    def test_run_session_reports_malformed_manifest_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: [\n", encoding="utf-8")
+
+            with patch("app.entrypoints.run.build_graph") as build_graph_mock:
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertIn("manifest could not be read", stderr)
+            build_graph_mock.assert_not_called()
 
     def test_run_session_invoke_exception_writes_durable_failed_terminal_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2718,7 +2740,7 @@ class ResumeCLITests(unittest.TestCase):
         # non-interactive but must still record the RECOMMENDED annotation intake
         # plan that the gene_annotation chain requires at entry. It must not call
         # the interactive prompt.
-        from app.execution.artifacts import read_artifact_records
+        from app.storage.artifacts import read_artifact_records
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,

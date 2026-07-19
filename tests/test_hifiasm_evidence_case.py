@@ -31,6 +31,7 @@ from app.knowledge.packs import load_knowledge_pack
 from app.llm.parameters.assembly.request import build_parameter_request_dto
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
+from app.stages.assembly.parameters.profile import build_prompt_profile
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,16 +111,17 @@ def _build_parameter_request(
     knowledge_root: Path,
 ) -> tuple[dict, dict]:
     catalog = load_parameter_catalog("hifiasm")
+    prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
     basis = build_parameter_basis_snapshot(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=full_profile,
+        prompt_profile=prompt_profile,
         knowledge_root=knowledge_root,
     )
     request = build_parameter_request_dto(
         method_id="hifiasm",
         catalog=catalog,
-        full_profile=full_profile,
+        prompt_profile=prompt_profile,
         task="recommend_initial",
         basis_snapshot=basis,
     )

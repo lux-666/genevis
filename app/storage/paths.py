@@ -15,7 +15,6 @@ from typing import Any
 from uuid import uuid4
 
 
-DEFAULT_DATA_ROOT = "data"
 LAYOUT_SCHEMA_VERSION = 2
 _LAYOUT_FILENAME = "layout.json"
 _LEGACY_RUNTIME_DIRS = frozenset(
@@ -25,11 +24,6 @@ _LEGACY_RUNTIME_DIRS = frozenset(
 
 class DataLayoutError(ValueError):
     """Raised when a path is not part of the supported v2 data layout."""
-
-
-def default_data_root() -> str:
-    """Return the configured root for newly created workflow sessions."""
-    return os.environ.get("GENE_AGENT_DATA_ROOT", DEFAULT_DATA_ROOT)
 
 
 def _resolved(path: str | Path) -> Path:

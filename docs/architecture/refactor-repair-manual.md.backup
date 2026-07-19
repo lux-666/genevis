@@ -1,0 +1,493 @@
+# 重构修理手册：收敛执行、选择、资源与运行时权威
+
+## 1. 目的与边界
+
+这次重构的目标不是把现有分支逐个补齐，而是删除重复权威、兼容扫描和测试旁路，让每类事实只有一个所有者。
+
+本轮优先处理共享基础设施，以及 `inventory -> read_qc -> genome_survey -> assembly -> assembly_dedup -> assembly_review -> hic_scaffolding -> t2t` 主线。annotation 相关 stage 暂不做业务行为重构；共享 schema 变更引起的机械性调用调整可以做，但 annotation 的路由、review 和循环依赖另开一轮。
+
+执行时遵守以下原则：
+
+1. 不保留旧字段、旧别名、旧解析顺序或兼容 shim。
+2. 旧配置应明确校验失败，而不是被静默转换。
+3. 先建立唯一权威，再迁移调用点，最后删除旧实现。
+4. 测试验证目标架构，不为旧测试在生产代码中保留旁路。
+5. 工具命令的执行参数必须显式；运行时不能发明默认值。
+6. TUI 可以推荐和填默认值，但写给运行层的必须是完整、明确、可审计的指令。
+
+## 2. 目标口径
+
+### 2.1 执行授权
+
+删除 `local_exec` 概念。
+
+- `requested_stages` 只决定本次工作流经过哪些业务 stage。
+- TUI 或 run config 选中了可执行 method，就表示该 method 应执行。
+- `gene-agent run` 本身就是直接运行的授权；TUI 的最终确认是交互入口的授权。
+- `assembly_dedup` 与其他可执行 stage 使用完全相同的规则，不再是特殊自动执行分支。
+- 如果以后需要只规划不执行，应设计独立的 `plan` 命令或显式运行模式，不能重新引入按 stage 切换的布尔安全阀。
+- `planner_only` method 不得进入可执行 run config；TUI 不应把它列为可运行选项，运行层收到它时直接拒绝。
+
+因此下面这些都应删除：
+
+- `RunConfig.local_exec`
+- `LocalExecStage`
+- CLI `--local-exec`
+- stage output 中的 `execution_mode=local` / `local_execution_not_enabled` 分支
+- `validate_local_assembly_execution` 这类以 `local_exec` 为前提的命名和判断
+- “没有 local_exec 就 plan-only”的测试与文档
+
+### 2.2 Assembly 方法选择
+
+运行层不做 assembly 方法选择。
+
+- TUI 是选择入口，descriptor registry 是 TUI 可选 method 元数据的来源。
+- TUI 必须把最终选择写成唯一、完整的 canonical method ID，例如 `assembly.candidate.hifiasm_ont`。
+- run config 的 assembly block 只携带一个明确 method 及该 method 的完整参数。
+- manifest/read type 可以帮助 TUI 推荐和过滤不兼容选项，但运行时只能校验，不能据此选择或改选 method。
+- runtime 不维护 primary/fallback/recommendation/timeout 等第二套选择状态。
+
+应删除：
+
+- `AssemblySelection`
+- `assembly_selection`
+- `assembly_route`
+- `DEFAULT_PRIMARY_BY_READ_TYPE`
+- runtime 的 `default_primary_method`
+- short-name method alias 和 normalize 后继续运行的兼容行为
+- ask 层和 run 层各自推导默认 assembler 的逻辑
+
+可以保留的只有纯校验能力，例如 canonical read type、method/read-type compatibility；它们不应带默认 method，也不应修改输入。
+
+### 2.3 执行参数默认值
+
+所有会改变工具命令的默认值只属于 TUI/planner 层。
+
+- 唯一默认值来源建议保留在 method descriptor 的 `planner.parameter_defaults`。
+- TUI 读取这些默认值、展示给用户，并把确认后的具体值写入 run config。
+- parameter catalog 只描述类型、范围、枚举、互斥和命令映射，不再保存第二套默认值。
+- Pydantic runtime schema 对执行参数使用必填字段，不设置命令级 default。
+- method adapter/freeze/command builder 收到缺失参数时必须失败，不得 fallback。
+- 来自上游测量的值不是“默认值”。例如 genome survey 的测量结果可以作为有来源的 runtime input，但来源必须明确并进入 parameter evidence。
+
+控制层默认值与工具参数要分开。报告格式、review policy 等不会改变工具 argv 的稳定控制默认值可以保留；threads、read type、cutoff、genome size 等命令输入不能在执行层默认。
+
+### 2.4 Read handoff 与通用资源交接
+
+跨 stage 交接使用中央资源表，不再读取其他 stage 的私有 output key。
+
+目标 state 增加一个小型 `resource_refs` 映射，只存引用和必要元数据。建议的逻辑资源名至少包括：
+
+- `long_reads`
+- `short_reads`
+- `assembly`
+- `masked_assembly`
+- `predicted_proteins`
+- `hic_reads`
+- `genome_size_estimate`
+
+规则如下：
+
+1. `inventory` 把 manifest asset 注册成初始资源。
+2. stage commit 只更新自己声明产出的资源。
+3. 同一条线上的新产物替换同名当前资源。例如 assembly、dedup、review、Hi-C、T2T 依次更新 `resource_refs["assembly"]`。
+4. 下游 stage 只按逻辑资源名读取，不知道上游 stage 的私有字段名。
+5. stage 私有 `stage_outputs` 可以保留执行游标、指标和 evidence ref，但不得作为跨 stage 资源发现协议。
+6. 资源缺失或损坏时失败；不得反向扫描所有 stage 猜测候选。
+
+`long_reads` 的 canonical 表示应是一个或多个具体 read file ref，而不是 FOFN。FOFN 是 NextDenovo、purge_dups 等 method adapter 的输入序列化格式：需要 FOFN 的 adapter 在自己的 work dir 中从 canonical read refs 生成。这样可以删除跨 stage 的 FOFN key 优先级和 suffix 猜测。
+
+现有 `ResourceSpec` / `ResourceResolution` 可以收窄后复用，不需要再创建一套 `ReadInput`、`ReadTypes` 或 prompt profile 模型：
+
+- `ResourceSpec` 只保留逻辑资源名、允许的 manifest asset type、是否必需、是否多值。
+- 删除 `prefer_stages` 和 `output_keys`。
+- `resolve_stage_resource` 只查显式 override、`state.resource_refs`、初始 asset registry 三个已声明位置。
+- 删除动态 `final_<type>_for_downstream`、reverse `STAGE_ORDER` 扫描和 legacy key 扫描。
+- `app/domains/read_inputs.py` 不再承担资源选择。若其中只剩通用 FOFN 解码，可移动到实际需要接受外部 FOFN 的 I/O 边界；如果 canonical handoff 已不接收 FOFN，则直接删除。
+- `read_qc.make_fofn` 不应作为业务 method 参与 stage handoff；需要 FOFN 的工具 adapter 自己物化。
+
+### 2.5 Workflow 与 method registry 的权威边界
+
+这里不应强行做成一个包罗万象的 registry，而应让两种不同事实各有一个权威：
+
+| 事实 | 唯一权威 | 不再拥有它的地方 |
+|---|---|---|
+| stage 名称、顺序、终止节点 | `app/workflow.py` | state、run config、graph 中的手写重复列表 |
+| stage builder 绑定 | `app/graph/builder.py` 的一个 mapping | 第二份 node list、第二份 edge list |
+| method ID、所属 stage、descriptor 路径、planner 元数据 | `descriptors/registry.yaml` + descriptor | Python method 常量表、TUI 手写 method catalog |
+| stage 需要/产出哪些逻辑资源 | `app/stages/resource_specs.py` | preflight 模拟表、各 stage 私有 key 搜索 |
+| 工具环境与 required tools | env config | stage 的 PATH 探测和测试注入 |
+
+具体收敛方式：
+
+- `DomainStage`/`RequestableStage` 从 `app/workflow.py` 导入或用其中的集合校验，不再各自列一遍 Literal。
+- graph builder 迭代 `STAGE_ORDER`，用一个 `STAGE_BUILDERS` mapping 建 node 和 edge；删除手写两轮 stage node 名单。
+- registry loader 校验 mapping key 必须等于 `descriptor.method_name`，method 的 `stage` 必须存在于 workflow，并且每个 method 在 `by_stage` 中恰好出现一次。
+- 所有 planner、stage 和 method adapter 通过一个 `load_descriptor_registry()` facade 取 registry，不再自行写路径和加载逻辑。
+- 测试只验证 authority 与 implementation binding 集合完全相等，不维护第三份 `WIRED_METHODS` 真值表。
+
+## 3. CWD 路径问题
+
+CWD 是启动进程时所在的目录。`Path("descriptors/registry.yaml")` 表示“当前目录下的 descriptors”，不是“本项目的 descriptors”。因此在仓库根目录运行时看似正常，从 `/tmp`、IDE、scheduler 或安装后的 console script 启动时就会找错位置。
+
+当前受影响的不只是 planner catalog；多个 stage 和 method adapter 都直接加载 `Path("descriptors/registry.yaml")`，默认 env config 也使用 `Path("config/envs.yaml")`。
+
+路径规则应一次性定义：
+
+1. 内置只读资源相对包资源定位，不相对 CWD。
+2. CLI 传入的用户路径在 entrypoint 解析一次并变成绝对路径。
+3. manifest 内的相对路径相对 manifest 文件所在目录。
+4. run config 内的相对路径相对 run config 文件所在目录，或者直接要求 TUI 物化为绝对路径；二选一后全局统一。
+5. env config 内的 install root 若允许相对路径，应相对 env config 文件所在目录。
+6. session 内引用通过 `SessionPaths` 解析，不能回退到 CWD。
+
+推荐实现：
+
+- 在一个配置 facade 中提供 `load_descriptor_registry()` 和 `active_env_config_path()`。
+- immutable descriptors 作为 package data，通过 `importlib.resources` 获取；不要在每个调用点传默认 `Path`。
+- host-specific env config 由显式 CLI/env override 指定。开发 checkout 的默认配置若保留，也必须锚定到模块位置，而不是 CWD。
+- `pyproject.toml` 必须把运行所需 descriptor 资源包含进 wheel；否则 console script 只安装 `app` 时仍然会缺资源。
+
+验收时必须从仓库外运行：
+
+```bash
+cd /tmp
+gene-agent inspect --help
+gene-agent run --manifest /absolute/path/to/manifest.yaml --run-config /absolute/path/to/run.json
+```
+
+descriptor catalog 的单元测试也应在临时 CWD 下加载成功。
+
+## 4. Preflight 与 runtime contract
+
+Preflight 不应该模拟 stage 私有输出，也不应该维护 runtime contract 的影子。
+
+中央 stage contract 同时声明：
+
+- `requires`: 逻辑资源名及 required/optional
+- `produces`: 成功 commit 后产生或替换的逻辑资源名
+- `methods`: 从 descriptor registry 反查，不重复声明 method metadata
+
+静态 preflight 只做集合推演：
+
+1. 从 manifest/初始 asset registry 得到可用逻辑资源集合。
+2. 按 `requested_stages` 和 `STAGE_ORDER` 遍历。
+3. 使用同一份 `requires` 判断缺失资源。
+4. stage 可运行时，把同一份 `produces` 加入集合。
+5. method 参数完整性使用 runtime 同一个 Pydantic schema/validator。
+
+runtime enter node 使用同一个 `requires` 调用严格 resolver，得到真实引用并验证存在性。这样 preflight 与 runtime 的区别只是“静态可用性”与“真实引用”，不是两份业务规则。
+
+应删除：
+
+- `_simulate_stage_outputs`
+- `STAGE_OUTPUTS` 私有 key 模拟表
+- 与 runtime 不同的 contextual-required 手写分支
+- preflight 独有的依赖优先级
+- 通过伪造输出让计划看似可运行的逻辑
+
+建议把人类可读 suggestion 作为错误码到文案的纯映射；它不能参与可运行性判断。
+
+## 5. Universal resolver 收窄
+
+`resolve_stage_resource` 的目标不是“尽量找到一个能用的东西”，而是解析架构已声明的当前资源。
+
+允许的解析顺序只有：
+
+1. stage config 中显式且 contract 允许的 override
+2. `state.resource_refs[resource_type]`
+3. 初始 asset registry 中 contract 声明的 asset type
+
+禁止：
+
+- 扫描任意 stage output
+- 猜 `final_*` key
+- legacy key fallback
+- 反向遍历 workflow
+- 根据文件后缀决定资源语义
+- registry JSON 损坏后返回空列表
+
+asset registry 缺失文件可以返回“资源不存在”；registry 文件存在但 JSON/schema 损坏必须抛出结构化错误，进入 terminal failure。数据损坏不能伪装成普通缺资源。
+
+## 6. 删除测试旁路
+
+生产执行路径不得识别“这是测试”。
+
+应删除：
+
+- `has_explicit_path_override`
+- stage output 的 `env.PATH` 特判
+- “fake-binary tests” 注释和无 conda 时回退到 shell/PATH 的执行语义
+- hifiasm/hifiasm_ont 中 “Fallback for tests” 参数来源
+- 为旧 fixture 放宽 manifest、descriptor、resource 或 parameter 校验的 catch-all
+
+执行边界统一为：
+
+1. method descriptor + env config 解析出完整 `EnvSpec`。
+2. preflight 检查该 env 与 required tools。
+3. freeze 把明确的 env target 写入 `FrozenAttemptSpec`。
+4. runner 只按 frozen spec 执行，不重新选择 PATH/conda 策略。
+
+测试替身只注入到边界：
+
+- `preflight(..., runner=fake_runner)` 已有依赖注入能力，可以继续使用。
+- `LocalRunner` 增加显式 subprocess adapter/runner 注入，或在测试中 patch runner 边界。
+- 端到端测试使用临时 env config 和可控 runner，不把 PATH 写进业务 state。
+- TUI 测试从选择 method 和参数开始，断言产生的 run config 以及最终 frozen argv；不要只手工拼 stage output。
+
+## 7. P2 收敛项
+
+### 7.1 LLM JSON 解析
+
+把 response text 提取、markdown fence 去除、JSON object 校验收敛为一个 shared helper。domain 模块只负责各自 Pydantic schema/业务字段校验。
+
+优先使用模型 SDK 的 structured output；需要文本 fallback 时也只能调用同一个严格 parser。禁止每个 recommender 复制 `_response_text` 和 `_parse_json_object`，禁止 catch-all 后静默换另一套含义。
+
+验收搜索：生产代码只剩一个通用 JSON object parser，domain-specific normalize/validate 可以有多个。
+
+### 7.2 Resume 协调
+
+`app/control/lifecycle.py` 应拥有一次完整 resume transaction：
+
+1. 读取当前 checkpoint。
+2. 校验 session、review request、hash 和 decision。
+3. 必要时把外部 decision snapshot 到 run 内。
+4. 生成 state update。
+5. 写 decision/resume ledger event。
+6. `graph.update_state`。
+7. `graph.invoke(None, config)`。
+8. 返回新 state/result。
+
+`run`、`resume`、interactive review 只负责输入输出和调用该服务，不各自复制这八步。dry-run 只能停在第 3 步之前，不写 durable state。
+
+### 7.3 Graph、lifecycle 与 reports
+
+依赖方向固定为：
+
+```text
+entrypoint -> control/lifecycle -> graph
+entrypoint -> reports -> storage
+graph -> stage builders
+stage builders -> execution/storage
+```
+
+- graph builder 只组装 node/edge，不直接写 report。
+- blocked/failed/completed report 在 graph invoke 返回后由 lifecycle/entrypoint 触发。
+- route controller 的 ledger 逻辑抽成 lifecycle service；builder 只绑定该 node。
+- `trace_writer` 不再 import `review_report` 的 private function。
+- 删除 `review_report -> trace_writer -> review_report` 方向。
+- 最终 summary 只保留一个公开 writer；`write_final_review_report` 若只是转发则删除。
+- `_pending_confirmations` 等纯 projection helper 放入 `_projection.py` 或 trace projection 模块。
+
+annotation 的现有大循环依赖不在本轮展开，但共享 reports/control 变更不得进一步加重它。
+
+### 7.4 Ask 到 run 的 typed 调用
+
+删除 `AskPlan -> 写文件 -> 转 argv -> _parse_args -> _run_session` 的内部回环。
+
+- TUI 仍可把 confirmed run config 持久化为审计 artifact。
+- 同时直接把已验证的 `RunConfig` 和 `EntryRequest` 交给公开的 `run_session()` service。
+- argparse 只存在于 CLI shell 边界。
+- `_run_session`、`_parse_args` 不应被其他业务模块当 API import。
+
+### 7.5 Durable JSON 与 artifact publication
+
+区分两类写入：
+
+- immutable evidence/artifact：只走 `app/storage/artifacts.py` 的 publish/register 边界。
+- regenerable report：只走 `_projection.atomic_write_text`。
+
+提供一个 canonical JSON encoder（UTF-8、`ensure_ascii=False`、稳定排序/分隔符、结尾换行），所有 hash 和持久化使用同一字节口径。删除 stage 中散落的 `write_text(json.dumps(...))` 作为 durable artifact 的做法。
+
+命令脚本和工具原生输出可以先写 work dir；collect 阶段再统一 publish。
+
+### 7.6 Manifest 加载
+
+只保留一个严格 manifest loader：
+
+- 负责 JSON/YAML 识别、相对路径锚定、Pydantic 校验和错误类型。
+- inventory、ask、run 都调用它。
+- ask 若允许“暂时没有 manifest”，应由调用方先判断 ref 是否存在；loader 本身不能吞掉 parse/schema 错误并返回 `None`。
+- 文件存在但损坏时永远 fail closed。
+
+### 7.7 Path 与 session component 校验
+
+`SessionPaths` 是 session ID、stage component、artifact relative path 的唯一 containment authority。
+
+- `EntryRequest` 调用同一 validator，不复制 regex/字符规则。
+- 所有 session 路径通过 `SessionPaths` 构造。
+- 删除入口、storage、report 各自不同的 sanitize 规则。
+- 用户展示 label 与文件系统 component 分开；展示文字不能直接拼路径。
+
+### 7.8 Genome size、evidence 与小 wrapper
+
+- genome size 的解析、单位转换、来源优先级只保留在 `app/domains/genome_size.py`。
+- stage 只能请求 `resolve_genome_size`，不能重新解析字符串或另定优先级。
+- execution result、attempt evidence、artifact publication 的相同 helper 收敛到现有 execution/storage 模块；method adapter 只提供 method-specific metadata。
+- 只转发参数且不增加 contract、错误语义或依赖隔离的 wrapper 直接删除。
+- `PlanWarning.model_dump_json_compat` 等兼容 API 直接删除。
+- read-QC 旧 output aliases、hifiasm test fallback、旧 route hints 全部删除，不做 deprecation 周期。
+
+## 8. 推荐修复顺序
+
+### Commit 1：固定 authority invariants
+
+先只增加目标架构测试，不改业务行为：
+
+- workflow stage 集合与 graph builder mapping 完全一致。
+- descriptor key 等于 `method_name`，method stage 合法且 `by_stage` 唯一。
+- 内置资源加载与 CWD 无关。
+- 旧字段 `local_exec`、`assembly_route`、`assembly_selection` 最终应被 schema 拒绝。
+
+这组测试是后续删除工作的护栏，不要复制当前实现细节。
+
+### Commit 2：统一路径与 registry facade
+
+- 建立唯一 descriptor/env config 路径 facade。
+- 迁移所有 `DescriptorRegistry.load(Path("descriptors/registry.yaml"))`。
+- 修正 wheel package data。
+- 删除各调用点的默认路径常量。
+- 加仓库外 CWD 测试。
+
+### Commit 3：删除 `local_exec`
+
+- 改 RunConfig、CLI、TUI materializer、state seeding 和所有 stage routing。
+- 可执行 method 被请求后总是 freeze/run/collect。
+- dedup 不再特殊。
+- 删除 plan-only-without-local-exec 测试，改成 method selected executes。
+- 旧 run config 带 `local_exec` 时因 `extra="forbid"` 直接失败。
+
+### Commit 4：TUI 独占方法选择与工具默认值
+
+- 删除 runtime assembly selector 和 route。
+- TUI 输出 canonical method ID 与完整参数。
+- runtime 只校验 method/read compatibility 和参数完整性。
+- descriptor planner defaults 成为唯一默认来源。
+- 删除 parameter catalog/runtime defaults。
+- 以 ONT、HiFi、CLR 各做一条 TUI -> run config -> frozen argv 测试。
+
+### Commit 5：建立 canonical resource handoff
+
+- 在 state 增加 `resource_refs`。
+- 收窄 `ResourceSpec`/`ResourceResolution`。
+- inventory 注册初始资源。
+- 逐 stage 改 commit/enter：先 read_qc、genome_survey、assembly、dedup、review，再 Hi-C/T2T。
+- 删除跨 stage 私有 key 读取。
+- 删除跨 stage FOFN 协议和 make_fofn workflow method。
+- annotation stage 只做保持编译所需的最小机械调整，业务迁移延后。
+
+### Commit 6：Preflight 与 resolver 共用 contract
+
+- preflight 改成 requires/produces 集合推演。
+- runtime resolver 只解析 canonical resources。
+- 删除模拟 output、动态 key、reverse scan、corrupt-registry swallowing。
+- 加静态 preflight 与 runtime 缺失资源给出同一错误码的契约测试。
+
+### Commit 7：删除执行测试旁路
+
+- env resolution、preflight、freeze、runner 形成单一路径。
+- runner 测试改为边界注入。
+- 清零生产代码中的 fake/PATH/test fallback。
+
+### Commit 8：P2 去重
+
+按依赖从底向上处理：
+
+1. canonical JSON/manifest/path helpers
+2. LLM parser
+3. execution evidence/publication helpers
+4. resume transaction
+5. report projection 与 graph builder
+6. ask typed invocation
+7. 删除 warning/alias/thin wrapper
+
+每完成一项就删除旧实现和旧测试，不保留双轨过渡。
+
+### Commit 9：文档归零后重写
+
+当前文档不要逐句打补丁。按目标架构重写当前文档：
+
+- `README.md`：真实 CLI、运行授权、TUI 到 run 的流程。
+- `docs/architecture.md`：唯一 authority、state/resources、control/graph/report 依赖方向。
+- `docs/stage_contracts.md`：每个 stage 的 requires/produces/method/review contract。
+- `docs/descriptor_spec.md`：planner defaults 与 runtime constraints 的边界。
+- `docs/examples/*.json|yaml`：移除旧字段，全部由当前 schema 验证。
+- `docs/beginner_mainline_guide.md`：若无法一次更新，先移到 archive 或加明确历史标记，不得继续作为当前入口。
+- `docs/phases/**`：视为历史记录，统一标注 superseded；不要让 phase 文档覆盖当前 architecture。
+- `docs/README.md` 与 `docs/PROJECT_STATUS.md`：只链接当前有效文档和真实状态。
+
+## 9. 关键测试矩阵
+
+### TUI 到执行
+
+| 场景 | 应验证 |
+|---|---|
+| ONT + 用户选 hifiasm_ont | run config 只有 canonical method；参数完整；frozen argv 完全一致 |
+| ONT + 用户选 Flye | 不被 runtime 改选；兼容性通过后按 Flye 执行 |
+| HiFi + 用户选 hifiasm | TUI 填入确认后的 threads；runtime 不补默认 |
+| method 缺参数 | TUI 不允许确认；直接 run config 也严格失败 |
+| method/read type 不兼容 | runtime 校验失败，不 fallback 到另一工具 |
+| 带 `assembly_route`/`assembly_selection` | schema 明确拒绝 |
+
+### 资源交接
+
+| 场景 | 应验证 |
+|---|---|
+| manifest raw long reads -> assembly | assembly 读取 `resource_refs.long_reads` |
+| read_qc filter -> genome survey/assembly | 两个 stage 得到同一 canonical read refs |
+| assembly -> dedup -> review | 每次只替换 `resource_refs.assembly` |
+| review -> Hi-C -> T2T | 下游不读取任何 `final_*` 私有 key |
+| asset registry 损坏 | terminal structured failure，不当作资源缺失 |
+| 缺少 required resource | preflight 与 runtime 使用同一错误码 |
+
+### 环境与路径
+
+| 场景 | 应验证 |
+|---|---|
+| 从临时 CWD 加载 registry | 成功 |
+| 从临时 CWD 加载显式 env config | 成功，relative root 相对 config |
+| FrozenAttemptSpec 无 env target | freeze 校验失败 |
+| 测试 fake runner | 通过注入工作，state 中没有 PATH 特判 |
+| wheel 安装后运行 console script | descriptor package data 可用 |
+
+### Resume 与 reports
+
+| 场景 | 应验证 |
+|---|---|
+| CLI resume 与 interactive resume | 调用同一 transaction，产生同构 ledger/state |
+| dry-run review | 不写 decision artifact、ledger、checkpoint |
+| blocked/failed/completed | graph 返回后由同一 report service 生成投影 |
+| 重生成 report | 不改变 ledger/artifact index |
+
+## 10. 删除完成检查
+
+重构结束后，下面搜索在生产代码中应为零，或只出现在明确标记为历史的 archive 文档中：
+
+```bash
+rg -n "local_exec|--local-exec|local_execution_not_enabled" app tests README.md docs
+rg -n "assembly_route|assembly_selection|DEFAULT_PRIMARY_BY_READ_TYPE" app tests README.md docs
+rg -n 'Path\("descriptors/registry.yaml"\)|Path\("config/envs.yaml"\)' app
+rg -n "has_explicit_path_override|fake-binary|Fallback for tests|fallback for tests" app
+rg -n "final_.*_for_downstream|prefer_stages|output_keys" app
+rg -n "model_dump_json_compat" app tests
+```
+
+允许保留的 `fallback` 必须是明确的业务策略，并且能指出唯一 contract；不得是兼容旧字段、吞数据损坏或照顾测试 fixture 的 fallback。
+
+最终验收：
+
+1. 全量测试通过。
+2. 从仓库外 CWD 的 smoke test 通过。
+3. 所有 example config 由当前 Pydantic schema 实际加载通过。
+4. descriptor/workflow/resource authority invariant 测试通过。
+5. import cycle 检查中 reports 非循环，parent graph 不依赖 entrypoints/reports。
+6. `git diff --check` 通过。
+7. 当前 README、architecture、stage contracts 对同一事实没有不同口径。
+
+## 11. 完成定义
+
+这轮重构完成时，主线应满足以下一句话描述：
+
+> TUI 依据 descriptor 给出选择和默认值，确认后生成完整 run config；workflow 按唯一 stage 顺序推进，stage 从 canonical resource table 取得输入，按明确 method 和参数冻结一次执行，runner 只执行 frozen spec，storage 保存证据，lifecycle 负责 resume，reports 只从 durable facts 生成投影。
+
+任何还需要“再看一个 route hint”“再扫一个旧 key”“没有值就按测试默认”“换个 CWD 才能找到配置”的代码，都说明对应修理项尚未完成。

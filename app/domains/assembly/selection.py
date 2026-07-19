@@ -7,8 +7,63 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.shared_parameters import NormalizedReadType, PLATFORM_TO_SHARED_READ_TYPE, SHARED_TO_METHOD_READ_TYPE
-from app.stages.assembly.constants import FLYE_METHOD, HIFIASM_METHOD, HIFIASM_ONT_METHOD, NEXTDENOVO_METHOD
+from app.domains.assembly.constants import (
+    FLYE_METHOD,
+    HIFIASM_METHOD,
+    HIFIASM_ONT_METHOD,
+    NEXTDENOVO_METHOD,
+)
+
+NormalizedReadType = Literal[
+    "cyclone",
+    "ont_raw",
+    "ont_hq",
+    "pacbio_clr",
+    "pacbio_hifi",
+]
+
+PLATFORM_TO_SHARED_READ_TYPE: dict[str, NormalizedReadType] = {
+    "cyclone": "cyclone",
+    "cycloneseq": "cyclone",
+    "ont": "ont_raw",
+    "clr": "pacbio_clr",
+    "pacbio_hifi": "pacbio_hifi",
+}
+
+FLYE_TO_SHARED_READ_TYPE: dict[str, NormalizedReadType] = {
+    "nano-raw": "ont_raw",
+    "nano-hq": "ont_hq",
+    "pacbio-raw": "pacbio_clr",
+    "pacbio-hifi": "pacbio_hifi",
+}
+
+SHARED_TO_METHOD_READ_TYPE: dict[NormalizedReadType, dict[str, str]] = {
+    "cyclone": {
+        "flye": "nano-raw",
+        "nextdenovo": "ont",
+        "hifiasm_ont": "ont",
+    },
+    "ont_raw": {
+        "flye": "nano-raw",
+        "nextdenovo": "ont",
+        "hifiasm_ont": "ont",
+    },
+    "ont_hq": {
+        "flye": "nano-hq",
+        "nextdenovo": "ont",
+        "hifiasm_ont": "ont",
+    },
+    "pacbio_clr": {
+        "flye": "pacbio-raw",
+        "nextdenovo": "clr",
+        "hifiasm": "not_preferred",
+    },
+    "pacbio_hifi": {
+        "flye": "pacbio-hifi",
+        "nextdenovo": "hifi",
+        "hifiasm": "hifi",
+    },
+}
 
 AssemblySelectionSource = Literal["run_config", "recommendation", "human", "timeout"]
 
@@ -91,14 +146,10 @@ def normalize_read_type(value: Any, *, platform: Any = None) -> NormalizedReadTy
         return value
     if value in ROUTE_TO_READ_TYPE:
         return ROUTE_TO_READ_TYPE[str(value)]
-    if value == "nano-raw":
-        return "ont_raw"
-    if value in {"nano-hq", "ont_hq"}:
-        return "ont_hq"
-    if value in {"clr", "pacbio-raw", "pacbio_clr"}:
+    if value in FLYE_TO_SHARED_READ_TYPE:
+        return FLYE_TO_SHARED_READ_TYPE[str(value)]
+    if value in {"clr", "pacbio_clr"}:
         return "pacbio_clr"
-    if value in {"hifi", "pacbio-hifi", "pacbio_hifi"}:
-        return "pacbio_hifi"
     if platform:
         return PLATFORM_TO_SHARED_READ_TYPE.get(str(platform))
     return None

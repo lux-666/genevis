@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.storage.integrity import sha256_file
+from app.integrity import sha256_file
 
 READ_QC_LONG_READ_STATS = "read_qc.long_read_stats"
 READ_QC_LONG_READ_SUMMARY = "read_qc.long_read_summary"
@@ -84,11 +84,6 @@ REPEAT_ANNOTATION_BUNDLE = "repeat_annotation.bundle"
 REPEAT_ANNOTATION_GFF3 = "repeat_annotation.gff3"
 REPEAT_SOFTMASKED_GENOME = "repeat_annotation.softmasked_genome"
 REPEAT_HARDMASKED_GENOME = "repeat_annotation.hardmasked_genome"
-
-
-# One exact-byte implementation is shared by producers and the index boundary.
-file_sha256 = sha256_file
-
 
 class ArtifactMeta(BaseModel):
     """Metadata stored in state/ledger instead of large file contents."""

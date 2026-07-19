@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import re
 from collections import Counter
 from pathlib import Path
 from statistics import median, quantiles
 from typing import Any
+
+from app.integrity import sha256_file
 
 
 REFERENCE_DIR = Path(__file__).resolve().parents[2] / "data" / "reference" / "ncbi_metazoa"
@@ -325,7 +326,7 @@ def _reference_provenance(
         if not isinstance(expected, dict):
             return provenance, "reference_version_manifest_invalid"
         path = reference_dir / name
-        actual = {"path": str(path), "sha256": _file_sha256(path) if path.exists() else None, "size_bytes": path.stat().st_size if path.exists() else None}
+        actual = {"path": str(path), "sha256": sha256_file(path) if path.exists() else None, "size_bytes": path.stat().st_size if path.exists() else None}
         provenance["files"][name] = actual
         if actual["sha256"] != expected.get("sha256") or actual["size_bytes"] != expected.get("size_bytes"):
             mismatches.append(name)
@@ -335,16 +336,6 @@ def _reference_provenance(
         return provenance, f"reference_version_mismatch:{','.join(mismatches)}"
     provenance["verification"] = "verified"
     return provenance, None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _load_tsv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return [dict(row) for row in csv.DictReader(handle, delimiter="\t")]

@@ -6,13 +6,13 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.parameter_attempts import load_current_frozen_attempt
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
-from app.stages.assembly.constants import FLYE_METHOD, FLYE_READ_TYPE_FLAGS
-from app.stages.assembly.input_files import AssemblyInputError, resolve_assembly_read_paths
+from app.domains.assembly.constants import FLYE_METHOD
 from app.stages.assembly.method_application.lifecycle import (
     MethodLifecycle,
     blocked_parameters,
@@ -27,6 +27,13 @@ from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_file
+
+FLYE_READ_TYPE_FLAGS = {
+    "nano-raw": "--nano-raw",
+    "nano-hq": "--nano-hq",
+    "pacbio-raw": "--pacbio-raw",
+    "pacbio-hifi": "--pacbio-hifi",
+}
 
 LIFECYCLE = MethodLifecycle(
     name="flye",

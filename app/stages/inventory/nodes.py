@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.schemas.assets import AssetRecord
 from app.schemas.manifest import InputManifest, validate_manifest
 from app.schemas.state import TopLevelState
@@ -22,11 +22,11 @@ from app.storage.paths import SessionPaths
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest:
-    """Load an InputManifest from a YAML or JSON file path.
+    """Load the canonical runtime manifest.
 
-    Relative asset paths are resolved against the manifest's directory first
-    and cwd second, then stored as absolute paths so downstream attempts that
-    chdir into their working directory can still find the files.
+    Entry materialization owns path normalization. Runtime consumers reject
+    relative paths instead of guessing whether they belong to the source
+    manifest directory, the run control directory, or the current process.
     """
     path = Path(manifest_ref)
     with path.open("r", encoding="utf-8") as handle:
@@ -34,34 +34,19 @@ def _load_manifest(manifest_ref: str) -> InputManifest:
             raw = json.load(handle)
         else:
             raw = yaml.safe_load(handle) or {}
-    manifest_dir = path.resolve().parent
-    for asset in raw.get("assets") or []:
-        resolved: list[str] = []
-        for p in asset.get("paths") or []:
-            resolved.append(_absolutize_asset_path(str(p), manifest_dir=manifest_dir))
-        if resolved:
-            asset["paths"] = resolved
-    return InputManifest.model_validate(raw)
-
-
-def _absolutize_asset_path(raw_path: str, *, manifest_dir: Path) -> str:
-    """Resolve a manifest-declared path to an absolute filesystem path.
-
-    Absolute paths are left as-is (so provenance keeps the operator's exact
-    spelling, and macOS ``/var/...`` vs ``/private/var/...`` canonicalisation
-    does not surprise downstream consumers). Relative paths are anchored to
-    the manifest directory first, then cwd as a fallback.
-    """
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        return str(candidate)
-    manifest_relative = (manifest_dir / candidate).resolve(strict=False)
-    if manifest_relative.exists():
-        return str(manifest_relative)
-    cwd_relative = (Path.cwd() / candidate).resolve(strict=False)
-    if cwd_relative.exists():
-        return str(cwd_relative)
-    return str(manifest_relative)
+    manifest = InputManifest.model_validate(raw)
+    relative_paths = [
+        declared
+        for asset in manifest.assets
+        for declared in asset.paths
+        if not Path(declared).is_absolute()
+    ]
+    if relative_paths:
+        raise ValueError(
+            "runtime manifest contains non-canonical relative asset paths: "
+            f"{relative_paths}"
+        )
+    return manifest
 
 
 def _build_asset_records(
@@ -235,7 +220,7 @@ def _apply_shared_platform_override(manifest: InputManifest, state: TopLevelStat
 
 def commit_inventory(state: TopLevelState) -> dict:
     """Advance to the next stage based on routing decision."""
-    from app.graph.routing import next_stage_name
+    from app.workflow import next_stage_name
 
     trace = append_route_trace(state, "inventory_stage")
     inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})

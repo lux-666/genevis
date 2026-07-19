@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping, TypedDict
 
-from app.schemas.state import TopLevelState
-
-
 class ResolvedGenomeSize(TypedDict):
     """One positive genome-size value with deterministic provenance."""
 
@@ -15,7 +12,7 @@ class ResolvedGenomeSize(TypedDict):
     source_path: str
 
 
-def resolve_explicit_genome_size(state: TopLevelState) -> ResolvedGenomeSize | None:
+def resolve_explicit_genome_size(state: Mapping[str, Any]) -> ResolvedGenomeSize | None:
     """Resolve only operator-provided values, never a survey measurement."""
 
     assembly = _mapping((state.get("stage_outputs") or {}).get("assembly"))
@@ -44,7 +41,7 @@ def resolve_explicit_genome_size(state: TopLevelState) -> ResolvedGenomeSize | N
     return None
 
 
-def resolve_genome_size(state: TopLevelState) -> ResolvedGenomeSize | None:
+def resolve_genome_size(state: Mapping[str, Any]) -> ResolvedGenomeSize | None:
     """Resolve the canonical provided-or-survey genome-size handoff."""
 
     explicit = resolve_explicit_genome_size(state)

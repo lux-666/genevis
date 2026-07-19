@@ -19,14 +19,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
+from app.config import default_data_root
 from app.domains.assembly.selection import (
     AssemblySelection,
     default_primary_method,
     read_type_from_method_parameters,
     resolve_read_type,
 )
-from app.control.ledger import Ledger
-from app.entrypoints.run_materializer import materialize_run_layout
+from app.storage.ledger import Ledger
+from app.storage.materialization import RunMaterializationError, materialize_run_layout
 from app.schemas.entry import EntryRequest
 from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
@@ -41,7 +42,7 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
-from app.storage.paths import SessionPaths, default_data_root, locate_session_data_dir
+from app.storage.paths import SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
@@ -447,11 +448,17 @@ def _run_session(args: argparse.Namespace) -> int:
     # directory.  Stage code can therefore keep its existing relative
     # artifact/work layout without spilling files into the shared root.
     paths = SessionPaths(data_dir, request.session_id)
-    materialize_run_layout(
-        paths,
-        manifest_path=manifest_path,
-        run_config_path=Path(run_config_path) if run_config_path else None,
-    )
+    try:
+        materialize_run_layout(
+            paths,
+            manifest_path=manifest_path,
+            run_config_path=Path(run_config_path) if run_config_path else None,
+        )
+        if run_config is not None:
+            run_config = load_run_config(paths.run_config_path)
+    except (RunMaterializationError, FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     run_dir = paths.run_dir
     request = request.model_copy(update={"data_dir": str(run_dir)})
     manifest_ref = paths.to_ref(paths.manifest_path)

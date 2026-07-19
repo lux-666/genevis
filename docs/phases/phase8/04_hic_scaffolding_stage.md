@@ -94,14 +94,14 @@ Expected output keys should stay under `stage_outputs.hic_scaffolding`:
 {
     "status": "completed | skipped | blocked_human | failed",
     "pre_hic_assembly_ref": "...",
-    "final_assembly_for_annotation": "...",  # legacy
-    "final_assembly_for_downstream": "...",  # ✅ unified contract key (2026-06-28)
+    "final_assembly_for_annotation": "...",
     "selected_method_name": "hic_scaffolding.candidate.autohic",
     "notes": [],
 }
 ```
 
-**Implementation note**: The current code uses `final_assembly_for_annotation` (legacy) and `final_assembly_for_downstream` (unified contract key added 2026-06-28). The `t2t` stage's `_assembly_ref()` function searches for `final_assembly_for_downstream` first, then falls back to legacy keys for backward compatibility.
+**Implementation note**: `final_assembly_for_annotation` is the canonical Hi-C
+handoff. T2T resolves it through the shared assembly resource spec.
 
 ## Routing With T2T
 

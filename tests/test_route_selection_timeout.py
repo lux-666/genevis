@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app.control.lifecycle as lifecycle
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, resume_review_state, timeout_terminal_update
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request

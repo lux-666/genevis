@@ -58,7 +58,7 @@ python3 -c "
 # Test that assembly_dedup is in all the right enums
 from app.schemas.run_config import RequestableStage
 from app.schemas.state import DomainStage
-from app.stages import STAGE_ORDER
+from app.workflow import STAGE_ORDER
 import typing
 
 # STAGE_ORDER

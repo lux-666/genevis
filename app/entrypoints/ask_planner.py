@@ -18,10 +18,14 @@ from app.schemas.ask_plan import (
 )
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import AutoHiCRunParameters, RunConfig
-from app.schemas.shared_parameters import FLYE_TO_SHARED_READ_TYPE, PLATFORM_TO_SHARED_READ_TYPE, SharedParameters
+from app.domains.assembly.selection import (
+    FLYE_TO_SHARED_READ_TYPE,
+    PLATFORM_TO_SHARED_READ_TYPE,
+)
+from app.schemas.shared_parameters import SharedParameters
 from app.schemas.warnings import PlanWarning as PlanWarning
 from app.review.gates import planned_review_gates
-from app.stages import STAGE_ORDER
+from app.workflow import STAGE_ORDER
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
 
 from .planner_catalog import (
@@ -351,7 +355,7 @@ def _build_assembly_execution_config(
     config_method = method_name.rsplit(".", 1)[-1]
     params = dict((plan.method_parameters or {}).get(method_name) or {})
     if plan.shared_parameters:
-        from app.schemas.shared_parameters import SHARED_TO_METHOD_READ_TYPE
+        from app.domains.assembly.selection import SHARED_TO_METHOD_READ_TYPE
 
         shared = plan.shared_parameters
         method_read_type = SHARED_TO_METHOD_READ_TYPE.get(shared.read_type or "", {}).get(config_method)

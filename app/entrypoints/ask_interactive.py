@@ -32,10 +32,12 @@ from app.entrypoints.ask_planner import (
 )
 from app.schemas.ask_plan import AskClarificationRequest, AskClarificationResponse, AskPlanState
 from app.schemas.artifacts import FunctionDatabaseProvenance
-from app.schemas.shared_parameters import (
+from app.domains.assembly.selection import (
     FLYE_TO_SHARED_READ_TYPE,
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
+)
+from app.schemas.shared_parameters import (
     SharedParameters,
 )
 
@@ -1709,7 +1711,7 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
     try:
         # Load the manifest and run inventory in a disposable session layout.
         from app.stages.inventory.nodes import register_assets, validate_inputs
-        from app.entrypoints.run_materializer import materialize_run_layout
+        from app.storage.materialization import materialize_run_layout
         from app.schemas.state import initial_state
         from app.stages.preflight import validate_execution_plan
         from app.storage.paths import SessionPaths

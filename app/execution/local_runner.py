@@ -6,7 +6,7 @@ import os
 import shlex
 import subprocess
 
-from app.execution.results import ExecutionResult
+from app.schemas.execution import ExecutionResult
 from app.schemas.descriptors import FrozenAttemptSpec
 
 

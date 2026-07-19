@@ -7,8 +7,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -17,7 +17,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
@@ -335,7 +335,7 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
                 metadata={"candidate_id": purged_candidate.candidate_id, "raw_candidate_ref": source_candidate_ref},
             )
         )
-    append_artifact_records(data_dir, session_id, artifacts)
+    publish_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
     attempt_id = None

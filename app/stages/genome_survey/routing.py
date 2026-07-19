@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -12,13 +12,13 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_resolve(state: TopLevelState) -> str:
     """Route after resolving survey inputs."""
-    return "fail" if is_fail_status(_output(state).get("status")) else "select"
+    return "fail" if is_terminal_failure(_output(state).get("status")) else "select"
 
 
 def route_after_select(state: TopLevelState) -> str:
     """Route to the selected survey contract writer."""
     survey_out = _output(state)
-    if is_fail_status(survey_out.get("status")):
+    if is_terminal_failure(survey_out.get("status")):
         return "fail"
     mode = survey_out.get("selected_mode")
     if mode == "full":
@@ -29,7 +29,7 @@ def route_after_select(state: TopLevelState) -> str:
 def route_after_full_plan(state: TopLevelState) -> str:
     """Route after planning full survey."""
     status = _output(state).get("status")
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
     if status == "local_execution_planned":
         return "jellyfish"
@@ -39,7 +39,7 @@ def route_after_full_plan(state: TopLevelState) -> str:
 def route_after_jellyfish(state: TopLevelState) -> str:
     """Route after the Jellyfish method subgraph returns."""
     status = _output(state).get("status")
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
     return "genomescope2" if status == "jellyfish_collected" else "fail"
 
@@ -47,11 +47,11 @@ def route_after_jellyfish(state: TopLevelState) -> str:
 def route_after_genomescope2(state: TopLevelState) -> str:
     """Route after the GenomeScope2 method subgraph returns."""
     status = _output(state).get("status")
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
     return "write_result" if status == "genomescope2_collected" else "fail"
 
 
 def route_after_plan(state: TopLevelState) -> str:
     """Route after writing a survey result or skip record."""
-    return "fail" if is_fail_status(_output(state).get("status")) else "commit"
+    return "fail" if is_terminal_failure(_output(state).get("status")) else "commit"

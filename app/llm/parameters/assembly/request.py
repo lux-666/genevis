@@ -18,8 +18,8 @@ from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
 from app.domains.assembly.profile_evidence import build_profile_evidence
+from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
-from app.stages.assembly.parameters.profile import ParameterPromptTask, build_prompt_profile
 
 
 _PARAMETER_SPEC_FIELDS = (
@@ -96,7 +96,7 @@ class AssemblyParameterRequestDTO(BaseModel):
 
     recommendation_contract: Literal["parameter_recommendation_v1"]
     method_id: str = Field(min_length=1)
-    task: ParameterPromptTask
+    task: ParameterAttemptTask
     observations: list[dict[str, Any]]
     adjustable_parameters: dict[str, dict[str, Any]]
     method_guidance: list[dict[str, Any]] | None = None
@@ -109,8 +109,8 @@ def build_parameter_request_dto(
     *,
     method_id: str,
     catalog: MethodParameterCatalog,
-    full_profile: dict[str, Any],
-    task: ParameterPromptTask,
+    prompt_profile: dict[str, Any],
+    task: ParameterAttemptTask,
     basis_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build only the model-visible parameter recommendation DTO."""
@@ -122,7 +122,6 @@ def build_parameter_request_dto(
     if basis_snapshot.get("method_id") != catalog.method_id:
         raise ValueError("parameter request basis method does not match the catalog")
 
-    prompt_profile = build_prompt_profile(full_profile, task)
     observations, _ = build_profile_evidence(prompt_profile)
     adjustable_parameters = _model_adjustable_parameters(catalog)
 

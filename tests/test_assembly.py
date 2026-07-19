@@ -11,10 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.control.lifecycle import resume_review_state
-from app.execution.artifacts import resolve_artifact_ref
+from app.storage.artifacts import resolve_artifact_ref
 from app.review.base import ResumeReviewRequest
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.shared_parameters import (
+from app.domains.assembly.selection import (
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
 )

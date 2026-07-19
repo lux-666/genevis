@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.entrypoints.review_interactive import (
     build_decision_brief,
     collect_gate_decision,

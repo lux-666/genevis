@@ -259,13 +259,11 @@ TUI 应该清楚提示最可能的问题，提供最安全的恢复路径，同�
 
 ---
 
-## Compatibility
+## Resource contract
 
-兼容性规则：
-
-- 现有 assembly consumers 可以继续使用 `resolve_current_assembly()`。
-- 新增或重构的 stages 应优先使用 `resolve_stage_resource()`。
-- Runtime 仍在使用的 legacy output keys 继续受支持。
+- Assembly consumers 统一使用 `resolve_stage_resource()` 与
+  `assembly_resource_spec(...)`。
+- Stage 只写 canonical output keys，不再写迁移 alias。
 - 影响 stage reachability 的 resource spec 变更必须配套 preflight tests。
 
 ---

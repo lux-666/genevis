@@ -7,8 +7,8 @@ Routes to:
 
 from __future__ import annotations
 
+from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.base import is_fail_status
 
 
 def _output(state: TopLevelState) -> dict:
@@ -18,7 +18,7 @@ def _output(state: TopLevelState) -> dict:
 def route_after_plan_metrics(state: TopLevelState) -> str:
     """Route after planning review metrics."""
     ar_out = _output(state)
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
     if ar_out.get("execution_mode") == "local":
         return "quast"
@@ -28,7 +28,7 @@ def route_after_plan_metrics(state: TopLevelState) -> str:
 def route_after_quast(state: TopLevelState) -> str:
     """Route after the QUAST method subgraph returns."""
     ar_out = _output(state)
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
     if ar_out.get("status") == "evaluating":
         return "busco"
@@ -38,7 +38,7 @@ def route_after_quast(state: TopLevelState) -> str:
 def route_after_busco(state: TopLevelState) -> str:
     """Route after the BUSCO method subgraph returns."""
     ar_out = _output(state)
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
     return "evaluate_rules"
 
@@ -55,7 +55,7 @@ def _has_available_review_metrics(ar_out: dict) -> bool:
 def route_after_parameter_quality_gate(state: TopLevelState) -> str:
     """Route Phase10 parameter-quality gate or continue normal review."""
     ar_out = _output(state)
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
     if state.get("current_stage") == "assembly" and ar_out.get("status") == "parameter_replan_requested":
         return "replan"
@@ -77,7 +77,7 @@ def route_from_evaluation(state: TopLevelState) -> str:
     """Return the next node after assembly review evaluation."""
     ar_out = _output(state)
 
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
 
     candidates = ar_out.get("candidates", [])
@@ -93,6 +93,6 @@ def route_from_evaluation(state: TopLevelState) -> str:
 def route_after_comparison(state: TopLevelState) -> str:
     """Route after generating candidate comparison."""
     ar_out = _output(state)
-    if is_fail_status(ar_out.get("status")):
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
     return "human_gate"

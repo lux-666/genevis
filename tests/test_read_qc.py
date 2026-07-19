@@ -12,7 +12,7 @@ import inspect
 from pathlib import Path
 
 from app.control.lifecycle import inspect_session
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
@@ -801,7 +801,7 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         self.assertTrue(manifest.exists())
         text = manifest.read_text(encoding="utf-8")
         self.assertIn("raw_long_reads", text)
-        self.assertIn("tests/fixtures/phase4/smoke.fastq", text)
+        self.assertIn("- smoke.fastq", text)
 
     def test_relative_data_dir_resolves_to_absolute_paths_in_generated_script(self):
         # Regression: when --data-dir is relative, the generated seqkit_stats

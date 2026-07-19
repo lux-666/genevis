@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.knowledge.packs import load_knowledge_pack
 from app.review.base import ResumeReviewRequest

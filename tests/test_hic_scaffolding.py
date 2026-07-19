@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from app.control.lifecycle import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
     ArtifactRef,
@@ -852,7 +852,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 adopted["stage_outputs"]["hic_scaffolding"][
-                    "final_assembly_for_downstream"
+                    "final_assembly_for_annotation"
                 ],
                 candidate["scaffold_fasta"],
             )
@@ -898,7 +898,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 kept["stage_outputs"]["hic_scaffolding"][
-                    "final_assembly_for_downstream"
+                    "final_assembly_for_annotation"
                 ],
                 str(assembly),
             )

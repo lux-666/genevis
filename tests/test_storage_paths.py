@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.execution.artifacts import (
-    append_artifact_records,
+from app.storage.artifacts import (
+    publish_artifact_records,
     publish_artifact_record,
     read_artifact_records,
     register_artifact_records,
@@ -25,7 +25,7 @@ from app.execution.evidence import (
     validate_execution_evidence,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.execution.results import ExecutionResult
+from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.storage.paths import (
     DataLayoutError,
@@ -160,7 +160,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 metadata={"attempt_id": "inventory-0", "business_status": "must-not-be-indexed"},
             )
 
-            refs = append_artifact_records(paths.run_dir, "s1", [artifact])
+            refs = publish_artifact_records(paths.run_dir, "s1", [artifact])
             records = read_artifact_records(paths.run_dir, "s1")
 
             self.assertEqual(len(refs), 1)
@@ -188,7 +188,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="command.stdout",
             )
 
-            [artifact_ref] = append_artifact_records(paths.run_dir, "s1", [artifact])
+            [artifact_ref] = publish_artifact_records(paths.run_dir, "s1", [artifact])
 
             published = paths.resolve_ref(artifact_ref.path_ref)
             self.assertEqual(published, paths.artifact_path("assembly", "outputs", "flye", "log"))
@@ -257,7 +257,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 method_name="assembly.candidate.flye",
                 artifact_type="command.stdout",
             )
-            [first_ref] = append_artifact_records(paths.run_dir, "s1", [first])
+            [first_ref] = publish_artifact_records(paths.run_dir, "s1", [first])
 
             source.write_text("first output\n", encoding="utf-8")
             replay = ArtifactMeta.from_file(
@@ -266,7 +266,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 method_name="assembly.candidate.flye",
                 artifact_type="command.stdout",
             )
-            [replay_ref] = append_artifact_records(paths.run_dir, "s1", [replay])
+            [replay_ref] = publish_artifact_records(paths.run_dir, "s1", [replay])
             self.assertEqual(replay_ref, first_ref)
             self.assertEqual(len(read_artifact_records(paths.run_dir, "s1")), 1)
 
@@ -278,7 +278,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="command.stdout",
             )
             with self.assertRaises(FileExistsError):
-                append_artifact_records(paths.run_dir, "s1", [conflict])
+                publish_artifact_records(paths.run_dir, "s1", [conflict])
 
     def test_registration_rejects_external_reports_and_repeated_session_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -292,7 +292,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="test.external",
             )
             with self.assertRaises(DataLayoutError):
-                append_artifact_records(paths.run_dir, "s1", [external_meta])
+                publish_artifact_records(paths.run_dir, "s1", [external_meta])
 
             report = paths.report_path("session_summary.json")
             report.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +304,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="report",
             )
             with self.assertRaises(DataLayoutError):
-                append_artifact_records(paths.run_dir, "s1", [report_meta])
+                publish_artifact_records(paths.run_dir, "s1", [report_meta])
 
             repeated = paths.artifact_path("assembly", "s1", "draft.fa")
             repeated.parent.mkdir(parents=True)
@@ -316,7 +316,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="assembly.draft",
             )
             with self.assertRaises(DataLayoutError):
-                append_artifact_records(paths.run_dir, "s1", [repeated_meta])
+                publish_artifact_records(paths.run_dir, "s1", [repeated_meta])
 
     def test_flat_root_and_mismatched_session_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:

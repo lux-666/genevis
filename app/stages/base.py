@@ -106,23 +106,6 @@ def append_route_trace(state: TopLevelState, *items: str) -> list[str]:
 
 
 # ============================================================================
-# Stage routing failure protocol
-# ============================================================================
-
-BASE_FAIL_STATUSES = frozenset({"failed", "blocked_env", "missing_tool"})
-"""Statuses that route every stage to its terminal `fail` node."""
-
-
-def is_fail_status(status: Any, extra: frozenset[str] = frozenset()) -> bool:
-    """Return True when a stage status is terminal-failing.
-
-    `extra` carries stage-specific failure statuses beyond the shared base set
-    (e.g. assembly's `blocked_param`, read_qc's `blocked_input`).
-    """
-    return status in BASE_FAIL_STATUSES or status in extra
-
-
-# ============================================================================
 # Universal Resource Resolution System
 # ============================================================================
 
@@ -265,7 +248,7 @@ def resolve_stage_resource(
                 return resolution
 
     # 3. Auto-fallback: check all stages in reverse STAGE_ORDER
-    from app.stages import STAGE_ORDER
+    from app.workflow import STAGE_ORDER
 
     for stage in reversed(STAGE_ORDER):
         if stage in resource_spec.prefer_stages:
@@ -390,41 +373,3 @@ def load_assets_from_registry(
         return [asset for asset in assets if asset.get("asset_type") in asset_types]
     except (OSError, json.JSONDecodeError):
         return []
-
-
-# ============================================================================
-# Backward Compatibility Wrappers
-# ============================================================================
-
-
-def resolve_current_assembly(
-    state: TopLevelState,
-    *,
-    override: str | None = None,
-    prefer_stages: list[str] | None = None,
-) -> tuple[str | None, str]:
-    """
-    Resolve assembly (backward compatibility wrapper).
-
-    This function maintains the original API for existing code.
-    New code should use resolve_stage_resource() directly.
-    """
-    spec = ResourceSpec(
-        resource_type="assembly",
-        prefer_stages=prefer_stages or [],
-        output_keys={
-            "t2t": ["final_assembly_for_annotation"],
-            "hic_scaffolding": [
-                "final_assembly_for_annotation",
-                "chromosome_scaffolded_assembly_candidate_ref",
-            ],
-            "assembly_review": [
-                "final_assembly_for_scaffolding_or_annotation",
-                "final_assembly_ref",
-            ],
-        },
-        asset_types=["assembly_fasta_registered"],
-    )
-
-    resolution = resolve_stage_resource(state, resource_spec=spec, override=override)
-    return (resolution.path, resolution.source)

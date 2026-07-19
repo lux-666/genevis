@@ -7,6 +7,8 @@ TODO: Future enhancement - generate/refine via LLM + knowledge base.
 Current: Hardcoded based on current stage implementations.
 """
 
+from dataclasses import replace
+
 from app.stages.base import ResourceSpec
 
 # ============================================================================
@@ -24,6 +26,14 @@ ASSEMBLY_SPEC = ResourceSpec(
     asset_types=["assembly_fasta_registered"],
     required=True,
 )
+
+
+def assembly_resource_spec(*prefer_stages: str) -> ResourceSpec:
+    """Return the canonical assembly resource with an explicit stage priority."""
+
+    if not prefer_stages:
+        return ASSEMBLY_SPEC
+    return replace(ASSEMBLY_SPEC, prefer_stages=list(prefer_stages))
 
 MASKED_ASSEMBLY_SPEC = ResourceSpec(
     resource_type="masked_assembly",

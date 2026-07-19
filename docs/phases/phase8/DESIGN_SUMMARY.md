@@ -43,32 +43,26 @@
 - 支持多个 fallback 路径
 - 从 stage outputs → asset_registry
 
-### 2. 统一 Stage Output Contract
+### 2. 统一 Assembly Resource Contract
 
 **设计原则**:
-- 每个 stage 输出一个 **unified key**: `final_<resource_type>_for_downstream`
-- 保留 **legacy keys** 向后兼容
-- Resolver 优先检查 unified key，fallback 到 legacy keys
+- assembly-producing stages 只写各自的 canonical output key。
+- consumer 通过 `ASSEMBLY_SPEC` 声明各 stage 的 canonical key。
+- 不再同时写 `final_assembly_for_downstream` alias。
 
 **实际输出示例**:
 ```python
 # hic_scaffolding
 {
-    "final_assembly_for_downstream": "path/to/hic.fa",  # Unified (未来实施)
-    "final_assembly_for_annotation": "path/to/hic.fa",  # Legacy (当前)
-    "chromosome_scaffolded_assembly_candidate_ref": "...",  # Legacy
+    "final_assembly_for_annotation": "path/to/hic.fa",
+    "chromosome_scaffolded_assembly_candidate_ref": "...",
 }
 
 # t2t
 {
-    "final_assembly_for_downstream": "path/to/t2t.fa",  # Unified (未来实施)
-    "final_assembly_for_annotation": "path/to/t2t.fa",  # Legacy (当前)
+    "final_assembly_for_annotation": "path/to/t2t.fa",
 }
 ```
-
-**为什么两层 keys？**
-- Unified key 支持自动 fallback（resolver 不需要知道具体 stage）
-- Legacy keys 保持现有代码兼容（渐进式重构）
 
 ### 3. Universal Resource Resolver
 
@@ -101,7 +95,7 @@ def resolve_stage_resource(
 **关键设计点**:
 - **声明式**: ResourceSpec 声明需求，resolver 负责查找
 - **多层 fallback**: override → prefer_stages → all_stages → assets
-- **向后兼容**: `resolve_current_assembly()` 作为 wrapper 保留
+- **单一入口**: consumers 直接调用 `resolve_stage_resource()` 并传入 `assembly_resource_spec(...)`
 
 ### 4. Preflight Check API
 
@@ -204,7 +198,7 @@ def _get_stage_requirements(stage: str) -> list[dict]:
 - `app/stages/base.py` (~320 行)
   - `resolve_stage_resource()` - 通用 resolver
   - `load_assets_from_registry()` - Helper
-  - `resolve_current_assembly()` - 向后兼容 wrapper
+  - `ResourceSpec` / `resolve_stage_resource()` - 通用 resolver contract
 
 - `app/stages/preflight.py` (~200 行)
   - `check_stage_prerequisites()` - 单 stage 检查

@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
 from app.domains.assembly.selection import (
     AssemblySelection,
+    PLATFORM_TO_SHARED_READ_TYPE,
+    SHARED_TO_METHOD_READ_TYPE,
     compatible_methods,
     default_primary_method,
     is_method_read_type_compatible,
@@ -22,12 +24,12 @@ from app.domains.assembly.selection import (
     route_from_read_type as _route_from_read_type,
 )
 from app.domains.genome_size import resolve_genome_size
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.knowledge.packs import load_knowledge_pack
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
@@ -48,12 +50,8 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.plan import AssemblyCandidatePlan
-from app.schemas.shared_parameters import (
-    PLATFORM_TO_SHARED_READ_TYPE,
-    SHARED_TO_METHOD_READ_TYPE,
-)
 from app.schemas.state import TopLevelState
-from app.stages.assembly.constants import (
+from app.domains.assembly.constants import (
     ASSEMBLY_AUTO_CANDIDATES,
     ASSEMBLY_CANDIDATES,
     FLYE_METHOD,
@@ -712,7 +710,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             ).model_dump(mode="json")
         )
 
-    append_artifact_records(data_dir, session_id, artifacts)
+    publish_artifact_records(data_dir, session_id, artifacts)
     if local_flye:
         status = "flye_execution_planned"
     elif local_nextdenovo:
@@ -1062,7 +1060,7 @@ def _write_assembly_json_artifact(
         method_name=method_name,
         artifact_type=artifact_type,
     )
-    refs = append_artifact_records(data_dir, session_id, [artifact])
+    refs = publish_artifact_records(data_dir, session_id, [artifact])
     if len(refs) != 1:
         raise ResumeValidationError("assembly artifact index did not return one ref")
     return refs[0].model_dump(mode="json")

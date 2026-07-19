@@ -732,7 +732,7 @@ class ReviewResumeTests(unittest.TestCase):
     def test_inspect_session_decision_requirements_none_when_no_unresolved(self):
         state = _assembly_blocked_state()
         # Add a decision after the request → unresolved goes away.
-        from app.control.ledger import Ledger
+        from app.storage.ledger import Ledger
 
         Ledger(state["data_dir"]).record_review_decision(
             "s1", "assembly_review", decision="accept", candidate_id="flye"
@@ -744,7 +744,7 @@ class ReviewResumeTests(unittest.TestCase):
 
     def test_inspect_session_uses_latest_review_event_order(self):
         state = _assembly_blocked_state()
-        from app.control.ledger import Ledger
+        from app.storage.ledger import Ledger
 
         ledger = Ledger(state["data_dir"])
         ledger.record_review_decision("s1", "assembly_review", decision="accept", candidate_id="flye")
@@ -759,7 +759,7 @@ class ReviewResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session_id = "operator-report-only"
             data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-            from app.control.ledger import Ledger
+            from app.storage.ledger import Ledger
 
             Ledger(data_dir).create_session(session_id, "control/manifest.yaml")
             interrupt = {
@@ -793,7 +793,7 @@ class ReviewResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session_id = "stale-operator-report"
             data_dir = v2_run_dir(Path(tmp) / "data", session_id)
-            from app.control.ledger import Ledger
+            from app.storage.ledger import Ledger
 
             ledger = Ledger(data_dir)
             ledger.create_session(session_id, "control/manifest.yaml")
@@ -985,7 +985,7 @@ def _assembly_blocked_state(
             "candidate_comparison_ref": "candidate_comparison.json",
         },
     }
-    from app.control.ledger import Ledger
+    from app.storage.ledger import Ledger
     state = {
         "session_id": session_id,
         "thread_id": session_id,
@@ -1119,7 +1119,7 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
     state["stage_outputs"]["hic_scaffolding"]["review_request_artifact_ref"] = (
         persisted.request_ref.model_dump(mode="json")
     )
-    from app.control.ledger import Ledger
+    from app.storage.ledger import Ledger
 
     ledger = Ledger(data_dir)
     ledger.create_session(session_id, "control/manifest.yaml")
@@ -1135,7 +1135,7 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
 
 
 def _read_events(state: dict) -> list[dict]:
-    from app.control.ledger import Ledger
+    from app.storage.ledger import Ledger
 
     return Ledger(state["data_dir"]).read_events(state["session_id"])
 

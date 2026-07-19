@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from app.execution.artifacts import append_artifact_records
-from app.schemas.artifacts import ArtifactMeta, ArtifactRef, file_sha256
+from app.storage.artifacts import publish_artifact_records
+from app.integrity import sha256_file
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.state import TopLevelState
 from app.storage.paths import DataLayoutError, SessionPaths
 from app.storage.publish import publish_file
@@ -314,7 +315,7 @@ def _publish_json(
         artifact_type=artifact_type,
         metadata=metadata,
     )
-    refs = append_artifact_records(paths.run_dir, session_id, [artifact])
+    refs = publish_artifact_records(paths.run_dir, session_id, [artifact])
     if len(refs) != 1:
         raise ReviewPersistenceError("artifact index did not return one review ref")
     return refs[0]
@@ -324,7 +325,7 @@ def _verify_ref(paths: SessionPaths, ref: ArtifactRef) -> Path:
     path = paths.resolve_ref(ref.path_ref)
     try:
         size = path.stat().st_size
-        digest = file_sha256(path)
+        digest = sha256_file(path)
     except OSError as exc:
         raise ReviewPersistenceError(f"review artifact is missing: {ref.path_ref}") from exc
     if size != ref.size_bytes or digest != ref.sha256:

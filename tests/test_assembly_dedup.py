@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.schemas.state import initial_state
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_review_stage

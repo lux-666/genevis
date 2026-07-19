@@ -63,7 +63,7 @@ def materialize_entry_manifest(request: EntryRequest) -> EntryRequest:
 def _expand_source_paths(source_paths: list[str]) -> list[Path]:
     expanded: list[Path] = []
     for raw_path in source_paths:
-        path = Path(raw_path)
+        path = Path(raw_path).expanduser().resolve(strict=False)
         if path.is_dir():
             expanded.extend(_scan_source_dir(path))
         else:

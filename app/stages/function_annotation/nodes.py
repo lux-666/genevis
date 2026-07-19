@@ -9,9 +9,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import (
-    append_artifact_records,
+from app.storage.ledger import Ledger
+from app.storage.artifacts import (
+    publish_artifact_records,
     publish_or_recover_work_artifact,
 )
 from app.execution.env_dispatch import resolve_method_env
@@ -22,7 +22,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.schemas.artifacts import (
     ArtifactMeta,
     FunctionAnnotationBundle,
@@ -195,7 +195,7 @@ def validate_database_provenance(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_artifact_registered(
         session_id, artifact.model_dump(mode="json")
     )
@@ -542,7 +542,7 @@ def commit_function_annotation(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
     Ledger(data_dir).record_artifact_registered(
         session_id, artifact.model_dump(mode="json")
     )

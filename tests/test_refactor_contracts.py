@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
+import yaml
+
+from app.storage.ledger import Ledger
+from app.storage.materialization import materialize_run_layout
 from app.entrypoints.run import _snapshot_resume_decision
-from app.execution.artifacts import artifact_ref_for_path, register_artifact_records
+from app.storage.artifacts import artifact_ref_for_path, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.env_resolver import EnvResolver, EnvSpec
 from app.execution.method_runner import build_frozen_attempt
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.state import initial_state
 from app.stages.assembly_dedup.nodes import _read_mapping_preset
 from app.stages.assembly_dedup.routing import (
     route_after_enter,
@@ -22,10 +27,94 @@ from app.stages.assembly_dedup.routing import (
     route_after_run,
 )
 from app.storage.paths import DataLayoutError, SessionPaths
+from app.stages.inventory.nodes import validate_inputs
 from tests.data_v2 import v2_run_dir
 
 
 class ExecutionRefactorContractTests(unittest.TestCase):
+    def test_run_manifest_resolves_relative_assets_against_source_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            reads = source_dir / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            source_manifest = source_dir / "manifest.yaml"
+            source_manifest.write_text(
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                "    paths: [reads.fastq]\n"
+                "    platform: ont\n"
+                "    format: fastq\n",
+                encoding="utf-8",
+            )
+            paths = SessionPaths(root / "data", "s1")
+
+            materialize_run_layout(
+                paths,
+                manifest_path=source_manifest,
+                run_config_path=None,
+            )
+
+            canonical = yaml.safe_load(paths.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(canonical["assets"][0]["paths"], [str(reads.resolve())])
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref=paths.to_ref(paths.manifest_path),
+                data_dir=str(paths.run_dir),
+            )
+            inventory = validate_inputs(state)["stage_outputs"]["inventory"]
+            self.assertTrue(inventory["valid"])
+
+    def test_run_config_paths_resolve_against_source_config_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            source_manifest = source_dir / "manifest.yaml"
+            source_manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            source_config = source_dir / "run_config.json"
+            source_config.write_text(
+                json.dumps(
+                    {
+                        "assembly": {"hifi_reads_ref": "reads/hifi.fofn"},
+                        "assembly_review": {
+                            "busco": {
+                                "lineage_path": "busco/metazoa",
+                                "lineage_name": "metazoa",
+                                "lineage_version": "v1",
+                                "lineage_source": "local",
+                                "threads": 4,
+                            }
+                        },
+                        "t2t": {"assembly_fasta_ref": "assembly/final.fasta"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = SessionPaths(root / "data", "s1")
+
+            materialize_run_layout(
+                paths,
+                manifest_path=source_manifest,
+                run_config_path=source_config,
+            )
+
+            canonical = json.loads(paths.run_config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                canonical["assembly"]["hifi_reads_ref"],
+                str((source_dir / "reads/hifi.fofn").resolve()),
+            )
+            self.assertEqual(
+                canonical["assembly_review"]["busco"]["lineage_path"],
+                str((source_dir / "busco/metazoa").resolve()),
+            )
+            self.assertEqual(
+                canonical["t2t"]["assembly_fasta_ref"],
+                str((source_dir / "assembly/final.fasta").resolve()),
+            )
+
     def test_external_resume_decision_is_snapshotted_under_run_control(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

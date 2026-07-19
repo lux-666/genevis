@@ -9,9 +9,9 @@ from errno import EEXIST, EXDEV
 from pathlib import Path
 from uuid import uuid4
 
-from app.execution.results import ExecutionResult
+from app.schemas.execution import ExecutionResult
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.storage.integrity import sha256_file
+from app.integrity import sha256_file
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
@@ -132,7 +132,3 @@ def publish_execution_logs(
         logs_dir / f"{safe_attempt_id}.{invocation_id}.stderr.log",
     )
     return result.model_copy(update={"stdout_path": stdout, "stderr_path": stderr})
-
-
-file_sha256 = sha256_file
-_sha256 = sha256_file

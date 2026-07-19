@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import append_artifact_records
+from app.storage.artifacts import publish_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -23,7 +23,7 @@ from app.execution.evidence import (
     persist_frozen_attempt,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
@@ -44,11 +44,13 @@ from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
+    resolve_stage_resource,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_specs import assembly_resource_spec
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -99,15 +101,14 @@ def enter_t2t(state: TopLevelState) -> dict:
 
 def resolve_t2t_inputs(state: TopLevelState) -> dict:
     """Resolve the current assembly and the preferred ONT evidence source."""
-    from app.stages.base import resolve_current_assembly
-
     existing = _output(state)
     config = _config(existing)
-    assembly_ref, source_stage = resolve_current_assembly(
+    assembly = resolve_stage_resource(
         state,
+        resource_spec=assembly_resource_spec("hic_scaffolding", "assembly_review"),
         override=config.get("assembly_fasta_ref"),
-        prefer_stages=["hic_scaffolding", "assembly_review"]
     )
+    assembly_ref, source_stage = assembly.path, assembly.source
     if not assembly_ref:
         return _fail(state, "missing final assembly ref for t2t")
     assembly_path = Path(assembly_ref)
@@ -135,7 +136,6 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
             "out_dir": str(out_dir),
             "work_dir": str(work_dir),
             "final_assembly_for_annotation": str(assembly_path),
-            "final_assembly_for_downstream": str(assembly_path),
             "notes": [],
         },
     )
@@ -406,7 +406,6 @@ def apply_t2t_patches(state: TopLevelState) -> dict:
             "patched_assembly_ref": materialized["patched_assembly_ref"],
             "patch_records_ref": materialized["patch_records_ref"],
             "final_assembly_for_annotation": materialized["patched_assembly_ref"],
-            "final_assembly_for_downstream": materialized["patched_assembly_ref"],
         },
     )
 
@@ -462,7 +461,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
     )
     bundle_path.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
     bundle_artifact = ArtifactMeta.from_file(bundle_path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type="t2t.bundle")
-    append_artifact_records(absolute_data_dir(state), state["session_id"], [bundle_artifact])
+    publish_artifact_records(absolute_data_dir(state), state["session_id"], [bundle_artifact])
     final_assembly = out.get("final_assembly_for_annotation") or out["input_assembly_ref"]
     return _update(
         state,
@@ -473,7 +472,6 @@ def write_t2t_report(state: TopLevelState) -> dict:
             "bundle_ref": str(bundle_path),
             "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
             "final_assembly_for_annotation": final_assembly,
-            "final_assembly_for_downstream": final_assembly,
         },
     )
 
@@ -543,7 +541,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         final_assembly_for_annotation = materialized["patched_assembly_ref"]
         patched_assembly_ref = materialized["patched_assembly_ref"]
         patch_records_ref = materialized["patch_records_ref"]
-        append_artifact_records(
+        publish_artifact_records(
             data_dir,
             session_id,
             [
@@ -1080,7 +1078,7 @@ def _register_artifacts(state: TopLevelState, out: dict[str, Any], summary_path:
             paths.append(path)
             artifacts.append(ArtifactMeta.from_file(path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type=artifact_type))
     if artifacts:
-        append_artifact_records(absolute_data_dir(state), state["session_id"], artifacts)
+        publish_artifact_records(absolute_data_dir(state), state["session_id"], artifacts)
     return paths
 
 

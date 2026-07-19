@@ -9,15 +9,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.execution.artifacts import (
-    append_artifact_records,
+from app.storage.artifacts import (
+    publish_artifact_records,
     publish_or_recover_work_artifact,
 )
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.graph.routing import next_stage_name
+from app.workflow import next_stage_name
 from app.review.annotation_intake import (
     DOWNSTREAM_STAGES,
     load_annotation_intake_plan,
@@ -41,11 +41,13 @@ from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
+    resolve_stage_resource,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_specs import assembly_resource_spec
 from app.stages.gene_annotation.persistence import (
     load_gene_attempt,
     load_gene_execution,
@@ -95,12 +97,15 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
         fallback_reason = _explicit_unmasked_fallback_reason(state)
         if not fallback_reason:
             return _fail_update(state, "missing softmasked_genome for gene_annotation")
-        # Fallback to unmasked assembly
-        from app.stages.base import resolve_current_assembly
-
-        genome_ref, _ = resolve_current_assembly(
-            state, prefer_stages=["t2t", "hic_scaffolding", "assembly_review"]
+        assembly = resolve_stage_resource(
+            state,
+            resource_spec=assembly_resource_spec(
+                "t2t",
+                "hic_scaffolding",
+                "assembly_review",
+            ),
         )
+        genome_ref = assembly.path
         genome_source = "final_assembly_for_annotation"
         if not genome_ref:
             return _fail_update(
@@ -289,7 +294,7 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
             "review_required": review_required,
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
     return _update_gene_output(
         state,
         {
@@ -404,7 +409,7 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
             "review_required": gene_out.get("review_required", False),
         },
     )
-    append_artifact_records(data_dir, session_id, [artifact])
+    publish_artifact_records(data_dir, session_id, [artifact])
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["gene_annotation"] = {
@@ -484,7 +489,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
         },
     )
     artifacts.append(bundle_artifact)
-    append_artifact_records(data_dir, session_id, artifacts)
+    publish_artifact_records(data_dir, session_id, artifacts)
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["gene_annotation"] = {

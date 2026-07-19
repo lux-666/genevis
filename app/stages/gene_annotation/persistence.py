@@ -13,7 +13,7 @@ from app.execution.evidence import (
     persist_execution_result,
     persist_frozen_attempt,
 )
-from app.execution.results import ExecutionResult
+from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.paths import DataLayoutError

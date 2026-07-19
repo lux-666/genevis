@@ -5,8 +5,8 @@ Decides whether inventory succeeds, fails, or requires human review.
 
 from __future__ import annotations
 
+from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-from app.stages.base import is_fail_status
 
 
 def route_from_inventory(state: TopLevelState) -> str:
@@ -20,7 +20,7 @@ def route_from_inventory(state: TopLevelState) -> str:
     inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
     status = inventory_out.get("status")
 
-    if is_fail_status(status):
+    if is_terminal_failure(status):
         return "fail"
 
     if status == "validated":

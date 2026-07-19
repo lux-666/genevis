@@ -9,8 +9,8 @@ from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.execution.evidence import (
     ExecutionEvidence,
     build_execution_evidence,
@@ -421,7 +421,7 @@ def collect_method_artifacts(
         }
 
     if artifacts:
-        append_artifact_records(data_dir, attempt.session_id, artifacts)
+        publish_artifact_records(data_dir, attempt.session_id, artifacts)
         payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
         ledger = Ledger(data_dir)
         if execution_succeeded:

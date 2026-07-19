@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
 from app.review.base import ReviewPayload

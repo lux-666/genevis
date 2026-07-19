@@ -1304,7 +1304,7 @@ def run_interactive_review(
         print(f"error: no checkpoint database at {db_path}", file=sys.stderr)
         return 1
 
-    from app.control.ledger import Ledger
+    from app.storage.ledger import Ledger
     from app.entrypoints.run import build_graph
 
     graph = build_graph(backend="sqlite", data_dir=data_dir)
@@ -1346,7 +1346,7 @@ def run_interactive_review(
             )
             update = {**update, **intake.update}
     except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-        from app.control.ledger import Ledger as _Ledger
+        from app.storage.ledger import Ledger as _Ledger
         _Ledger(data_dir).record_event(session_id, "resume_rejected", {
             "source": "interactive_review",
             "error": f"{type(exc).__name__}: {exc}",
@@ -1355,7 +1355,7 @@ def run_interactive_review(
         print(f"error: resume rejected: {exc}", file=sys.stderr)
         return 1
     except (RuntimeError, ValueError) as exc:
-        from app.control.ledger import Ledger as _Ledger
+        from app.storage.ledger import Ledger as _Ledger
         _Ledger(data_dir).record_event(session_id, "resume_rejected", {
             "source": "interactive_review",
             "error": f"{type(exc).__name__}: {exc}",

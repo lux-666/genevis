@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError, inspect_state, resume_review_state
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_request

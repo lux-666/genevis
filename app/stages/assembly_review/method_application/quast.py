@@ -7,8 +7,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.control.ledger import Ledger
-from app.execution.artifacts import append_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.artifacts import publish_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -159,7 +159,7 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             summary_path.write_text(json.dumps({"session_id": session_id, "method_name": QUAST_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "report_tsv_ref": str(report_tsv), "metrics": metrics, "notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
             artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
             metric_refs.append(str(summary_path))
-            append_artifact_records(data_dir, session_id, artifacts)
+            publish_artifact_records(data_dir, session_id, artifacts)
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
             for artifact in payloads:

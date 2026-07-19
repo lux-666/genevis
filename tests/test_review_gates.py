@@ -14,7 +14,7 @@ from app.control.lifecycle import (
     inspect_session,
     resume_review_state,
 )
-from app.control.ledger import Ledger
+from app.storage.ledger import Ledger
 from app.entrypoints.review_interactive import prompt_generic_gate_decision
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.gates import ReviewGateDeclaration, get_review_gate, register_review_gate
