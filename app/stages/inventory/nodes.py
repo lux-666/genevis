@@ -16,6 +16,7 @@ from app.storage.ledger import Ledger
 from app.schemas.assets import AssetRecord
 from app.schemas.manifest import InputManifest, validate_manifest
 from app.schemas.state import TopLevelState
+from app.schemas.resource_ref import ResourceRef
 from app.review.persistence import persist_review_decision
 from app.stages.base import append_route_trace, resolve_run_ref
 from app.storage.paths import SessionPaths
@@ -190,8 +191,12 @@ def register_assets(state: TopLevelState) -> dict:
         ambiguous=any("ambiguous" in w for w in report["warnings"]),
     )
 
+    # Populate resource_refs from registered assets
+    resource_refs = _populate_resource_refs_from_assets(records)
+
     return {
         "asset_registry_ref": str(registry_path),
+        "resource_refs": resource_refs,
         "stage_outputs": {
             **(state.get("stage_outputs") or {}),
             "inventory": {
@@ -310,3 +315,61 @@ def apply_inventory_resume_decision(state: TopLevelState, request: Any) -> dict[
         "stage_outputs": outputs,
         "active_interrupt": None,
     }
+
+
+def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str, dict]:
+    """Populate resource_refs from registered asset records.
+
+    Maps asset_type to logical resource names and creates ResourceRef entries.
+
+    Args:
+        records: List of registered AssetRecord objects
+
+    Returns:
+        Dictionary of resource_type -> ResourceRef dict (serialized)
+    """
+    resource_refs: dict[str, dict] = {}
+
+    # Group assets by logical resource type
+    for record in records:
+        resource_type = None
+
+        # Map asset_type to logical resource name
+        if record.asset_type in ["raw_long_reads", "clean_long_reads"]:
+            resource_type = "long_reads"
+        elif record.asset_type in ["raw_short_dna_reads", "clean_short_dna_reads"]:
+            resource_type = "short_reads"
+        elif record.asset_type in ["hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"]:
+            resource_type = "hic_reads"
+        elif record.asset_type == "assembly_fasta_registered":
+            resource_type = "assembly"
+        elif record.asset_type == "predicted_proteins":
+            resource_type = "predicted_proteins"
+        elif record.asset_type == "repeat_library":
+            resource_type = "repeat_library"
+        elif record.asset_type == "reference_proteins":
+            resource_type = "reference_proteins"
+
+        if resource_type:
+            # Get or create ResourceRef for this resource type
+            if resource_type not in resource_refs:
+                resource_refs[resource_type] = ResourceRef(
+                    resource_type=resource_type,
+                    paths=[],
+                    source_stage=None,  # From manifest, not a stage
+                    metadata={
+                        "asset_ids": [],
+                        "platforms": [],
+                    }
+                ).to_dict()
+
+            # Add this asset's path
+            resource_refs[resource_type]["paths"].append(str(record.path))
+
+            # Accumulate metadata
+            resource_refs[resource_type]["metadata"]["asset_ids"].append(record.asset_id)
+            if record.platform and record.platform not in resource_refs[resource_type]["metadata"]["platforms"]:
+                resource_refs[resource_type]["metadata"]["platforms"].append(record.platform)
+
+    return resource_refs
+
