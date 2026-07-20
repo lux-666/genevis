@@ -9,6 +9,7 @@ references only.
 
 import json
 import math
+import warnings
 from collections.abc import Mapping
 from typing import (
     Annotated,
@@ -24,9 +25,16 @@ from typing import (
 )
 
 from app.schemas.limits import (
+    ACTIVE_INTERRUPT_MAX_BYTES,
+    LAST_ERROR_MAX_CHARS,
     RESOURCE_REFS_MAX_BYTES,
+    REVIEW_NOTE_MAX_CHARS,
+    REVIEW_NOTES_MAX_ITEMS,
+    ROUTE_TRACE_LIMIT,
     STAGE_CURSOR_MAX_BYTES,
     STAGE_OUTPUTS_MAX_BYTES,
+    TOP_LEVEL_STATE_HARD_MAX_BYTES,
+    TOP_LEVEL_STATE_TARGET_BYTES,
 )
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.shared_parameters import SharedParameters
@@ -77,7 +85,14 @@ _FROZEN_ATTEMPT_BODY_KEYS = frozenset(
     }
 )
 
+_ARTIFACT_IDENTITY_KEYS = frozenset({"artifact_id", "path_ref", "sha256"})
+_ARTIFACT_BODY_KEYS = frozenset({"body", "bytes", "content", "data", "payload", "text"})
+
 _StageKey = TypeVar("_StageKey", bound=str)
+
+
+class CheckpointBudgetWarning(UserWarning):
+    """The whole state exceeded its architecture target but not its hard limit."""
 
 
 def validate_stage_outputs(value: Mapping[_StageKey, object] | None) -> StageOutputs:
@@ -164,6 +179,13 @@ def _validate_json_value(value: object, *, path: str) -> None:
             _validate_json_value(item, path=f"{path}[{index}]")
         return
     if isinstance(value, dict):
+        if (
+            _ARTIFACT_IDENTITY_KEYS <= value.keys()
+            and _ARTIFACT_BODY_KEYS & value.keys()
+        ):
+            raise ValueError(
+                f"{path} embeds an artifact body; store only its ArtifactRef"
+            )
         if _FROZEN_ATTEMPT_BODY_KEYS <= value.keys():
             raise ValueError(
                 f"{path} embeds a FrozenAttemptSpec; store its artifact ref instead"
@@ -186,6 +208,134 @@ def _canonical_json_size(value: object) -> int:
             separators=(",", ":"),
         ).encode("utf-8")
     )
+
+
+def validate_top_level_state(value: Mapping[str, object]) -> "TopLevelState":
+    """Validate the complete JSON-only state at the checkpoint boundary."""
+
+    if not isinstance(value, dict):
+        raise TypeError("TopLevelState must be a JSON object")
+    declared = set(TopLevelState.__annotations__)
+    unknown = set(value).difference(declared)
+    if unknown:
+        raise ValueError(
+            "TopLevelState contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    missing = set(TopLevelState.__required_keys__).difference(value)
+    if missing:
+        raise ValueError(
+            "TopLevelState is missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+
+    for name, field_value in value.items():
+        validate_state_field(name, field_value)
+
+    serialized_bytes = _canonical_json_size(value)
+    if serialized_bytes > TOP_LEVEL_STATE_HARD_MAX_BYTES:
+        raise ValueError(
+            "TopLevelState exceeds hard limit "
+            f"{TOP_LEVEL_STATE_HARD_MAX_BYTES} bytes: {serialized_bytes}"
+        )
+    if serialized_bytes > TOP_LEVEL_STATE_TARGET_BYTES:
+        warnings.warn(
+            "TopLevelState exceeds target "
+            f"{TOP_LEVEL_STATE_TARGET_BYTES} bytes: {serialized_bytes}",
+            CheckpointBudgetWarning,
+            stacklevel=2,
+        )
+    return cast(TopLevelState, dict(value))
+
+
+def validate_state_field(name: str, value: object) -> None:
+    """Validate one pending state-channel write before a saver persists it."""
+
+    if name not in TopLevelState.__annotations__:
+        raise ValueError(f"unknown TopLevelState field: {name}")
+    _validate_json_value(value, path=name)
+    if name == "stage_outputs":
+        validate_stage_outputs(cast(Mapping[str, object] | None, value))
+    elif name == "resource_refs":
+        validate_resource_refs(cast(Mapping[str, object] | None, value))
+    elif name == "active_interrupt":
+        _validate_active_interrupt(value)
+    elif name == "last_error":
+        _validate_last_error(value)
+    elif name == "review_notes":
+        _validate_review_notes(value)
+    elif name == "route_trace":
+        _validate_route_trace(value)
+    if _canonical_json_size(value) > TOP_LEVEL_STATE_HARD_MAX_BYTES:
+        raise ValueError(
+            f"{name} exceeds whole-state hard limit "
+            f"{TOP_LEVEL_STATE_HARD_MAX_BYTES} bytes"
+        )
+
+
+def _validate_active_interrupt(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise TypeError("active_interrupt must be a JSON object or null")
+    unknown = set(value).difference(ActiveInterrupt.__annotations__)
+    if unknown:
+        raise ValueError(
+            "active_interrupt contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    if value.get("stage") not in DOMAIN_STAGES:
+        raise ValueError("active_interrupt.stage must be a known domain stage")
+    request_ref = value.get("request_ref")
+    if request_ref is not None:
+        from app.schemas.artifacts import ArtifactRef
+
+        try:
+            parsed_ref = ArtifactRef.model_validate(request_ref)
+        except Exception as exc:
+            raise ValueError(
+                "active_interrupt.request_ref must be a valid ArtifactRef"
+            ) from exc
+        request_hash = value.get("request_hash")
+        if request_hash is not None and request_hash != parsed_ref.sha256:
+            raise ValueError(
+                "active_interrupt.request_hash must match request_ref.sha256"
+            )
+    serialized_bytes = _canonical_json_size(value)
+    if serialized_bytes > ACTIVE_INTERRUPT_MAX_BYTES:
+        raise ValueError(
+            "active_interrupt exceeds hard limit "
+            f"{ACTIVE_INTERRUPT_MAX_BYTES} bytes: {serialized_bytes}"
+        )
+
+
+def _validate_last_error(last_error: object) -> None:
+    if last_error is not None and not isinstance(last_error, str):
+        raise TypeError("last_error must be a string or null")
+    if isinstance(last_error, str) and len(last_error) > LAST_ERROR_MAX_CHARS:
+        raise ValueError(f"last_error exceeds {LAST_ERROR_MAX_CHARS} characters")
+
+
+def _validate_review_notes(notes: object) -> None:
+    if not isinstance(notes, list) or not all(isinstance(note, str) for note in notes):
+        raise TypeError("review_notes must be a list of strings")
+    if len(notes) > REVIEW_NOTES_MAX_ITEMS:
+        raise ValueError(f"review_notes exceeds {REVIEW_NOTES_MAX_ITEMS} items")
+    for index, note in enumerate(notes):
+        if len(note) > REVIEW_NOTE_MAX_CHARS:
+            raise ValueError(
+                f"review_notes[{index}] exceeds {REVIEW_NOTE_MAX_CHARS} characters; "
+                "publish long notes as artifacts"
+            )
+
+
+def _validate_route_trace(route_trace: object) -> None:
+    if not isinstance(route_trace, list) or not all(
+        isinstance(item, str) for item in route_trace
+    ):
+        raise TypeError("route_trace must be a list of strings")
+    if len(route_trace) > ROUTE_TRACE_LIMIT:
+        raise ValueError(f"route_trace exceeds {ROUTE_TRACE_LIMIT} entries")
 
 
 class ActiveInterrupt(TypedDict, total=False):

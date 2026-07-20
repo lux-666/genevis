@@ -20,7 +20,7 @@ from app.storage.artifacts import read_artifact_records
 from app.execution.env_resolver import PreflightResult
 from app.entrypoints.review_interactive import run_interactive_review
 from app.entrypoints.tui import _tui_main, run_tui
-from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _build_assembly_selection, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, generate_session_id
+from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _build_assembly_selection, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, _run_storage_audit, generate_session_id
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import PersistedReviewRequest, load_review_request, persist_review_request
 from app.schemas.artifacts import ArtifactRef
@@ -371,6 +371,82 @@ class EntrypointTests(unittest.TestCase):
         self.assertTrue(args.json)
         self.assertEqual(args.write_decision_template, "decision.json")
 
+    def test_storage_audit_args_are_read_only_and_json_only(self):
+        args = _parse_args(
+            [
+                "storage-audit",
+                "--session-id",
+                "s1",
+                "--data-dir",
+                "out",
+                "--format",
+                "json",
+                "--dry-run-manifest",
+            ]
+        )
+
+        self.assertEqual(args.command, "storage-audit")
+        self.assertEqual(args.session_id, "s1")
+        self.assertEqual(args.format, "json")
+        self.assertTrue(args.dry_run_manifest)
+        self.assertFalse(hasattr(args, "apply"))
+
+    def test_storage_audit_cli_emits_optional_dry_run_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "s1")
+            ensure_run_layout(paths)
+            report = paths.report_path("session_summary.json")
+            report.write_text("{}\n", encoding="utf-8")
+            work = paths.work_path("assembly", "resume-required.txt")
+            work.parent.mkdir(parents=True, exist_ok=True)
+            work.write_text("keep\n", encoding="utf-8")
+            args = _parse_args(
+                [
+                    "storage-audit",
+                    "--session-id",
+                    "s1",
+                    "--data-dir",
+                    tmp,
+                    "--format",
+                    "json",
+                    "--dry-run-manifest",
+                ]
+            )
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                code = _run_storage_audit(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["audit"]["session_id"], "s1")
+        self.assertEqual(payload["cleanup_manifest"]["candidate_file_count"], 1)
+        self.assertEqual(payload["cleanup_manifest"]["retained_work_file_count"], 1)
+
+    def test_storage_audit_cli_returns_nonzero_on_integrity_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SessionPaths(tmp, "s1")
+            ensure_run_layout(paths)
+            paths.artifact_index_path.write_text("{not-json}\n", encoding="utf-8")
+            args = _parse_args(
+                [
+                    "storage-audit",
+                    "--session-id",
+                    "s1",
+                    "--data-dir",
+                    tmp,
+                    "--format",
+                    "json",
+                ]
+            )
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                code = _run_storage_audit(args)
+
+        self.assertEqual(code, 1)
+        self.assertIn("storage audit failed", stderr.getvalue())
+
     def test_review_args_accept_checkpointer_flag(self):
         args = _parse_args([
             "review",
@@ -521,6 +597,42 @@ class EntrypointTests(unittest.TestCase):
             )
             self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
             self.assertTrue((root / "data" / "runs" / "s1" / "ledger" / "events.jsonl").exists())
+
+    def test_structured_run_does_not_refinalize_interactive_resume_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            graph = _FakeGraph(
+                {
+                    "current_stage": "assembly_review",
+                    "supervision_state": "blocked_human",
+                    "route_trace": ["assembly_stage"],
+                }
+            )
+            terminal = {
+                "current_stage": "done",
+                "supervision_state": "completed",
+                "route_trace": ["assembly_stage", "done_stage"],
+            }
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.entrypoints.run._interactive_gate_loop", return_value=terminal
+            ), patch("app.entrypoints.run.finalize_terminal_state") as finalize:
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    argparse.Namespace(
+                        session_id="s1",
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                        checkpointer="sqlite",
+                        _interactive_gate=True,
+                    ),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            finalize.assert_not_called()
 
     def test_structured_run_resolves_relative_data_dir_before_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1547,6 +1659,67 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             terminal = [event for event in events if event["event_type"] == "session_terminal"]
             self.assertEqual(len(terminal), 1)
             self.assertEqual(terminal[0]["outcome"], "failed")
+
+    def test_run_session_invoke_exception_persists_before_terminal_compaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.yaml"
+            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            data_dir = root / "data"
+            operations = []
+
+            class _ExplodingDurableGraph:
+                checkpointer = object()
+
+                def invoke(self, state, config):
+                    self.state = {
+                        **state,
+                        "current_stage": "assembly",
+                        "route_trace": ["inventory_stage", "assembly_stage"],
+                    }
+                    raise RuntimeError("durable stage exploded")
+
+                def get_state(self, config):
+                    return SimpleNamespace(values=dict(self.state))
+
+                def update_state(self, config, update):
+                    operations.append("update_state")
+                    self.state.update(update)
+
+            graph = _ExplodingDurableGraph()
+
+            def compact(checkpointer, config, terminal_state):
+                operations.append("compact")
+                self.assertEqual(terminal_state["supervision_state"], "failed_terminal")
+                self.assertIsNone(terminal_state.get("active_interrupt"))
+                return True
+
+            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
+                "app.graph.checkpoint_compaction.compact_terminal_checkpoint",
+                side_effect=compact,
+            ):
+                code, _stdout, stderr = _capture_cli(
+                    _run_session,
+                    self._namespace(
+                        manifest=str(manifest),
+                        data_dir=str(data_dir),
+                        checkpointer="sqlite",
+                    ),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(operations, ["update_state", "compact"])
+            self.assertEqual(graph.state["supervision_state"], "failed_terminal")
+            self.assertIn("workflow invoke failed: RuntimeError", stderr)
+            self.assertNotIn("failed to persist/compact", stderr)
+
+            session_dir = SessionPaths(data_dir, "s1").run_dir
+            event_types = [
+                event["event_type"] for event in Ledger(session_dir).read_events("s1")
+            ]
+            self.assertEqual(event_types.count("session_terminal"), 1)
+            self.assertEqual(event_types.count("terminal_compaction_completed"), 1)
+            self.assertNotIn("terminal_compaction_skipped", event_types)
 
     def test_run_config_seeds_nextdenovo_method_and_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:

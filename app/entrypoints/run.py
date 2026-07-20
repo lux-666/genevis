@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
 from app.config import default_data_root
+from app.control.lifecycle import finalize_terminal_state
 from app.domains.assembly.selection import (
     AssemblySelection,
     default_primary_method,
@@ -42,7 +43,7 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
-from app.storage.paths import SessionPaths, locate_session_data_dir
+from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
     from app.review.base import ResumeReviewRequest
@@ -239,6 +240,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inspect_parser.add_argument(
         "--write-decision-template",
         help="Write a JSON decision-file template for the active review gate",
+    )
+
+    storage_audit_parser = subparsers.add_parser(
+        "storage-audit",
+        help="Audit one v2 run's storage without changing it",
+    )
+    storage_audit_parser.add_argument(
+        "--session-id", required=True, help="Session identifier to audit"
+    )
+    storage_audit_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
+    storage_audit_parser.add_argument(
+        "--format",
+        choices=["json"],
+        default="json",
+        help="Machine-readable output format",
+    )
+    storage_audit_parser.add_argument(
+        "--dry-run-manifest",
+        action="store_true",
+        default=False,
+        help="Include a report-only cleanup manifest; never deletes files",
     )
 
     resume_parser = subparsers.add_parser(
@@ -588,16 +612,17 @@ def _run_session(args: argparse.Namespace) -> int:
             "last_error": error,
             "checkpoint_persistence": backend,
         }
-        Ledger(request.data_dir).record_session_terminal(
-            request.session_id,
-            outcome="failed",
-            stage=failure_result.get("current_stage"),
-            error=error,
-            idempotency_key="session-terminal:failed",
+        compaction_warning = finalize_terminal_state(
+            graph, config, failure_result, request.session_id,
+            request.data_dir, backend,
+            report_kind="operator",
         )
-        from app.reports.review_report import write_operator_report
-
-        write_operator_report(request.data_dir, request.session_id, failure_result)
+        if compaction_warning:
+            print(
+                "error: failed to persist/compact terminal failure checkpoint: "
+                f"{compaction_warning}",
+                file=sys.stderr,
+            )
         print(f"error: workflow invoke failed: {error}", file=sys.stderr)
         return 1
 
@@ -606,9 +631,11 @@ def _run_session(args: argparse.Namespace) -> int:
         interactive_gate = sys.stdin.isatty()
     supervision = result.get("supervision_state", "unknown")
 
+    terminal_finalized_by_resume = False
     if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
         result = _interactive_gate_loop(graph, config, result, request.session_id, request.data_dir)
         supervision = result.get("supervision_state", "unknown")
+        terminal_finalized_by_resume = supervision in {"completed", "failed_terminal"}
 
     current_stage = result.get("current_stage", "unknown")
     route_trace = result.get("route_trace", [])
@@ -638,10 +665,17 @@ def _run_session(args: argparse.Namespace) -> int:
         run_config_ref = Path(run_config_path).expanduser().resolve(strict=False)
         print(f"run_config_ref: {run_config_ref}")
 
-    if supervision in {"completed", "failed_terminal"}:
-        from app.reports.review_report import write_final_review_report
-
-        write_final_review_report(request.data_dir, request.session_id)
+    compaction_warning = None
+    if not terminal_finalized_by_resume:
+        compaction_warning = finalize_terminal_state(
+            graph, config, result, request.session_id, request.data_dir, backend,
+            report_kind="final",
+        )
+    if compaction_warning:
+        print(
+            f"warning: terminal checkpoint compaction skipped: {compaction_warning}",
+            file=sys.stderr,
+        )
 
     if supervision == "failed_terminal":
         print(f"error: {result.get('last_error', 'unknown failure')}", file=sys.stderr)
@@ -870,6 +904,28 @@ def generate_session_id(data_dir: str | Path | None = None, *, now: datetime | N
                 if match:
                     max_index = max(max_index, int(match.group(1)))
     return f"gene-{date}-{max_index + 1:06d}"
+
+
+def _run_storage_audit(args: argparse.Namespace) -> int:
+    """Emit one read-only v2 storage audit and optional dry-run manifest."""
+
+    from app.storage.audit import audit_run_storage, build_cleanup_manifest
+
+    data_root = _resolve_data_dir(args.data_dir)
+    run_root = SessionPaths(data_root, args.session_id).run_dir
+    try:
+        audit = audit_run_storage(run_root)
+        payload: dict[str, Any] = audit
+        if getattr(args, "dry_run_manifest", False):
+            payload = {
+                "audit": audit,
+                "cleanup_manifest": build_cleanup_manifest(audit),
+            }
+    except (DataLayoutError, OSError, ValueError) as exc:
+        print(f"error: storage audit failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def _run_inspect(args: argparse.Namespace) -> int:
@@ -1279,9 +1335,9 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                         print(f"  ❌ {result.detail}")
                 else:
                     print(f"  [dry-run] Would conform {package_name} installation")
-                    print(f"    - Create scripts -> CPU symlink if missing")
+                    print("    - Create scripts -> CPU symlink if missing")
                     if juicer_tools_spec:
-                        print(f"    - Link juicer_tools.jar into scripts/common/")
+                        print("    - Link juicer_tools.jar into scripts/common/")
 
     if not args.apply and any(pkg.conform_on_bootstrap for pkg in resolver.packages.values()):
         print("\n💡 Run with --apply to execute conformance actions")
@@ -1328,6 +1384,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ask(args)
     if args.command == "inspect":
         return _run_inspect(args)
+    if args.command == "storage-audit":
+        return _run_storage_audit(args)
     if args.command == "resume":
         return _run_resume(args)
     if args.command == "review":

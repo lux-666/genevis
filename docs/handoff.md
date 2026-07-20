@@ -8,7 +8,8 @@ in phase documents and Git.
 **Updated:** 2026-07-20
 
 **Current baseline:** unified-resource baseline `b610ad5`, followed by the
-artifact-publication and resume-transaction slice described below
+artifact-publication, resume-transaction, and checkpoint/storage-audit slices
+described below
 
 ## Read Order
 
@@ -65,14 +66,26 @@ recommendation signals now flow from the asset registry through
 ## Next Implementation Slice
 
 The resource handoff, typed stage cursor, frozen-attempt, review persistence,
-atomic artifact publication, unified resume transaction, read-only storage
-audit, durable SQLite resume, and assembly-to-annotation E2E paths are
-implemented. The next slice is based on the 2026-07-20 code audit:
+atomic artifact publication, unified resume transaction, whole-state saver
+budgets, unified terminal finalization, verified single-terminal-checkpoint compaction, read-only
+`storage-audit` CLI, durable SQLite resume, and assembly-to-annotation E2E paths
+are implemented. The next slice is based on the 2026-07-20 code audit:
 
-1. enforce whole-`TopLevelState`/active-interrupt budgets, then compact terminal checkpoints;
-2. expose the existing storage audit as a CLI; enable deletion only after post-compaction retention-root tests;
-3. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance;
+1. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance;
+2. implement deletion-performing GC only as a separate change with terminal gating, manifest revalidation, explicit confirmation, no `work/` deletion, and artifact-index compaction last;
+3. reduce duplicate session identity parameters through a typed run context;
 4. only then split large modules and add structured field metadata to `ask_interactive`.
+
+Storage audit usage:
+
+```bash
+gene-agent storage-audit --session-id <id> --data-dir <data-root> --format json
+gene-agent storage-audit --session-id <id> --data-dir <data-root> --format json --dry-run-manifest
+```
+
+There is deliberately no `--apply` option. The dry-run manifest contains only
+regenerable report candidates; retained `work/` bytes remain visible in audit
+statistics but are excluded from automatic cleanup candidates.
 
 Detailed evidence and ordering live in
 [`architecture/refactor/architecture-contracts.md`](architecture/refactor/architecture-contracts.md#10-后续路线).

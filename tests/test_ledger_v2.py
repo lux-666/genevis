@@ -175,6 +175,27 @@ class LedgerV2Tests(unittest.TestCase):
                 route_trace[-ROUTE_TRACE_LIMIT:],
             )
 
+    def test_stage_failure_event_carries_durable_evidence_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            evidence = paths.artifact_path("read_qc", "failure.json")
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_text("{}\n", encoding="utf-8")
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+
+            ledger.record_stage_failed(
+                "s1",
+                "read_qc",
+                error="tool failed",
+                refs=[{"path_ref": paths.to_ref(evidence), "role": "execution"}],
+            )
+
+            event = ledger.read_events("s1")[-1]
+            self.assertEqual(event["event_type"], "stage_failed")
+            self.assertEqual(event["error"], "tool failed")
+            self.assertEqual(event["refs"][0]["path_ref"], paths.to_ref(evidence))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,10 +7,10 @@
 **Implementation:** Partial. The v2 run layout, immutable refs, ledger/report
 ownership, recommendation persistence, typed bounded stage cursors, universal
 frozen-attempt refs, process-result evidence, read-only storage audit, and a
-dry-run cleanup manifest are in use. A code audit on 2026-07-20 confirmed that
-some stage producers still write directly to fixed `artifacts/` paths before
-registration; whole-checkpoint budgets, terminal compaction, deletion-performing
-artifact GC, and a unified `storage-audit` CLI remain incomplete.
+report-only dry-run cleanup manifest are in use. Whole-checkpoint budgets,
+verified single-terminal-checkpoint compaction, and the unified read-only
+`storage-audit` CLI were completed on 2026-07-20. Deletion-performing artifact
+GC and artifact-index compaction after GC remain incomplete.
 
 **Scope:** New workflow sessions created after the v2 cutover
 
@@ -619,7 +619,7 @@ code must not recreate or silently mix legacy data into the v2 root.
 | 4. Extract the shared parameter-recommendation persistence contract | Complete for shared persistence, Assembly, and AutoHiC adoption | Future stage recommenders, including T2T, must reuse the same storage helper; this step does not authorize new recommendation behavior. |
 | 5. Persist exact model requests/responses and policy/knowledge references | Complete for the implemented parameter-recommendation path | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
 | 6. Move reports out of the artifact index and generate shared report views | Complete | `current_status.json`, `assembly_review.md`, and `session_summary.{json,md}` are derived projections rather than workflow truth. |
-| 7. Add storage audit, checkpoint compaction, and mark-and-sweep artifact GC | Partial | Read-only storage audit and a pure dry-run cleanup manifest are implemented. Terminal checkpoint compaction, deletion-performing artifact GC, artifact-index compaction after GC, and a unified `storage-audit` CLI are not implemented. Work cleanup is intentionally outside the design. |
+| 7. Add storage audit, checkpoint compaction, and mark-and-sweep artifact GC | Partial | Read-only storage audit, the unified JSON `storage-audit` CLI, report-only dry-run manifests, whole-state checkpoint budgets, and verified terminal SQLite compaction are implemented. Compaction retains one standalone top-level terminal checkpoint and removes its thread's historical/subgraph checkpoint rows only after ledger reconstruction and checkpoint-free artifact-retention proofs pass. Deletion-performing artifact GC and artifact-index compaction after GC are not implemented. Work cleanup remains outside automatic GC. |
 | 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. Real SQLite resume and existing-assembly-to-annotation entrypoint E2E tests exist; the outstanding clean-v2 acceptance path starts from raw reads and crosses read_qc/genome_survey/assembly before review. |
 
 ## 22. Confirmed Conformance Debt
@@ -629,8 +629,7 @@ The following gaps were confirmed against the current implementation on
 
 | Priority | Area | Confirmed gap | Required ownership boundary |
 |---|---|---|---|
-| P1 | Whole-checkpoint budget | Stage cursor and resource-table budgets are enforced, but the 64 KiB target for the complete serialized `TopLevelState` and the 4 KiB active-interrupt budget are not yet enforced at one boundary. A 2 MB `review_notes` value is currently accepted by a memory checkpoint. | Add one whole-state checkpoint validator without reintroducing stage payload schemas or artifact bodies. |
-| P1 | GC retention roots | Read-only reachability analysis exists, but checkpoint removal changes the root set and not every terminal/stage event carries the refs needed for audit replay. | Prove terminal audit reconstruction and artifact reachability after compaction before enabling deletion; keep work cleanup outside automatic GC. |
+| P1 | Deletion-performing GC | Terminal compaction and checkpoint-free retention-root verification are implemented, but there is intentionally no filesystem deletion executor or `--apply` CLI. | Require a terminal session, revalidate every manifest path/hash/size immediately before deletion, require explicit confirmation, delete only unreachable immutable artifacts and regenerable reports, reject every `work/` entry, and compact the artifact index last. |
 | P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
 
 The former Gene collection and checkpoint gaps were resolved on 2026-07-16:
@@ -653,6 +652,17 @@ resolved on 2026-07-20. Durable producers now cross the existing atomic
 `work/` publication boundary, while already-published outputs use registration
 only. One control transaction owns all resume state mutation and lifecycle
 events; entrypoints own only operator I/O.
+
+The former whole-checkpoint budget and terminal-retention gaps were resolved on
+2026-07-20. One saver decorator validates both full checkpoints and pending
+writes for built-in and injected savers. Terminal/stage/failure events retain
+the refs needed by audit replay; terminal SQLite compaction is fail-closed and
+keeps one standalone top-level checkpoint only after durable terminal
+reconstruction and checkpoint-free artifact reachability succeed. Initial-run
+and resume paths share one terminal finalizer instead of owning parallel report,
+failure-ledger, checkpoint-persistence, and compaction-event branches. The
+read-only `storage-audit` CLI is available, while deletion-performing GC remains
+separate and `work/` is excluded from its manifest candidates.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus

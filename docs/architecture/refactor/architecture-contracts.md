@@ -122,13 +122,13 @@ gene-agent --help
 
 | 领域 | 实际状态 | 证据与缺口 |
 |---|---|---|
-| Checkpoint 预算 | 部分实现 | 单 stage cursor、整个 `stage_outputs` 和 `resource_refs` 已有硬上限；完整 `TopLevelState` 和 `active_interrupt` 仍没有统一上限，memory graph 实测可接受 2,000,000 字节的单条 `review_notes` |
-| Storage audit | 核心已实现 | `app.storage.audit` 已能只读审计六层目录、checkpoint 字段、artifact 完整性/可达性、重复内容和 reclaimable reports/work，并能生成纯 dry-run cleanup manifest；缺少 CLI 和任何删除执行 |
+| Checkpoint 预算 | 已收口 | 一个 saver decorator 同时覆盖 MemorySaver、SqliteSaver 和外部注入 saver 的完整 checkpoint/pending writes；64 KiB 目标告警、256 KiB 硬拒绝、4 KiB interrupt、16 项 route tail 与自由文本边界均有回归，终态 SQLite 在 retention 证明后压成一个独立 checkpoint |
+| Storage audit | 只读运维已收口 | `app.storage.audit` 只读审计六层目录、checkpoint 字段、artifact 完整性/可达性、重复内容和 retained/reclaimable bytes；`gene-agent storage-audit --format json [--dry-run-manifest]` 已接入且无 `--apply`。删除执行与 artifact-index 压缩仍是独立后续变更 |
 | Durable resume/E2E | 已有实质覆盖 | 已有真实 parent graph + SQLite 关闭/重开 resume 测试，以及 existing assembly → review → RepeatMasker/provided annotation → function completion/failure E2E；缺口是 raw reads 起点经过 read_qc/genome_survey/assembly 的整链入口测试 |
 | Artifact publication | 已收口 | durable producer 先写 `work/`，再直接调用既有 `publish_artifact_record` 或 `publish_or_recover_work_artifact`；shell 已原子发布的输出只调用 `register_artifact_records`。自动 publication 拒绝 `artifacts/` 来源，冲突回归同时验证旧文件和 index 不变；没有新增一层 JSON/helper 包装 |
 | Resume 事务 | 已收口 | `app.control.resume_transaction.execute_resume_transaction` 统一拥有 snapshot 校验、decision 应用、annotation intake、lifecycle event、checkpoint update、invoke 和 terminal report；三个入口只保留 I/O，并统一记录带 phase 的 `resume_failed` |
 | CI/打包 | 未固化 | 仓库没有 CI workflow；当前环境缺少 `hatchling`，因此 wheel 构建无法在现有开发环境复现，不能把 source-checkout 的 CWD smoke test 等同于 wheel 安装验收 |
-| 模块复杂度 | 高，但不是首个正确性修复 | `gene_annotation/nodes.py` 2364 行、`assembly_review/nodes.py` 2022 行、`ask_interactive.py` 1817 行、`control/lifecycle.py` 1542 行；`ask_interactive` 的字符串前缀识别是真实 TODO，但当前风险低于 publication/resume 边界 |
+| 模块复杂度 | 高，但不是首个正确性修复 | `gene_annotation/nodes.py` 2364 行、`assembly_review/nodes.py` 2022 行、`ask_interactive.py` 1817 行、`control/lifecycle.py` 1542 行；`ask_interactive` 的字符串前缀识别是真实 TODO，但当前风险低于缺失的 raw-read E2E/CI 和删除型 GC 安全边界 |
 
 全仓 Ruff 仍有 3188 个既有格式、import 顺序和行长问题；本轮新增文件通过完整 Ruff，全部变更 Python 文件通过 `F` 规则。
 
@@ -138,11 +138,11 @@ gene-agent --help
 
 - `git diff --check` 通过；
 - 资源、state、Runner、CWD 专项测试通过；
-- `/private/tmp` 中成功加载 descriptor registry 并运行 `gene-agent --help`；
-- 全量 `unittest`：1028 tests passed，1 skipped；
+- `/private/tmp` 中成功加载 descriptor registry；`gene-agent storage-audit --help` smoke 通过；
+- 全量 `unittest`：1039 tests passed，1 skipped；
 - artifact publication 与 stage 专项复验：207 tests passed；
-- resume transaction 与 entrypoint 专项复验：131 tests passed；
-- checkpoint 探针确认完整 state 总量没有统一门禁；artifact 覆盖探针确认“先写已发布路径再注册”会破坏 index/file 一致性；
+- checkpoint/audit/durable resume/entrypoint 专项复验通过；
+- checkpoint 回归确认 memory、SQLite 和注入 saver 均经过统一边界；terminal retention 失败、缺少 terminal event、active/blocked state 均不会删除历史，成功路径只保留一个父链为空的顶层 checkpoint；
 - 新增文件通过完整 Ruff，全部变更 Python 文件通过 Ruff/Pyflakes `F` 检查。
 
 持续验收时，以下查询在 Python 运行时代码中应无结果：
@@ -162,8 +162,8 @@ rg 'assembly_input_fofn|filtered_reads_fofn' app --glob '*.py'
 
 1. **已完成：修 durable artifact 不可变性。** Durable producer 统一从 `work/` 经过既有 publication primitive；已经由 runner/shell 发布的文件只注册。没有增加新的通用 JSON helper。重复执行、publication 后 checkpoint 前恢复、冲突后旧 artifact/index 不变均有回归覆盖。
 2. **已完成：统一 resume transaction。** “snapshot 校验 → decision → 可选 annotation intake → lifecycle event → update checkpoint → invoke → terminal/report”由一个 control service 拥有；三个入口只负责 I/O。`update_state` 抛错/返回 `False`、invoke 抛错、无 checkpoint、重复 decision 和事件顺序进入同一失败语义。
-3. **下一步：补完整 checkpoint 边界，再做终态压缩。** 在统一 checkpoint 写入边界校验完整 `TopLevelState` 与 `active_interrupt`，限制自由文本字段；随后确保 ledger/artifact 足以独立重建终态，再压缩 terminal checkpoint。不能只给已有的两个大字段继续加局部限制。
-4. **暴露已有 storage audit，暂缓删除型 GC。** 先给 `audit_run_storage`/`build_cleanup_manifest` 接只读 CLI 和 JSON 输出。只有在 terminal compaction 后的 retention-root 测试证明 audit replay 所需 artifact 全部可达，才实现带 hash 复核、dry-run manifest 和显式确认的删除；`work/` 继续排除在自动 GC 外。
+3. **已完成：完整 checkpoint 边界与终态压缩。** `StateBudgetCheckpointer` 统一包住 MemorySaver、SqliteSaver 和外部注入 saver 的 `put`/`put_writes`；完整 state 使用 64 KiB 目标告警和 256 KiB 硬拒绝，`active_interrupt` 4 KiB，route tail 16，`review_notes`/`last_error` 有界，并统一拒绝非 JSON、非有限浮点数和内嵌 artifact body。初始运行和 resume 共用一个 terminal finalizer，入口不再各自实现 report、失败 ledger、checkpoint 补写和 compaction event。终态压缩前会从 ledger 重建 terminal projection，并在移除 checkpoint roots 的条件下证明 state 中 required artifact 仍可达；随后 SQLite 仅保留一个父链为空的顶层 terminal checkpoint，同时删除该 thread 的子图 namespace 历史。active/blocked run 和证明失败的 terminal run 均保留原 checkpoint 链。
+4. **已完成只读 storage audit CLI；删除型 GC 继续暂缓。** `gene-agent storage-audit --session-id ... --data-dir ... --format json` 暴露既有 audit，可用 `--dry-run-manifest` 同时输出纯 manifest；完整性错误非零退出，CLI 不提供 `--apply`。manifest 只把可再生 `reports/` 列为自动清理候选，`work/` 仅报告 retained/conditional bytes，不进入删除候选。删除执行器、删除前 path/hash/size 复核和 artifact-index 最后压缩仍是后续独立变更。
 5. **补 E2E 的真正空白并建立 CI。** 新增 raw reads → inventory → read_qc → genome_survey → assembly → review 的入口级工具-shim E2E；再把现有全量测试、SQLite resume、wheel 构建/临时安装、仓库外 CWD smoke 和新增代码 Ruff 固化为 CI。现有 assembly 后半程 E2E 不应重复建设。
 6. **最后拆大模块。** Resume transaction 已按副作用边界抽出；其余大模块仍按职责拆分，不按行数机械切文件。最后再处理 `ask_interactive` structured field metadata。
 

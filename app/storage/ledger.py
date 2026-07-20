@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.limits import ROUTE_TRACE_LIMIT
-from app.storage.paths import SessionPaths, ensure_run_layout
+from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 LEDGER_SCHEMA_VERSION = 2
 SUMMARY_MAX_BYTES = 12 * 1024
@@ -160,6 +160,7 @@ class Ledger:
         *,
         return_code: int | None = None,
         error: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append an attempt-failure event with a bounded diagnostic summary."""
         self.record_event(
@@ -172,6 +173,7 @@ class Ledger:
             },
             stage=attempt.stage,
             subject_id=attempt.attempt_id,
+            refs=self._artifact_refs(artifacts or []),
             idempotency_key=f"attempt:{attempt.attempt_id}:failed",
         )
 
@@ -381,6 +383,25 @@ class Ledger:
             idempotency_key=idempotency_key,
         )
 
+    def record_stage_failed(
+        self,
+        session_id: str,
+        stage: str,
+        *,
+        error: str | None = None,
+        refs: Iterable[Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.record_event(
+            session_id,
+            "stage_failed",
+            {"error": error},
+            stage=stage,
+            subject_id=stage,
+            refs=refs,
+            idempotency_key=idempotency_key,
+        )
+
     def record_session_terminal(
         self,
         session_id: str,
@@ -532,6 +553,18 @@ class Ledger:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+    def references_from(
+        self,
+        value: Any,
+        *,
+        role_prefix: str,
+    ) -> list[dict[str, Any]]:
+        """Extract normalized run-local refs from a compact nested value."""
+
+        return self._normalize_refs(
+            self._refs_from_nested(value, role_prefix=role_prefix)
+        )
+
     def _rows_from_locked_handle(self, handle: Any) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for line_number, line in enumerate(handle, start=1):
@@ -630,7 +663,12 @@ class Ledger:
             for key, nested in value.items():
                 role = f"{role_prefix}.{key}"
                 if isinstance(nested, (str, Path)) and _is_ref_key(str(key)):
-                    refs.append(self._path_ref(role, nested))
+                    try:
+                        refs.append(self._path_ref(role, nested))
+                    except DataLayoutError:
+                        if Path(nested).is_absolute():
+                            continue
+                        raise
                 else:
                     refs.extend(self._refs_from_nested(nested, role_prefix=role))
         elif isinstance(value, list):

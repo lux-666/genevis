@@ -10,10 +10,10 @@ from app.control.lifecycle import (
     DurableResumeUnavailableError,
     ResumeValidationError,
     UnsupportedLifecycleOperationError,
+    finalize_terminal_state,
     resume_review_state,
     validate_resume_review_state,
 )
-from app.reports.review_report import write_final_review_report
 from app.review.annotation_intake import (
     AnnotationIntakeSelection,
     maybe_collect_annotation_intake,
@@ -183,14 +183,15 @@ def execute_resume_transaction(
                 "invoke", f"{type(exc).__name__}: {exc}"
             ) from exc
 
-        supervision = final.get("supervision_state")
-        if supervision in {"completed", "failed_terminal"}:
-            try:
-                write_final_review_report(paths.run_dir, session_id)
-            except Exception as exc:
-                raise ResumeTransactionError(
-                    "terminal_report", f"{type(exc).__name__}: {exc}"
-                ) from exc
+        try:
+            finalize_terminal_state(
+                graph, config, final, session_id, paths.run_dir, checkpointer,
+                report_kind="final",
+            )
+        except Exception as exc:
+            raise ResumeTransactionError(
+                "terminal_report", f"{type(exc).__name__}: {exc}"
+            ) from exc
     except ResumeTransactionError as exc:
         ledger.record_event(
             session_id,

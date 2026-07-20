@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from app.graph.checkpointer import (
     DEFAULT_CHECKPOINTER_BACKEND,
     CheckpointerBackend,
+    bound_checkpointer,
     get_checkpointer,
 )
 from app.graph.routing import route_controller, route_from_current_stage
@@ -64,11 +65,41 @@ def build_graph(
                 if isinstance(trace_item, str) and trace_item.endswith("_stage"):
                     completed_stage = trace_item[: -len("_stage")]
                     if completed_stage in STAGE_ORDER:
-                        ledger.record_stage_completed(
-                            session_id,
-                            completed_stage,
-                            idempotency_key=f"stage-completed:{completed_stage}",
+                        completed_cursor = (
+                            state.get("stage_outputs") or {}
+                        ).get(completed_stage, {})
+                        completed_refs = ledger.references_from(
+                            completed_cursor,
+                            role_prefix=f"stage.{completed_stage}",
                         )
+                        if (
+                            supervision == "blocked_human"
+                            and completed_stage == state.get("current_stage")
+                        ):
+                            continue
+                        if (
+                            supervision == "failed_terminal"
+                            and completed_stage == state.get("current_stage")
+                        ):
+                            ledger.record_stage_failed(
+                                session_id,
+                                completed_stage,
+                                error=state.get("last_error"),
+                                refs=completed_refs,
+                                idempotency_key=f"stage-failed:{completed_stage}",
+                            )
+                        else:
+                            ledger.record_stage_completed(
+                                session_id,
+                                completed_stage,
+                                refs=completed_refs,
+                                idempotency_key=f"stage-completed:{completed_stage}",
+                            )
+
+            terminal_refs = ledger.references_from(
+                state,
+                role_prefix="terminal",
+            )
 
             if supervision == "failed_terminal":
                 ledger.record_session_terminal(
@@ -76,6 +107,7 @@ def build_graph(
                     outcome="failed",
                     stage=state.get("current_stage"),
                     error=state.get("last_error"),
+                    refs=terminal_refs,
                     idempotency_key="session-terminal:failed",
                 )
             elif supervision == "completed" or state.get("current_stage") == TERMINAL_STAGE:
@@ -83,6 +115,7 @@ def build_graph(
                     session_id,
                     outcome="completed",
                     stage=state.get("current_stage"),
+                    refs=terminal_refs,
                     idempotency_key="session-terminal:completed",
                 )
             elif supervision != "blocked_human":
@@ -173,10 +206,9 @@ def build_graph(
     ]:
         graph.add_edge(node_name, "route_controller")
 
-    return graph.compile(
-        checkpointer=(
-            checkpointer
-            if checkpointer is not None
-            else get_checkpointer(backend, data_dir=data_dir)
-        )
+    resolved_checkpointer = (
+        bound_checkpointer(checkpointer)
+        if checkpointer is not None
+        else get_checkpointer(backend, data_dir=data_dir)
     )
+    return graph.compile(checkpointer=resolved_checkpointer)

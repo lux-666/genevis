@@ -18,6 +18,7 @@ import argparse
 import contextlib
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ from pathlib import Path
 from app.storage.ledger import Ledger
 from app.entrypoints.run import _run_resume
 from app.graph.builder import build_graph
+from app.graph.checkpointer import checkpoint_db_path
 from app.review.base import ReviewPayload
 from app.review.persistence import PersistedReviewRequest, persist_review_request
 from app.schemas.state import initial_state
@@ -179,7 +181,24 @@ class DurableResumeTests(unittest.TestCase):
             # advanced state.
             self.assertNotIn("Traceback", stderr)
 
+            connection = sqlite3.connect(checkpoint_db_path(run_dir))
+            try:
+                checkpoint_rows = connection.execute(
+                    "SELECT checkpoint_ns, parent_checkpoint_id FROM checkpoints "
+                    "WHERE thread_id = ?",
+                    ("s1",),
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual(checkpoint_rows, [("", None)])
+
             ledger_events = Ledger(run_dir).read_events("s1")
+            self.assertTrue(
+                any(
+                    event["event_type"] == "terminal_compaction_completed"
+                    for event in ledger_events
+                )
+            )
             decision_events = [e for e in ledger_events if e["event_type"] == "review_decision"]
             self.assertTrue(decision_events, "expected review_decision ledger event")
             # The accepted assembly_review decision advances downstream into the

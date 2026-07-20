@@ -4,6 +4,7 @@ import pytest
 
 from app.schemas.state import (
     ActiveInterrupt,
+    CheckpointBudgetWarning,
     ControlState,
     DomainStage,
     StageOutputs,
@@ -11,6 +12,8 @@ from app.schemas.state import (
     TopLevelState,
     initial_state,
     validate_stage_outputs,
+    validate_state_field,
+    validate_top_level_state,
 )
 
 
@@ -125,3 +128,78 @@ def test_stage_outputs_reject_embedded_frozen_attempt_before_checkpoint() -> Non
         graph.compile().invoke(
             initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
         )
+
+
+def test_whole_state_budget_warns_at_target_and_rejects_at_hard_limit() -> None:
+    target_state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    target_state["shared_parameters"] = {"padding": "x" * (70 * 1024)}
+    with pytest.warns(CheckpointBudgetWarning, match="target"):
+        validate_top_level_state(target_state)
+
+    hard_state = initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    hard_state["shared_parameters"] = {"padding": "x" * (130 * 1024)}
+    hard_state["skip_reasons"] = {"assembly": "x" * (130 * 1024)}
+    with pytest.raises(ValueError, match="hard limit"):
+        validate_top_level_state(hard_state)
+
+    with pytest.raises(ValueError, match="whole-state hard limit"):
+        validate_state_field(
+            "shared_parameters", {"padding": "x" * (256 * 1024)}
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "match"),
+    [
+        ("last_error", "x" * 4097, "last_error"),
+        ("review_notes", ["note"] * 17, "review_notes"),
+        ("review_notes", ["x" * 2049], r"review_notes\[0\]"),
+        ("route_trace", ["route"] * 17, "route_trace"),
+        (
+            "active_interrupt",
+            {"stage": "assembly", "reason": "x" * (4 * 1024)},
+            "active_interrupt",
+        ),
+        (
+            "active_interrupt",
+            {"stage": "assembly", "unexpected_payload": "not allowed"},
+            "unsupported fields",
+        ),
+        (
+            "active_interrupt",
+            {
+                "stage": "assembly",
+                "request_ref": {"path_ref": "artifacts/request.json"},
+            },
+            "valid ArtifactRef",
+        ),
+        ("shared_parameters", {"value": object()}, "non-JSON value"),
+        ("shared_parameters", {"ratio": float("inf")}, "non-finite float"),
+        (
+            "shared_parameters",
+            {
+                "artifact": {
+                    "artifact_id": "art_" + "a" * 32,
+                    "path_ref": "artifacts/x.json",
+                    "sha256": "b" * 64,
+                    "body": {"large": "payload"},
+                }
+            },
+            "artifact body",
+        ),
+    ],
+)
+def test_state_entrypoints_share_field_validation(
+    name: str,
+    value: object,
+    match: str,
+) -> None:
+    state: dict[str, object] = dict(
+        initial_state(session_id="s1", input_manifest_ref="manifest.yaml")
+    )
+    state[name] = value
+
+    with pytest.raises((TypeError, ValueError), match=match):
+        validate_top_level_state(state)
+    with pytest.raises((TypeError, ValueError), match=match):
+        validate_state_field(name, value)

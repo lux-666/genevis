@@ -100,7 +100,7 @@ def run_frozen_attempt(
     result = publish_execution_logs(
         data_dir, attempt, (runner or LocalRunner()).run(attempt)
     )
-    register_artifact_records(
+    log_refs = register_artifact_records(
         data_dir,
         attempt.session_id,
         [
@@ -136,6 +136,7 @@ def run_frozen_attempt(
             attempt,
             return_code=result.return_code,
             error=error,
+            artifacts=[ref.model_dump(mode="json") for ref in log_refs],
         )
         return RunOutcome(success=False, result=result, error=error)
 

@@ -142,9 +142,10 @@ def audit_run_storage(
 def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
     """Build a pure dry-run manifest from an audit result.
 
-    Report entries are regenerable.  Work entries remain conditional because
-    an audit cannot infer that every required tool output was published merely
-    from a filename.  This function performs no filesystem access.
+    Only regenerable reports enter the automatic-cleanup candidate set.
+    ``work/`` remains reported as retained because Data v2 reserves it for
+    resume and operator-directed cleanup. This function performs no filesystem
+    access.
     """
 
     if audit.get("schema_version") != 2:
@@ -161,6 +162,7 @@ def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("storage audit has invalid reclaimable candidates")
 
     entries: list[dict[str, Any]] = []
+    retained_work: list[dict[str, Any]] = []
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("cleanup candidate must be an object")
@@ -193,9 +195,13 @@ def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("cleanup candidate is not a normalized audited file")
         if (path_parts[0] == "work") != entry["requires_output_verification"]:
             raise ValueError("cleanup candidate has an invalid layer safety classification")
-        entries.append(entry)
+        if path_parts[0] == "work":
+            retained_work.append(entry)
+        else:
+            entries.append(entry)
 
     entries.sort(key=lambda item: item["path_ref"])
+    retained_work.sort(key=lambda item: item["path_ref"])
     return {
         "schema_version": 2,
         "session_id": session_id,
@@ -205,6 +211,57 @@ def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_file_count": len(entries),
         "candidate_bytes": sum(item["size_bytes"] for item in entries),
         "entries": entries,
+        "retained_work_file_count": len(retained_work),
+        "retained_work_bytes": sum(item["size_bytes"] for item in retained_work),
+    }
+
+
+def verify_checkpoint_free_artifact_retention(
+    run_root: str | Path,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove that state artifact refs remain reachable without checkpoint roots."""
+
+    paths = SessionPaths.from_run_dir(run_root)
+    validate_data_layout(paths.data_root)
+    if not paths.run_dir.is_dir():
+        raise DataLayoutError(f"v2 run root does not exist: {paths.run_dir}")
+
+    warnings: list[str] = []
+    artifact_files = _inventory_layer(paths, "artifacts", paths.artifacts_dir)
+    control_files = _inventory_layer(paths, "control", paths.control_dir)
+    ledger_files = _inventory_layer(paths, "ledger", paths.ledger_dir)
+    records = read_artifact_records(paths.run_dir, paths.session_id)
+    artifact_index = _audit_artifact_index(
+        paths,
+        records,
+        artifact_files=artifact_files,
+        control_files=control_files,
+        ledger_files=ledger_files,
+        latest_checkpoint_states=[],
+        warnings=warnings,
+    )
+    by_id = {str(record["artifact_id"]): record for record in records}
+    by_path = {str(record["path_ref"]): record for record in records}
+    required = _collect_references(
+        state,
+        paths=paths,
+        by_id=by_id,
+        by_path=by_path,
+        context="terminal checkpoint state",
+    )
+    unreachable = {
+        str(item["artifact_id"])
+        for item in artifact_index["unreachable_artifacts"]
+    }
+    reachable = set(by_id).difference(unreachable)
+    missing = sorted(required.difference(reachable))
+    return {
+        "session_id": paths.session_id,
+        "required_artifact_ids": sorted(required),
+        "reachable_artifact_ids": sorted(reachable),
+        "missing_artifact_ids": missing,
+        "warnings": sorted(set(warnings)),
     }
 
 
@@ -638,7 +695,7 @@ def _collect_references(
                         by_id=by_id,
                         by_path=by_path,
                         context=f"{context}:{key_text}",
-                        require_artifact=False,
+                        require_artifact="artifact" in key_text,
                     )
                 )
             found.update(
@@ -726,7 +783,20 @@ def _resolve_declared_reference(
         return {by_path[value]["artifact_id"]}
 
     path_value = Path(value)
-    if path_value.is_absolute() or ".." in path_value.parts:
+    if path_value.is_absolute():
+        try:
+            value = path_value.resolve(strict=False).relative_to(
+                paths.run_dir.resolve(strict=False)
+            ).as_posix()
+        except ValueError:
+            if require_artifact:
+                raise DataLayoutError(
+                    f"artifact dependency is outside run root in {context}: {value}"
+                )
+            return set()
+        if value in by_path:
+            return {by_path[value]["artifact_id"]}
+    elif ".." in path_value.parts:
         paths.resolve_ref(value)  # raises with the canonical containment error
     if value.startswith("artifacts/") or value.startswith("art_") or require_artifact:
         raise DataLayoutError(f"dangling artifact reference in {context}: {value}")
@@ -806,4 +876,8 @@ def _reclaimable_candidates(
     }
 
 
-__all__ = ["audit_run_storage", "build_cleanup_manifest"]
+__all__ = [
+    "audit_run_storage",
+    "build_cleanup_manifest",
+    "verify_checkpoint_free_artifact_retention",
+]

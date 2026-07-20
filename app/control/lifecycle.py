@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.storage.ledger import Ledger
 from app.storage.artifacts import read_artifact_records
@@ -39,6 +39,71 @@ class DurableResumeUnavailableError(LifecycleError):
 
 class UnsupportedLifecycleOperationError(LifecycleError):
     """Raised for lifecycle operations outside the current task scope."""
+
+
+def finalize_terminal_state(
+    graph: Any, config: dict[str, Any], state: dict[str, Any], session_id: str,
+    data_dir: str | Path, checkpointer: str, *,
+    report_kind: Literal["operator", "final"],
+) -> str | None:
+    """No-op active states; report terminals and soft-fail SQLite compaction."""
+    if state.get("supervision_state") not in {"completed", "failed_terminal"}:
+        return None
+
+    paths = SessionPaths.from_run_dir(data_dir)
+    paths.require_session_id(session_id)
+    ledger = Ledger(paths.run_dir)
+    terminal_state = {**state, "session_id": session_id, "data_dir": str(paths.run_dir)}
+
+    from app.reports import review_report
+
+    if report_kind == "operator":
+        refs = ledger.references_from(terminal_state, role_prefix="terminal.failure")
+        ledger.record_session_terminal(
+            session_id, outcome="failed", stage=terminal_state.get("current_stage"),
+            error=terminal_state.get("last_error"), refs=refs,
+            idempotency_key="session-terminal:failed",
+        )
+        review_report.write_operator_report(paths.run_dir, session_id, terminal_state)
+    else:
+        review_report.write_final_review_report(paths.run_dir, session_id)
+
+    saver = getattr(graph, "checkpointer", None)
+    if checkpointer != "sqlite" or saver is None:
+        return None
+
+    try:
+        checkpoint_state = terminal_state
+        if report_kind == "operator":
+            graph.update_state(
+                config,
+                {
+                    "supervision_state": "failed_terminal",
+                    "last_error": terminal_state.get("last_error"),
+                    "active_interrupt": None,
+                },
+            )
+            checkpoint_values = getattr(graph.get_state(config), "values", None)
+            if not isinstance(checkpoint_values, dict):
+                raise RuntimeError("persisted terminal checkpoint has no state values")
+            checkpoint_state = {**terminal_state, **checkpoint_values}
+        from app.graph.checkpoint_compaction import compact_terminal_checkpoint
+
+        compacted = compact_terminal_checkpoint(saver, config, checkpoint_state)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        ledger.record_event(
+            session_id, "terminal_compaction_skipped", {"error": error},
+            idempotency_key="terminal-compaction:skipped",
+        )
+        return error
+
+    if compacted:
+        ledger.record_event(
+            session_id, "terminal_compaction_completed", {"checkpoint_count": 1},
+            idempotency_key="terminal-compaction:completed",
+        )
+    return None
 
 
 def inspect_state(

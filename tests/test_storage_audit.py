@@ -160,15 +160,11 @@ class StorageAuditTests(unittest.TestCase):
         manifest = build_cleanup_manifest(audit)
         self.assertTrue(manifest["dry_run"])
         self.assertFalse(manifest["deletion_performed"])
-        self.assertEqual(manifest["candidate_file_count"], 2)
-        self.assertEqual(manifest["candidate_bytes"], len(duplicate_bytes) * 2)
-        self.assertTrue(
-            next(
-                item
-                for item in manifest["entries"]
-                if item["path_ref"] == self.paths.to_ref(work)
-            )["requires_output_verification"]
-        )
+        self.assertEqual(manifest["candidate_file_count"], 1)
+        self.assertEqual(manifest["candidate_bytes"], len(duplicate_bytes))
+        self.assertEqual(manifest["retained_work_file_count"], 1)
+        self.assertEqual(manifest["retained_work_bytes"], len(duplicate_bytes))
+        self.assertFalse(any(item["path_ref"].startswith("work/") for item in manifest["entries"]))
 
     def test_requires_strict_v2_run_root(self) -> None:
         with self.assertRaises(DataLayoutError):
