@@ -1,429 +1,169 @@
-# 架构契约定义（重构统一版）
+# 统一资源与执行架构契约
 
-**版本：** 1.0  
-**日期：** 2026-07-20  
-**状态：** 实施中
+状态：已实施，进入架构守护与 Data v2 收尾阶段
+最后更新：2026-07-20
 
----
+本文是 `docs/architecture/refactor/` 下唯一的规范性架构文档。历史分析、决策讨论、修订说明和提交操作记录已经删除；若代码与本文冲突，以测试覆盖的当前代码为准，并应在同一变更中修正文档。
 
-## 1. 总体原则
+## 1. 状态所有权
 
-本次重构采用**务实统一**策略，而非理想化重写：
+`TopLevelState` 的跨阶段文件交接只使用 `resource_refs`。`stage_outputs` 是阶段私有、可检查点化的紧凑游标，可保存状态、指标、证据引用和阶段内部恢复信息，但下游阶段不得通过猜测键名或反向扫描阶段来寻找输入文件。
 
-1. **保留 `execution_mode="local"`** - 统一测试和生产的执行控制机制
-2. **建立 `resource_refs` 中央资源表** - 消除多套资源查找逻辑
-3. **统一方法选择边界** - TUI 选择，runtime 验证，消除重复选择代码
-4. **Runner 抽象** - `execution_mode="local"` 映射到 FakeRunner，生产用 LocalRunner
-
----
-
-## 2. 核心契约
-
-### 2.1 State Schema 扩展
-
-在现有 `TopLevelState` 中**新增**字段：
+`ResourceRef` 的持久化形态为：
 
 ```python
-class TopLevelState(TypedDict, total=False):
-    # ... 现有字段保持不变 ...
-    
-    # 新增：中央资源引用表
-    resource_refs: NotRequired[dict[str, ResourceRef]]
-```
-
-**ResourceRef 定义**：
-
-```python
-@dataclass
-class ResourceRef:
-    """中央资源引用，跨 stage 资源交接的唯一协议"""
-    resource_type: str              # 'long_reads', 'assembly', 'masked_assembly' 等
-    paths: list[str]                # 一个或多个文件路径
-    source_stage: str | None        # 产生此资源的 stage 名称
-    metadata: dict[str, Any]        # 可选元数据（size, count, quality 等）
-```
-
-**逻辑资源名定义**：
-
-| 资源名 | 说明 | 典型来源 |
-|--------|------|---------|
-| `long_reads` | 长读长测序数据 | inventory, read_qc |
-| `short_reads` | 短读长测序数据 | inventory |
-| `assembly` | 组装结果（会被后续 stage 更新） | assembly → dedup → review → hic → t2t |
-| `masked_assembly` | 掩码后的组装 | repeat_annotation |
-| `predicted_proteins` | 预测的蛋白质 | gene_annotation |
-| `hic_reads` | Hi-C 测序数据 | inventory |
-| `genome_size_estimate` | 基因组大小估计 | genome_survey |
-
----
-
-### 2.2 资源解析机制（统一后）
-
-**resolve_stage_resource 新逻辑**：
-
-```python
-def resolve_stage_resource(
-    state: TopLevelState,
-    *,
-    resource_spec: ResourceSpec,
-    override: str | None = None,
-) -> ResourceResolution:
-    """
-    统一的资源解析，按顺序查找：
-    1. RunConfig 显式 override（如果提供）
-    2. state.resource_refs[resource_type]（中央资源表）
-    3. asset_registry（初始 manifest assets）
-    
-    不再扫描：prefer_stages, output_keys, 反向遍历 STAGE_ORDER
-    """
-    # 1. Override
-    if override:
-        return ResourceResolution(found=True, paths=[override], source='override', ...)
-    
-    # 2. 中央资源表
-    if "resource_refs" in state:
-        resource_ref = state["resource_refs"].get(resource_spec.resource_type)
-        if resource_ref:
-            return ResourceResolution(
-                found=True,
-                paths=resource_ref.paths,
-                source=resource_ref.source_stage or 'resource_refs',
-                source_type='resource_refs',
-                metadata=resource_ref.metadata
-            )
-    
-    # 3. Asset registry (初始 manifest)
-    if resource_spec.asset_types:
-        resolution = _check_asset_registry(state, resource_spec)
-        if resolution.found:
-            return resolution
-    
-    # 4. 资源缺失
-    if resource_spec.required:
-        raise ResourceNotFoundError(f"Required resource '{resource_spec.resource_type}' not found")
-    
-    return ResourceResolution(found=False, source='missing', ...)
-```
-
-**ResourceSpec 简化**：
-
-```python
-@dataclass
-class ResourceSpec:
-    resource_type: str          # 逻辑资源名
-    asset_types: list[str]      # 作为 fallback 的 asset 类型
-    required: bool = True
-    allow_multiple: bool = False
-    
-    # 删除的字段：
-    # ❌ prefer_stages: list[str]
-    # ❌ output_keys: dict[str, list[str]]
-```
-
----
-
-### 2.3 Stage 资源契约
-
-每个 stage 声明其资源需求和产出：
-
-```python
-# app/stages/resource_specs.py
-STAGE_CONTRACTS = {
-    "inventory": {
-        "requires": [],
-        "produces": ["long_reads", "short_reads", "hic_reads"],  # 根据 manifest
-    },
-    "read_qc": {
-        "requires": ["long_reads"],
-        "produces": ["long_reads"],  # 过滤后替换原资源
-    },
-    "genome_survey": {
-        "requires": ["long_reads"],
-        "produces": ["genome_size_estimate"],
-    },
-    "assembly": {
-        "requires": ["long_reads", "genome_size_estimate"],
-        "produces": ["assembly"],
-    },
-    "assembly_dedup": {
-        "requires": ["assembly"],
-        "produces": ["assembly"],  # 更新同一资源
-    },
-    "assembly_review": {
-        "requires": ["assembly"],
-        "produces": ["assembly"],  # 继续更新
-    },
-    "hic_scaffolding": {
-        "requires": ["assembly", "hic_reads"],
-        "produces": ["assembly"],
-    },
-    "t2t": {
-        "requires": ["assembly"],
-        "produces": ["assembly"],
-    },
-    "repeat_annotation": {
-        "requires": ["assembly"],
-        "produces": ["masked_assembly"],
-    },
-    "gene_annotation": {
-        "requires": ["assembly"],  # 或 masked_assembly，contextual
-        "produces": ["predicted_proteins"],
-    },
+{
+    "resource_type": "assembly",
+    "paths": ["/run/artifacts/assembly/draft.fasta"],
+    "source_stage": "assembly",
+    "metadata": {"candidate_bundle_refs": ["..."]},
 }
 ```
 
-**Stage commit 规则**：
+约束：
 
-```python
-def commit_stage(state: TopLevelState, stage_name: str, outputs: dict):
-    """
-    Stage 完成后更新资源表
-    """
-    contract = STAGE_CONTRACTS[stage_name]
-    
-    # 根据契约更新 resource_refs
-    for resource_type in contract["produces"]:
-        if resource_type in outputs:
-            state["resource_refs"][resource_type] = ResourceRef(
-                resource_type=resource_type,
-                paths=outputs[resource_type]["paths"],
-                source_stage=stage_name,
-                metadata=outputs[resource_type].get("metadata", {})
-            )
-    
-    # 同时保留 stage_outputs 用于私有数据（指标、evidence 等）
-    state["stage_outputs"][stage_name] = {
-        "metrics": outputs.get("metrics", {}),
-        "evidence_refs": outputs.get("evidence_refs", []),
-        # 但不包含跨 stage 资源路径
-    }
-```
+- `resource_type` 必须与 `resource_refs` 表键一致；
+- `paths` 至少包含一个非空字符串；
+- 整张表必须是 JSON-only，最大 128 KiB；
+- LangGraph reducer 对资源表采用“验证后整体替换”，stage node 返回 delta，不得原地修改输入 state；
+- `metadata` 只存紧凑溯源信息，大对象、命令输出和指标表必须落 artifact/ledger 后保存引用。
 
----
+`genome_size` 等标量属于参数或测量证据，不伪装成路径资源，也不进入 `resource_refs`。
 
-### 2.4 execution_mode 语义（统一设计）
+## 2. 资源解析
 
-**定义**：`execution_mode` 是控制 stage 是否真实执行工具的开关。
+所有阶段使用 `app.stages.resource_resolution.resolve_stage_resource`，优先级固定为：
 
-**取值**：
-- `"local"` - 本地执行（测试模式或小规模运行）
-- `"none"` 或缺失 - 不执行，仅规划
+1. 显式 run override；
+2. `state.resource_refs[logical_resource]`；
+3. 初始 asset registry fallback；
+4. 返回 `found=False`。
 
-**使用位置**：
-1. **RunConfig** 中声明哪些 stage 启用本地执行
-2. **Stage output** 中记录该 stage 的执行模式
-3. **Runner 选择** - `execution_mode="local"` 映射到 FakeRunner（测试）或 LocalRunner（生产）
+解析器不扫描 `stage_outputs`，不接受 `prefer_stages` 或 `output_keys`。是否因缺失而阻塞由 preflight/调用阶段结合 `ResourceSpec.required` 决定，解析器本身保持无异常查询语义。
 
-**Runner 抽象**：
+Inventory 同一逻辑资源中同时存在 clean/raw asset 时，按 `ResourceSpec.asset_types` 顺序选择同一优先类型；后续 stage 发布的中央引用始终优先于 registry，不能静默回退到较旧输入。
 
-```python
-class Runner(ABC):
-    @abstractmethod
-    def run(self, frozen_spec: FrozenAttemptSpec) -> ExecutionResult:
-        """执行冻结的命令规范"""
-        pass
+Stage commit 使用 `update_resource_ref(...)` 返回新的、已验证的完整资源表。它不修改传入 state。
 
-class LocalRunner(Runner):
-    """生产环境真实执行"""
-    def run(self, frozen_spec: FrozenAttemptSpec) -> ExecutionResult:
-        # 真实执行 subprocess
-        return subprocess_run(frozen_spec.command, ...)
+## 3. 逻辑资源契约
 
-class FakeRunner(Runner):
-    """测试环境模拟执行"""
-    def run(self, frozen_spec: FrozenAttemptSpec) -> ExecutionResult:
-        # 记录命令但不执行
-        self.executed_commands.append(frozen_spec.command)
-        return ExecutionResult(status="success", exit_code=0, ...)
-```
+| Stage | Requires | Produces/updates |
+|---|---|---|
+| inventory | — | `long_reads`, `short_reads`, `hic_reads`, `assembly`（按 manifest 实际存在） |
+| read_qc | `long_reads` | `long_reads` |
+| genome_survey | `long_reads` | 标量测量证据，不产生路径资源 |
+| assembly | `long_reads` | `assembly` |
+| assembly_dedup | `assembly` | `assembly` |
+| assembly_review | `assembly` | `assembly` |
+| hic_scaffolding | `assembly`，上下文需要时 `hic_reads` | `assembly` |
+| t2t | `assembly` | `assembly` |
+| repeat_annotation | `assembly` | `masked_assembly` |
+| gene_annotation | `masked_assembly`；显式允许时回退 `assembly` | `predicted_proteins` |
+| function_annotation | `predicted_proteins` | — |
 
-**在 stage node 中使用**：
+组装候选 bundle、review decision、执行证据等仍是 artifact。它们可通过当前 `assembly` 引用的 metadata 关联，但不能成为另一套“最终文件”交接字段。
 
-```python
-def enter_assembly(
-    state: TopLevelState,
-    config: AssemblyConfig,
-    runner: Runner | None = None
-) -> AssemblyResult:
-    """
-    Assembly stage 入口
-    """
-    # 如果未提供 runner，根据 execution_mode 创建
-    if runner is None:
-        execution_mode = config.get("execution_mode", "none")
-        if execution_mode == "local":
-            runner = LocalRunner()
-        else:
-            # 规划模式，不执行
-            return plan_only_result()
-    
-    # 使用统一的 runner 执行
-    frozen_spec = freeze_assembly(state, config)
-    result = runner.run(frozen_spec)
-    
-    return result
-```
+## 4. FOFN 边界
 
-**测试中注入 FakeRunner**：
+跨阶段长读输入的 canonical 形态是 `resource_refs["long_reads"].paths: list[str]`。
 
-```python
-def test_assembly_command(fake_runner):
-    result = enter_assembly(state, config, runner=fake_runner)
-    assert fake_runner.executed_commands[0] == ["hifiasm", "-t", "8", ...]
-```
+FOFN 仅是工具适配器或阶段内部 artifact：
 
----
+- read_qc 可以为审计/工具调用生成 FOFN；
+- NextDenovo 等需要 FOFN 的 adapter 在自己的 work directory 从中央路径列表生成；
+- 下游阶段不得消费 `*_fofn_ref`、`assembly_input_ref` 等 stage-output handoff 键。
 
-### 2.5 方法选择边界（统一）
+## 5. 执行控制与 Runner
 
-**原则**：TUI 是唯一选择入口，runtime 只验证。
+`execution_mode="local"` 表示该阶段获准冻结并真实执行本地命令；缺失时走 planning/contract 分支。它不选择测试执行器。
 
-**TUI 职责**：
-1. 读取 descriptor registry 获取可用方法
-2. 根据 manifest read type 过滤兼容方法
-3. 展示给用户，收集确认
-4. 写入 run config：**canonical method ID + 完整参数**
+执行器只有一个 `Runner` protocol：
 
-**Runtime 职责**：
-1. 读取 run config 中的 method ID
-2. 验证 method 与 read type 兼容性
-3. 验证参数完整性（使用 Pydantic schema）
-4. **不选择、不补默认值、不根据 read type 切换方法**
+- 生产路径由 `run_frozen_attempt` 默认注入 `LocalRunner`；
+- 测试可以显式注入 `FakeRunner` 或其他实现；
+- stage 的 freeze/collect 逻辑与执行器实现解耦。
 
-**需要统一/删除的**：
+禁止把 `test`/`fake` 扩展为持久化的 `execution_mode` 值，否则运行配置会同时承担授权和依赖注入两种职责。
 
-1. **删除 runtime 的方法选择逻辑**：
-   - `DEFAULT_PRIMARY_BY_READ_TYPE` 常量
-   - 根据 read type 动态选择 method 的代码
+## 6. 方法选择边界
 
-2. **统一 AssemblySelection 的用途**：
-   - 保留 `AssemblySelection` 模型，但只作为**审计记录**
-   - 存储在 `stage_outputs["assembly"]` 中，记录选择来源和理由
-   - **不作为 runtime 决策依据**
+Descriptor registry 是方法可用性与 planner metadata 的唯一目录。TUI/run config 的显式 canonical method ID 优先，runtime 必须验证方法与 read type、参数和 descriptor 的一致性。
 
-3. **删除 assembly_route 的运行时逻辑**：
-   - `assembly_route` 只在 TUI 中作为用户偏好提示
-   - Run config 中不再包含 `assembly_route`，只有明确的 `method` 字段
+为保留无交互 planning 能力，未显式选择方法时 assembly planner 可以产生最多一个 primary 和一个 fallback，并将 `AssemblySelection` 作为审计记录；只有 `execution_mode="local"` 且所选方法参数完整时才会执行。`assembly_route` 当前保留为 read-type hint，不是第二份方法注册表。
 
-**新的 run config 格式**：
+这一约定取代已删除文档中“TUI 必须是唯一选择入口”和“runtime 自动选择必须全部删除”的冲突要求。
 
-```yaml
-# run_config.yaml
-manifest_ref: manifest.yaml
-requested_stages: [assembly]
+## 7. CWD 与打包
 
-assembly:
-  method: assembly.candidate.hifiasm  # Canonical method ID
-  execution_mode: local
-  parameters:
-    threads: 16
-    kmer_size: 51
-    genome_size: 2.3Gb
-```
+运行时代码通过 `app.configuration` 加载 packaged `descriptors`，不得直接构造 `Path("descriptors/registry.yaml")`。`descriptors` 是 wheel package，parameter catalog 与 registry 均从包根解析。
 
----
+从仓库外目录运行必须成功：
 
-## 3. FOFN 处理策略
-
-**原则**：FOFN 是工具适配器的内部序列化格式，不是跨 stage 协议。
-
-**Canonical 表示**：`resource_refs["long_reads"].paths` 是 `list[str]`
-
-**FOFN 生成**：在需要 FOFN 的 method adapter 内部生成
-
-```python
-# app/stages/assembly/method_application/nextdenovo.py
-def freeze_nextdenovo(state, params):
-    # 从中央资源表获取 reads
-    read_refs = resolve_stage_resource(state, resource_spec=RAW_READS_SPEC)
-    
-    # 在 work dir 生成 FOFN
-    work_dir = get_work_dir(state, "assembly", "nextdenovo")
-    fofn_path = work_dir / "input.fofn"
-    write_fofn(read_refs.paths, fofn_path)
-    
-    # 使用 FOFN 构建命令
-    return FrozenAttemptSpec(
-        command=["nextdenovo", "config.cfg"],
-        config_content=f"input_fofn = {fofn_path}\n...",
-        ...
-    )
-```
-
-**删除**：
-- `read_qc.make_fofn` 作为 workflow method
-- 跨 stage 的 FOFN key 搜索（`assembly_input_fofn`, `filtered_reads_fofn`）
-
----
-
-## 4. 迁移策略
-
-### 阶段 1：建立新机制（不破坏现有）
-
-1. 在 State 添加 `resource_refs` 字段（可选）
-2. Inventory 填充 `resource_refs`
-3. 实现新的 `resolve_stage_resource` 逻辑，保留 fallback 到旧机制
-4. 实现 Runner 抽象（LocalRunner, FakeRunner）
-
-### 阶段 2：迁移最小纵向链路
-
-迁移 `inventory → read_qc → assembly`，验证端到端工作：
-- Inventory 注册 `long_reads` 到 resource_refs
-- read_qc 从 resource_refs 读取，更新 resource_refs
-- assembly 从 resource_refs 读取，写入 `assembly`
-- 使用 Runner 抽象执行
-
-### 阶段 3：逐步移除旧机制
-
-- 删除 `prefer_stages` 和 `output_keys` 扫描
-- 删除 `final_*_for_downstream` 模式
-- 统一 AssemblySelection 用途（只作审计，不作决策）
-- 删除 runtime 的 method selection 逻辑
-- 删除跨 stage FOFN 协议
-
-### 阶段 4：CWD 独立性（独立任务）
-
-- 创建统一 config loader
-- 使用 importlib.resources 加载 descriptors
-- 更新所有 `Path("descriptors/registry.yaml")` 调用点
-
----
-
-## 5. 验收标准
-
-### 核心目标
-- [ ] 只有一套资源解析逻辑（resource_refs → asset_registry）
-- [ ] 只有一套方法选择逻辑（TUI 选择，runtime 验证）
-- [ ] 只有一套执行抽象（Runner interface，execution_mode 映射）
-- [ ] 从任意 CWD 可运行（config loader 独立）
-
-### 自动化检查
 ```bash
-# 应该返回 0 结果（或只在明确标记的 archive 中出现）
-rg "prefer_stages|output_keys" app/
-rg "DEFAULT_PRIMARY_BY_READ_TYPE" app/
-rg "assembly_input_fofn|filtered_reads_fofn" app/
-rg 'Path\("descriptors/registry\.yaml"\)' app/
+cd /tmp
+python -c 'from app.configuration import load_descriptor_registry; print(len(load_descriptor_registry().methods))'
+gene-agent --help
 ```
 
-### 功能验证
-- [ ] inventory → read_qc → assembly 链路端到端测试通过
-- [ ] 使用 FakeRunner 的单元测试通过
-- [ ] 从 `/tmp` 运行 `gene-agent inspect --help` 成功
+## 8. 实施进度
 
----
+截至 2026-07-20，本轮重构已经完成：
 
-## 6. 与原手册的差异
+| 范围 | 状态 | 当前结果 |
+|---|---|---|
+| 提交审阅 | 完成 | 审阅 `7bfa0e3e98ded78511796f21ba59d90c2da4ea28`，修复重复 resolver、state 原地修改、空路径、无大小/JSON 校验和缺少测试等问题 |
+| 中央资源交接 | 完成 | Inventory、read_qc、genome_survey、assembly、dedup、review、Hi-C、T2T、repeat、gene、function 已迁移到逻辑资源引用 |
+| 旧 handoff 清理 | 完成 | 删除 `prefer_stages`/`output_keys` 扫描、`final_*_for_*` 字段和 read_qc workflow 级 `make_fofn` |
+| 执行器收口 | 完成 | 仅保留一个 `Runner` protocol；生产默认 `LocalRunner`，测试替身通过依赖注入使用 |
+| 配置加载 | 完成 | descriptor registry 与 parameter catalog 使用 CWD-independent 加载；source checkout 在仓库外 smoke test 成功加载 18 个方法。wheel 构建/安装尚未形成可重复验收 |
+| 文档收口 | 完成 | 本文同时承载规范、进度、验收记录和后续路线；过期分析、阶段计划、修订说明及独立进度页已删除 |
 
-本契约与 `refactor-repair-manual.md` 的主要差异：
+2026-07-20 又按实际代码和测试做了一次对账，不能把设计文档中的“未完成”直接当作代码现状。结论如下：
 
-| 项目 | 原手册 | 本契约（务实版） |
-|------|--------|-----------------|
-| execution_mode | 完全删除 | **保留统一**，映射到 Runner |
-| local_exec | 删除 | 合并到 execution_mode 语义 |
-| AssemblySelection | 删除 | **保留**作为审计记录 |
-| assembly_route | 删除 | TUI 内部使用，不进 run config |
-| 测试策略 | 依赖注入 | **依赖注入 + execution_mode** |
-| 兼容性 | 明确拒绝 | 同样明确拒绝 + 清晰指引 |
+| 领域 | 实际状态 | 证据与缺口 |
+|---|---|---|
+| Checkpoint 预算 | 部分实现 | 单 stage cursor、整个 `stage_outputs` 和 `resource_refs` 已有硬上限；完整 `TopLevelState` 和 `active_interrupt` 仍没有统一上限，memory graph 实测可接受 2,000,000 字节的单条 `review_notes` |
+| Storage audit | 核心已实现 | `app.storage.audit` 已能只读审计六层目录、checkpoint 字段、artifact 完整性/可达性、重复内容和 reclaimable reports/work，并能生成纯 dry-run cleanup manifest；缺少 CLI 和任何删除执行 |
+| Durable resume/E2E | 已有实质覆盖 | 已有真实 parent graph + SQLite 关闭/重开 resume 测试，以及 existing assembly → review → RepeatMasker/provided annotation → function completion/failure E2E；缺口是 raw reads 起点经过 read_qc/genome_survey/assembly 的整链入口测试 |
+| Artifact publication | 基础设施已实现，但存在绕过缺陷 | `publish_file`、`publish_artifact_record` 和 replay recovery 已存在且有测试；多个 stage 仍先直接写 `artifacts/` 固定路径再调用注册。实测第二次写入会先改变文件，随后注册抛 `FileExistsError`，留下 index hash 与文件不一致 |
+| Resume 事务 | 功能可用，但入口重复 | `_run_resume`、进程内 interactive gate、`run_interactive_review` 各自复制 validate/persist/update/invoke/ledger 流程；两个路径没有捕获 `graph.update_state` 异常，事件字段和失败语义也不完全一致 |
+| CI/打包 | 未固化 | 仓库没有 CI workflow；当前环境缺少 `hatchling`，因此 wheel 构建无法在现有开发环境复现，不能把 source-checkout 的 CWD smoke test 等同于 wheel 安装验收 |
+| 模块复杂度 | 高，但不是首个正确性修复 | `gene_annotation/nodes.py` 2364 行、`assembly_review/nodes.py` 2022 行、`ask_interactive.py` 1817 行、`control/lifecycle.py` 1542 行；`ask_interactive` 的字符串前缀识别是真实 TODO，但当前风险低于 publication/resume 边界 |
 
-**核心思想**：不追求理想架构，而是**统一到一个可行的设计**，消除并行的多套机制。
+全仓 Ruff 仍有 3188 个既有格式、import 顺序和行长问题；本轮新增文件通过完整 Ruff，全部变更 Python 文件通过 `F` 规则。
+
+## 9. 验收记录
+
+本轮实测结果：
+
+- `git diff --check` 通过；
+- 资源、state、Runner、CWD 专项测试通过；
+- `/private/tmp` 中成功加载 descriptor registry 并运行 `gene-agent --help`；
+- 全量测试：1266 passed，1 skipped，240 subtests passed；
+- storage、artifact path、durable resume、entrypoint E2E 专项复验：113 passed，4 subtests passed；
+- checkpoint 探针确认完整 state 总量没有统一门禁；artifact 覆盖探针确认“先写已发布路径再注册”会破坏 index/file 一致性；
+- 新增文件通过完整 Ruff，全部变更 Python 文件通过 Ruff/Pyflakes `F` 检查。
+
+持续验收时，以下查询在 Python 运行时代码中应无结果：
+
+```bash
+rg 'prefer_stages|output_keys' app --glob '*.py'
+rg 'final_[a-z_]+_for_[a-z_]+' app --glob '*.py'
+rg 'Path\("descriptors/registry\.yaml"\)' app --glob '*.py'
+rg 'assembly_input_fofn|filtered_reads_fofn' app --glob '*.py'
+```
+
+还必须覆盖：资源优先级、表大小/JSON 验证、非原地更新、inventory → read_qc → assembly、下游 assembly 更新链、FakeRunner 注入和任意 CWD descriptor 加载。
+
+## 10. 后续路线
+
+按实际正确性风险和依赖排序，下一阶段应依次推进：
+
+1. **先修 durable artifact 不可变性。** 将直接写入 `artifacts/` 的 plan、bundle、summary 和 registry 改为先写 stage work 临时文件，再通过一个共享 JSON publication helper 原子发布并注册。增加回归测试，保证重复执行无副作用、冲突失败后旧 artifact 和 index 仍一致。这是当前已经复现的数据完整性缺陷。
+2. **统一 resume transaction。** 把“验证 decision → 可选 annotation intake → 写 lifecycle event → update checkpoint → invoke → terminal/report”收进一个 control service，三个入口只负责 I/O。必须覆盖 `update_state` 抛错/返回失败、invoke 抛错、重复 decision 和事件顺序。
+3. **补完整 checkpoint 边界，再做终态压缩。** 在统一 checkpoint 写入边界校验完整 `TopLevelState` 与 `active_interrupt`，限制自由文本字段；随后确保 ledger/artifact 足以独立重建终态，再压缩 terminal checkpoint。不能只给已有的两个大字段继续加局部限制。
+4. **暴露已有 storage audit，暂缓删除型 GC。** 先给 `audit_run_storage`/`build_cleanup_manifest` 接只读 CLI 和 JSON 输出。只有在 terminal compaction 后的 retention-root 测试证明 audit replay 所需 artifact 全部可达，才实现带 hash 复核、dry-run manifest 和显式确认的删除；`work/` 继续排除在自动 GC 外。
+5. **补 E2E 的真正空白并建立 CI。** 新增 raw reads → inventory → read_qc → genome_survey → assembly → review 的入口级工具-shim E2E；再把现有全量测试、SQLite resume、wheel 构建/临时安装、仓库外 CWD smoke 和新增代码 Ruff 固化为 CI。现有 assembly 后半程 E2E 不应重复建设。
+6. **最后拆大模块。** 优先抽取 resume transaction 和 durable JSON publication 这两个已经暴露边界问题的模块；之后才处理 `ask_interactive` 字段 metadata 和超大 stage node 文件。按职责/副作用边界拆分，不按行数机械切文件。
+
+优先级 1–3 是数据正确性与恢复语义，应该先完成；4–5 是可运维和防回归能力；6 是长期可维护性。Ruff 历史清理可并行分批推进，但不应挤占前三项。

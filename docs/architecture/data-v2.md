@@ -6,9 +6,11 @@
 
 **Implementation:** Partial. The v2 run layout, immutable refs, ledger/report
 ownership, recommendation persistence, typed bounded stage cursors, universal
-frozen-attempt refs, and process-result evidence are in use. Whole-checkpoint
-budgets, terminal compaction, artifact GC, and a unified `storage-audit` CLI
-remain incomplete.
+frozen-attempt refs, process-result evidence, read-only storage audit, and a
+dry-run cleanup manifest are in use. A code audit on 2026-07-20 confirmed that
+some stage producers still write directly to fixed `artifacts/` paths before
+registration; whole-checkpoint budgets, terminal compaction, deletion-performing
+artifact GC, and a unified `storage-audit` CLI remain incomplete.
 
 **Scope:** New workflow sessions created after the v2 cutover
 
@@ -618,20 +620,20 @@ code must not recreate or silently mix legacy data into the v2 root.
 | 5. Persist exact model requests/responses and policy/knowledge references | Complete for the implemented parameter-recommendation path | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
 | 6. Move reports out of the artifact index and generate shared report views | Complete | `current_status.json`, `assembly_review.md`, and `session_summary.{json,md}` are derived projections rather than workflow truth. |
 | 7. Add storage audit, checkpoint compaction, and mark-and-sweep artifact GC | Partial | Read-only storage audit and a pure dry-run cleanup manifest are implemented. Terminal checkpoint compaction, deletion-performing artifact GC, artifact-index compaction after GC, and a unified `storage-audit` CLI are not implemented. Work cleanup is intentionally outside the design. |
-| 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. A final clean v2 end-to-end acceptance run remains outstanding. |
+| 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. Real SQLite resume and existing-assembly-to-annotation entrypoint E2E tests exist; the outstanding clean-v2 acceptance path starts from raw reads and crosses read_qc/genome_survey/assembly before review. |
 
 ## 22. Confirmed Conformance Debt
 
-The following gaps were confirmed against the current implementation through
-2026-07-17. They are bounded follow-up work, not precedents for new stages.
+The following gaps were confirmed against the current implementation on
+2026-07-20. They are bounded follow-up work, not precedents for new stages.
 
 | Priority | Area | Confirmed gap | Required ownership boundary |
 |---|---|---|---|
-| P1 | Whole-checkpoint budget | Stage cursor budgets are enforced, but the 64 KiB target for the complete serialized `TopLevelState` and the 4 KiB active-interrupt budget are not yet enforced at one boundary. | Add one whole-state checkpoint validator without reintroducing stage payload schemas or artifact bodies. |
-| P1 | Review recommendation | A recommendation artifact repeats the canonical review request and uses a stage-fixed filename. | Bind recommendation evidence to review request ID/ref/hash and publish it immutably per request. |
-| P2 | Review request identity | `stage`, `gate_id`, and `reason` occur in both the persisted request envelope and body. | The envelope is the sole identity owner; the body contains only gate-specific facts. |
+| P0 | Artifact publication bypass | Shared atomic publishers and replay recovery exist, but several stage producers write a fixed path below `artifacts/` before calling `publish_artifact_records`. A conflicting replay mutates the published file before registration fails, leaving index/file hashes inconsistent. | Every durable producer writes under `work/` and crosses one atomic publish-and-register boundary; conflict tests must prove both the old file and index remain unchanged. |
+| P1 | Resume transaction | CLI resume, the in-process interactive gate loop, and interactive review separately implement validation, annotation intake, checkpoint update, graph invocation, and lifecycle events. Their `update_state` failure handling and event envelopes differ. | One control-layer transaction owns state mutation and lifecycle event ordering; entrypoints own only input/output. |
+| P1 | Whole-checkpoint budget | Stage cursor and resource-table budgets are enforced, but the 64 KiB target for the complete serialized `TopLevelState` and the 4 KiB active-interrupt budget are not yet enforced at one boundary. A 2 MB `review_notes` value is currently accepted by a memory checkpoint. | Add one whole-state checkpoint validator without reintroducing stage payload schemas or artifact bodies. |
+| P1 | GC retention roots | Read-only reachability analysis exists, but checkpoint removal changes the root set and not every terminal/stage event carries the refs needed for audit replay. | Prove terminal audit reconstruction and artifact reachability after compaction before enabling deletion; keep work cleanup outside automatic GC. |
 | P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
-| P2 | Session inspection | Inspection may use derived `current_status.json` content to classify a report even though lifecycle state comes from the ledger. | Ledger/artifacts determine classification; reports remain optional views only. |
 
 The former Gene collection and checkpoint gaps were resolved on 2026-07-16:
 collection now returns and consumes the durable published path, and Gene
@@ -641,6 +643,12 @@ The former Assembly/AutoHiC attempt-ownership gap was resolved on 2026-07-17:
 each `ParameterAttempt` now owns its exact frozen runner-input ref and execution
 ref; method-specific current-stage duplicates were removed, and sealed manifests
 retain those relations across retries.
+
+The former review-recommendation, review-request-identity, and session-inspection
+gaps were verified resolved on 2026-07-20. Recommendation files are scoped by
+`review_request_id` and reference the canonical request without embedding it;
+request bodies reject duplicate envelope fields; lifecycle classification reads
+ledger/artifact facts and treats report files only as optional paths.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus

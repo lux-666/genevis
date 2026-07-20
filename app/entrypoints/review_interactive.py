@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -175,7 +174,7 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
 
     methods = requirements.get("candidate_methods") or []
     if methods:
-        print(f"\ncandidate_methods:")
+        print("\ncandidate_methods:")
         for m in methods:
             print(f"  - {m}")
 
@@ -189,7 +188,7 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
                     print(f"    {key}: {candidate[key]}")
 
     interrupt = (summary.get("latest_review_request") or {}).get("payload", {})
-    for key in ("pre_hic_assembly_ref", "final_assembly_for_annotation",
+    for key in ("pre_hic_assembly_ref", "output_assembly_ref",
                 "hic_review_bundle_ref",
                 "chromosome_scaffolded_assembly_candidate_ref", "hic_qc_report_ref"):
         val = interrupt.get(key) or requirements.get(key)

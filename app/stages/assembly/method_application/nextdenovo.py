@@ -12,7 +12,7 @@ from app.execution.parameter_attempts import (
     current_parameter_attempt,
     load_current_frozen_attempt,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
 from app.domains.assembly.constants import NEXTDENOVO_METHOD
@@ -52,7 +52,7 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     output = stage_output(state, "assembly")
     if output.get("status") != LIFECYCLE.planned_status:
         return {}
-    if NEXTDENOVO_METHOD not in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods:
+    if NEXTDENOVO_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{NEXTDENOVO_METHOD!r}]")
     params, blocked = _parameters(output)
     if blocked:

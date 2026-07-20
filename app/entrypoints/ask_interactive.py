@@ -16,7 +16,6 @@ from app.entrypoints.ask_planner import (
     FUNCTION_DATABASE_PROVENANCE_FIELD,
     READ_QC_FILTER_METHODS,
     READ_QC_FILTER_SKIP,
-    READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
     _STAGES_NEEDING_METHOD_SELECTION,
     _all_selectable_stages,
@@ -1339,13 +1338,12 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
             label = m.get("display_name") or m["method_name"]
             marker = "*" if m["method_name"] == default_filter else " "
             print(f"    {marker} {i}. {label}")
-        print(f"    * always: {READ_QC_HANDOFF_METHOD}")
         print(f"\n  Choose one length filter. Enter = {default_filter}:")
         raw = input("  read_qc length_filter> ").strip()
         picks = _parse_selection(raw, filter_names) if raw else [default_filter]
         filter_method = picks[0] if picks else default_filter
 
-    return [READ_QC_STATS_METHOD, filter_method, READ_QC_HANDOFF_METHOD]
+    return [READ_QC_STATS_METHOD, filter_method]
 
 
 def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -> AskClarificationResponse:

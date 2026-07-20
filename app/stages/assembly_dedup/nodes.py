@@ -24,7 +24,7 @@ from app.schemas.artifacts import (
     ArtifactMeta,
     AssemblyCandidateBundle,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -34,6 +34,8 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC, LONG_READS_SPEC
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
 
@@ -69,8 +71,8 @@ def plan_purge_dups(state: TopLevelState) -> dict:
             },
         )
     candidate_ref, candidate_id, final_assembly_ref = candidate
-    long_reads_ref = _long_reads_ref(state, assembly_out)
-    if long_reads_ref is None:
+    long_read_refs = _long_read_refs(state)
+    if not long_read_refs:
         return _update_output(
             state,
             {
@@ -93,7 +95,8 @@ def plan_purge_dups(state: TopLevelState) -> dict:
             "method_name": ASSEMBLY_DEDUP_METHOD,
             "input_assembly_ref": str(final_assembly_ref),
             "output_assembly_ref": str(dedup_dir / "purged_assembly.fasta"),
-            "long_reads_ref": long_reads_ref,
+            "long_reads_ref": long_read_refs[0],
+            "long_read_refs": long_read_refs,
             "read_mapping_preset": _read_mapping_preset(assembly_out),
             "cutoffs_strategy": "calcuts_auto",
             "get_seqs_exclude_haplotigs": True,
@@ -110,7 +113,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     input_manifest_ref = state.get("input_manifest_ref", "")
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     if ASSEMBLY_DEDUP_METHOD not in registry.methods:
         return _fail(state, f"assembly dedup descriptor missing: {ASSEMBLY_DEDUP_METHOD}")
 
@@ -128,7 +131,9 @@ def run_purge_dups(state: TopLevelState) -> dict:
     candidate_ref = dedup_out["candidate_ref"]
     input_assembly_ref = Path(dedup_out["input_assembly_ref"])
     output_assembly_ref = Path(dedup_out["output_assembly_ref"])
-    long_reads_ref = Path(str(dedup_out["long_reads_ref"]))
+    long_read_refs = [str(path) for path in dedup_out.get("long_read_refs") or []]
+    if not long_read_refs and dedup_out.get("long_reads_ref"):
+        long_read_refs = [str(dedup_out["long_reads_ref"])]
     work_dir = stage_work_dir(state, "assembly_dedup")
     artifact_dir = stage_artifacts_dir(state, "assembly_dedup")
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -147,12 +152,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
     get_seqs_primary = Path(f"{get_seqs_prefix}.purged.fa")
     script_path.write_text(
         "set -euo pipefail\n"
-        f"reads_ref={shlex.quote(str(long_reads_ref))}\n"
-        "if [[ \"$reads_ref\" == *.fofn ]]; then\n"
-        "  mapfile -t reads < \"$reads_ref\"\n"
-        "else\n"
-        "  reads=(\"$reads_ref\")\n"
-        "fi\n"
+        "reads=(" + " ".join(shlex.quote(path) for path in long_read_refs) + ")\n"
         "if [[ ${#reads[@]} -eq 0 ]]; then\n"
         "  echo 'no long-read files found for purge_dups' >&2\n"
         "  exit 2\n"
@@ -194,7 +194,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
             "candidate_id": dedup_out.get("candidate_id"),
             "input_assembly_ref": str(input_assembly_ref),
             "output_assembly_ref": str(output_assembly_ref),
-            "long_reads_ref": str(long_reads_ref),
+            "long_reads_refs": list(long_read_refs),
             "read_bam_ref": str(read_bam),
             "read_paf_ref": str(read_paf),
             "split_assembly_ref": str(split_assembly),
@@ -313,8 +313,8 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
             candidate_id=f"{dedup_out.get('candidate_id') or session_id}:assembly_dedup.purge_dups",
             method_name=ASSEMBLY_DEDUP_METHOD,
             status="executed",
-            input_ref=str(dedup_out.get("long_reads_ref") or ""),
-            input_type="long_reads.fofn" if str(dedup_out.get("long_reads_ref", "")).endswith(".fofn") else "clean_long_reads",
+            input_ref=list(dedup_out.get("long_read_refs") or [dedup_out.get("long_reads_ref")]),
+            input_type="clean_long_reads",
             expected_outputs={"draft_assembly_fasta": str(output_assembly_ref)},
             metadata={
                 "raw_candidate_ref": source_candidate_ref,
@@ -346,24 +346,39 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
         ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt_id)
 
     outputs = dict(state.get("stage_outputs") or {})
+    current_assembly_ref = (
+        str(output_assembly_ref)
+        if dedup_out.get("status") == "dedup_ran" and output_assembly_ref
+        else input_assembly_ref
+    )
     outputs["assembly_dedup"] = {
         **dedup_out,
         "status": "completed",
         "purged_assembly_ref": str(output_assembly_ref) if dedup_out.get("status") == "dedup_ran" else None,
         "purged_candidate_ref": purged_candidate_ref,
-        "final_assembly_for_scaffolding_or_annotation": (
-            str(output_assembly_ref)
-            if dedup_out.get("status") == "dedup_ran" and output_assembly_ref
-            else input_assembly_ref
-        ),
         "artifact_refs": [str(artifact.file_path) for artifact in artifacts],
     }
-    return {
+    update = {
         "current_stage": next_stage_name("assembly_dedup"),
         "supervision_state": "running_stage",
         "route_trace": append_route_trace(state, "assembly_dedup_stage"),
         "stage_outputs": outputs,
     }
+    if current_assembly_ref:
+        update["resource_refs"] = update_resource_ref(
+            state,
+            "assembly",
+            [str(current_assembly_ref)],
+            "assembly_dedup",
+            {
+                "candidate_bundle_refs": [purged_candidate_ref]
+                if purged_candidate_ref
+                else [],
+                "raw_candidate_ref": source_candidate_ref,
+                "deduplicated": dedup_out.get("status") == "dedup_ran",
+            },
+        )
+    return update
 
 
 def fail_assembly_dedup(state: TopLevelState) -> dict:
@@ -381,9 +396,13 @@ def _primary_candidate_ref(candidate_refs: list[str]) -> str:
 
 
 def _selected_assembly_candidate(state: TopLevelState) -> tuple[str, str | None, str] | None:
-    assembly_out = dict((state.get("stage_outputs") or {}).get("assembly") or {})
-    selected_refs = list(assembly_out.get("selected_candidate_refs") or [])
-    draft_ref = assembly_out.get("draft_assembly_ref")
+    resolution = resolve_stage_resource(
+        state,
+        resource_spec=ASSEMBLY_CANDIDATES_SPEC,
+    )
+    if not resolution.found:
+        return None
+    selected_refs = list(resolution.metadata.get("candidate_bundle_refs") or [])
 
     # Dedup runs only on the ordered primary assembly candidate.  When multiple
     # candidate bundle refs exist, selected_candidate_refs[0] is the handoff
@@ -396,14 +415,14 @@ def _selected_assembly_candidate(state: TopLevelState) -> tuple[str, str | None,
         final_ref = (payload.get("expected_outputs") or {}).get("draft_assembly_fasta")
         if not final_ref or not Path(str(final_ref)).exists():
             continue
-        if draft_ref and Path(str(draft_ref)).exists() and Path(str(final_ref)) != Path(str(draft_ref)):
-            continue
         return str(path), payload.get("candidate_id"), str(final_ref)
 
-    if draft_ref and Path(str(draft_ref)).exists():
+    for draft_ref in resolution.paths:
+        if not Path(str(draft_ref)).is_file():
+            continue
         candidate_ref = _primary_candidate_ref(selected_refs or [str(draft_ref)])
         payload = _load_candidate_payload(Path(str(candidate_ref)))
-        candidate_id = payload.get("candidate_id") if payload else assembly_out.get("candidate_id")
+        candidate_id = payload.get("candidate_id") if payload else None
         return str(candidate_ref), candidate_id, str(draft_ref)
     return None
 
@@ -418,14 +437,9 @@ def _load_candidate_payload(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _long_reads_ref(state: TopLevelState, assembly_out: dict[str, Any]) -> str | None:
-    if assembly_out.get("input_ref"):
-        return str(assembly_out["input_ref"])
-    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
-    for key in ["assembly_input_ref", "filtered_long_reads_fofn_ref", "long_reads_fofn_ref"]:
-        if read_qc_out.get(key):
-            return str(read_qc_out[key])
-    return None
+def _long_read_refs(state: TopLevelState) -> list[str]:
+    resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    return list(resolution.paths) if resolution.found else []
 
 
 def _read_mapping_preset(assembly_out: dict[str, Any]) -> str:

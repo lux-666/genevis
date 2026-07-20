@@ -48,7 +48,7 @@ from app.schemas.artifacts import (
     AssemblyInputProfile,
     AssemblyRouteDecision,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.state import TopLevelState
 from app.domains.assembly.constants import (
@@ -74,6 +74,8 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import HIC_READS_SPEC, LONG_READS_SPEC
 from app.storage.publish import publish_file
 
 ROUTE_DECISION_MAP = {
@@ -98,22 +100,56 @@ def enter_assembly(state: TopLevelState) -> dict:
 def resolve_extended_inputs(state: TopLevelState) -> dict:
     """Resolve long-read, HiFi, Hi-C, platform, and route hints for assembly."""
     assembly_out = stage_output(state, "assembly")
-    read_qc_ref = _read_qc_assembly_input_ref(state)
-    asset_long_ref = _asset_input_ref(state)
-    long_read_platform = _long_read_platform(state)
-    hifi_reads_ref = assembly_out.get("hifi_reads_ref") or _hifi_asset_input_ref(state)
+    explicit_long_ref = assembly_out.get("hifi_reads_ref") or assembly_out.get("ont_reads_ref")
+    long_reads = resolve_stage_resource(
+        state,
+        resource_spec=LONG_READS_SPEC,
+        override=str(explicit_long_ref) if explicit_long_ref else None,
+    )
+    if not long_reads.found:
+        return _fail_update(state, "assembly requires long reads")
+    input_refs = list(long_reads.paths)
+    primary_ref = input_refs[0]
+    long_read_assets = [
+        asset
+        for asset in (long_reads.metadata.get("assets") or [])
+        if isinstance(asset, dict)
+    ]
+    hifi_asset_refs = [
+        str(asset["path"])
+        for asset in long_read_assets
+        if asset.get("path")
+        and (
+            asset.get("asset_type") == "pacbio_hifi"
+            or asset.get("platform") == "pacbio_hifi"
+        )
+    ]
+    non_hifi_asset_refs = [
+        str(asset["path"])
+        for asset in long_read_assets
+        if asset.get("path")
+        and asset.get("asset_type") != "pacbio_hifi"
+        and asset.get("platform") != "pacbio_hifi"
+    ]
+    platforms = list(long_reads.metadata.get("platforms") or [])
+    long_read_platform = (
+        platforms[0]
+        if platforms
+        else long_reads.metadata.get("platform") or _long_read_platform(state)
+    )
+    hifi_reads_ref = assembly_out.get("hifi_reads_ref") or (
+        hifi_asset_refs[0] if hifi_asset_refs else None
+    )
     has_explicit_hifi_ref = bool(assembly_out.get("hifi_reads_ref"))
     if not hifi_reads_ref and long_read_platform == "pacbio_hifi":
-        hifi_reads_ref = read_qc_ref or asset_long_ref
-    ont_reads_ref = (
+        hifi_reads_ref = primary_ref
+    ont_reads_ref = non_hifi_asset_refs[0] if non_hifi_asset_refs else (
         None
         if hifi_reads_ref and (has_explicit_hifi_ref or long_read_platform == "pacbio_hifi")
-        else read_qc_ref or asset_long_ref
+        else primary_ref
     )
-    hic_reads_ref = assembly_out.get("hic_reads_ref") or _asset_ref_by_type(
-        state,
-        {"hic_reads", "hi_c_reads"},
-    )
+    hic_reads = resolve_stage_resource(state, resource_spec=HIC_READS_SPEC)
+    hic_reads_ref = assembly_out.get("hic_reads_ref") or hic_reads.path
 
     configured_route = assembly_out.get("assembly_route") or "auto"
     existing_selection = _selection_from_output(assembly_out)
@@ -126,26 +162,37 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
         context="assembly.resolve_extended_inputs",
     )
     if hinted_read_type == "pacbio_hifi":
-        primary_long_reads_ref = hifi_reads_ref or read_qc_ref or asset_long_ref
+        primary_long_reads_ref = hifi_reads_ref or primary_ref
     else:
         primary_long_reads_ref = ont_reads_ref or hifi_reads_ref
     if hinted_read_type == "pacbio_hifi" and primary_long_reads_ref and not hifi_reads_ref:
         hifi_reads_ref = primary_long_reads_ref
     if not primary_long_reads_ref:
-        return _fail_update(state, "assembly requires long reads (clean_long_reads or long_reads.fofn)")
+        return _fail_update(state, "assembly requires long reads")
 
     primary_platform = "pacbio_hifi" if hinted_read_type == "pacbio_hifi" or (hifi_reads_ref and not ont_reads_ref) else long_read_platform
-    input_source = "read_qc" if read_qc_ref else "asset_registry"
-    if hifi_reads_ref and not ont_reads_ref:
-        input_source = "run_config" if assembly_out.get("hifi_reads_ref") else "asset_registry"
+    input_source = long_reads.source
 
     resolved_genome_size = resolve_genome_size(state)
     genome_size_prior = resolved_genome_size["value_bp"] if resolved_genome_size else None
     read_type_prior = _read_type_prior(state)
     target_level = assembly_out.get("target_level") or "draft"
     explicit_route = configured_route if configured_route in ROUTE_VALUES else None
-    input_ref = primary_long_reads_ref
-    input_type = "long_reads.fofn" if str(input_ref).endswith(".fofn") else "clean_long_reads"
+    selected_input_refs = input_refs
+    if hinted_read_type == "pacbio_hifi" and hifi_asset_refs:
+        selected_input_refs = hifi_asset_refs
+    elif hinted_read_type != "pacbio_hifi" and non_hifi_asset_refs:
+        selected_input_refs = non_hifi_asset_refs
+    input_ref: str | list[str] = (
+        selected_input_refs[0]
+        if len(selected_input_refs) == 1
+        else selected_input_refs
+    )
+    input_type = (
+        "long_reads.fofn"
+        if isinstance(input_ref, str) and input_ref.endswith(".fofn")
+        else "clean_long_reads"
+    )
 
     return update_stage_output(
         state,
@@ -474,7 +521,7 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
     if selection is None:
         return _fail_update(state, "assembly_selection is required before candidate planning")
 
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     planned_methods = _planned_candidate_methods(selection)
     missing = [method for method in planned_methods if method not in registry.methods]
     if missing:
@@ -796,12 +843,38 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
     outputs = dict(state.get("stage_outputs") or {})
     outputs["assembly"] = {key: assembly_out[key] for key in committed_keys if key in assembly_out}
     trace = append_route_trace(state, "assembly_stage")
-    return {
+    update = {
         "current_stage": next_stage_name("assembly"),
         "supervision_state": "running_stage",
         "route_trace": trace,
         "stage_outputs": outputs,
     }
+    assembly_paths = [
+        str(path)
+        for path in assembly_out.get("candidate_assembly_refs") or []
+        if path and Path(str(path)).is_file()
+    ]
+    if not assembly_paths and assembly_out.get("draft_assembly_ref"):
+        draft = str(assembly_out["draft_assembly_ref"])
+        if Path(draft).is_file():
+            assembly_paths = [draft]
+    if assembly_paths:
+        update["resource_refs"] = update_resource_ref(
+            state,
+            "assembly",
+            assembly_paths,
+            "assembly",
+            {
+                "candidate_bundle_refs": list(
+                    assembly_out.get("executed_candidate_refs") or []
+                ),
+                "methods": list(assembly_out.get("selected_methods") or []),
+                "rejected_candidates": dict(
+                    assembly_out.get("rejected_candidates") or {}
+                ),
+            },
+        )
+    return update
 
 
 def fail_assembly(state: TopLevelState) -> dict:
@@ -1162,33 +1235,6 @@ def _route_selector_payload(
         },
     }
 
-def _read_qc_assembly_input_ref(state: TopLevelState) -> str | None:
-    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
-    for key in ["assembly_input_ref", "filtered_long_reads_fofn_ref", "long_reads_fofn_ref"]:
-        value = read_qc_out.get(key)
-        if value:
-            return str(value)
-    return None
-
-
-def _asset_input_ref(state: TopLevelState) -> str | None:
-    return _asset_ref_by_type(state, {"clean_long_reads", "raw_long_reads"})
-
-
-def _asset_ref_by_type(state: TopLevelState, asset_types: set[str]) -> str | None:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return None
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return None
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    for asset in registry.get("assets", []):
-        if asset.get("asset_type") in asset_types:
-            return str(asset.get("path"))
-    return None
-
-
 def _genome_size_prior(state: TopLevelState) -> int | None:
     resolved = resolve_genome_size(state)
     return resolved["value_bp"] if resolved else None
@@ -1258,30 +1304,6 @@ def _long_read_platform(state: TopLevelState) -> str | None:
     for asset in registry.get("assets", []):
         if asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"} and asset.get("platform"):
             return str(asset["platform"])
-    return None
-
-
-def _hifi_asset_input_ref(state: TopLevelState) -> str | None:
-    ref = _asset_ref_by_type(
-        state,
-        {"pacbio_hifi", "clean_hifi_reads", "hifi_reads"},
-    )
-    if ref:
-        return ref
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return None
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return None
-    registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    for asset in registry.get("assets", []):
-        if (
-            asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"}
-            and asset.get("platform") == "pacbio_hifi"
-            and asset.get("path")
-        ):
-            return str(asset["path"])
     return None
 
 

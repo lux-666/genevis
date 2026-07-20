@@ -39,18 +39,18 @@ from app.schemas.artifacts import (
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
-    resolve_stage_resource,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
     update_stage_output,
 )
 from app.stages.resource_specs import assembly_resource_spec
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
@@ -105,7 +105,7 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
     config = _config(existing)
     assembly = resolve_stage_resource(
         state,
-        resource_spec=assembly_resource_spec("hic_scaffolding", "assembly_review"),
+        resource_spec=assembly_resource_spec(),
         override=config.get("assembly_fasta_ref"),
     )
     assembly_ref, source_stage = assembly.path, assembly.source
@@ -135,7 +135,7 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
             "execution_enabled": existing.get("execution_mode") == "local",
             "out_dir": str(out_dir),
             "work_dir": str(work_dir),
-            "final_assembly_for_annotation": str(assembly_path),
+            "output_assembly_ref": str(assembly_path),
             "notes": [],
         },
     )
@@ -259,7 +259,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
                 "candidate_count": 0,
             },
         )
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     if T2T_ALIGNMENT_METHOD not in registry.methods:
         return _fail(state, f"t2t descriptor missing: {T2T_ALIGNMENT_METHOD}")
     env_spec, _packages, blocked = resolve_method_env(
@@ -405,7 +405,7 @@ def apply_t2t_patches(state: TopLevelState) -> dict:
             "status": "patched",
             "patched_assembly_ref": materialized["patched_assembly_ref"],
             "patch_records_ref": materialized["patch_records_ref"],
-            "final_assembly_for_annotation": materialized["patched_assembly_ref"],
+            "output_assembly_ref": materialized["patched_assembly_ref"],
         },
     )
 
@@ -451,7 +451,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
         session_id=state["session_id"],
         status=final_status,
         input_assembly_ref=out["input_assembly_ref"],
-        final_assembly_for_annotation=out.get("final_assembly_for_annotation") or out["input_assembly_ref"],
+        output_assembly_ref=out.get("output_assembly_ref") or out["input_assembly_ref"],
         ont_reads_ref=out.get("ont_reads_ref"),
         mode=out.get("mode", "auto_patch"),
         patched_assembly_ref=out.get("patched_assembly_ref"),
@@ -462,7 +462,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
     bundle_path.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
     bundle_artifact = ArtifactMeta.from_file(bundle_path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type="t2t.bundle")
     publish_artifact_records(absolute_data_dir(state), state["session_id"], [bundle_artifact])
-    final_assembly = out.get("final_assembly_for_annotation") or out["input_assembly_ref"]
+    final_assembly = out.get("output_assembly_ref") or out["input_assembly_ref"]
     return _update(
         state,
         {
@@ -471,7 +471,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
             "t2t_finishing_report_ref": str(report_path),
             "bundle_ref": str(bundle_path),
             "artifact_refs": [str(path) for path in artifacts] + [str(bundle_path)],
-            "final_assembly_for_annotation": final_assembly,
+            "output_assembly_ref": final_assembly,
         },
     )
 
@@ -495,11 +495,22 @@ def gate_t2t_review(state: TopLevelState) -> dict:
 
 def commit_t2t(state: TopLevelState) -> dict:
     """Advance to annotation with the patched or original assembly reference."""
-    return {
+    out = _output(state)
+    assembly_ref = out.get("output_assembly_ref") or out.get("input_assembly_ref")
+    update = {
         "current_stage": next_stage_name("t2t"),
         "supervision_state": "running_stage",
         "route_trace": append_route_trace(state, "t2t_stage"),
     }
+    if assembly_ref:
+        update["resource_refs"] = update_resource_ref(
+            state,
+            "assembly",
+            [str(assembly_ref)],
+            "t2t",
+            {"patched": bool(out.get("patched_assembly_ref"))},
+        )
+    return update
 
 
 def fail_t2t(state: TopLevelState) -> dict:
@@ -538,7 +549,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         materialized = _materialize_t2t_patches(out, selected_candidate_ids=set(request.candidate_ids), allowed_decisions={"proposed", "auto_patch"})
         if not materialized:
             raise ResumeValidationError("t2t selected candidates could not be materialized into a patched assembly")
-        final_assembly_for_annotation = materialized["patched_assembly_ref"]
+        output_assembly_ref = materialized["patched_assembly_ref"]
         patched_assembly_ref = materialized["patched_assembly_ref"]
         patch_records_ref = materialized["patch_records_ref"]
         publish_artifact_records(
@@ -551,7 +562,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         )
         status = "completed"
     else:
-        final_assembly_for_annotation = out["input_assembly_ref"]
+        output_assembly_ref = out["input_assembly_ref"]
         patched_assembly_ref = None
         patch_records_ref = out.get("patch_records_ref")
         status = "failed_terminal" if request.decision == "stop_pipeline" else "completed"
@@ -561,7 +572,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         decision=request.decision,
         candidate_ids=list(request.candidate_ids),
         input_assembly_ref=out["input_assembly_ref"],
-        final_assembly_for_annotation=str(final_assembly_for_annotation),
+        output_assembly_ref=str(output_assembly_ref),
         patched_assembly_ref=patched_assembly_ref,
         notes=list(request.notes),
         metadata=request.metadata,
@@ -602,7 +613,7 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         "selected_candidate_ids": list(request.candidate_ids),
         "patched_assembly_ref": patched_assembly_ref,
         "patch_records_ref": patch_records_ref,
-        "final_assembly_for_annotation": str(final_assembly_for_annotation),
+        "output_assembly_ref": str(output_assembly_ref),
         "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
         "notes": list(request.notes),
         "decided_by": request.decided_by,
@@ -1047,7 +1058,7 @@ def _report_markdown(out: dict[str, Any], summary: list[dict[str, str]]) -> str:
         f"- telomeric reads: `{out.get('telomeric_read_count', 0)}`",
         f"- extension candidates: `{out.get('candidate_count', 0)}`",
         f"- selected patches: `{out.get('selected_patch_count', 0)}`",
-        f"- annotation assembly: `{out.get('final_assembly_for_annotation', '')}`",
+        f"- output assembly: `{out.get('output_assembly_ref', '')}`",
         "",
         "## Notes",
     ]

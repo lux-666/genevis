@@ -5,9 +5,9 @@ and non-normative. Architecture decisions live in
 [`architecture/README.md`](architecture/README.md); implementation history lives
 in phase documents and Git.
 
-**Updated:** 2026-07-17
+**Updated:** 2026-07-20
 
-**Current baseline:** `47a5c5f refactor: unify durable execution evidence`
+**Current baseline:** `e74b96d` plus the uncommitted unified-resource refactor
 
 ## Read Order
 
@@ -30,8 +30,8 @@ in phase documents and Git.
   stage is entered.
 - The diagnostic route tail uses one shared limit of 16 entries.
 
-Data v2 is accepted but only partially conformant. Its live debt table is the
-single current list: [`architecture/data-v2.md`](architecture/data-v2.md#22-confirmed-conformance-debt).
+Data v2 is accepted but only partially conformant. Its code-audited debt table
+is the current list: [`architecture/data-v2.md`](architecture/data-v2.md#22-confirmed-conformance-debt).
 
 ## Current Architecture Decision
 
@@ -59,13 +59,18 @@ recommendation signals now flow from the asset registry through
 
 ## Next Implementation Slice
 
-The typed stage cursor and frozen-attempt migrations are implemented. The next
-data-boundary slice is deliberately narrower:
+The resource handoff, typed stage cursor, frozen-attempt, review persistence,
+read-only storage audit, durable SQLite resume, and assembly-to-annotation E2E
+paths are implemented. The next slice is based on the 2026-07-20 code audit:
 
-1. enforce the whole-`TopLevelState` 64 KiB target and active-interrupt budget;
-2. finish terminal checkpoint compaction;
-3. keep artifact GC separate from retained work;
-4. add the unified `storage-audit` CLI.
+1. remove direct writes to fixed `artifacts/` paths and enforce atomic publish-and-register;
+2. unify the three resume transaction implementations and their failure events;
+3. enforce whole-`TopLevelState`/active-interrupt budgets, then compact terminal checkpoints;
+4. expose the existing storage audit as a CLI; enable deletion only after post-compaction retention-root tests;
+5. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance.
+
+Detailed evidence and ordering live in
+[`architecture/refactor/architecture-contracts.md`](architecture/refactor/architecture-contracts.md#10-后续路线).
 
 ## Verification
 

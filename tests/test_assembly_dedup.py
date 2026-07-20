@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.storage.ledger import Ledger
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.assembly_dedup.builder import build_stage as build_dedup_stage
 from app.stages.assembly_review.builder import build_stage as build_review_stage
 from tests.data_v2 import v2_run_dir
@@ -77,7 +78,7 @@ class AssemblyDedupStageTests(unittest.TestCase):
             self.assertEqual(dedup["status"], "completed")
             self.assertEqual(dedup["skip_reason"], "no_materialized_draft_assembly")
 
-    def test_assembly_review_preserves_raw_and_adds_dedup_output(self):
+    def test_assembly_review_consumes_current_deduplicated_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             draft = Path(tmpdir) / "draft.fasta"
             draft.write_text(">contig1\nACGT\n", encoding="utf-8")
@@ -99,17 +100,20 @@ class AssemblyDedupStageTests(unittest.TestCase):
                     "method_name": "assembly_dedup.purge_dups",
                     "input_assembly_ref": str(draft),
                     "purged_assembly_ref": str(purged),
-                    "final_assembly_for_scaffolding_or_annotation": str(purged),
                 },
             }
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(purged)],
+                source_stage="assembly_dedup",
+                metadata={"candidate_bundle_refs": []},
+            ).to_dict()
 
             result = build_review_stage().invoke(state)
 
             candidates = result["stage_outputs"]["assembly_review"]["candidates"]
-            self.assertEqual([candidate["source"] for candidate in candidates], ["assembly_stage", "assembly_dedup_stage"])
-            self.assertEqual(candidates[0]["final_assembly_ref"], str(draft))
-            self.assertEqual(candidates[1]["final_assembly_ref"], str(purged))
-            self.assertEqual(candidates[1]["pre_dedup_assembly_ref"], str(draft))
+            self.assertEqual([candidate["source"] for candidate in candidates], ["assembly_dedup"])
+            self.assertEqual(candidates[0]["final_assembly_ref"], str(purged))
 
     def test_default_auto_purge_dups_writes_purged_candidate_without_overwriting_raw(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,6 +196,18 @@ class AssemblyDedupStageTests(unittest.TestCase):
                     "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
                 },
             }
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(draft)],
+                source_stage="assembly",
+                metadata={"candidate_bundle_refs": [str(candidate_ref)]},
+            ).to_dict()
+            state["resource_refs"]["long_reads"] = ResourceRef(
+                resource_type="long_reads",
+                paths=[str(reads)],
+                source_stage="read_qc",
+                metadata={"platforms": ["ont"]},
+            ).to_dict()
 
             result = build_dedup_stage().invoke(state)
 

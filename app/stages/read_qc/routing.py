@@ -48,14 +48,5 @@ def route_after_length_filter(state: TopLevelState) -> str:
     return (
         "fail"
         if is_terminal_failure(_status(state), extra_statuses=EXTRA_FAIL_STATUSES)
-        else "fofn"
-    )
-
-
-def route_after_make_fofn(state: TopLevelState) -> str:
-    """Route after FOFN creation."""
-    return (
-        "fail"
-        if is_terminal_failure(_status(state), extra_statuses=EXTRA_FAIL_STATUSES)
         else "commit"
     )

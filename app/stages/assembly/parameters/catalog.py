@@ -7,12 +7,10 @@ from typing import Any
 
 import yaml
 
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import descriptors_root, load_descriptor_registry
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
-CATALOG_ROOT = _PROJECT_ROOT / "descriptors" / "knowledge_packs" / "assembly" / "methods"
-_REGISTRY_PATH = _PROJECT_ROOT / "descriptors" / "registry.yaml"
+CATALOG_ROOT = descriptors_root() / "knowledge_packs" / "assembly" / "methods"
 
 # Exact runtime producer paths accepted by ``build_parameter_sources``. Keeping
 # this list closed makes catalog typos fail at load time instead of silently
@@ -44,7 +42,7 @@ def catalog_id_for_method(method_id: str) -> str:
 
     if "." not in method_id:
         return method_id
-    registry = DescriptorRegistry.load(_REGISTRY_PATH)
+    registry = load_descriptor_registry()
     descriptor = registry.methods.get(method_id)
     if descriptor is None:
         raise ValueError(f"Unknown method descriptor: {method_id}")

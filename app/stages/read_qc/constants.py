@@ -2,7 +2,6 @@
 
 METHOD_NAME = "read_qc.long_read_stats.seqkit_stats"
 LENGTH_FILTER_METHOD_NAME = "read_qc.length_filter.seqkit_seq"
-MAKE_FOFN_METHOD_NAME = "read_qc.make_fofn.local"
 LENGTH_FILTER_SKIP = "skip"
 LENGTH_FILTER_DECISIONS = {
     LENGTH_FILTER_SKIP: "skip filtering, use raw reads",

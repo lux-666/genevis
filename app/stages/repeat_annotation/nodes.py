@@ -33,7 +33,7 @@ from app.schemas.artifacts import (
     RepeatAnnotationBundle,
     RepeatAnnotationPlan,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -44,6 +44,8 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import ASSEMBLY_SPEC
 from app.storage.publish import shell_publish_file
 
 REPEAT_LIBRARY_CANDIDATES: list[str] = []
@@ -71,13 +73,9 @@ def enter_repeat_annotation(state: TopLevelState) -> dict:
 
 def resolve_repeat_inputs(state: TopLevelState) -> dict:
     """Resolve assembly and optional provided repeat library inputs."""
-    # Use resolve_stage_resource to match preflight behavior
-    from app.stages.base import resolve_stage_resource
-    from app.stages.resource_specs import ASSEMBLY_SPEC
-
     resolution = resolve_stage_resource(state, resource_spec=ASSEMBLY_SPEC)
     if not resolution.found:
-        return _fail_update(state, "missing final_assembly_for_annotation for repeat_annotation")
+        return _fail_update(state, "missing assembly resource for repeat_annotation")
 
     final_assembly_ref = resolution.path
 
@@ -89,7 +87,7 @@ def resolve_repeat_inputs(state: TopLevelState) -> dict:
         {
             **existing,
             "status": "resolved",
-            "final_assembly_for_annotation": final_assembly_ref,
+            "input_assembly_ref": final_assembly_ref,
             "provided_repeat_library_refs": [asset.get("asset_id", "") for asset in repeat_libraries if asset.get("asset_id")],
             "provided_repeat_library_paths": [str(asset.get("path")) for asset in repeat_libraries if asset.get("path")],
             "confidence": confidence,
@@ -124,7 +122,7 @@ def plan_repeat_library(state: TopLevelState) -> dict:
     if repeat_out.get("status") != "strategy_selected":
         return {}
 
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     strategy = repeat_out["strategy"]
     if strategy == "provided":
         library_ref = repeat_out["provided_repeat_library_paths"][0]
@@ -167,7 +165,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
     if repeat_out.get("status") != "library_planned":
         return {}
 
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     if REPEAT_MASKING_METHOD not in registry.methods:
         return _fail_update(state, f"repeat_annotation descriptors missing: ['{REPEAT_MASKING_METHOD}']")
 
@@ -197,7 +195,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
         status="planned",
         strategy=repeat_out["strategy"],
         repeat_library_source=repeat_out["repeat_library_source"],
-        final_assembly_for_annotation=repeat_out["final_assembly_for_annotation"],
+        input_assembly_ref=repeat_out["input_assembly_ref"],
         provided_repeat_library_ref=provided_repeat_library_ref,
         library_candidate_methods=repeat_out.get("library_candidate_methods", []),
         helper_methods=repeat_out.get("helper_methods", []),
@@ -255,7 +253,7 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
     if descriptor_error:
         return _fail_update(state, descriptor_error)
 
-    assembly_ref = Path(str(repeat_out.get("final_assembly_for_annotation", "")))
+    assembly_ref = Path(str(repeat_out.get("input_assembly_ref", "")))
     library_ref = Path(str(repeat_out.get("repeat_library_ref", "")))
     if not assembly_ref.exists():
         return _fail_update(state, f"RepeatMasker local execution assembly not found: {assembly_ref}")
@@ -308,7 +306,7 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
         env=repeat_out.get("env"),
         env_spec=env_spec,
         metadata={
-            "final_assembly_for_annotation": str(assembly_ref),
+            "input_assembly_ref": str(assembly_ref),
             "repeat_library_ref": str(library_ref),
             "softmasked_genome": str(softmasked_genome),
             "repeat_annotation_gff3": str(repeat_gff3),
@@ -462,7 +460,7 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
         status="executed" if repeat_out.get("execution_enabled") else "planned",
         strategy=repeat_out["strategy"],
         repeat_library_source=repeat_out["repeat_library_source"],
-        final_assembly_for_annotation=repeat_out["final_assembly_for_annotation"],
+        input_assembly_ref=repeat_out["input_assembly_ref"],
         repeat_library_ref=repeat_out["repeat_library_ref"],
         repeat_annotation_gff3_ref=repeat_out["repeat_annotation_gff3_ref"],
         softmasked_genome_ref=repeat_out["softmasked_genome_ref"],
@@ -511,6 +509,18 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
         "current_stage": next_stage_name("repeat_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
+        "resource_refs": update_resource_ref(
+            state,
+            "masked_assembly",
+            [str(repeat_out["softmasked_genome_ref"])],
+            "repeat_annotation",
+            {
+                "repeat_annotation_ref": str(
+                    repeat_out["repeat_annotation_gff3_ref"]
+                ),
+                "bundle_ref": str(bundle_ref),
+            },
+        ),
     }
 
 
@@ -623,7 +633,7 @@ def apply_mask_review_decision(state: TopLevelState, request: ResumeReviewReques
     session_id = state["session_id"]
     notes = list(repeat_out.get("notes") or [])
     if request.decision == "skip":
-        softmasked_genome_ref = repeat_out.get("final_assembly_for_annotation") or softmasked_genome_ref
+        softmasked_genome_ref = repeat_out.get("input_assembly_ref") or softmasked_genome_ref
         notes = [*notes, "mask_review_skipped"]
 
     decision_payload = {
@@ -717,7 +727,7 @@ def _local_repeatmasker_enabled(repeat_out: dict[str, Any]) -> bool:
 
 
 def _validate_repeat_methods(methods: list[str]) -> str | None:
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     missing = [method for method in methods if method not in registry.methods]
     if missing:
         return f"repeat_annotation descriptors missing: {missing}"

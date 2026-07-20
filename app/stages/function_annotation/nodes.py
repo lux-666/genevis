@@ -30,7 +30,7 @@ from app.schemas.artifacts import (
     FunctionDatabaseProvenance,
     FunctionMethodResult,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -39,6 +39,8 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
+from app.stages.resource_resolution import resolve_stage_resource
+from app.stages.resource_specs import PREDICTED_PROTEINS_SPEC
 
 FUNCTION_CANDIDATE_METHODS = [
     "function_annotation.candidate.diamond",
@@ -77,22 +79,20 @@ def resolve_protein_inputs(state: TopLevelState) -> dict:
     """Resolve required predicted proteins and optional structural annotation refs."""
     if _function_output(state).get("status"):
         return {}
-    gene_out = (state.get("stage_outputs") or {}).get("gene_annotation") or {}
-    proteins_ref = _first_value(
-        gene_out, ["proteins_fasta_ref", "predicted_proteins_ref", "predicted_proteins"]
-    )
+    proteins = resolve_stage_resource(state, resource_spec=PREDICTED_PROTEINS_SPEC)
+    proteins_ref = proteins.path
     if not proteins_ref:
         return _fail_update(state, "missing proteins.fa for function_annotation")
+    metadata = proteins.metadata
 
     return _update_function_output(
         state,
         {
             "status": "resolved",
             "proteins_fasta_ref": proteins_ref,
-            "genes_gff3_ref": _first_value(
-                gene_out, ["genes_gff3_ref", "gene_models_ref", "gene_models"]
-            ),
-            "transcripts_fasta_ref": _first_value(gene_out, ["transcripts_fasta_ref"]),
+            "genes_gff3_ref": metadata.get("genes_gff3_ref"),
+            "transcripts_fasta_ref": metadata.get("transcripts_fasta_ref"),
+            "input_source": proteins.source,
         },
     )
 
@@ -103,7 +103,7 @@ def plan_function_methods(state: TopLevelState) -> dict:
     if function_out.get("status") != "resolved":
         return {}
 
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     missing = [
         method
         for method in FUNCTION_CANDIDATE_METHODS

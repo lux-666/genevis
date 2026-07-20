@@ -83,6 +83,8 @@ from app.stages.base import (
     stage_artifacts_dir,
     stage_work_dir,
 )
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
 from app.storage.publish import shell_publish_file
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
@@ -94,59 +96,56 @@ def enter_assembly_review(state: TopLevelState) -> dict:
 
 
 def resolve_candidates(state: TopLevelState) -> dict:
-    """Resolve available assembly candidates from prior stage outputs.
-
-    Accepts:
-    - existing assembly inputs routed directly from inventory
-    - candidate assembly bundles produced by the assembly stage
-    """
+    """Resolve current assembly candidates from the central resource table."""
     stage_outputs = state.get("stage_outputs") or {}
-
-    # Check for existing assembly route from inventory
-    inventory_out = stage_outputs.get("inventory", {})
-    entry_mode = inventory_out.get("entry_mode")
-    registry_ref = state.get("asset_registry_ref")
-
     candidates: list[dict[str, Any]] = []
-    rejected_candidates = dict((stage_outputs.get("assembly") or {}).get("rejected_candidates") or {})
-
-    if entry_mode == "existing_assembly" and registry_ref:
-        final_assembly_ref = _existing_assembly_ref(registry_ref)
-        candidates.append({
-            "candidate_id": "existing_assembly",
-            "method_name": "user_provided",
-            "source": "inventory",
-            "registry_ref": registry_ref,
-            "final_assembly_ref": final_assembly_ref,
-        })
-
-    # Check for assembly stage candidate bundles
-    assembly_out = stage_outputs.get("assembly", {})
-    assembly_candidates = _load_selected_candidate_refs(assembly_out.get("selected_candidate_refs") or [])
-    assembly_candidates.extend(assembly_out.get("candidate_bundles", []))
+    assembly = resolve_stage_resource(
+        state,
+        resource_spec=ASSEMBLY_CANDIDATES_SPEC,
+    )
+    bundle_refs = list(assembly.metadata.get("candidate_bundle_refs") or [])
+    assembly_candidates = _load_selected_candidate_refs(bundle_refs)
+    assembly_candidates.extend(
+        bundle
+        for bundle in assembly.metadata.get("candidate_bundles") or []
+        if isinstance(bundle, dict)
+    )
+    materialized_from_bundles: set[str] = set()
     for bundle in assembly_candidates:
+        final_ref = (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
+        if final_ref:
+            materialized_from_bundles.add(str(final_ref))
         candidates.append({
             "candidate_id": bundle.get("candidate_id", "unknown"),
             "method_name": bundle.get("method_name", "unknown"),
-            "source": "assembly_stage",
+            "source": assembly.source,
             "bundle_ref": bundle.get("candidate_ref") or bundle.get("bundle_ref"),
             "status": bundle.get("status", "planned"),
-            "final_assembly_ref": (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta"),
+            "final_assembly_ref": final_ref,
         })
-
-    # A successful dedup stage adds a second candidate; it never replaces raw.
-    dedup_out = stage_outputs.get("assembly_dedup", {})
-    purged_ref = dedup_out.get("purged_assembly_ref")
-    if purged_ref:
+    for index, assembly_ref in enumerate(assembly.paths):
+        if assembly_ref in materialized_from_bundles:
+            continue
+        # Candidate metadata is authoritative for planned/non-materialized
+        # candidates.  Do not turn its locator paths into duplicate candidates.
+        if assembly_candidates and not Path(assembly_ref).is_file():
+            continue
+        is_registered_input = (
+            assembly.source_type == "asset"
+            or assembly.metadata.get("asset_type") == "assembly_fasta_registered"
+            or "assembly_fasta_registered"
+            in (assembly.metadata.get("asset_types") or [])
+        )
         candidates.append({
-            "candidate_id": f"{dedup_out.get('candidate_id') or 'assembly'}:assembly_dedup.purge_dups",
-            "method_name": "assembly_dedup.purge_dups",
-            "source": "assembly_dedup_stage",
-            "bundle_ref": dedup_out.get("purged_candidate_ref"),
-            "status": dedup_out.get("status", "completed"),
-            "final_assembly_ref": purged_ref,
-            "pre_dedup_assembly_ref": dedup_out.get("input_assembly_ref"),
-            "purged_assembly_ref": purged_ref,
+            "candidate_id": (
+                "existing_assembly"
+                if is_registered_input and index == 0
+                else f"{assembly.source}:{index}"
+            ),
+            "method_name": assembly.metadata.get("method_name", "user_provided"),
+            "source": assembly.source,
+            "status": "materialized",
+            "final_assembly_ref": assembly_ref,
         })
 
     # Build review plan
@@ -163,7 +162,9 @@ def resolve_candidates(state: TopLevelState) -> dict:
         "status": "resolved",
         "candidate_count": len(candidates),
         "candidates": candidates,
-        "rejected_candidates": rejected_candidates,
+        "rejected_candidates": dict(
+            assembly.metadata.get("rejected_candidates") or {}
+        ),
         "review_plan": review_plan.model_dump(mode="json"),
     }
 
@@ -723,7 +724,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     evidence_refs = list(ar_out.get("evidence_refs") or [])
     evidence_notes = list(ar_out.get("evidence_notes") or [])
 
-    final_for_downstream = ar_out.get("final_assembly_for_scaffolding_or_annotation") or final_assembly_ref
+    output_assembly_ref = final_assembly_ref
     trace = append_route_trace(state, "assembly_review_stage")
     next_stage = next_stage_name(
         "assembly_review",
@@ -742,7 +743,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "action_execution_mode": action_execution_mode,
         "pre_action_assembly_ref": pre_action_ref,
         "post_action_assembly_ref": final_assembly_ref,
-        "final_assembly_for_scaffolding_or_annotation": final_for_downstream,
+        "output_assembly_ref": output_assembly_ref,
         "method_name": method_name,
         "evidence_refs": evidence_refs,
         "evidence_notes": evidence_notes,
@@ -791,7 +792,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         review_request_id=review_request_id,
     )
     action_ref = None
-    if selected_candidate_id and pre_action_ref and final_assembly_ref and final_for_downstream:
+    if selected_candidate_id and pre_action_ref and final_assembly_ref and output_assembly_ref:
         action_artifact = AssemblyReviewActionArtifact(
             session_id=state["session_id"],
             decision=decision,
@@ -799,7 +800,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             candidate_id=selected_candidate_id,
             pre_action_assembly_ref=pre_action_ref,
             post_action_assembly_ref=final_assembly_ref,
-            final_assembly_for_scaffolding_or_annotation=final_for_downstream,
+            output_assembly_ref=output_assembly_ref,
             action_execution_mode=action_execution_mode,
             method_name=method_name,
             evidence_refs=evidence_refs,
@@ -829,7 +830,6 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             "selected_candidate_id": selected_candidate_id,
             "rejected_candidates": rejected_candidates,
             "final_assembly_ref": final_assembly_ref,
-            "final_assembly_for_scaffolding_or_annotation": final_for_downstream,
             "pre_action_assembly_ref": pre_action_ref,
             "action_type": action_type,
             "action_execution_mode": action_execution_mode,
@@ -845,6 +845,18 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         if method_name:
             committed_out["action_method_name"] = method_name
         update["stage_outputs"] = {**stage_outputs, "assembly_review": committed_out}
+        if output_assembly_ref:
+            update["resource_refs"] = update_resource_ref(
+                state,
+                "assembly",
+                [str(output_assembly_ref)],
+                "assembly_review",
+                {
+                    "selected_candidate_id": selected_candidate_id,
+                    "decision": decision,
+                    "action_type": action_type,
+                },
+            )
 
     return update
 
@@ -887,7 +899,6 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         "selected_candidate_id": request.candidate_id,
         "rejected_candidates": request.rejected_candidates,
         "final_assembly_ref": action_payload["final_assembly_ref"],
-        "final_assembly_for_scaffolding_or_annotation": action_payload["final_assembly_for_scaffolding_or_annotation"],
         "pre_action_assembly_ref": action_payload["pre_action_assembly_ref"],
         "action_type": action_payload["action_type"],
         "action_execution_mode": action_payload["action_execution_mode"],
@@ -918,7 +929,6 @@ def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_fina
         action_type = "pass_low_confidence" if request.decision == "continue_low_confidence" else "pass"
         return {
             "final_assembly_ref": request.final_assembly_ref,
-            "final_assembly_for_scaffolding_or_annotation": request.final_assembly_ref,
             "pre_action_assembly_ref": request.final_assembly_ref,
             "action_type": action_type,
             "action_execution_mode": "none",
@@ -955,7 +965,6 @@ def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_fina
             raise ResumeValidationError("short-read polishing requires explicit short-read evidence")
     return {
         "final_assembly_ref": str(action_output_ref),
-        "final_assembly_for_scaffolding_or_annotation": str(action_output_ref),
         "pre_action_assembly_ref": candidate_final_ref,
         "action_type": request.decision,
         "action_execution_mode": "external",
@@ -1132,6 +1141,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "supervision_state": "running_stage",
             "active_interrupt": None,
             "stage_outputs": stage_outputs,
+            "resource_refs": _rerun_resource_refs(state, existing_refs),
         }
 
     ledger.record_event(session_id, "rerun_requested", {
@@ -1335,6 +1345,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         "supervision_state": "running_stage",
         "active_interrupt": None,
         "stage_outputs": stage_outputs,
+        "resource_refs": _rerun_resource_refs(state, updated_refs),
     }
 
 
@@ -1923,6 +1934,27 @@ def _load_selected_candidate_refs(candidate_refs: list[str]) -> list[dict[str, A
         payload["bundle_ref"] = str(path)
         candidates.append(payload)
     return candidates
+
+
+def _rerun_resource_refs(state: TopLevelState, candidate_refs: list[str]) -> dict:
+    """Publish all materialized rerun candidates through the central table."""
+    current = resolve_stage_resource(state, resource_spec=ASSEMBLY_CANDIDATES_SPEC)
+    paths = [
+        str((candidate.get("expected_outputs") or {}).get("draft_assembly_fasta"))
+        for candidate in _load_selected_candidate_refs(candidate_refs)
+        if (candidate.get("expected_outputs") or {}).get("draft_assembly_fasta")
+    ]
+    if not paths:
+        paths = current.paths
+    metadata = dict(current.metadata)
+    metadata["candidate_bundle_refs"] = list(candidate_refs)
+    return update_resource_ref(
+        state,
+        "assembly",
+        paths,
+        "assembly",
+        metadata,
+    )
 
 
 def _existing_assembly_ref(registry_ref: str) -> str | None:

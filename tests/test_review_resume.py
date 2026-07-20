@@ -88,7 +88,10 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["selected_candidate_id"], "flye")
         self.assertEqual(ar_out["action_type"], "pass")
         self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
-        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(
+            update["resource_refs"]["assembly"]["paths"],
+            ["work/assembly/flye/draft.fasta"],
+        )
         self.assertTrue(_artifact_path(state, ar_out["review_decision_artifact_ref"]).exists())
         self.assertTrue(_artifact_path(state, ar_out["assembly_review_action_artifact_ref"]).exists())
         events = _read_events(state)
@@ -118,7 +121,10 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["decision"], "pass")
         self.assertEqual(ar_out["action_type"], "pass")
         self.assertEqual(ar_out["action_execution_mode"], "none")
-        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(
+            update["resource_refs"]["assembly"]["paths"],
+            ["work/assembly/flye/draft.fasta"],
+        )
 
     def test_resume_assembly_purge_requires_materialized_output(self):
         state = _assembly_blocked_state()
@@ -230,10 +236,11 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["action_execution_mode"], "external")
         self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
         self.assertEqual(ar_out["purged_assembly"], str(purged))
-        self.assertEqual(ar_out["final_assembly_for_scaffolding_or_annotation"], str(purged))
+        self.assertEqual(update["resource_refs"]["assembly"]["paths"], [str(purged)])
         action = json.loads(_artifact_path(state, ar_out["assembly_review_action_artifact_ref"]).read_text(encoding="utf-8"))
         self.assertEqual(action["action_type"], "purge")
         self.assertEqual(action["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(action["output_assembly_ref"], str(purged))
         decision_record = json.loads(
             _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(encoding="utf-8")
         )
@@ -463,7 +470,7 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertEqual(hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic")
-        self.assertTrue(hic_out["final_assembly_for_annotation"].endswith("autohic.fasta"))
+        self.assertTrue(hic_out["output_assembly_ref"].endswith("autohic.fasta"))
         self.assertTrue(_artifact_path(state, hic_out["review_decision_artifact_ref"]).exists())
 
     def test_resume_hic_honors_interrupt_decisions_allowed(self):
@@ -506,7 +513,7 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
         self.assertTrue(
-            hic_out["final_assembly_for_annotation"].endswith(
+            hic_out["output_assembly_ref"].endswith(
                 "work/hic_scaffolding/pre_hic.fasta"
             )
         )
@@ -1066,7 +1073,7 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
             "hic_scaffolding": {
                 "status": "blocked_human",
                 "pre_hic_assembly_ref": str(pre_hic),
-                "final_assembly_for_annotation": str(pre_hic),
+                "output_assembly_ref": str(pre_hic),
                 "hic_read_refs": ["hic1"],
                 "method_candidates": {
                     "hic_scaffolding.candidate.autohic": {
@@ -1100,7 +1107,7 @@ def _hic_blocked_state(*, decisions_allowed: list[str] | None = None) -> dict:
             else ["accept_candidate", "keep_prior_assembly", "stop_human_review"]
         ),
         "pre_hic_assembly_ref": str(pre_hic),
-        "final_assembly_for_annotation": str(pre_hic),
+        "output_assembly_ref": str(pre_hic),
     }
     persisted = persist_review_request(
         state,

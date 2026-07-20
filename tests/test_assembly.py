@@ -19,6 +19,7 @@ from app.domains.assembly.selection import (
     SHARED_TO_METHOD_READ_TYPE,
 )
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.assembly.builder import build_stage
 from app.stages.assembly.method_application import flye as flye_graph
 from app.stages.assembly.method_application import hifiasm as hifiasm_graph
@@ -65,6 +66,15 @@ def _assembly_selection(
         "source": source,
         "rationale": rationale,
     }
+
+
+def _set_long_reads(state: dict, *paths: Path, platform: str = "cycloneseq") -> None:
+    state["resource_refs"]["long_reads"] = ResourceRef(
+        resource_type="long_reads",
+        paths=[str(path) for path in paths],
+        source_stage="read_qc",
+        metadata={"platforms": [platform], "formats": ["fastq"]},
+    ).to_dict()
 
 
 class _ParameterResponse:
@@ -336,7 +346,7 @@ class AssemblyStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "assembly")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("clean_long_reads or long_reads.fofn", result["last_error"])
+            self.assertIn("assembly requires long reads", result["last_error"])
 
     def test_rnaseq_registry_signal_reaches_typed_parameter_profile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -378,15 +388,12 @@ class AssemblyStageTests(unittest.TestCase):
 
     def test_plans_primary_and_one_fallback_from_fofn_and_genome_size_prior(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fofn = Path(tmpdir) / "long_reads.fofn"
-            fofn.write_text(f"{Path(tmpdir) / 'reads.fastq'}\n", encoding="utf-8")
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {
-                    "status": "completed",
-                    "assembly_input_ref": str(fofn),
-                },
+                "read_qc": {"status": "completed"},
                 "genome_survey": {
                     "status": "completed",
                     "mode": "full",
@@ -404,6 +411,7 @@ class AssemblyStageTests(unittest.TestCase):
                     ),
                 },
             }
+            _set_long_reads(state, reads)
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -417,22 +425,19 @@ class AssemblyStageTests(unittest.TestCase):
             for candidate_ref in assembly["selected_candidate_refs"]:
                 candidate = json.loads(Path(candidate_ref).read_text(encoding="utf-8"))
                 self.assertEqual(candidate["status"], "planned")
-                self.assertEqual(candidate["input_ref"], str(fofn))
+                self.assertEqual(candidate["input_ref"], str(reads))
                 self.assertEqual(candidate["genome_size_prior"], 2_000_000)
                 self.assertEqual(candidate["artifact_type"], "draft_assembly.candidate")
                 self.assertTrue(candidate["expected_outputs"]["draft_assembly_fasta"].endswith(".fasta"))
 
     def test_missing_genome_size_rejects_methods_that_require_it(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            fofn = Path(tmpdir) / "long_reads.fofn"
-            fofn.write_text(f"{Path(tmpdir) / 'reads.fastq'}\n", encoding="utf-8")
+            reads = Path(tmpdir) / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {
-                    "status": "completed",
-                    "assembly_input_ref": str(fofn),
-                },
+                "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "cyclone",
                     "assembly_selection": _assembly_selection(
@@ -441,6 +446,7 @@ class AssemblyStageTests(unittest.TestCase):
                     ),
                 },
             }
+            _set_long_reads(state, reads)
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -761,7 +767,7 @@ class AssemblyStageTests(unittest.TestCase):
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
+                "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
@@ -773,12 +779,13 @@ class AssemblyStageTests(unittest.TestCase):
                     },
                 },
             }
+            _set_long_reads(state, reads)
 
             result = self._invoke_with_parameter_approvals(state)
 
             self.assertEqual(result["current_stage"], "assembly_dedup")
             assembly = result["stage_outputs"]["assembly"]
-            self.assertEqual(assembly["input_type"], "long_reads.fofn")
+            self.assertEqual(assembly["input_type"], "clean_long_reads")
             self.assertTrue(Path(assembly["draft_assembly_ref"]).exists())
             candidate = json.loads(Path(assembly["executed_candidate_refs"][0]).read_text(encoding="utf-8"))
             self.assertEqual(candidate["status"], "executed")
@@ -795,7 +802,7 @@ class AssemblyStageTests(unittest.TestCase):
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
+                "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "cyclone",
                     "execution_mode": "local",
@@ -807,6 +814,7 @@ class AssemblyStageTests(unittest.TestCase):
                     },
                 },
             }
+            _set_long_reads(state, reads_1, reads_2)
 
             result = self._invoke_with_parameter_approvals(state)
 
@@ -961,7 +969,7 @@ class AssemblyStageTests(unittest.TestCase):
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "read_qc": {"status": "completed", "assembly_input_ref": str(fofn)},
+                "read_qc": {"status": "completed"},
                 "assembly": {
                     "assembly_route": "ont",
                     "execution_mode": "local",
@@ -969,6 +977,7 @@ class AssemblyStageTests(unittest.TestCase):
                     "hifiasm_ont_parameters": {"read_type": "ont"},
                 },
             }
+            _set_long_reads(state, reads, platform="ont")
 
             result = self._invoke_with_parameter_approvals(state)
 

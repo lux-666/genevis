@@ -8,3 +8,6 @@ STAGE_CURSOR_MAX_BYTES = 64 * 1024
 
 STAGE_OUTPUTS_MAX_BYTES = 256 * 1024
 """Hard ceiling for the complete checkpointed ``stage_outputs`` mapping."""
+
+RESOURCE_REFS_MAX_BYTES = 128 * 1024
+"""Hard ceiling for the checkpointed cross-stage resource reference table."""

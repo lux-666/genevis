@@ -852,7 +852,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 adopted["stage_outputs"]["hic_scaffolding"][
-                    "final_assembly_for_annotation"
+                    "output_assembly_ref"
                 ],
                 candidate["scaffold_fasta"],
             )
@@ -898,7 +898,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 kept["stage_outputs"]["hic_scaffolding"][
-                    "final_assembly_for_annotation"
+                    "output_assembly_ref"
                 ],
                 str(assembly),
             )
@@ -946,7 +946,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertEqual(hic["status"], "failed")
             self.assertEqual(hic["failure_kind"], "execution")
-            self.assertEqual(hic["final_assembly_for_annotation"], str(assembly))
+            self.assertEqual(hic["output_assembly_ref"], str(assembly))
             self.assertEqual(
                 hic["parameter_attempts"][0]["status"],
                 "execution_failed",

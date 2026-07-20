@@ -335,7 +335,7 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
         resource_type = None
 
         # Map asset_type to logical resource name
-        if record.asset_type in ["raw_long_reads", "clean_long_reads"]:
+        if record.asset_type in ["raw_long_reads", "clean_long_reads", "pacbio_hifi"]:
             resource_type = "long_reads"
         elif record.asset_type in ["raw_short_dna_reads", "clean_short_dna_reads"]:
             resource_type = "short_reads"
@@ -351,17 +351,19 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
             resource_type = "reference_proteins"
 
         if resource_type:
-            # Get or create ResourceRef for this resource type
+            # Accumulate raw values first; ResourceRef requires a materialized
+            # non-empty path list and is constructed after grouping completes.
             if resource_type not in resource_refs:
-                resource_refs[resource_type] = ResourceRef(
-                    resource_type=resource_type,
-                    paths=[],
-                    source_stage=None,  # From manifest, not a stage
-                    metadata={
+                resource_refs[resource_type] = {
+                    "paths": [],
+                    "metadata": {
                         "asset_ids": [],
                         "platforms": [],
-                    }
-                ).to_dict()
+                        "formats": [],
+                        "asset_types": [],
+                        "assets": [],
+                    },
+                }
 
             # Add this asset's path
             resource_refs[resource_type]["paths"].append(str(record.path))
@@ -370,6 +372,20 @@ def _populate_resource_refs_from_assets(records: list[AssetRecord]) -> dict[str,
             resource_refs[resource_type]["metadata"]["asset_ids"].append(record.asset_id)
             if record.platform and record.platform not in resource_refs[resource_type]["metadata"]["platforms"]:
                 resource_refs[resource_type]["metadata"]["platforms"].append(record.platform)
+            if record.format and record.format not in resource_refs[resource_type]["metadata"]["formats"]:
+                resource_refs[resource_type]["metadata"]["formats"].append(record.format)
+            if record.asset_type not in resource_refs[resource_type]["metadata"]["asset_types"]:
+                resource_refs[resource_type]["metadata"]["asset_types"].append(record.asset_type)
+            resource_refs[resource_type]["metadata"]["assets"].append(
+                record.model_dump(mode="json")
+            )
 
-    return resource_refs
-
+    return {
+        resource_type: ResourceRef(
+            resource_type=resource_type,
+            paths=list(payload["paths"]),
+            source_stage=None,
+            metadata=dict(payload["metadata"]),
+        ).to_dict()
+        for resource_type, payload in resource_refs.items()
+    }

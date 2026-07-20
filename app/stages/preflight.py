@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.schemas.state import TopLevelState
-from app.stages.base import ResourceSpec, resolve_stage_resource
+from app.stages.resource_resolution import ResourceSpec, resolve_stage_resource
 
 
 @dataclass
@@ -131,7 +131,10 @@ def check_stage_prerequisites(
                     spec=spec,
                     found=False,
                     source=None,
-                    message=f"Required {req['name']} not found. Searched: {', '.join(spec.prefer_stages or ['asset_registry'])}.",
+                    message=(
+                        f"Required {req['name']} not found. Searched: "
+                        f"resource_refs.{spec.resource_type}, asset_registry."
+                    ),
                 ))
             else:
                 warnings.append(f"Optional {req['name']} not found (will use fallback).")
@@ -307,12 +310,12 @@ def _collect_planned_resources(requested_stages: list[str]) -> dict[str, list[st
     Returns:
         {stage_name: [output_key, ...]}
     """
-    from app.stages.resource_specs import STAGE_OUTPUTS
+    from app.stages.resource_specs import STAGE_CONTRACTS
 
     return {
-        stage: outputs
+        stage: resources
         for stage in requested_stages
-        if (outputs := STAGE_OUTPUTS.get(stage))
+        if (resources := (STAGE_CONTRACTS.get(stage) or {}).get("produces"))
     }
 
 
@@ -334,18 +337,12 @@ def _check_planned_resource(
     Returns:
         True if an upstream stage in the plan will produce this resource
     """
-    # Check if any preferred stage in the spec will run and produce a matching output key
-    # BUT only consider stages that have already been processed (are upstream)
-    for stage in spec.prefer_stages:
+    # Only already-processed upstream stages may satisfy this requirement.
+    for stage, resources in planned_resources.items():
         if stage == current_stage:
-            # A stage can't satisfy its own requirements
             continue
         if stage in planned_resources and stage in stages_processed:
-            planned_outputs = planned_resources[stage]
-            expected_outputs = spec.output_keys.get(stage, [])
-
-            # If this stage will produce any of the expected output keys, resource will be available
-            if any(out in planned_outputs for out in expected_outputs):
+            if spec.resource_type in resources:
                 return True
 
     return False
@@ -362,12 +359,14 @@ def _simulate_stage_outputs(state: TopLevelState, stage: str) -> None:
         state: State to mutate
         stage: Stage that just "ran"
     """
-    # Add placeholder stage outputs
-    if "stage_outputs" not in state:
-        state["stage_outputs"] = {}
+    from app.schemas.resource_ref import ResourceRef
+    from app.stages.resource_specs import STAGE_CONTRACTS
 
-    from app.stages.resource_specs import STAGE_OUTPUTS
-
-    outputs = {key: "placeholder" for key in STAGE_OUTPUTS.get(stage, [])}
-    if outputs:
-        state["stage_outputs"][stage] = outputs
+    refs = dict(state.get("resource_refs") or {})
+    for resource_type in (STAGE_CONTRACTS.get(stage) or {}).get("produces", []):
+        refs[resource_type] = ResourceRef(
+            resource_type=resource_type,
+            paths=[f"/planned/{stage}/{resource_type}"],
+            source_stage=stage,
+        ).to_dict()
+    state["resource_refs"] = refs

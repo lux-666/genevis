@@ -25,7 +25,7 @@ from app.schemas.artifacts import (
     AssemblyEvalBundle,
     AssemblyEvalSignal,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_artifacts_dir, stage_work_dir
 from app.storage.publish import publish_file
@@ -70,7 +70,7 @@ def update_review_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
 
 
 def review_methods_error(methods: list[str]) -> str | None:
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     missing = [method for method in methods if method not in registry.methods]
     return f"assembly_review descriptors missing: {missing}" if missing else None
 

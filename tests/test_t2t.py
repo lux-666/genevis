@@ -16,6 +16,7 @@ from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import build_t2t_candidates, scan_read_telomeres
@@ -47,6 +48,11 @@ class T2TStageTests(unittest.TestCase):
         registry.write_text(json.dumps({"session_id": "s1", "assets": assets}), encoding="utf-8")
         state["asset_registry_ref"] = str(registry)
         state["stage_outputs"] = {"assembly_review": {"status": "completed", "final_assembly_ref": str(assembly)}}
+        state["resource_refs"]["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=[str(assembly)],
+            source_stage="assembly_review",
+        ).to_dict()
         return state
 
     def _fake_minimap2(self, tmpdir: str, *, support_count: int = 2) -> Path:
@@ -93,10 +99,10 @@ class T2TStageTests(unittest.TestCase):
             self.assertTrue(patched.exists())
             self.assertEqual(assembly.read_text(encoding="utf-8"), original)
             self.assertIn("TTAGGG" * 4, patched.read_text(encoding="utf-8"))
-            self.assertEqual(t2t["final_assembly_for_annotation"], str(patched))
+            self.assertEqual(t2t["output_assembly_ref"], str(patched))
 
             downstream = resolve_repeat_inputs(result)
-            self.assertEqual(downstream["stage_outputs"]["repeat_annotation"]["final_assembly_for_annotation"], str(patched))
+            self.assertEqual(downstream["stage_outputs"]["repeat_annotation"]["input_assembly_ref"], str(patched))
 
     def test_execution_is_plan_only_without_local_exec(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -106,7 +112,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "repeat_annotation")
             t2t = result["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "skipped")
-            self.assertEqual(t2t["final_assembly_for_annotation"], str(assembly))
+            self.assertEqual(t2t["output_assembly_ref"], str(assembly))
             self.assertTrue(Path(t2t["t2t_finishing_report_ref"]).exists())
 
     def test_hic_final_assembly_has_priority_over_assembly_review(self):
@@ -115,7 +121,12 @@ class T2TStageTests(unittest.TestCase):
             hic_assembly = Path(tmpdir) / "hic_final.fa"
             hic_assembly.write_text(">chrH\n" + "TTAGGG" * 4 + "A" * 10_050 + "\n", encoding="utf-8")
             state = self._state(tmpdir, review_assembly, reads)
-            state["stage_outputs"]["hic_scaffolding"] = {"final_assembly_for_annotation": str(hic_assembly)}
+            state["stage_outputs"]["hic_scaffolding"] = {"output_assembly_ref": str(hic_assembly)}
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(hic_assembly)],
+                source_stage="hic_scaffolding",
+            ).to_dict()
 
             result = build_stage().invoke(state)
 
@@ -267,7 +278,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(t2t["status"], "completed")
             self.assertEqual(t2t["selected_candidate_ids"], ["chr1:right"])
             self.assertTrue(Path(t2t["patched_assembly_ref"]).exists())
-            self.assertEqual(t2t["final_assembly_for_annotation"], t2t["patched_assembly_ref"])
+            self.assertEqual(t2t["output_assembly_ref"], t2t["patched_assembly_ref"])
 
     def test_manual_review_resume_continue_without_patch_uses_input_assembly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,7 +304,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(resumed["current_stage"], "repeat_annotation")
             t2t = resumed["stage_outputs"]["t2t"]
             self.assertEqual(t2t["status"], "completed")
-            self.assertEqual(t2t["final_assembly_for_annotation"], str(assembly))
+            self.assertEqual(t2t["output_assembly_ref"], str(assembly))
             self.assertIsNone(t2t["patched_assembly_ref"])
 
     def test_manual_review_resume_stop_pipeline_does_not_enter_downstream(self):

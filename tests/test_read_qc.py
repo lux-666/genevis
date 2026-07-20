@@ -19,10 +19,9 @@ from app.schemas.state import initial_state
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 from app.stages.read_qc.builder import build_stage
-from app.stages.read_qc.method_application.make_fofn import build_make_fofn_graph
 from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
-from app.stages.read_qc.method_application import make_fofn, seqkit_length_filter, seqkit_stats
+from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
 
 
 class ReadQCSeqKitDescriptorTests(unittest.TestCase):
@@ -48,28 +47,15 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["read_qc"])
 
-    def test_descriptor_registry_loads_make_fofn_with_runtime_method_name(self):
-        registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
-
-        self.assertIn("python", registry.packages)
-        self.assertIn("read_qc.make_fofn.local", registry.methods)
-        method = registry.methods["read_qc.make_fofn.local"]
-        self.assertEqual(method.stage, "read_qc")
-        self.assertEqual(method.package_ref, "python")
-        self.assertIn("read_qc.make_fofn.local", registry.by_stage["read_qc"])
-        self.assertNotIn("read_qc.handoff.make_fofn", registry.methods)
-
-
 class ReadQCSeqKitStageTests(unittest.TestCase):
     def test_outer_graph_routes_to_method_subgraphs(self):
         outer_nodes = set(build_stage().get_graph().nodes)
         stats_nodes = set(build_seqkit_stats_graph().get_graph().nodes)
         filter_nodes = set(build_seqkit_length_filter_graph().get_graph().nodes)
-        fofn_nodes = set(build_make_fofn_graph().get_graph().nodes)
 
         self.assertIn("seqkit_stats", outer_nodes)
         self.assertIn("seqkit_length_filter", outer_nodes)
-        self.assertIn("make_fofn", outer_nodes)
+        self.assertNotIn("make_fofn", outer_nodes)
         self.assertNotIn("freeze_seqkit_attempt", outer_nodes)
         self.assertNotIn("maybe_run_length_filter", outer_nodes)
         self.assertIn("freeze", stats_nodes)
@@ -78,10 +64,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         self.assertIn("freeze", filter_nodes)
         self.assertIn("run", filter_nodes)
         self.assertIn("collect", filter_nodes)
-        self.assertIn("make", fofn_nodes)
 
     def test_method_subgraphs_do_not_import_parent_stage_modules(self):
-        for module in [seqkit_stats, seqkit_length_filter, make_fofn]:
+        for module in [seqkit_stats, seqkit_length_filter]:
             source = inspect.getsource(module)
             self.assertNotIn("app.stages.read_qc.nodes", source)
             self.assertNotIn("app.stages.read_qc.routing", source)
@@ -324,19 +309,15 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 read_qc["substeps"]["length_filter"]["skip_reason"],
                 "no_filtering_requested",
             )
-            fofn_ref = Path(read_qc["long_reads_fofn_ref"])
-            self.assertTrue(fofn_ref.exists())
-            self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{fq}\n")
-            self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
             self.assertNotIn("filtered_long_reads_ref", read_qc)
-            self.assertNotIn("filtered_long_reads_fofn_ref", read_qc)
+            self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
 
             artifact_events = [
                 json.loads(line)
                 for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
-            self.assertIn("read_qc.long_reads.fofn", artifact_types)
+            self.assertNotIn("read_qc.long_reads.fofn", artifact_types)
 
     def test_multiple_raw_long_reads_write_multi_line_raw_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -378,8 +359,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "s1:raw_long_reads:reads_1.fastq",
                 "s1:raw_long_reads:reads_2.fastq",
             ])
-            fofn_ref = Path(read_qc["long_reads_fofn_ref"])
-            self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{fq1}\n{fq2}\n")
+            self.assertEqual(
+                result["resource_refs"]["long_reads"]["paths"],
+                [str(fq1), str(fq2)],
+            )
             stats_script = Path(result["data_dir"]) / "work" / "read_qc" / "seqkit_stats" / "run_seqkit_stats.sh"
             stats_script_text = stats_script.read_text(encoding="utf-8")
             self.assertIn(str(fq1), stats_script_text)
@@ -429,10 +412,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             filtered_ref = Path(read_qc["filtered_long_reads_ref"])
             self.assertTrue(filtered_ref.exists())
             self.assertEqual(filtered_ref.read_text(encoding="utf-8"), fq.read_text(encoding="utf-8"))
-            fofn_ref = Path(read_qc["filtered_long_reads_fofn_ref"])
-            self.assertTrue(fofn_ref.exists())
-            self.assertEqual(fofn_ref.read_text(encoding="utf-8"), f"{filtered_ref}\n")
-            self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
+            self.assertEqual(
+                result["resource_refs"]["long_reads"]["paths"],
+                [str(filtered_ref)],
+            )
 
             filter_script = Path(result["data_dir"]) / "work" / "read_qc" / "length_filter" / "run_length_filter.sh"
             filter_script_text = filter_script.read_text(encoding="utf-8")
@@ -454,7 +437,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
-            self.assertIn("read_qc.filtered_long_reads.fofn", artifact_types)
+            self.assertNotIn("read_qc.filtered_long_reads.fofn", artifact_types)
 
     def test_multiple_raw_long_reads_filter_to_multi_line_filtered_fofn(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -501,12 +484,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             ])
             self.assertEqual(filtered_refs[0].read_text(encoding="utf-8"), fq1.read_text(encoding="utf-8"))
             self.assertEqual(filtered_refs[1].read_text(encoding="utf-8"), fq2.read_text(encoding="utf-8"))
-            fofn_ref = Path(read_qc["filtered_long_reads_fofn_ref"])
             self.assertEqual(
-                fofn_ref.read_text(encoding="utf-8"),
-                "".join(f"{path}\n" for path in filtered_refs),
+                result["resource_refs"]["long_reads"]["paths"],
+                [str(path) for path in filtered_refs],
             )
-            self.assertEqual(read_qc["assembly_input_ref"], str(fofn_ref))
             self.assertEqual(read_qc["substeps"]["length_filter"]["artifact_refs"], [str(path) for path in filtered_refs])
 
     def test_approved_min_length_filter_names_fasta_output_with_fasta_extension(self):
@@ -581,10 +562,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 "threshold_decision_missing",
             )
             self.assertNotIn("filtered_long_reads_ref", read_qc)
-            self.assertNotIn("filtered_long_reads_fofn_ref", read_qc)
             self.assertNotIn("length_filter_request", read_qc)
-            self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
-            self.assertEqual(Path(read_qc["long_reads_fofn_ref"]).read_text(encoding="utf-8"), f"{fq}\n")
+            self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
 
     def test_non_seqkit_filter_selection_does_not_run_without_executable_route(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -620,7 +599,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
             self.assertEqual(read_qc["substeps"]["length_filter"]["skip_reason"], "unknown_filter_method")
             self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.filtlong")
-            self.assertEqual(read_qc["assembly_input_ref"], read_qc["long_reads_fofn_ref"])
+            self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
 
     def test_missing_seqkit_records_failed_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -926,10 +905,9 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
             stats = artifact_dir / "seqkit_stats.tsv"
             summary = artifact_dir / "read_qc_summary.json"
-            fofn = artifact_dir / "long_reads.fofn"
             self.assertTrue(stats.exists(), f"seqkit_stats.tsv missing at {stats}")
             self.assertTrue(summary.exists(), f"read_qc_summary.json missing at {summary}")
-            self.assertTrue(fofn.exists(), f"long_reads.fofn missing at {fofn}")
+            self.assertFalse((artifact_dir / "long_reads.fofn").exists())
 
             # SeqKit TSV header should be intact and we should see three reads.
             stats_text = stats.read_text(encoding="utf-8")
@@ -937,13 +915,6 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             summary_payload = json.loads(summary.read_text(encoding="utf-8"))
             self.assertEqual(summary_payload["summary"]["num_seqs"], 3)
 
-            # FOFN must point to a real, readable path (absolute after
-            # inventory resolution).
-            fofn_lines = [line for line in fofn.read_text(encoding="utf-8").splitlines() if line]
-            self.assertEqual(len(fofn_lines), 1)
-            fofn_path = Path(fofn_lines[0])
-            self.assertTrue(fofn_path.is_absolute(), f"FOFN entry not absolute: {fofn_path}")
-            self.assertTrue(fofn_path.exists(), f"FOFN path does not exist: {fofn_path}")
 
 
 if __name__ == "__main__":

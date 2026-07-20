@@ -28,6 +28,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.assembly_review.builder import build_stage
 from app.stages.assembly_review.method_application.busco import build_busco_graph
 from app.stages.assembly_review.method_application.quast import build_quast_graph
@@ -120,6 +121,22 @@ class AssemblyReviewStageTests(unittest.TestCase):
             data_dir=str(v2_run_dir(data_root, session_id)),
         )
         state["stage_outputs"] = stage_outputs
+        if candidate_bundles:
+            candidate_paths = [
+                str(
+                    (bundle.get("expected_outputs") or {}).get(
+                        "draft_assembly_fasta"
+                    )
+                    or f"/planned/{bundle.get('candidate_id', index)}.fasta"
+                )
+                for index, bundle in enumerate(candidate_bundles)
+            ]
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=candidate_paths,
+                source_stage="assembly",
+                metadata={"candidate_bundles": candidate_bundles},
+            ).to_dict()
         if registry_ref:
             state["asset_registry_ref"] = registry_ref
         return state
@@ -154,6 +171,30 @@ class AssemblyReviewStageTests(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    @staticmethod
+    def _set_candidate_refs(state: dict, candidate_refs: list[str]) -> None:
+        paths: list[str] = []
+        for candidate_ref in candidate_refs:
+            payload = json.loads(Path(candidate_ref).read_text(encoding="utf-8"))
+            draft = (payload.get("expected_outputs") or {}).get(
+                "draft_assembly_fasta"
+            )
+            if draft:
+                paths.append(str(draft))
+        state["resource_refs"]["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=paths,
+            source_stage="assembly",
+            metadata={
+                "candidate_bundle_refs": list(candidate_refs),
+                "rejected_candidates": dict(
+                    (state.get("stage_outputs") or {})
+                    .get("assembly", {})
+                    .get("rejected_candidates", {})
+                ),
+            },
+        ).to_dict()
 
     def _write_registry(self, tmpdir: str, *, assets: list[dict]) -> Path:
         path = Path(tmpdir) / "registry.json"
@@ -296,6 +337,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "status": "planned",
                 "selected_candidate_refs": [str(candidate_ref)],
             }
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["current_stage"] = "assembly_review"
             graph = build_stage()
             result = graph.invoke(state)
@@ -326,6 +368,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
 
             result = build_stage().invoke(state)
 
@@ -353,6 +396,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
 
             result = build_stage().invoke(state)
 
@@ -380,6 +424,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["current_stage"] = "assembly_review"
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -467,6 +512,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             fake_bin = self._fake_quast_bin(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -520,6 +566,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["current_stage"] = "assembly_review"
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -582,6 +629,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._fake_busco_bin(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -615,6 +663,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             self._fake_busco_bin(tmpdir, fail=True)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -677,6 +726,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             fake_bin = self._fake_quast_bin(tmpdir, fail=True)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "draft_ready", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -724,6 +774,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             fake_bin = self._fake_quast_bin(tmpdir)
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {
                 "execution_mode": "local",
                 "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -862,6 +913,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "status": "planned",
                 "selected_candidate_refs": [str(candidate_ref)],
             }
+            self._set_candidate_refs(state, [str(candidate_ref)])
             graph = build_stage()
             result = graph.invoke(state)
             ar_out = result["stage_outputs"]["assembly_review"]
@@ -947,6 +999,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
             with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=True), \
                  patch(
@@ -983,6 +1036,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
             ar_out = {
                 "candidates": [{"candidate_id": "flye_01"}],
@@ -1044,6 +1098,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
             with patch("app.stages.assembly_review.nodes._assembly_review_auto_decidable", return_value=False), \
                  patch("app.stages.assembly_review.nodes.recommend_review_decision") as mock_rec:
@@ -1066,6 +1121,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
             )
             state = self._build_state(entry_mode="raw_inputs", data_dir=tmpdir)
             state["stage_outputs"]["assembly"] = {"status": "planned", "selected_candidate_refs": [str(candidate_ref)]}
+            self._set_candidate_refs(state, [str(candidate_ref)])
             state["stage_outputs"]["assembly_review"] = {"review_policy": {"mode": "auto"}}
             rec = ResumeReviewRequest(
                 session_id="test-session",
@@ -1103,6 +1159,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "draft_assembly_ref": str(draft),
                 "executed_candidate_refs": [str(flye_ref)],
             }
+            self._set_candidate_refs(state, [str(flye_ref)])
 
             result = build_stage().invoke(state)
 
@@ -1130,6 +1187,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "selected_candidate_refs": [str(flye_ref), str(hifiasm_ref)],
                 "rejected_candidates": {"assembly.candidate.canu": "genome_size_required"},
             }
+            self._set_candidate_refs(state, [str(flye_ref), str(hifiasm_ref)])
 
             result = build_stage().invoke(state)
 
@@ -1183,6 +1241,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "status": "draft_ready",
                     "selected_candidate_refs": [str(candidate_ref)],
                 }
+                self._set_candidate_refs(state, [str(candidate_ref)])
                 state["stage_outputs"]["assembly_review"] = {
                     "execution_mode": "local",
                     "env": {"PATH": "/nonexistent"},
@@ -1358,6 +1417,12 @@ class AssemblyRerunTests(unittest.TestCase):
                 }],
             },
         }
+        state["resource_refs"]["assembly"] = ResourceRef(
+            resource_type="assembly",
+            paths=[str(assembly_fasta)],
+            source_stage="assembly",
+            metadata={"candidate_bundle_refs": selected_refs},
+        ).to_dict()
         if not persist_request:
             return state
         blocked = human_review_gate(state)

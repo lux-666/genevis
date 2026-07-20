@@ -15,6 +15,7 @@ from app.review.gates import get_review_gate
 from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.repeat_annotation.builder import build_stage
 from app.stages.repeat_annotation.nodes import (
     _parse_tbl_repeat_percentage,
@@ -22,6 +23,26 @@ from app.stages.repeat_annotation.nodes import (
     block_mask_review,
 )
 from tests.data_v2 import v2_run_dir
+
+
+def _invoke_repeat(state: dict) -> dict:
+    """Upgrade pre-refactor test cursors to the explicit resource contract."""
+
+    outputs = state.get("stage_outputs") or {}
+    for stage, keys in (
+        ("hic_scaffolding", ("output_assembly_ref",)),
+        ("assembly_review", ("final_assembly_ref",)),
+    ):
+        stage_out = outputs.get(stage) or {}
+        assembly_ref = next((stage_out.get(key) for key in keys if stage_out.get(key)), None)
+        if assembly_ref:
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(assembly_ref)],
+                source_stage=stage,
+            ).to_dict()
+            break
+    return build_stage().invoke(state)
 
 
 class RepeatAnnotationDescriptorTests(unittest.TestCase):
@@ -77,14 +98,14 @@ class RepeatAnnotationStageTests(unittest.TestCase):
         script.chmod(0o755)
         return bin_dir
 
-    def test_missing_final_assembly_for_annotation_fails_terminally(self):
+    def test_missing_assembly_resource_fails_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             registry = self._write_registry(tmpdir, assets=[])
             result = build_stage().invoke(self._state(tmpdir, str(registry)))
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("final_assembly_for_annotation", result["last_error"])
+            self.assertIn("missing assembly resource", result["last_error"])
 
     def test_provided_repeat_library_skips_de_novo_discovery(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -107,11 +128,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "hic_scaffolding": {
                     "status": "skipped",
-                    "final_assembly_for_annotation": str(assembly),
+                    "output_assembly_ref": str(assembly),
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -142,11 +163,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {"execution_mode": "local"},
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(result["current_stage"], "gene_annotation")
@@ -166,7 +187,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -174,7 +195,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -213,7 +234,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["data_dir"] = os.path.relpath(data_dir, Path.cwd())
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -221,7 +242,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -243,7 +264,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -251,7 +272,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "repeat_annotation")
             self.assertEqual(result["supervision_state"], "failed_terminal")
@@ -275,11 +296,11 @@ class RepeatAnnotationStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "hic_scaffolding": {
                     "status": "skipped",
-                    "final_assembly_for_annotation": str(assembly),
+                    "output_assembly_ref": str(assembly),
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -308,7 +329,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             repeat = result["stage_outputs"]["repeat_annotation"]
             self.assertEqual(result["current_stage"], "gene_annotation")
@@ -332,7 +353,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -355,7 +376,7 @@ class RepeatAnnotationStageTests(unittest.TestCase):
                 }
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             self.assertIn("repeat_annotation_stage", result["route_trace"])
@@ -428,7 +449,7 @@ class MaskReviewGateTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -436,7 +457,7 @@ class MaskReviewGateTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["current_stage"], "gene_annotation")
             repeat = result["stage_outputs"]["repeat_annotation"]
@@ -474,7 +495,7 @@ class MaskReviewGateTests(unittest.TestCase):
             )
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
-                "hic_scaffolding": {"status": "skipped", "final_assembly_for_annotation": str(assembly)},
+                "hic_scaffolding": {"status": "skipped", "output_assembly_ref": str(assembly)},
                 "repeat_annotation": {
                     "execution_mode": "local",
                     "primary_method": "repeat_annotation.masking.repeatmasker",
@@ -483,7 +504,7 @@ class MaskReviewGateTests(unittest.TestCase):
                 },
             }
 
-            result = build_stage().invoke(state)
+            result = _invoke_repeat(state)
 
             self.assertEqual(result["supervision_state"], "blocked_human")
             self.assertEqual(result["current_stage"], "repeat_annotation")
@@ -510,7 +531,7 @@ class MaskReviewGateTests(unittest.TestCase):
                     "repeat_percentage": 25.0,
                     "strategy": "provided",
                     "repeat_library_source": "provided",
-                    "final_assembly_for_annotation": str(softmasked),
+                    "input_assembly_ref": str(softmasked),
                     "repeat_library_ref": str(softmasked),
                     "confidence": "high",
                     "low_confidence_reasons": [],
@@ -558,7 +579,7 @@ class MaskReviewGateTests(unittest.TestCase):
                     "repeat_percentage": 5.0,
                     "strategy": "provided",
                     "repeat_library_source": "provided",
-                    "final_assembly_for_annotation": str(unmasked),
+                    "input_assembly_ref": str(unmasked),
                     "repeat_library_ref": str(unmasked),
                     "confidence": "high",
                     "low_confidence_reasons": [],

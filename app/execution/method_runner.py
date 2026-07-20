@@ -15,22 +15,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from app.storage.ledger import Ledger
 from app.storage.artifacts import register_artifact_records
 from app.execution.env_resolver import EnvSpec
 from app.execution.local_runner import LocalRunner
+from app.execution.runner import Runner
 from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.publish import publish_execution_logs
-
-
-class AttemptRunner(Protocol):
-    """Minimal duck-typed runner contract used by ``run_frozen_attempt``."""
-
-    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult: ...
 
 
 def build_frozen_attempt(
@@ -85,7 +80,7 @@ def run_frozen_attempt(
     input_manifest_ref: str = "",
     fail_label: str,
     cleanup_outputs: bool = True,
-    runner: AttemptRunner | None = None,
+    runner: Runner | None = None,
     ledger: Ledger | None = None,
 ) -> RunOutcome:
     """Run a frozen attempt with shared ledger bookkeeping.

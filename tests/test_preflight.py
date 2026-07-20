@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.preflight import (
     check_stage_prerequisites,
     validate_execution_plan,
@@ -101,10 +102,13 @@ class PreflightCheckTests(unittest.TestCase):
             )
             state["asset_registry_ref"] = str(registry)
             state["stage_outputs"] = {
-                "assembly_review": {
-                    "final_assembly_for_scaffolding_or_annotation": str(assembly_path),
-                }
+                "assembly_review": {"status": "completed"}
             }
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(assembly_path)],
+                source_stage="assembly_review",
+            ).to_dict()
 
             check = check_stage_prerequisites(state, "hic_scaffolding")
 

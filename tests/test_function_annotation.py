@@ -10,6 +10,7 @@ from pathlib import Path
 from app.storage.ledger import Ledger
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.function_annotation.builder import build_stage
 from tests.data_v2 import v2_run_dir
 
@@ -59,6 +60,15 @@ class FunctionAnnotationStageTests(unittest.TestCase):
                 "transcripts_fasta_ref": str(Path(tmpdir) / "transcripts.fa"),
             }
         }
+        state["resource_refs"]["predicted_proteins"] = ResourceRef(
+            resource_type="predicted_proteins",
+            paths=[proteins_ref],
+            source_stage="gene_annotation",
+            metadata={
+                "genes_gff3_ref": str(Path(tmpdir) / "genes.gff3"),
+                "transcripts_fasta_ref": str(Path(tmpdir) / "transcripts.fa"),
+            },
+        ).to_dict()
         if provenance is not None:
             state["stage_outputs"]["function_annotation"] = {"database_provenance": provenance}
         return state

@@ -23,7 +23,11 @@ from typing import (
     get_args,
 )
 
-from app.schemas.limits import STAGE_CURSOR_MAX_BYTES, STAGE_OUTPUTS_MAX_BYTES
+from app.schemas.limits import (
+    RESOURCE_REFS_MAX_BYTES,
+    STAGE_CURSOR_MAX_BYTES,
+    STAGE_OUTPUTS_MAX_BYTES,
+)
 from app.schemas.resource_ref import ResourceRef
 from app.schemas.shared_parameters import SharedParameters
 
@@ -57,6 +61,7 @@ JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 StageCursor: TypeAlias = dict[str, JsonValue]
 StageOutputs: TypeAlias = dict[DomainStage, StageCursor]
+ResourceRefs: TypeAlias = dict[str, dict[str, JsonValue]]
 
 DOMAIN_STAGES: frozenset[str] = frozenset(get_args(DomainStage))
 
@@ -110,6 +115,41 @@ def replace_stage_outputs(
     """LangGraph reducer that validates every replacement before checkpointing."""
 
     return validate_stage_outputs(update)
+
+
+def validate_resource_refs(value: Mapping[str, object] | None) -> ResourceRefs:
+    """Validate the bounded, JSON-only cross-stage resource table."""
+
+    if value is None:
+        return {}
+    refs: dict[str, dict[str, JsonValue]] = {}
+    for resource_type, raw_ref in value.items():
+        if not isinstance(resource_type, str) or not resource_type.strip():
+            raise TypeError("resource_refs keys must be non-empty strings")
+        if not isinstance(raw_ref, Mapping):
+            raise TypeError(f"resource_refs.{resource_type} must be a JSON object")
+        ref = ResourceRef.from_dict(raw_ref)
+        if ref.resource_type != resource_type:
+            raise ValueError(
+                f"resource_refs.{resource_type}.resource_type must match its table key"
+            )
+        serialized = ref.to_dict()
+        _validate_json_value(serialized, path=f"resource_refs.{resource_type}")
+        refs[resource_type] = cast(dict[str, JsonValue], serialized)
+
+    total_size = _canonical_json_size(refs)
+    if total_size > RESOURCE_REFS_MAX_BYTES:
+        raise ValueError(f"resource_refs exceeds {RESOURCE_REFS_MAX_BYTES} bytes")
+    return refs
+
+
+def replace_resource_refs(
+    _current: ResourceRefs | None,
+    update: Mapping[str, object] | None,
+) -> ResourceRefs:
+    """Replace the resource table after validating its checkpoint contract."""
+
+    return validate_resource_refs(update)
 
 
 def _validate_json_value(value: object, *, path: str) -> None:
@@ -206,7 +246,7 @@ class TopLevelState(TypedDict, total=False):
 
     # Central resource reference table for cross-stage resource handoff.
     # Maps logical resource names to their current locations and metadata.
-    resource_refs: NotRequired[dict[str, dict[str, Any]]]
+    resource_refs: NotRequired[Annotated[ResourceRefs, replace_resource_refs]]
 
     # Stage skip reasons keyed by stage name.
     skip_reasons: Required[dict[DomainStage, str]]
@@ -237,6 +277,6 @@ def initial_state(
         review_notes=[],
         route_trace=[],
         stage_outputs=validate_stage_outputs({}),
-        resource_refs={},
+        resource_refs=validate_resource_refs({}),
         skip_reasons={},
     )

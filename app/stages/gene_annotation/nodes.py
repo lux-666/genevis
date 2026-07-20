@@ -36,18 +36,19 @@ from app.schemas.artifacts import (
     GeneAnnotationBundle,
     GeneAnnotationPlan,
 )
+from app.configuration import load_descriptor_registry
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
     append_route_trace,
-    resolve_stage_resource,
     stage_artifacts_dir,
     stage_output,
     stage_work_dir,
     update_stage_output,
 )
-from app.stages.resource_specs import assembly_resource_spec
+from app.stages.resource_specs import MASKED_ASSEMBLY_SPEC, assembly_resource_spec
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.gene_annotation.persistence import (
     load_gene_attempt,
     load_gene_execution,
@@ -99,18 +100,14 @@ def resolve_gene_annotation_inputs(state: TopLevelState) -> dict:
             return _fail_update(state, "missing softmasked_genome for gene_annotation")
         assembly = resolve_stage_resource(
             state,
-            resource_spec=assembly_resource_spec(
-                "t2t",
-                "hic_scaffolding",
-                "assembly_review",
-            ),
+            resource_spec=assembly_resource_spec(),
         )
         genome_ref = assembly.path
-        genome_source = "final_assembly_for_annotation"
+        genome_source = "assembly"
         if not genome_ref:
             return _fail_update(
                 state,
-                "missing final_assembly_for_annotation for gene_annotation fallback",
+                "missing assembly resource for gene_annotation fallback",
             )
 
     rnaseq_refs = _asset_paths(state, {"clean_rnaseq_reads", "raw_rnaseq_reads"})
@@ -212,7 +209,7 @@ def plan_gene_methods(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evidence_profile_selected":
         return {}
 
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     profile = gene_out["evidence_profile"]
     candidate_methods = _candidate_methods(profile)
     helper_methods = _helper_methods(gene_out.get("available_evidence", []))
@@ -432,6 +429,17 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
         "current_stage": next_stage_name("gene_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
+        "resource_refs": update_resource_ref(
+            state,
+            "predicted_proteins",
+            [str(final_proteins_ref)],
+            "gene_annotation",
+            {
+                "genes_gff3_ref": str(genes_gff3_ref),
+                "transcripts_fasta_ref": str(transcripts_ref),
+                "bundle_ref": str(bundle_ref),
+            },
+        ),
     }
 
 
@@ -507,6 +515,17 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
         "current_stage": next_stage_name("gene_annotation"),
         "supervision_state": "running_stage",
         "route_trace": trace,
+        "resource_refs": update_resource_ref(
+            state,
+            "predicted_proteins",
+            [str(gene_out["predicted_proteins_ref"])],
+            "gene_annotation",
+            {
+                "genes_gff3_ref": str(gene_out["genes_gff3_ref"]),
+                "transcripts_fasta_ref": gene_out.get("transcripts_fasta_ref"),
+                "bundle_ref": str(bundle_ref),
+            },
+        ),
     }
 
 
@@ -1176,12 +1195,9 @@ CANDIDATE_PROTEINS_TYPE = "gene_annotation.candidate_proteins"
 # Per-candidate EVM evidence class, keyed by method. Used both for EVM weight
 # selection and for the standardized candidate bundle. Methods absent here
 # default to ABINITIO_PREDICTION.
-_REGISTRY_PATH = Path("descriptors/registry.yaml")
-
-
 @lru_cache(maxsize=1)
 def _gene_registry() -> DescriptorRegistry:
-    return DescriptorRegistry.load(_REGISTRY_PATH)
+    return load_descriptor_registry()
 
 
 def _method_evm_class(method_name: str) -> str:
@@ -2231,21 +2247,14 @@ def _parse_busco_short_summary(path: Path) -> dict[str, Any]:
 
 
 def _softmasked_genome_ref(state: TopLevelState) -> str | None:
-    repeat_out = (state.get("stage_outputs") or {}).get("repeat_annotation") or {}
-    for key in ["softmasked_genome_ref", "softmasked_genome"]:
-        value = repeat_out.get(key)
-        if value:
-            return str(value)
-    return None
+    resolution = resolve_stage_resource(state, resource_spec=MASKED_ASSEMBLY_SPEC)
+    return resolution.path
 
 
 def _repeat_annotation_ref(state: TopLevelState) -> str | None:
-    repeat_out = (state.get("stage_outputs") or {}).get("repeat_annotation") or {}
-    for key in ["repeat_annotation_gff3_ref", "repeat_annotation"]:
-        value = repeat_out.get(key)
-        if value:
-            return str(value)
-    return None
+    resolution = resolve_stage_resource(state, resource_spec=MASKED_ASSEMBLY_SPEC)
+    value = resolution.metadata.get("repeat_annotation_ref")
+    return str(value) if value else None
 
 
 def _explicit_unmasked_fallback_reason(state: TopLevelState) -> str | None:
@@ -2299,7 +2308,7 @@ def _provided_gene_annotation_refs(state: TopLevelState) -> dict[str, str | None
 
 def _provided_annotation_review_triggers(gene_out: dict[str, Any]) -> list[str]:
     triggers: list[str] = []
-    if gene_out.get("genome_input_source") == "final_assembly_for_annotation":
+    if gene_out.get("genome_input_source") == "assembly":
         triggers.append("unmasked_genome_fallback_requires_review")
     if (
         gene_out.get("rnaseq_read_refs")
@@ -2348,7 +2357,7 @@ def _review_triggers(gene_out: dict[str, Any]) -> list[str]:
     available = set(gene_out.get("available_evidence", []))
     if "protein" in available and ({"rnaseq", "long_rna"} & available):
         triggers.append("rna_protein_evidence_conflict_review")
-    if gene_out.get("genome_input_source") == "final_assembly_for_annotation":
+    if gene_out.get("genome_input_source") == "assembly":
         triggers.append("unmasked_genome_fallback_requires_review")
     if gene_out.get("evidence_profile") == "no_evidence":
         triggers.append("species_or_training_policy_required")

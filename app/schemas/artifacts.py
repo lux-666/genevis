@@ -299,7 +299,7 @@ class AssemblyCandidateBundle(BaseModel):
     method_name: str
     status: Literal["planned", "executed", "failed", "rejected"]
     artifact_type: str = ASSEMBLY_CANDIDATE_BUNDLE
-    input_ref: str
+    input_ref: str | list[str]
     input_type: str
     genome_size_prior: int | None = None
     expected_outputs: dict[str, str] = Field(default_factory=dict)
@@ -371,7 +371,7 @@ class AssemblyReviewActionArtifact(BaseModel):
     candidate_id: str
     pre_action_assembly_ref: str
     post_action_assembly_ref: str
-    final_assembly_for_scaffolding_or_annotation: str
+    output_assembly_ref: str
     action_execution_mode: Literal["none", "external"]
     method_name: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
@@ -388,7 +388,7 @@ class HiCScaffoldDecisionArtifact(BaseModel):
     decision: Literal["accept_candidate", "keep_prior_assembly", "stop_human_review"]
     method_name: str | None = None
     pre_hic_assembly_ref: str
-    final_assembly_for_annotation: str
+    output_assembly_ref: str
     hic_read_refs: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -402,7 +402,7 @@ class T2TReviewDecisionArtifact(BaseModel):
     decision: Literal["accept_selected_candidates", "continue_without_patch", "stop_pipeline"]
     candidate_ids: list[str] = Field(default_factory=list)
     input_assembly_ref: str
-    final_assembly_for_annotation: str
+    output_assembly_ref: str
     patched_assembly_ref: str | None = None
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -414,7 +414,7 @@ class T2TFinishingBundle(BaseModel):
     session_id: str
     status: str
     input_assembly_ref: str
-    final_assembly_for_annotation: str
+    output_assembly_ref: str
     ont_reads_ref: str | None = None
     mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
     patched_assembly_ref: str | None = None
@@ -430,7 +430,7 @@ class RepeatAnnotationPlan(BaseModel):
     status: Literal["planned"]
     strategy: Literal["provided", "de_novo"]
     repeat_library_source: Literal["provided", "de_novo"]
-    final_assembly_for_annotation: str
+    input_assembly_ref: str
     provided_repeat_library_ref: str | None = None
     library_candidate_methods: list[str] = Field(default_factory=list)
     helper_methods: list[str] = Field(default_factory=list)
@@ -450,7 +450,7 @@ class RepeatAnnotationBundle(BaseModel):
     status: Literal["planned", "executed"]
     strategy: Literal["provided", "de_novo"]
     repeat_library_source: Literal["provided", "de_novo"]
-    final_assembly_for_annotation: str
+    input_assembly_ref: str
     repeat_library_ref: str
     repeat_annotation_gff3_ref: str
     softmasked_genome_ref: str
@@ -469,7 +469,7 @@ class GeneAnnotationPlan(BaseModel):
     session_id: str
     status: Literal["planned"]
     genome_input_ref: str
-    genome_input_source: Literal["softmasked_genome", "final_assembly_for_annotation"]
+    genome_input_source: Literal["softmasked_genome", "assembly"]
     unmasked_fallback_reason: str | None = None
     repeat_annotation_ref: str | None = None
     rnaseq_read_refs: list[str] = Field(default_factory=list)
@@ -493,7 +493,7 @@ class GeneAnnotationBundle(BaseModel):
     session_id: str
     status: Literal["planned", "adopted_existing_annotation"]
     genome_input_ref: str
-    genome_input_source: Literal["softmasked_genome", "final_assembly_for_annotation"]
+    genome_input_source: Literal["softmasked_genome", "assembly"]
     genes_gff3_ref: str
     transcripts_fasta_ref: str | None = None
     predicted_proteins_ref: str
@@ -628,7 +628,7 @@ class AssemblyInputProfile(BaseModel):
     """InputProfiler output: data profile plus route recommendation."""
 
     session_id: str
-    primary_long_reads_ref: str | None = None
+    primary_long_reads_ref: str | list[str] | None = None
     primary_long_read_platform: str | None = None
     ont_reads_ref: str | None = None
     hifi_reads_ref: str | None = None

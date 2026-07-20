@@ -21,7 +21,7 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_FROZEN_PARAMETERS,
     ParameterAttempt,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.lifecycle import (
@@ -64,7 +64,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     output = hic_output(state)
     if not is_enabled(output):
         return {}
-    if METHOD not in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods:
+    if METHOD not in load_descriptor_registry().methods:
         return update_hic_output(
             state,
             _missing_block(f"descriptor: {METHOD}"),

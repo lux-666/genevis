@@ -11,7 +11,6 @@ from unittest.mock import patch
 from app.entrypoints.ask_planner import (
     READ_QC_FILTER_SKIP,
     READ_QC_FILTER_SEQKIT,
-    READ_QC_HANDOFF_METHOD,
     READ_QC_STATS_METHOD,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
@@ -48,7 +47,7 @@ def _base_plan(**overrides) -> AskPlanState:
 
 
 def _read_qc_default_methods() -> list[str]:
-    return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
+    return [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
 
 
 def _diamond_provenance(proteins_ref: str = "/data/proteins.fa") -> list[dict[str, str]]:
@@ -465,7 +464,6 @@ class AskPlannerMethodSelectionTests(unittest.TestCase):
                     READ_QC_STATS_METHOD,
                     READ_QC_FILTER_SKIP,
                     "read_qc.length_filter.seqkit_seq",
-                    READ_QC_HANDOFF_METHOD,
                 ]
             },
         )
@@ -987,7 +985,6 @@ class AskPlannerRunConfigTests(unittest.TestCase):
                 "read_qc": [
                     READ_QC_STATS_METHOD,
                     READ_QC_FILTER_SKIP,
-                    READ_QC_HANDOFF_METHOD,
                 ]
             },
             confirmed=True,
@@ -1003,7 +1000,6 @@ class AskPlannerRunConfigTests(unittest.TestCase):
                 "read_qc": [
                     READ_QC_STATS_METHOD,
                     READ_QC_FILTER_SEQKIT,
-                    READ_QC_HANDOFF_METHOD,
                 ]
             },
             method_parameters={READ_QC_FILTER_SEQKIT: {"min_len": 1000}},
@@ -1051,7 +1047,6 @@ class AskPlannerRunConfigTests(unittest.TestCase):
                 "read_qc": [
                     READ_QC_STATS_METHOD,
                     READ_QC_FILTER_SEQKIT,
-                    READ_QC_HANDOFF_METHOD,
                 ]
             },
             confirmed=True,

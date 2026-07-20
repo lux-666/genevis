@@ -304,8 +304,8 @@ def collect_method_artifacts(
                     "method_name": lifecycle.method_name,
                     "status": f"{lifecycle.name}_executed_review_required",
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
-                    "final_assembly_for_annotation": output.get(
-                        "final_assembly_for_annotation"
+                    "output_assembly_ref": output.get(
+                        "output_assembly_ref"
                     ),
                     "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get(
                         "scaffold_fasta"

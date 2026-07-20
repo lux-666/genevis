@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
 from typing import Any
 
 from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.parameter_attempts import load_current_frozen_attempt
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
 from app.domains.assembly.constants import HIFIASM_ONT_METHOD
@@ -51,7 +50,7 @@ def freeze_hifiasm_ont_attempt(state: TopLevelState) -> dict:
     output = stage_output(state, "assembly")
     if output.get("status") != LIFECYCLE.planned_status:
         return {}
-    if HIFIASM_ONT_METHOD not in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods:
+    if HIFIASM_ONT_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{HIFIASM_ONT_METHOD!r}]")
 
     params, blocked = _parameters(output)

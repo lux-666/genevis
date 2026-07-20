@@ -67,12 +67,11 @@ _STAGE_SELECTION_MODE: dict[str, str] = {
 READ_QC_STATS_METHOD = "read_qc.long_read_stats.seqkit_stats"
 READ_QC_FILTER_SKIP = "read_qc.length_filter.skip"
 READ_QC_FILTER_SEQKIT = "read_qc.length_filter.seqkit_seq"
-READ_QC_HANDOFF_METHOD = "read_qc.make_fofn.local"
 READ_QC_FILTER_METHODS = [
     READ_QC_FILTER_SKIP,
     READ_QC_FILTER_SEQKIT,
 ]
-READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP, READ_QC_HANDOFF_METHOD]
+READ_QC_DEFAULT_METHODS = [READ_QC_STATS_METHOD, READ_QC_FILTER_SKIP]
 
 def _build_assembly_review_config(plan: AskPlanState) -> dict[str, Any]:
     ar_config: dict[str, Any] = {}
@@ -977,8 +976,6 @@ def _validate_selected_methods(methods: dict[str, str | list[str]], plan: AskPla
                 raise ValueError("read_qc method selection requires exactly one length filter choice")
             if READ_QC_STATS_METHOD not in method_list:
                 raise ValueError(f"read_qc method selection requires {READ_QC_STATS_METHOD}")
-            if READ_QC_HANDOFF_METHOD not in method_list:
-                raise ValueError(f"read_qc method selection requires {READ_QC_HANDOFF_METHOD}")
         if stage == "genome_survey":
             executable = set(method_list)
             if executable and executable != GENOME_SURVEY_EXECUTABLE_METHODS:
@@ -994,7 +991,7 @@ def _normalize_selected_methods(methods: dict[str, str | list[str]]) -> dict[str
         selected = normalized["read_qc"]
         method_list = selected if isinstance(selected, list) else [selected]
         filter_method = next((method for method in method_list if method in READ_QC_FILTER_METHODS), READ_QC_FILTER_SKIP)
-        normalized["read_qc"] = [READ_QC_STATS_METHOD, filter_method, READ_QC_HANDOFF_METHOD]
+        normalized["read_qc"] = [READ_QC_STATS_METHOD, filter_method]
     return normalized
 
 

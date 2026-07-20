@@ -52,3 +52,6 @@ strict = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"descriptors" = "app/_descriptors"

@@ -35,7 +35,6 @@ from app.stages.hic_scaffolding.routing import (
 from app.stages.inventory.routing import route_from_inventory
 from app.stages.read_qc.routing import (
     route_after_length_filter,
-    route_after_make_fofn,
     route_after_stats,
 )
 from app.stages.read_qc.routing import (
@@ -146,7 +145,6 @@ class RoutingFailureContractTests(unittest.TestCase):
                 route_after_qc_plan,
                 route_after_stats,
                 route_after_length_filter,
-                route_after_make_fofn,
             ):
                 with self.subTest(status=status, router=router.__name__):
                     self.assertEqual(router(stage_state("read_qc", status)), "fail")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +16,11 @@ from app.review.persistence import (
     persist_review_request,
 )
 from app.schemas.artifacts import ArtifactRef, HiCScaffoldDecisionArtifact
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, append_route_trace, resolve_stage_resource
-from app.stages.resource_specs import assembly_resource_spec
+from app.stages.base import absolute_data_dir, append_route_trace
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import HIC_READS_SPEC, assembly_resource_spec
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     hic_output as _hic_output,
 )
@@ -43,7 +43,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
 
     assembly = resolve_stage_resource(
         state,
-        resource_spec=assembly_resource_spec("assembly_review"),
+        resource_spec=assembly_resource_spec(),
     )
     final_assembly_ref, source = assembly.path, assembly.source
     hic_assets = _hic_assets(state)
@@ -57,7 +57,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
     resolved = {
         **existing,
         "pre_hic_assembly_ref": final_assembly_ref,
-        "final_assembly_for_annotation": final_assembly_ref,
+        "output_assembly_ref": final_assembly_ref,
         "hic_read_refs": hic_read_refs,
         "hic_read_paths": hic_read_paths,
         "hic_library_metadata": [
@@ -88,7 +88,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
     try:
         descriptor_present = (
             AUTOHIC_METHOD
-            in DescriptorRegistry.load(Path("descriptors/registry.yaml")).methods
+            in load_descriptor_registry().methods
         )
     except (OSError, ValueError):
         descriptor_present = False
@@ -301,7 +301,7 @@ def apply_hic_scaffolding_resume_decision(
         decision=request.decision,
         method_name=AUTOHIC_METHOD,
         pre_hic_assembly_ref=str(pre_hic_assembly_ref),
-        final_assembly_for_annotation=final_assembly,
+        output_assembly_ref=final_assembly,
         hic_read_refs=list(hic_out.get("hic_read_refs") or []),
         notes=list(request.notes),
         metadata=request.metadata,
@@ -348,7 +348,7 @@ def apply_hic_scaffolding_resume_decision(
         "decision": request.decision,
         "selected_method_name": AUTOHIC_METHOD,
         "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
-        "final_assembly_for_annotation": final_assembly,
+        "output_assembly_ref": final_assembly,
         "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
         "notes": list(request.notes),
         "decided_by": request.decided_by,
@@ -369,6 +369,16 @@ def apply_hic_scaffolding_resume_decision(
         "active_interrupt": None,
         "stage_outputs": outputs,
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
+        "resource_refs": update_resource_ref(
+            state,
+            "assembly",
+            [final_assembly],
+            "hic_scaffolding",
+            {
+                "decision": request.decision,
+                "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+            },
+        ),
     }
 
 
@@ -402,18 +412,20 @@ def _target_assembly_level(state: TopLevelState) -> str:
 
 
 def _hic_assets(state: TopLevelState) -> list[dict[str, Any]]:
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
+    resolution = resolve_stage_resource(state, resource_spec=HIC_READS_SPEC)
+    if not resolution.found:
         return []
-    registry_path = Path(registry_ref)
-    if not registry_path.is_file():
-        return []
-    try:
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    metadata = resolution.metadata
+    assets = metadata.get("assets")
+    if isinstance(assets, list) and assets:
+        return [dict(asset) for asset in assets if isinstance(asset, dict)]
+    asset_ids = list(metadata.get("asset_ids") or [])
     return [
-        asset
-        for asset in registry.get("assets", [])
-        if isinstance(asset, dict) and asset.get("asset_type") == "hic_reads_registered"
+        {
+            "asset_id": asset_ids[index] if index < len(asset_ids) else f"hic_reads:{index}",
+            "asset_type": "hic_reads",
+            "path": path,
+            "metadata": metadata,
+        }
+        for index, path in enumerate(resolution.paths)
     ]

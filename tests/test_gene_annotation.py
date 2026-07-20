@@ -13,6 +13,7 @@ from app.review.base import ResumeReviewRequest
 from app.review.gates import get_review_gate
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.gene_annotation.builder import build_stage
 from app.stages.gene_annotation.nodes import (
     GENE_REVIEW_GATES,
@@ -141,6 +142,12 @@ class GeneAnnotationStageTests(unittest.TestCase):
             "softmasked_genome_ref": str(softmasked),
             "repeat_annotation_gff3_ref": str(repeats),
         }
+        state["resource_refs"]["masked_assembly"] = ResourceRef(
+            resource_type="masked_assembly",
+            paths=[str(softmasked)],
+            source_stage="repeat_annotation",
+            metadata={"repeat_annotation_ref": str(repeats)},
+        ).to_dict()
         bin_dir = _fake_gene_method_bins(tmpdir)
         state["stage_outputs"]["gene_annotation"] = {
             "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -382,7 +389,12 @@ class GeneAnnotationStageTests(unittest.TestCase):
             registry = self._write_registry(tmpdir, assets=[])
             state = self._state(tmpdir, str(registry))
             state["skip_reasons"] = {"repeat_annotation": "repeat_annotation_skipped_by_user"}
-            state["stage_outputs"]["hic_scaffolding"] = {"final_assembly_for_annotation": str(assembly)}
+            state["stage_outputs"]["hic_scaffolding"] = {"output_assembly_ref": str(assembly)}
+            state["resource_refs"]["assembly"] = ResourceRef(
+                resource_type="assembly",
+                paths=[str(assembly)],
+                source_stage="hic_scaffolding",
+            ).to_dict()
             bin_dir = _fake_gene_method_bins(tmpdir)
             state["stage_outputs"]["gene_annotation"] = {
                 "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
@@ -393,7 +405,7 @@ class GeneAnnotationStageTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "function_annotation")
             gene = result["stage_outputs"]["gene_annotation"]
-            self.assertEqual(gene["genome_input_source"], "final_assembly_for_annotation")
+            self.assertEqual(gene["genome_input_source"], "assembly")
             self.assertEqual(gene["unmasked_fallback_reason"], "repeat_annotation_skipped_by_user")
             self.assertIn("unmasked_genome_fallback_requires_review", gene["review_triggers"])
 
@@ -441,7 +453,13 @@ class GeneAnnotationReviewChainTests(unittest.TestCase):
             "softmasked_genome_ref": str(softmasked),
             "repeat_annotation_gff3_ref": str(repeats),
         }
-        state["stage_outputs"]["hic_scaffolding"] = {"status": "completed", "final_assembly_for_annotation": str(softmasked)}
+        state["resource_refs"]["masked_assembly"] = ResourceRef(
+            resource_type="masked_assembly",
+            paths=[str(softmasked)],
+            source_stage="repeat_annotation",
+            metadata={"repeat_annotation_ref": str(repeats)},
+        ).to_dict()
+        state["stage_outputs"]["hic_scaffolding"] = {"status": "completed", "output_assembly_ref": str(softmasked)}
         bin_dir = _fake_gene_method_bins(tmpdir)
         state["stage_outputs"]["gene_annotation"] = {
             "env": {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},

@@ -6,7 +6,6 @@ from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.read_qc.method_application import (
-    build_make_fofn_graph,
     build_seqkit_length_filter_graph,
     build_seqkit_stats_graph,
 )
@@ -20,7 +19,6 @@ from app.stages.read_qc.nodes import (
 )
 from app.stages.read_qc.routing import (
     route_after_length_filter,
-    route_after_make_fofn,
     route_after_plan,
     route_after_resolve,
     route_after_stats,
@@ -37,7 +35,6 @@ def build_stage():
     graph.add_node("seqkit_stats", build_seqkit_stats_graph())
     graph.add_node("plan_length_filter", plan_length_filter)
     graph.add_node("seqkit_length_filter", build_seqkit_length_filter_graph())
-    graph.add_node("make_fofn", build_make_fofn_graph())
     graph.add_node("commit", commit_read_qc)
     graph.add_node("fail", fail_read_qc)
 
@@ -62,11 +59,6 @@ def build_stage():
     graph.add_conditional_edges(
         "seqkit_length_filter",
         route_after_length_filter,
-        {"fofn": "make_fofn", "fail": "fail"},
-    )
-    graph.add_conditional_edges(
-        "make_fofn",
-        route_after_make_fofn,
         {"commit": "commit", "fail": "fail"},
     )
     graph.add_edge("commit", END)

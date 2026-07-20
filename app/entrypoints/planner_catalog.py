@@ -7,9 +7,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.configuration import descriptor_registry_path, load_descriptor_registry
 from app.schemas.descriptors import DescriptorRegistry, MethodDescriptor
 
-REGISTRY_PATH = Path("descriptors/registry.yaml")
+REGISTRY_PATH = descriptor_registry_path()
 
 
 class PlannerMethodCatalog(BaseModel):
@@ -26,10 +27,15 @@ class PlannerMethodCatalog(BaseModel):
         return dict(method) if method else None
 
 
-def load_planner_method_catalog(registry_path: Path = REGISTRY_PATH) -> PlannerMethodCatalog:
+def load_planner_method_catalog(registry_path: Path | None = None) -> PlannerMethodCatalog:
     """Load the descriptor registry and derive planner-facing method metadata."""
 
-    return build_planner_method_catalog(DescriptorRegistry.load(registry_path))
+    registry = (
+        DescriptorRegistry.load(registry_path)
+        if registry_path is not None
+        else load_descriptor_registry()
+    )
+    return build_planner_method_catalog(registry)
 
 
 def build_planner_method_catalog(registry: DescriptorRegistry) -> PlannerMethodCatalog:

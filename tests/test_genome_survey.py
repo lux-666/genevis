@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.schemas.resource_ref import ResourceRef
 from app.stages.genome_survey.builder import build_stage
 from app.stages.genome_survey.method_application.genomescope2 import build_genomescope2_graph
 from app.stages.genome_survey.method_application.jellyfish import build_jellyfish_graph
@@ -142,13 +143,16 @@ class GenomeSurveyStageTests(unittest.TestCase):
         genomescope.chmod(0o755)
         return bin_dir
 
-    def test_missing_asset_registry_fails_terminally(self):
+    def test_missing_resources_fail_terminally(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = build_stage().invoke(self._state(tmpdir, None))
 
             self.assertEqual(result["current_stage"], "genome_survey")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertIn("asset_registry_ref", result["last_error"])
+            self.assertEqual(
+                result["stage_outputs"]["genome_survey"]["error_code"],
+                "GENOME_SIZE_UNAVAILABLE",
+            )
 
     def test_explicit_size_does_not_skip_survey_when_clean_short_reads_exist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -545,8 +549,6 @@ class GenomeSurveyStageTests(unittest.TestCase):
             raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
             filtered = Path(tmpdir) / "filtered_long_reads.fastq"
             filtered.write_text("@r1\nACGTACGT\n+\n!!!!!!!!\n", encoding="utf-8")
-            fofn = Path(tmpdir) / "filtered_long_reads.fofn"
-            fofn.write_text(f"{filtered}\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -567,8 +569,6 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "format": "fastq",
                     "filtered_long_reads_ref": str(filtered),
                     "filtered_long_reads_refs": [str(filtered)],
-                    "filtered_long_reads_fofn_ref": str(fofn),
-                    "assembly_input_ref": str(fofn),
                 },
                 "genome_survey": {
                     "execution_mode": "local",
@@ -576,6 +576,18 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
                 },
             }
+            state["resource_refs"]["long_reads"] = ResourceRef(
+                resource_type="long_reads",
+                paths=[str(filtered)],
+                source_stage="read_qc",
+                metadata={
+                    "platforms": ["ont"],
+                    "formats": ["fastq"],
+                    "input_asset_ids": [
+                        f"s1:clean_long_reads:read_qc:{filtered.name}"
+                    ],
+                },
+            ).to_dict()
 
             result = build_stage().invoke(state)
 
@@ -619,24 +631,28 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "format": "fastq",
                     "filtered_long_reads_ref": str(missing),
                     "filtered_long_reads_refs": [str(missing)],
-                    "assembly_input_ref": str(missing),
                 },
                 "genome_survey": {
                     "execution_mode": "local",
                     "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
                 },
             }
+            state["resource_refs"]["long_reads"] = ResourceRef(
+                resource_type="long_reads",
+                paths=[str(missing)],
+                source_stage="read_qc",
+                metadata={"platforms": ["ont"], "formats": ["fastq"]},
+            ).to_dict()
 
             result = build_stage().invoke(state)
 
             self.assertEqual(result["supervision_state"], "failed_terminal")
             survey = result["stage_outputs"]["genome_survey"]
             self.assertEqual(survey["status"], "failed")
-            self.assertIn("missing on disk", survey["reason"])
-            self.assertIn("refusing to fall back", survey["reason"])
+            self.assertIn("resource path not found", survey["reason"])
 
-    def test_read_qc_fofn_relative_paths_resolve_against_fofn_dir(self):
-        """Relative entries in a QC FOFN resolve relative to the FOFN file."""
+    def test_central_qc_read_path_is_consumed_directly(self):
+        """The survey consumes the concrete path published by read_qc."""
         with tempfile.TemporaryDirectory() as tmpdir:
             raw_reads = Path(tmpdir) / "raw.fastq.gz"
             raw_reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
@@ -644,8 +660,6 @@ class GenomeSurveyStageTests(unittest.TestCase):
             qc_dir.mkdir()
             filtered = qc_dir / "filtered_long_reads.fastq"
             filtered.write_text("@r1\nACGTACGT\n+\n!!!!!!!!\n", encoding="utf-8")
-            fofn = qc_dir / "filtered_long_reads.fofn"
-            fofn.write_text("filtered_long_reads.fastq\n", encoding="utf-8")
             registry = self._write_registry(
                 tmpdir,
                 assets=[
@@ -661,11 +675,9 @@ class GenomeSurveyStageTests(unittest.TestCase):
             state = self._state(tmpdir, str(registry))
             state["stage_outputs"] = {
                 "read_qc": {
-                    "status": "fofn_ready",
+                    "status": "completed",
                     "platform": "ont",
                     "format": "fastq",
-                    "filtered_long_reads_fofn_ref": str(fofn),
-                    "assembly_input_ref": str(fofn),
                 },
                 "genome_survey": {
                     "execution_mode": "local",
@@ -673,6 +685,12 @@ class GenomeSurveyStageTests(unittest.TestCase):
                     "survey_parameters": {"kmer_size": 21, "hash_size": "10M", "threads": 1},
                 },
             }
+            state["resource_refs"]["long_reads"] = ResourceRef(
+                resource_type="long_reads",
+                paths=[str(filtered.resolve())],
+                source_stage="read_qc",
+                metadata={"platforms": ["ont"], "formats": ["fastq"]},
+            ).to_dict()
 
             result = build_stage().invoke(state)
 

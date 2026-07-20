@@ -6,7 +6,7 @@ goal: "Execute a NextDenovo candidate assembly from long-read FOFN and genome-si
 required_inputs:
   - name: long_reads_fofn
     type: clean_long_reads
-    description: "Approved long-read FOFN, preferably from read_qc make_fofn."
+    description: "Adapter-local FOFN generated from the canonical long-read path list."
   - name: genome_size
     type: genome_survey_result
     description: "Genome size prior from survey or human input."

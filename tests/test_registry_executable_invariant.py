@@ -20,7 +20,6 @@ WIRED_RUNNERS = set().union(
         "t2t.alignment.minimap2",
         "read_qc.long_read_stats.seqkit_stats",
         "read_qc.length_filter.seqkit_seq",
-        "read_qc.make_fofn.local",
         "repeat_annotation.masking.repeatmasker",
     },
 )

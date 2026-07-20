@@ -9,14 +9,13 @@ from typing import Any
 
 from app.storage.ledger import Ledger
 from app.domains.genome_size import resolve_explicit_genome_size
-from app.domains.read_inputs import AssemblyInputError, parse_fofn_paths
 from app.storage.artifacts import publish_artifact_records
 from app.workflow import next_stage_name
 from app.schemas.artifacts import (
     ArtifactMeta,
     GenomeSurveyResult,
 )
-from app.schemas.descriptors import DescriptorRegistry
+from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -24,6 +23,8 @@ from app.stages.base import (
     stage_output,
     update_stage_output,
 )
+from app.stages.resource_resolution import resolve_stage_resource
+from app.stages.resource_specs import LONG_READS_SPEC, SHORT_READS_SPEC
 
 FULL_SURVEY_METHODS = [
     "genome_survey.kmer_count.jellyfish",
@@ -72,38 +73,26 @@ def enter_genome_survey(state: TopLevelState) -> dict:
 
 
 def resolve_survey_inputs(state: TopLevelState) -> dict:
-    """Resolve survey reads: short DNA from registry; long DNA prefer read_qc then registry.
+    """Resolve survey reads from the central table, then the initial registry."""
 
-    Long-read priority matches assembly wiring:
-    1. stage_outputs.read_qc filtered/assembly input refs (post-QC)
-    2. asset_registry clean_long_reads
-    3. asset_registry raw_long_reads (via family selection)
+    short_resolution = resolve_stage_resource(state, resource_spec=SHORT_READS_SPEC)
+    long_resolution = resolve_stage_resource(state, resource_spec=LONG_READS_SPEC)
+    short_assets, short_error = _resolution_assets(short_resolution, "short_reads")
+    long_assets, long_error = _resolution_assets(long_resolution, "long_reads")
+    if short_error or long_error:
+        return _fail_update(state, short_error or long_error or "survey input error")
 
-    Short DNA still wins over long DNA in `_survey_input_family` when present.
-    When short DNA is absent, post-QC long reads are required if read_qc declared them.
-    """
-    from app.stages.base import load_assets_from_registry
-
-    registry_ref = state.get("asset_registry_ref")
-    if not registry_ref:
-        return _fail_update(state, "missing asset_registry_ref for genome_survey")
-
-    registry_path = Path(registry_ref)
-    if not registry_path.exists():
-        return _fail_update(state, f"asset registry not found: {registry_ref}")
-
-    clean_short = load_assets_from_registry(state, ["clean_short_dna_reads"])
-    raw_short = load_assets_from_registry(state, ["raw_short_dna_reads"])
-    registry_clean_long = load_assets_from_registry(state, ["clean_long_reads"])
-    raw_long = load_assets_from_registry(state, ["raw_long_reads"])
-    # Prefer post-QC long reads from read_qc stage_outputs over registry clean/raw.
-    # If read_qc declared long-read outputs, missing/unreadable paths fail hard —
-    # never silently fall back to raw registry paths.
-    qc_long, qc_error = _read_qc_clean_long_assets(state)
-    if qc_error:
-        return _fail_update(state, qc_error)
-    clean_long = qc_long or registry_clean_long
-    long_reads = [*clean_long, *raw_long] if clean_long or raw_long else []
+    short_types = set(short_resolution.metadata.get("asset_types") or [])
+    long_types = set(long_resolution.metadata.get("asset_types") or [])
+    clean_short = short_assets if "clean_short_dna_reads" in short_types else []
+    raw_short = [] if clean_short else short_assets
+    clean_long = (
+        long_assets
+        if long_resolution.source == "read_qc" or "clean_long_reads" in long_types
+        else []
+    )
+    raw_long = [] if clean_long else long_assets
+    long_reads = clean_long or raw_long
 
     return _update_genome_survey_output(
         state,
@@ -123,96 +112,31 @@ def resolve_survey_inputs(state: TopLevelState) -> dict:
     )
 
 
-_READ_QC_READY_STATUSES = frozenset({"completed", "fofn_ready"})
-_READ_QC_LONG_READ_KEYS = (
-    "filtered_long_reads_refs",
-    "filtered_long_reads_ref",
-    "filtered_long_reads_fofn_ref",
-    "assembly_input_ref",
-    "long_reads_fofn_ref",
-)
+def _resolution_assets(resolution: Any, resource_type: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Adapt a logical resource to the survey stage's private asset cursor."""
 
-
-def _read_qc_clean_long_assets(state: TopLevelState) -> tuple[list[dict[str, Any]], str | None]:
-    """Materialize clean_long_reads-shaped assets from read_qc stage outputs.
-
-    Mirrors assembly's preference for filtered FOFN / assembly_input_ref without
-    requiring read_qc to re-register into the asset registry.
-
-    Returns:
-        (assets, error). When read_qc is ready and declares long-read outputs,
-        a resolution failure is returned as error (caller must not fall back).
-        When read_qc is absent/not ready/has no long-read keys, returns ([], None).
-    """
-    read_qc_out = (state.get("stage_outputs") or {}).get("read_qc") or {}
-    if not isinstance(read_qc_out, dict) or not read_qc_out:
+    if not resolution.found:
         return [], None
-
-    status = read_qc_out.get("status")
-    if status not in _READ_QC_READY_STATUSES:
-        return [], None
-
-    declared_keys = [key for key in _READ_QC_LONG_READ_KEYS if read_qc_out.get(key)]
-    if not declared_keys:
-        return [], None
-
-    paths, path_error = _read_qc_long_read_paths(read_qc_out)
-    if path_error:
-        return [], path_error
-    if not paths:
-        return [], (
-            "read_qc declared long-read outputs "
-            f"({', '.join(declared_keys)}) but no readable read paths were resolved"
-        )
-
-    missing = [str(path) for path in paths if not path.exists()]
+    missing = [path for path in resolution.paths if not Path(path).is_file()]
     if missing:
-        preview = ", ".join(missing[:3])
-        more = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
-        return [], (
-            "read_qc long-read outputs are missing on disk: "
-            f"{preview}{more}; refusing to fall back to raw registry reads"
-        )
-
-    session_id = str(state.get("session_id") or "session")
-    assets: list[dict[str, Any]] = []
-    for path in paths:
+        return [], f"{resource_type} resource path not found: {missing[0]}"
+    metadata = resolution.metadata
+    asset_ids = list(metadata.get("asset_ids") or metadata.get("input_asset_ids") or [])
+    platforms = list(metadata.get("platforms") or [])
+    formats = list(metadata.get("formats") or [])
+    assets = []
+    for index, path in enumerate(resolution.paths):
         assets.append(
             {
-                "asset_id": f"{session_id}:clean_long_reads:read_qc:{path.name}",
-                "asset_type": "clean_long_reads",
-                "path": str(path),
-                "platform": read_qc_out.get("platform"),
-                "format": read_qc_out.get("format"),
-                "source": "read_qc",
+                "asset_id": asset_ids[index] if index < len(asset_ids) else f"{resource_type}:{index}",
+                "asset_type": resource_type,
+                "path": path,
+                "platform": platforms[0] if platforms else metadata.get("platform"),
+                "format": formats[0] if formats else metadata.get("format"),
+                "source": resolution.source,
             }
         )
     return assets, None
-
-
-def _read_qc_long_read_paths(read_qc_out: dict[str, Any]) -> tuple[list[Path], str | None]:
-    """Expand read_qc long-read refs into concrete paths (FOFN relative to the FOFN file)."""
-    refs = read_qc_out.get("filtered_long_reads_refs")
-    if isinstance(refs, list) and refs:
-        return [Path(str(item)).expanduser() for item in refs if item], None
-    if read_qc_out.get("filtered_long_reads_ref"):
-        return [Path(str(read_qc_out["filtered_long_reads_ref"])).expanduser()], None
-
-    for key in ("filtered_long_reads_fofn_ref", "assembly_input_ref", "long_reads_fofn_ref"):
-        value = read_qc_out.get(key)
-        if not value:
-            continue
-        candidate = Path(str(value)).expanduser()
-        if candidate.suffix == ".fofn" or candidate.name.endswith(".fofn"):
-            try:
-                paths = parse_fofn_paths(candidate)
-            except AssemblyInputError as exc:
-                return [], f"read_qc {key} {exc}"
-            if not paths:
-                return [], f"read_qc {key} FOFN is empty or unreadable: {candidate}"
-            return paths, None
-        return [candidate], None
-    return [], None
 
 
 def select_survey_mode(state: TopLevelState) -> dict:
@@ -606,7 +530,7 @@ def _record_result(
 
 
 def _validate_methods(method_names: list[str]) -> str | None:
-    registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
+    registry = load_descriptor_registry()
     for method_name in method_names:
         if method_name not in registry.methods:
             return f"descriptor missing: {method_name}"

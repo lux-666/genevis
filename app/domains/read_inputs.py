@@ -14,7 +14,7 @@ class AssemblyInputError(ValueError):
 
 
 def resolve_assembly_read_paths(
-    input_ref: str | Path | None,
+    input_ref: str | Path | list[str] | None,
     input_type: AssemblyReadInputType | None,
 ) -> list[Path]:
     """Resolve one canonical runtime input into existing read files.
@@ -23,8 +23,23 @@ def resolve_assembly_read_paths(
     case they are anchored to the FOFN directory rather than the process CWD.
     """
 
-    if input_ref is None or not str(input_ref).strip():
+    if input_ref is None or (not isinstance(input_ref, list) and not str(input_ref).strip()):
         raise AssemblyInputError("requires assembly input_ref")
+    if isinstance(input_ref, list):
+        paths = [Path(path).expanduser() for path in input_ref if str(path).strip()]
+        non_absolute = [str(path) for path in paths if not path.is_absolute()]
+        if non_absolute:
+            raise AssemblyInputError(
+                f"requires absolute assembly input refs: {non_absolute}"
+            )
+        if input_type != "clean_long_reads":
+            raise AssemblyInputError(f"does not support list input_type: {input_type}")
+        if not paths:
+            raise AssemblyInputError("requires at least one read path")
+        missing = [str(path) for path in paths if not path.is_file()]
+        if missing:
+            raise AssemblyInputError(f"read files not found: {missing}")
+        return paths
     source = Path(input_ref).expanduser()
     if not source.is_absolute():
         raise AssemblyInputError(f"requires an absolute assembly input_ref: {source}")
