@@ -20,6 +20,7 @@ from app.schemas.resource_ref import ResourceRef
 from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import build_t2t_candidates, scan_read_telomeres
+from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -381,10 +382,10 @@ class T2TStageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
-            out_dir = Path(tmpdir) / "out"
-            work_dir = Path(tmpdir) / "work"
-            out_dir.mkdir()
-            work_dir.mkdir()
+            paths = SessionPaths.from_run_dir(state["data_dir"])
+            out_dir = paths.artifact_path("t2t", "outputs", "t2t_finishing")
+            work_dir = paths.work_path("t2t", "t2t_finishing")
+            work_dir.mkdir(parents=True)
             state["stage_outputs"]["t2t"] = {
                 "status": "reads_prepared",
                 "ont_reads_path": str(reads),

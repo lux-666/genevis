@@ -10,7 +10,7 @@ from app.execution.evidence import load_frozen_attempt, persist_frozen_attempt
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_MODEL_SUMMARY
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.lifecycle import (
     attempt_artifacts,
     build_method_graph,
@@ -59,18 +59,17 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
         return update_genome_survey_output(state, blocked)
 
     working_dir = stage_work_dir(state, "genome_survey", "genomescope2")
-    artifact_dir = stage_artifacts_dir(state, "genome_survey", "genomescope2")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     params = dict(output["survey_parameters"])
-    summary_path = artifact_dir / "summary.txt"
+    output_dir = working_dir / "output"
+    summary_path = output_dir / "summary.txt"
     script_path = working_dir / "run_genomescope2.sh"
     script_path.write_text(
         "set -e\n"
-        f"mkdir -p {shlex.quote(str(artifact_dir))}\n"
+        f"mkdir -p {shlex.quote(str(output_dir))}\n"
         f"genomescope2 -i {shlex.quote(str(Path(output['kmer_hist_path'])))} "
-        f"-o {shlex.quote(str(artifact_dir))} -k {int(params['kmer_size'])}\n"
+        f"-o {shlex.quote(str(output_dir))} -k {int(params['kmer_size'])}\n"
         f"test -f {shlex.quote(str(summary_path))}\n",
         encoding="utf-8",
     )
@@ -98,7 +97,7 @@ def freeze_genomescope2_attempt(state: TopLevelState) -> dict:
             "status": FROZEN_STATUS,
             FROZEN_ATTEMPT_KEY: attempt_ref.model_dump(mode="json"),
             "genomescope2_summary_path": str(summary_path),
-            "genomescope2_output_dir": str(artifact_dir),
+            "genomescope2_output_dir": str(output_dir),
         },
     )
 
@@ -128,10 +127,12 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
     )
     validate_attempt_execution(state, attempt, output[EXECUTION_RESULT_KEY])
     artifacts = attempt_artifacts(
+        state,
         attempt,
         {str(Path(output["genomescope2_summary_path"])): GENOME_SURVEY_MODEL_SUMMARY},
     )
     record_attempt_success(state, attempt, artifacts)
+    summary_ref = str(artifacts[0].file_path)
 
     substeps = dict(output.get("substeps") or {})
     substeps["genome_model"] = {
@@ -139,14 +140,15 @@ def collect_genomescope2_artifacts(state: TopLevelState) -> dict:
         "name": "genome_model",
         "status": "executed",
         "method_name": attempt.method_name,
-        "summary_ref": output["genomescope2_summary_path"],
+        "summary_ref": summary_ref,
     }
     return update_genome_survey_output(
         state,
         {
             "status": COLLECTED_STATUS,
-            "genomescope2_summary_ref": output["genomescope2_summary_path"],
-            "genomescope2_output_dir_ref": output["genomescope2_output_dir"],
+            "genomescope2_summary_path": summary_ref,
+            "genomescope2_summary_ref": summary_ref,
+            "genomescope2_output_dir_ref": str(Path(summary_ref).parent),
             "artifact_refs": [
                 *list(output.get("artifact_refs") or []),
                 *[str(artifact.file_path) for artifact in artifacts],

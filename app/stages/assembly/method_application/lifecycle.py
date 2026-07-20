@@ -16,7 +16,11 @@ from uuid import uuid4
 from langgraph.graph import END, START, StateGraph
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import (
+    publish_artifact_record,
+    publish_or_recover_work_artifact,
+    register_artifact_records,
+)
 from app.execution.evidence import (
     build_execution_evidence,
     persist_frozen_attempt,
@@ -41,14 +45,19 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
+from app.storage.paths import SessionPaths
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
     load_recommendation_bundle,
     read_json_artifact,
     write_attempt_json_artifact,
 )
-from app.stages.base import ordered_unique, stage_output, update_stage_output
-from app.storage.publish import publish_file
+from app.stages.base import (
+    absolute_data_dir,
+    ordered_unique,
+    stage_output,
+    update_stage_output,
+)
 
 
 @dataclass(frozen=True)
@@ -360,17 +369,34 @@ def collect_method_artifacts(
             },
         )
     ]
+    paths = SessionPaths.from_run_dir(absolute_data_dir(state))
     for path, artifact_type in extra_artifacts:
-        if path.exists():
-            artifacts.append(
-                ArtifactMeta.from_file(
-                    path,
+        resolved_path = path.expanduser().resolve(strict=False)
+        try:
+            resolved_path.relative_to(paths.artifacts_dir)
+        except ValueError:
+            try:
+                published = publish_or_recover_work_artifact(
+                    paths.run_dir,
+                    attempt.session_id,
+                    resolved_path,
                     stage="assembly",
                     method_name=lifecycle.method_name,
                     artifact_type=artifact_type,
                     metadata={"attempt_id": attempt.attempt_id},
                 )
+            except FileNotFoundError:
+                continue
+            resolved_path = published.path
+        artifacts.append(
+            ArtifactMeta.from_file(
+                resolved_path,
+                stage="assembly",
+                method_name=lifecycle.method_name,
+                artifact_type=artifact_type,
+                metadata={"attempt_id": attempt.attempt_id},
             )
+        )
 
     bundle_path = _candidate_bundle_path(output, lifecycle.method_name)
     if bundle_path is None:
@@ -417,25 +443,29 @@ def collect_method_artifacts(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    bundle_artifact = ArtifactMeta.from_file(
+        temporary_bundle,
+        stage="assembly",
+        method_name=lifecycle.method_name,
+        artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        metadata={
+            "candidate_id": bundle.candidate_id,
+            "execution_enabled": True,
+            "attempt_id": attempt.attempt_id,
+        },
+    )
     try:
-        publish_file(temporary_bundle, executed_bundle_path)
+        publish_artifact_record(
+            state.get("data_dir", "data"),
+            attempt.session_id,
+            bundle_artifact,
+            destination=executed_bundle_path,
+        )
     finally:
         temporary_bundle.unlink(missing_ok=True)
-    artifacts.append(
-        ArtifactMeta.from_file(
-            executed_bundle_path,
-            stage="assembly",
-            method_name=lifecycle.method_name,
-            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
-            metadata={
-                "candidate_id": bundle.candidate_id,
-                "execution_enabled": True,
-                "attempt_id": attempt.attempt_id,
-            },
-        )
-    )
+    artifacts.append(bundle_artifact)
 
-    publish_artifact_records(
+    register_artifact_records(
         state.get("data_dir", "data"), attempt.session_id, artifacts
     )
     ledger = Ledger(state.get("data_dir", "data"))

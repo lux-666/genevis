@@ -1274,7 +1274,14 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 script_path = attempt.script_path
                 self.assertTrue(script_path.exists(), f"script not found: {script_path}")
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_out_dir = run_dir / "artifacts" / "assembly_review" / "quast"
+                expected_out_dir = (
+                    run_dir
+                    / "work"
+                    / "assembly_review"
+                    / "quast"
+                    / "s1_assembly.candidate.flye"
+                    / "quast_out"
+                )
                 self.assertIn(str(expected_out_dir), script_text)
                 self.assertNotIn(" out/runs/s1/artifacts/", script_text)
             finally:

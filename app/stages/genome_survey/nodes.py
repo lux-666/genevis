@@ -9,7 +9,7 @@ from typing import Any
 
 from app.storage.ledger import Ledger
 from app.domains.genome_size import resolve_explicit_genome_size
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.workflow import next_stage_name
 from app.schemas.artifacts import (
     ArtifactMeta,
@@ -21,6 +21,7 @@ from app.stages.base import (
     append_route_trace,
     stage_artifacts_dir,
     stage_output,
+    stage_work_dir,
     update_stage_output,
 )
 from app.stages.resource_resolution import resolve_stage_resource
@@ -494,16 +495,17 @@ def _record_result(
     preserve_artifact_refs: bool = False,
 ) -> dict:
     data_dir = Path(state.get("data_dir", "data"))
-    result_dir = stage_artifacts_dir(state, "genome_survey")
-    result_dir.mkdir(parents=True, exist_ok=True)
-    result_path = result_dir / "genome_survey_result.json"
-    result_path.write_text(
+    result_source = stage_work_dir(
+        state, "genome_survey", "genome_survey_result.json"
+    )
+    result_source.parent.mkdir(parents=True, exist_ok=True)
+    result_source.write_text(
         json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
     artifact = ArtifactMeta.from_file(
-        result_path,
+        result_source,
         stage="genome_survey",
         method_name=GENOME_SURVEY_METHOD,
         artifact_type="genome_survey_result",
@@ -513,7 +515,14 @@ def _record_result(
             "skip_reason": result.skip_reason,
         },
     )
-    publish_artifact_records(data_dir, state["session_id"], [artifact])
+    result_path = publish_artifact_record(
+        data_dir,
+        state["session_id"],
+        artifact,
+        destination=stage_artifacts_dir(
+            state, "genome_survey", "genome_survey_result.json"
+        ),
+    ).path
     Ledger(data_dir).record_artifact_registered(state["session_id"], artifact.model_dump(mode="json"))
     artifact_refs = [str(artifact.file_path)]
     if preserve_artifact_refs:

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -324,18 +324,33 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
                 "get_seqs_exclude_haplotigs": True,
             },
         )
-        bundle_path.write_text(json.dumps(purged_candidate.model_dump(mode="json"), indent=2), encoding="utf-8")
-        purged_candidate_ref = str(bundle_path)
-        artifacts.append(
-            ArtifactMeta.from_file(
-                bundle_path,
-                stage="assembly_dedup",
-                method_name=ASSEMBLY_DEDUP_METHOD,
-                artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
-                metadata={"candidate_id": purged_candidate.candidate_id, "raw_candidate_ref": source_candidate_ref},
-            )
+        bundle_source = stage_work_dir(
+            state, "assembly_dedup", "purged_candidate.json"
         )
-    publish_artifact_records(data_dir, session_id, artifacts)
+        bundle_source.write_text(
+            json.dumps(purged_candidate.model_dump(mode="json"), indent=2),
+            encoding="utf-8",
+        )
+        bundle_artifact = ArtifactMeta.from_file(
+            bundle_source,
+            stage="assembly_dedup",
+            method_name=ASSEMBLY_DEDUP_METHOD,
+            artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+            metadata={
+                "candidate_id": purged_candidate.candidate_id,
+                "raw_candidate_ref": source_candidate_ref,
+            },
+        )
+        purged_candidate_ref = str(
+            publish_artifact_record(
+                data_dir,
+                session_id,
+                bundle_artifact,
+                destination=bundle_path,
+            ).path
+        )
+        artifacts.append(bundle_artifact)
+    register_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
     attempt_id = None

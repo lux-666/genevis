@@ -1249,22 +1249,6 @@ def persist_decision_artifact(
     return decision_path
 
 
-def applied_decision_artifact_path(
-    request: "ResumeReviewRequest",
-    data_dir: str,
-) -> Path:
-    """Return the canonical decision written by a successful gate applier."""
-
-    if not request.review_request_id:
-        raise ValueError("applied decision requires review_request_id")
-    path = SessionPaths.from_run_dir(data_dir).artifact_path(
-        "reviews", request.review_request_id, "decision.json"
-    )
-    if not path.is_file():
-        raise FileNotFoundError(f"review gate did not persist its decision: {path}")
-    return path
-
-
 # ---------------------------------------------------------------------------
 # Standalone CLI entry: gene-agent review
 # ---------------------------------------------------------------------------
@@ -1279,13 +1263,12 @@ def run_interactive_review(
     """Full interactive review flow: inspect → prompt → validate → persist → resume."""
     located = locate_session_data_dir(data_dir, session_id)
     data_dir = str(located or SessionPaths(data_dir, session_id).run_dir)
-    from app.control.lifecycle import (
-        DurableResumeUnavailableError,
-        ResumeValidationError,
-        resume_review_state,
+    from app.control.resume_transaction import (
+        ResumeTransactionError,
+        execute_resume_transaction,
     )
     from app.graph.checkpointer import checkpoint_db_path
-    from app.review.annotation_intake import collect_annotation_intake_selection, persist_annotation_intake_plan
+    from app.review.annotation_intake import collect_annotation_intake_selection
 
     result = collect_gate_decision(session_id, data_dir)
     if result is None:
@@ -1303,118 +1286,37 @@ def run_interactive_review(
         print(f"error: no checkpoint database at {db_path}", file=sys.stderr)
         return 1
 
-    from app.storage.ledger import Ledger
     from app.entrypoints.run import build_graph
 
     graph = build_graph(backend="sqlite", data_dir=data_dir)
     config = {"configurable": {"thread_id": session_id}}
-    snapshot = graph.get_state(config)
-    if (
-        snapshot is None
-        or not snapshot.values
-        or snapshot.values.get("session_id") != session_id
-    ):
-        print(f"error: no checkpoint for session {session_id!r}", file=sys.stderr)
-        return 1
 
-    state = snapshot.values
-    if state.get("supervision_state") != "blocked_human":
-        print(
-            f"error: session {session_id!r} is not blocked for human review "
-            f"(supervision_state={state.get('supervision_state')!r})",
-            file=sys.stderr,
-        )
-        return 1
-
-    intake_selection = None
     try:
-        intake_selection = collect_annotation_intake_selection(
-            state=state,
+        transaction = execute_resume_transaction(
+            graph=graph,
+            config=config,
+            session_id=session_id,
+            data_dir=data_dir,
             request=request,
+            source="interactive_review",
+            checkpointer="sqlite",
+            annotation_intake_collector=collect_annotation_intake_selection,
         )
-        update = resume_review_state(state, request)
-        intake = None
-        if intake_selection is not None:
-            merged_state = {**state, **update}
-            intake = persist_annotation_intake_plan(
-                state=merged_state,
-                recommended_plan=intake_selection.recommended_plan,
-                final_plan=intake_selection.final_plan,
-                request=request,
-                source="interactive_review",
-            )
-            update = {**update, **intake.update}
-    except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-        from app.storage.ledger import Ledger as _Ledger
-        _Ledger(data_dir).record_event(session_id, "resume_rejected", {
-            "source": "interactive_review",
-            "error": f"{type(exc).__name__}: {exc}",
-            "decision": {"stage": request.stage, "decision": request.decision},
-        })
-        print(f"error: resume rejected: {exc}", file=sys.stderr)
-        return 1
-    except (RuntimeError, ValueError) as exc:
-        from app.storage.ledger import Ledger as _Ledger
-        _Ledger(data_dir).record_event(session_id, "resume_rejected", {
-            "source": "interactive_review",
-            "error": f"{type(exc).__name__}: {exc}",
-            "decision": {"stage": request.stage, "decision": request.decision},
-        })
-        print(f"error: resume rejected: {exc}", file=sys.stderr)
+    except ResumeTransactionError as exc:
+        if exc.phase == "validation":
+            print(f"error: resume rejected: {exc}", file=sys.stderr)
+        else:
+            print(f"error: resume {exc.phase} failed: {exc}", file=sys.stderr)
         return 1
 
-    decision_path = applied_decision_artifact_path(request, data_dir)
-    print(f"decision_artifact: {decision_path}")
-    if intake is not None:
-        print(f"annotation_intake_plan: {intake.artifact_ref}")
-
-    ledger = Ledger(data_dir)
-    resume_event_payload = {
-        "source": "interactive_review",
-        "decision_artifact_ref": SessionPaths.from_run_dir(data_dir).to_ref(decision_path),
-        "decision": {
-            "stage": request.stage,
-            "decision": request.decision,
-            "candidate_id": request.candidate_id,
-            "method_name": request.method_name,
-            "decided_by": request.decided_by,
-        },
-    }
-    ledger.record_event(session_id, "resume_started", resume_event_payload)
-
-    try:
-        update_result = graph.update_state(config, update)
-    except Exception as exc:
-        ledger.record_event(
-            session_id,
-            "resume_failed",
-            {**resume_event_payload, "error": f"update_state failed: {type(exc).__name__}: {exc}"},
+    final = transaction.state
+    if transaction.decision_artifact_path is not None:
+        print(f"decision_artifact: {transaction.decision_artifact_path}")
+    if transaction.annotation_intake_artifact_ref is not None:
+        print(
+            "annotation_intake_plan: "
+            f"{transaction.annotation_intake_artifact_ref}"
         )
-        print(f"error: resume update failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-    if update_result is False:
-        ledger.record_event(
-            session_id,
-            "resume_failed",
-            {**resume_event_payload, "error": "update_state returned False"},
-        )
-        print("error: resume update failed: update_state returned False", file=sys.stderr)
-        return 1
-    try:
-        final = graph.invoke(None, config=config)
-    except Exception as exc:
-        ledger.record_event(
-            session_id, "resume_failed",
-            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
-        )
-        print(f"error: resume invoke failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-
-    ledger.record_event(session_id, "resume_completed", {
-        **resume_event_payload,
-        "current_stage": final.get("current_stage"),
-        "supervision_state": final.get("supervision_state"),
-    })
 
     print(f"\nsession_id:        {session_id}")
     print(f"current_stage:     {final.get('current_stage', 'unknown')}")

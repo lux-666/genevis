@@ -85,13 +85,19 @@ def publish_artifact_records(
     session_id: str,
     artifacts: list[ArtifactMeta],
 ) -> list[ArtifactRef]:
-    """Publish and register a batch of artifact metadata records."""
+    """Move stage-work files into immutable storage and register them.
 
-    paths = _session_paths(data_dir, session_id)
-    ensure_run_layout(paths)
-    for artifact in artifacts:
-        artifact.file_path = _publish_work_backed_artifact(paths, artifact)
-    return register_artifact_records(paths.run_dir, session_id, artifacts)
+    Sources must live below the matching ``work/<stage>/`` tree.  Files that
+    have already crossed the publication boundary must be passed to
+    :func:`register_artifact_records` instead.  Keeping the two operations
+    distinct prevents a producer from overwriting a fixed ``artifacts/`` path
+    and only discovering the conflict while appending the index row.
+    """
+
+    return [
+        publish_artifact_record(data_dir, session_id, artifact).ref
+        for artifact in artifacts
+    ]
 
 
 def publish_artifact_record(
@@ -103,9 +109,12 @@ def publish_artifact_record(
 ) -> PublishedArtifact:
     """Explicitly publish and index one artifact, returning its durable identity.
 
-    ``destination`` must be below the run's ``artifacts/`` tree.  When it is
-    omitted, a stage work file is published to the matching
-    ``artifacts/<stage>/outputs/`` path.
+    Without an explicit destination, the source must live below the matching
+    ``work/<stage>/`` tree and is published to
+    ``artifacts/<stage>/outputs/``.  An explicit destination accepts any
+    run-local ``work/`` source and must point below the run's ``artifacts/``
+    tree; this supports fixed contract paths without allowing artifact-to-
+    artifact rewrites.
     """
 
     paths = _session_paths(data_dir, session_id)
@@ -134,7 +143,7 @@ def recover_published_artifact(
 ) -> PublishedArtifact | None:
     """Recover one deterministic artifact path and repair a missing index row.
 
-    An existing destination is re-registered through the normal publication
+    An existing destination is re-registered through the strict registration
     boundary, so metadata conflicts still fail closed.  If an index row exists
     but its file disappeared, resolution raises instead of treating the effect
     as absent and allowing a nondeterministic producer to run again.
@@ -151,12 +160,8 @@ def recover_published_artifact(
             artifact_type=artifact_type,
             metadata=metadata,
         )
-        return publish_artifact_record(
-            paths.run_dir,
-            session_id,
-            artifact,
-            destination=destination_path,
-        )
+        [ref] = register_artifact_records(paths.run_dir, session_id, [artifact])
+        return PublishedArtifact(ref=ref, path=destination_path)
 
     indexed_ref = _indexed_artifact_ref_for_path(
         paths,
@@ -422,14 +427,7 @@ def _registration_for(paths: SessionPaths, artifact: ArtifactMeta) -> dict[str, 
 def _publish_work_backed_artifact(paths: SessionPaths, artifact: ArtifactMeta) -> Path:
     """Publish a mutable stage work product into its immutable output tree."""
     source = Path(artifact.file_path).expanduser().resolve(strict=False)
-    try:
-        destination = _work_artifact_destination(paths, source, artifact.stage)
-    except DataLayoutError:
-        try:
-            source.relative_to(paths.work_dir)
-        except ValueError:
-            return source
-        raise
+    destination = _work_artifact_destination(paths, source, artifact.stage)
     return publish_file(source, destination)
 
 
@@ -454,8 +452,20 @@ def _publish_to_destination(
     destination: Path | str,
 ) -> Path:
     source = Path(artifact.file_path).expanduser().resolve(strict=False)
+    _require_work_source(paths, source)
     destination_path = _artifact_destination_path(paths, destination)
     return publish_file(source, destination_path)
+
+
+def _require_work_source(paths: SessionPaths, source: Path) -> None:
+    try:
+        relative = source.relative_to(paths.work_dir)
+    except ValueError as exc:
+        raise DataLayoutError(
+            f"publication source must be below {paths.work_dir}: {source}"
+        ) from exc
+    if paths.session_id in relative.parts:
+        raise DataLayoutError(f"session_id must not be repeated below work/: {source}")
 
 
 def _artifact_destination_path(

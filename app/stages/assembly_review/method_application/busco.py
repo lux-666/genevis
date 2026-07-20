@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -37,7 +37,7 @@ from app.stages.assembly_review.method_application.lifecycle import (
     update_review_output,
     update_signal,
 )
-from app.stages.base import absolute_data_dir, ordered_unique, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
 
 BUSCO_METHOD = "assembly_review.eval.busco"
 FROZEN_STATUS = "busco_frozen"
@@ -86,17 +86,16 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
         working_dir = stage_work_dir(state, "assembly_review", "busco", safe_id)
-        artifact_dir = stage_artifacts_dir(state, "assembly_review", "busco", safe_id)
         working_dir.mkdir(parents=True, exist_ok=True)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
         script_path = working_dir / "run_busco.sh"
         out_name = f"busco_{safe_id}"
-        short_summary = artifact_dir / out_name / f"short_summary.specific.{lineage_path.name}.{out_name}.txt"
+        output_dir = working_dir / "output"
+        short_summary = output_dir / out_name / f"short_summary.specific.{lineage_path.name}.{out_name}.txt"
         assembly_ref = Path(candidate["final_assembly_ref"])
         script_path.write_text(
             "set -e\n"
-            f"mkdir -p {shlex.quote(str(artifact_dir))}\n"
-            f"cd {shlex.quote(str(artifact_dir))}\n"
+            f"mkdir -p {shlex.quote(str(output_dir))}\n"
+            f"cd {shlex.quote(str(output_dir))}\n"
             f"busco -i {shlex.quote(str(assembly_ref))} -l {shlex.quote(str(lineage_path))} "
             f"-o {shlex.quote(out_name)} -m {shlex.quote(str(params['mode']))} "
             f"--offline --cpu {params['threads']}\n"
@@ -109,7 +108,7 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
             stage="assembly_review", method_name=BUSCO_METHOD, script_path=script_path,
             working_dir=working_dir, expected_outputs=[short_summary], env=output.get("env"), env_spec=env_spec,
             metadata={"candidate_id": candidate_id, "draft_assembly_ref": str(assembly_ref),
-                      "busco_output_dir": str(artifact_dir / out_name), "short_summary_ref": str(short_summary),
+                      "busco_output_dir": str(output_dir / out_name), "short_summary_ref": str(short_summary),
                       "lineage_path": str(lineage_path), "lineage_name": params["lineage_name"],
                       "lineage_version": params["lineage_version"], "lineage_source": params["lineage_source"],
                       "mode": params["mode"], "threads": params["threads"]},
@@ -156,15 +155,32 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
         metric_refs: list[str] = []
         metadata: dict[str, Any] = {"attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "busco_output_dir": attempt.metadata.get("busco_output_dir"), "provenance": busco_provenance(attempt)}
         if result.success:
-            short_summary = Path(attempt.metadata["short_summary_ref"])
-            artifacts.append(ArtifactMeta.from_file(short_summary, stage="assembly_review", method_name=BUSCO_METHOD, artifact_type=ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
+            artifact_metadata = {"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}
+            short_summary = publish_or_recover_work_artifact(
+                data_dir,
+                session_id,
+                Path(attempt.metadata["short_summary_ref"]),
+                stage="assembly_review",
+                method_name=BUSCO_METHOD,
+                artifact_type=ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY,
+                metadata=artifact_metadata,
+            ).path
+            artifacts.append(ArtifactMeta.from_file(short_summary, stage="assembly_review", method_name=BUSCO_METHOD, artifact_type=ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY, metadata=artifact_metadata))
             metric_refs.append(str(short_summary))
             metrics = parse_busco_short_summary(short_summary)
-            summary_path = Path(attempt.metadata["busco_output_dir"]).parent / "busco_summary.json"
-            summary_path.write_text(json.dumps({"session_id": session_id, "method_name": BUSCO_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "short_summary_ref": str(short_summary), "lineage": busco_provenance(attempt), "metrics": metrics, "notes": ["thresholds_not_applied_without_human_approval"]}, ensure_ascii=False, indent=2), encoding="utf-8")
-            artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=BUSCO_METHOD, artifact_type=ASSEMBLY_REVIEW_BUSCO_SUMMARY, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
+            summary_source = Path(attempt.working_dir) / "busco_summary.json"
+            summary_source.write_text(json.dumps({"session_id": session_id, "method_name": BUSCO_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "short_summary_ref": str(short_summary), "lineage": busco_provenance(attempt), "metrics": metrics, "notes": ["thresholds_not_applied_without_human_approval"]}, ensure_ascii=False, indent=2), encoding="utf-8")
+            summary_path = publish_or_recover_work_artifact(
+                data_dir,
+                session_id,
+                summary_source,
+                stage="assembly_review",
+                method_name=BUSCO_METHOD,
+                artifact_type=ASSEMBLY_REVIEW_BUSCO_SUMMARY,
+                metadata=artifact_metadata,
+            ).path
+            artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=BUSCO_METHOD, artifact_type=ASSEMBLY_REVIEW_BUSCO_SUMMARY, metadata=artifact_metadata))
             metric_refs.append(str(summary_path))
-            publish_artifact_records(data_dir, session_id, artifacts)
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
             for artifact in payloads:

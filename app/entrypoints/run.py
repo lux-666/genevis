@@ -658,18 +658,12 @@ def _interactive_gate_loop(
     data_dir: str,
 ) -> dict:
     """Loop on human gates: prompt operator, resume, repeat until not blocked."""
-    from app.control.lifecycle import (
-        DurableResumeUnavailableError,
-        ResumeValidationError,
-        resume_review_state,
+    from app.control.resume_transaction import (
+        ResumeTransactionError,
+        execute_resume_transaction,
     )
-    from app.entrypoints.review_interactive import (
-        applied_decision_artifact_path,
-        collect_gate_decision,
-    )
-    from app.review.annotation_intake import collect_annotation_intake_selection, persist_annotation_intake_plan
-
-    ledger = Ledger(data_dir)
+    from app.entrypoints.review_interactive import collect_gate_decision
+    from app.review.annotation_intake import collect_annotation_intake_selection
 
     while result.get("supervision_state") == "blocked_human":
         gate_result = collect_gate_decision(session_id, data_dir)
@@ -677,75 +671,34 @@ def _interactive_gate_loop(
             print("review skipped; session remains blocked")
             break
 
-        request, raw_decision = gate_result
+        request, _raw_decision = gate_result
 
-        snapshot = graph.get_state(config)
-        if not snapshot or not snapshot.values:
-            print("error: checkpoint lost", file=sys.stderr)
-            break
-
-        state = snapshot.values
-
-        intake_selection = None
         try:
-            intake_selection = collect_annotation_intake_selection(
-                state=state,
+            transaction = execute_resume_transaction(
+                graph=graph,
+                config=config,
+                session_id=session_id,
+                data_dir=data_dir,
                 request=request,
+                source="interactive_gate",
+                checkpointer="sqlite",
+                annotation_intake_collector=collect_annotation_intake_selection,
             )
-            update = resume_review_state(state, request)
-            intake = None
-            if intake_selection is not None:
-                merged_state = {**state, **update}
-                intake = persist_annotation_intake_plan(
-                    state=merged_state,
-                    recommended_plan=intake_selection.recommended_plan,
-                    final_plan=intake_selection.final_plan,
-                    request=request,
-                    source="interactive_gate",
-                )
-                update = {**update, **intake.update}
-        except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-            ledger.record_event(session_id, "resume_rejected", {
-                "source": "interactive_gate",
-                "error": str(exc),
-                "decision": {"stage": request.stage, "decision": request.decision},
-            })
-            print(f"error: resume rejected: {exc}", file=sys.stderr)
-            break
-        except RuntimeError as exc:
-            ledger.record_event(session_id, "resume_rejected", {
-                "source": "interactive_gate",
-                "error": str(exc),
-                "decision": {"stage": request.stage, "decision": request.decision},
-            })
-            print(f"error: resume rejected: {exc}", file=sys.stderr)
+        except ResumeTransactionError as exc:
+            print(
+                f"error: resume {exc.phase} failed: {exc}",
+                file=sys.stderr,
+            )
             break
 
-        decision_path = applied_decision_artifact_path(request, data_dir)
-        print(f"decision_artifact: {decision_path}")
-        if intake is not None:
-            print(f"annotation_intake_plan: {intake.artifact_ref}")
-
-        resume_payload = {
-            "source": "interactive_gate",
-            "decision_artifact_ref": SessionPaths.from_run_dir(data_dir).to_ref(decision_path),
-            "decision": {"stage": request.stage, "gate_id": request.gate_id, "decision": request.decision},
-        }
-        ledger.record_event(session_id, "resume_started", resume_payload)
-
-        graph.update_state(config, update)
-        try:
-            result = graph.invoke(None, config=config)
-        except Exception as exc:
-            ledger.record_event(session_id, "resume_failed", {**resume_payload, "error": str(exc)})
-            print(f"error: resume invoke failed: {exc}", file=sys.stderr)
-            break
-
-        ledger.record_event(session_id, "resume_completed", {
-            **resume_payload,
-            "current_stage": result.get("current_stage"),
-            "supervision_state": result.get("supervision_state"),
-        })
+        result = transaction.state
+        if transaction.decision_artifact_path is not None:
+            print(f"decision_artifact: {transaction.decision_artifact_path}")
+        if transaction.annotation_intake_artifact_ref is not None:
+            print(
+                "annotation_intake_plan: "
+                f"{transaction.annotation_intake_artifact_ref}"
+            )
         print(f"\nresumed → stage={result.get('current_stage')} state={result.get('supervision_state')}")
 
     return result
@@ -1090,11 +1043,9 @@ def _snapshot_resume_decision(
 
 
 def _run_resume(args: argparse.Namespace) -> int:
-    from app.control.lifecycle import (
-        DurableResumeUnavailableError,
-        ResumeValidationError,
-        UnsupportedLifecycleOperationError,
-        resume_review_state,
+    from app.control.resume_transaction import (
+        ResumeTransactionError,
+        execute_resume_transaction,
     )
     from app.review.base import load_resume_review_request
 
@@ -1125,7 +1076,7 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # The downstream `resume_review_state` re-checks that
+    # The control-layer resume transaction re-checks that
     # state.session_id == decision.session_id. That is intentional
     # defense-in-depth: the helper is also called directly by the
     # in-process resume tests in `tests/test_review_resume.py`, where
@@ -1149,26 +1100,6 @@ def _run_resume(args: argparse.Namespace) -> int:
 
     graph = build_graph(backend=backend, data_dir=str(data_dir))
     config = {"configurable": {"thread_id": args.session_id}}
-    snapshot = graph.get_state(config)
-    # New LangGraph versions can return a default snapshot rather than
-    # None when the thread is missing, so cross-check session_id too —
-    # this is the only reliable signal that the checkpoint actually
-    # belongs to the session being resumed.
-    if (
-        snapshot is None
-        or not snapshot.values
-        or snapshot.values.get("session_id") != args.session_id
-    ):
-        print(
-            f"error: no checkpoint found for session_id {args.session_id!r} "
-            f"in {db_path}",
-            file=sys.stderr,
-        )
-        return 1
-
-    state = snapshot.values
-
-    ledger = Ledger(data_dir)
     try:
         paths = SessionPaths.from_run_dir(data_dir)
         decision_path = _snapshot_resume_decision(
@@ -1178,98 +1109,39 @@ def _run_resume(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"error: resume decision could not be materialized: {exc}", file=sys.stderr)
         return 1
-    resume_event_payload = {
-        "source": "cli",
-        "checkpointer": backend,
-        "data_dir": str(data_dir),
+    event_context = {
         "decision_file_ref": decision_ref,
-        "max_blocked_seconds": getattr(args, "max_blocked_seconds", None),
-        "decision": {
-            "stage": decision.stage,
-            "gate_id": decision.gate_id,
-            "decision": decision.decision,
-            "candidate_id": decision.candidate_id,
-            "method_name": decision.method_name,
-            "decided_by": decision.decided_by,
-            "rationale_artifact_ref": decision.rationale_artifact_ref,
-        },
     }
-    # Record resume_started before any state mutation so the audit
-    # trail captures the operator's intent even if validation, the
-    # state update, or the downstream invoke fails.
-    ledger.record_event(args.session_id, "resume_started", resume_event_payload)
-
     try:
-        update = resume_review_state(state, decision, blocked_timeout_seconds=getattr(args, "max_blocked_seconds", None))
-    except (ResumeValidationError, DurableResumeUnavailableError) as exc:
-        ledger.record_event(
-            args.session_id,
-            "resume_failed",
-            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
+        transaction = execute_resume_transaction(
+            graph=graph,
+            config=config,
+            session_id=args.session_id,
+            data_dir=data_dir,
+            request=decision,
+            source="cli",
+            checkpointer=backend,
+            blocked_timeout_seconds=getattr(args, "max_blocked_seconds", None),
+            collect_default_annotation_intake=True,
+            event_context=event_context,
         )
-        print(f"error: resume rejected: {exc}", file=sys.stderr)
-        return 1
-    except UnsupportedLifecycleOperationError as exc:
-        ledger.record_event(
-            args.session_id,
-            "resume_failed",
-            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
-        )
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    # Continue-downstream at assembly_review hands off to the annotation agent
-    # via annotation.intake_plan. A non-interactive decision-file resume must
-    # still record the recommended intake plan so gene_annotation can enter.
-    from app.review.annotation_intake import maybe_collect_annotation_intake
-
-    intake = maybe_collect_annotation_intake(
-        state=state,
-        resume_update=update,
-        request=decision,
-        source="cli",
-        interactive=False,
-    )
-    if intake is not None:
-        update = {**update, **intake.update}
-        print(f"annotation_intake_plan: {intake.artifact_ref}")
-
-    graph.update_state(config, update)
-    try:
-        result = graph.invoke(None, config=config)
-    except Exception as exc:
-        ledger.record_event(
-            args.session_id,
-            "resume_failed",
-            {**resume_event_payload, "error": f"{type(exc).__name__}: {exc}"},
-        )
-        # Match the other subcommands: surface the failure as a CLI
-        # error line and a non-zero exit code rather than letting a
-        # traceback leak to the operator's terminal. The underlying
-        # exception is still recorded in the ledger.
-        print(f"error: resume invoke failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    except ResumeTransactionError as exc:
+        if exc.phase == "validation":
+            print(f"error: resume rejected: {exc}", file=sys.stderr)
+        else:
+            print(f"error: resume {exc.phase} failed: {exc}", file=sys.stderr)
         return 1
 
+    result = transaction.state
+    if transaction.annotation_intake_artifact_ref is not None:
+        print(
+            "annotation_intake_plan: "
+            f"{transaction.annotation_intake_artifact_ref}"
+        )
     current_stage = result.get("current_stage", "unknown")
     supervision = result.get("supervision_state", "unknown")
     route_trace = result.get("route_trace", [])
     active_interrupt = result.get("active_interrupt")
-
-    ledger.record_event(
-        args.session_id,
-        "resume_completed",
-        {
-            **resume_event_payload,
-            "current_stage": current_stage,
-            "supervision_state": supervision,
-            "route_trace": route_trace,
-        },
-    )
-
-    if supervision in {"completed", "failed_terminal"}:
-        from app.reports.review_report import write_final_review_report
-
-        write_final_review_report(data_dir, args.session_id)
 
     print(f"session_id: {args.session_id}")
     print(f"current_stage: {current_stage}")

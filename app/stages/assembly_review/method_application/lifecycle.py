@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.execution.evidence import load_frozen_attempt, persist_execution_result
 from app.execution.method_runner import run_frozen_attempt
 from app.schemas.artifacts import (
@@ -28,7 +28,6 @@ from app.schemas.artifacts import (
 from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_artifacts_dir, stage_work_dir
-from app.storage.publish import publish_file
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
@@ -184,13 +183,22 @@ def write_json_artifact(state: TopLevelState, filename: str, payload: dict[str, 
     )
     temporary.parent.mkdir(parents=True, exist_ok=True)
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifact = ArtifactMeta.from_file(
+        temporary,
+        stage="assembly_review",
+        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
+        artifact_type=artifact_type,
+    )
     try:
-        publish_file(temporary, path)
+        published = publish_artifact_record(
+            data_dir,
+            state["session_id"],
+            artifact,
+            destination=path,
+        )
     finally:
         temporary.unlink(missing_ok=True)
-    artifact = ArtifactMeta.from_file(path, stage="assembly_review", method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD, artifact_type=artifact_type)
-    publish_artifact_records(data_dir, state["session_id"], [artifact])
-    return str(path)
+    return str(published.path)
 
 
 def rewrite_eval_bundle(state: TopLevelState, output: dict[str, Any], *, status: str) -> dict:

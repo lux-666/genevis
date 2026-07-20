@@ -12,7 +12,7 @@ from typing import Any, Callable
 from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.storage.artifacts import (
-    publish_artifact_records,
+    publish_artifact_record,
     publish_or_recover_work_artifact,
 )
 from app.execution.env_dispatch import resolve_method_env
@@ -251,8 +251,6 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
     review_required = bool(review_triggers)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = stage_artifacts_dir(state, "gene_annotation")
-    out_dir.mkdir(parents=True, exist_ok=True)
     plan = GeneAnnotationPlan(
         session_id=session_id,
         status="planned",
@@ -274,13 +272,16 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
         notes=gene_out.get("notes", []),
         metadata={"execution_enabled": bool(gene_out.get("executed_methods"))},
     )
-    plan_ref = out_dir / "gene_annotation_plan.json"
-    plan_ref.write_text(
+    plan_source = stage_work_dir(
+        state, "gene_annotation", "gene_annotation_plan.json"
+    )
+    plan_source.parent.mkdir(parents=True, exist_ok=True)
+    plan_source.write_text(
         json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        plan_ref,
+        plan_source,
         stage="gene_annotation",
         method_name=GENE_CONTRACT_METHOD,
         artifact_type="gene_annotation.plan",
@@ -291,7 +292,14 @@ def plan_evidence_merge_or_review(state: TopLevelState) -> dict:
             "review_required": review_required,
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    plan_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=stage_artifacts_dir(
+            state, "gene_annotation", "gene_annotation_plan.json"
+        ),
+    ).path
     return _update_gene_output(
         state,
         {
@@ -356,8 +364,6 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = stage_artifacts_dir(state, "gene_annotation")
-    out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = gene_out["expected_outputs"]
     final_gff_ref, final_proteins_ref, final_cds_ref, final_error = (
         _resolve_final_gene_set(gene_out)
@@ -389,13 +395,16 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
         notes=gene_out.get("notes", []),
         metadata={"execution_enabled": False},
     )
-    bundle_ref = out_dir / "gene_annotation_bundle.json"
-    bundle_ref.write_text(
+    bundle_source = stage_work_dir(
+        state, "gene_annotation", "gene_annotation_bundle.json"
+    )
+    bundle_source.parent.mkdir(parents=True, exist_ok=True)
+    bundle_source.write_text(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        bundle_ref,
+        bundle_source,
         stage="gene_annotation",
         method_name=GENE_CONTRACT_METHOD,
         artifact_type="gene_annotation.bundle",
@@ -406,7 +415,14 @@ def _commit_planned_gene_annotation(state: TopLevelState) -> dict:
             "review_required": gene_out.get("review_required", False),
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    bundle_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=stage_artifacts_dir(
+            state, "gene_annotation", "gene_annotation_bundle.json"
+        ),
+    ).path
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["gene_annotation"] = {
@@ -447,8 +463,6 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
     gene_out = _gene_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = stage_artifacts_dir(state, "gene_annotation")
-    out_dir.mkdir(parents=True, exist_ok=True)
     review_triggers = list(gene_out.get("review_triggers") or [])
     bundle = GeneAnnotationBundle(
         session_id=session_id,
@@ -473,8 +487,11 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
             "source": "manifest",
         },
     )
-    bundle_ref = out_dir / "gene_annotation_bundle.json"
-    bundle_ref.write_text(
+    bundle_source = stage_work_dir(
+        state, "gene_annotation", "gene_annotation_bundle.json"
+    )
+    bundle_source.parent.mkdir(parents=True, exist_ok=True)
+    bundle_source.write_text(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -484,7 +501,7 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
     # ownership and break portable run-relative references.
     artifacts: list[ArtifactMeta] = []
     bundle_artifact = ArtifactMeta.from_file(
-        bundle_ref,
+        bundle_source,
         stage="gene_annotation",
         method_name=GENE_CONTRACT_METHOD,
         artifact_type="gene_annotation.bundle",
@@ -497,7 +514,15 @@ def _commit_adopted_gene_annotation(state: TopLevelState) -> dict:
         },
     )
     artifacts.append(bundle_artifact)
-    publish_artifact_records(data_dir, session_id, artifacts)
+    published_bundle = publish_artifact_record(
+        data_dir,
+        session_id,
+        bundle_artifact,
+        destination=stage_artifacts_dir(
+            state, "gene_annotation", "gene_annotation_bundle.json"
+        ),
+    )
+    bundle_ref = published_bundle.path
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["gene_annotation"] = {

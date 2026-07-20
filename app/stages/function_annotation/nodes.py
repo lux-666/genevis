@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from app.storage.ledger import Ledger
 from app.storage.artifacts import (
-    publish_artifact_records,
+    publish_artifact_record,
     publish_or_recover_work_artifact,
 )
 from app.execution.env_dispatch import resolve_method_env
@@ -160,8 +160,6 @@ def validate_database_provenance(state: TopLevelState) -> dict:
 
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = stage_artifacts_dir(state, "function_annotation")
-    out_dir.mkdir(parents=True, exist_ok=True)
     plan = FunctionAnnotationPlan(
         session_id=session_id,
         status="planned",
@@ -179,13 +177,16 @@ def validate_database_provenance(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    plan_ref = out_dir / "function_annotation_plan.json"
-    plan_ref.write_text(
+    plan_source = stage_work_dir(
+        state, "function_annotation", "function_annotation_plan.json"
+    )
+    plan_source.parent.mkdir(parents=True, exist_ok=True)
+    plan_source.write_text(
         json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        plan_ref,
+        plan_source,
         stage="function_annotation",
         method_name=FUNCTION_CONTRACT_METHOD,
         artifact_type="function_annotation.plan",
@@ -195,7 +196,14 @@ def validate_database_provenance(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    plan_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=stage_artifacts_dir(
+            state, "function_annotation", "function_annotation_plan.json"
+        ),
+    ).path
     Ledger(data_dir).record_artifact_registered(
         session_id, artifact.model_dump(mode="json")
     )
@@ -483,8 +491,6 @@ def commit_function_annotation(state: TopLevelState) -> dict:
     function_out = _function_output(state)
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
-    out_dir = stage_artifacts_dir(state, "function_annotation")
-    out_dir.mkdir(parents=True, exist_ok=True)
     expected_outputs = function_out.get("expected_outputs", {})
     diamond_hits_ref = function_out.get("diamond_hits_ref")
     materialized_gene_function = _existing_file_ref(
@@ -526,13 +532,16 @@ def commit_function_annotation(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    bundle_ref = out_dir / "function_annotation_bundle.json"
-    bundle_ref.write_text(
+    bundle_source = stage_work_dir(
+        state, "function_annotation", "function_annotation_bundle.json"
+    )
+    bundle_source.parent.mkdir(parents=True, exist_ok=True)
+    bundle_source.write_text(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        bundle_ref,
+        bundle_source,
         stage="function_annotation",
         method_name=FUNCTION_CONTRACT_METHOD,
         artifact_type="function_annotation.bundle",
@@ -542,7 +551,14 @@ def commit_function_annotation(state: TopLevelState) -> dict:
             "provenance_required": True,
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    bundle_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=stage_artifacts_dir(
+            state, "function_annotation", "function_annotation_bundle.json"
+        ),
+    ).path
     Ledger(data_dir).record_artifact_registered(
         session_id, artifact.model_dump(mode="json")
     )

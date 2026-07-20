@@ -629,8 +629,6 @@ The following gaps were confirmed against the current implementation on
 
 | Priority | Area | Confirmed gap | Required ownership boundary |
 |---|---|---|---|
-| P0 | Artifact publication bypass | Shared atomic publishers and replay recovery exist, but several stage producers write a fixed path below `artifacts/` before calling `publish_artifact_records`. A conflicting replay mutates the published file before registration fails, leaving index/file hashes inconsistent. | Every durable producer writes under `work/` and crosses one atomic publish-and-register boundary; conflict tests must prove both the old file and index remain unchanged. |
-| P1 | Resume transaction | CLI resume, the in-process interactive gate loop, and interactive review separately implement validation, annotation intake, checkpoint update, graph invocation, and lifecycle events. Their `update_state` failure handling and event envelopes differ. | One control-layer transaction owns state mutation and lifecycle event ordering; entrypoints own only input/output. |
 | P1 | Whole-checkpoint budget | Stage cursor and resource-table budgets are enforced, but the 64 KiB target for the complete serialized `TopLevelState` and the 4 KiB active-interrupt budget are not yet enforced at one boundary. A 2 MB `review_notes` value is currently accepted by a memory checkpoint. | Add one whole-state checkpoint validator without reintroducing stage payload schemas or artifact bodies. |
 | P1 | GC retention roots | Read-only reachability analysis exists, but checkpoint removal changes the root set and not every terminal/stage event carries the refs needed for audit replay. | Prove terminal audit reconstruction and artifact reachability after compaction before enabling deletion; keep work cleanup outside automatic GC. |
 | P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
@@ -649,6 +647,12 @@ gaps were verified resolved on 2026-07-20. Recommendation files are scoped by
 `review_request_id` and reference the canonical request without embedding it;
 request bodies reject duplicate envelope fields; lifecycle classification reads
 ledger/artifact facts and treats report files only as optional paths.
+
+The former artifact-publication and duplicated-resume-transaction gaps were
+resolved on 2026-07-20. Durable producers now cross the existing atomic
+`work/` publication boundary, while already-published outputs use registration
+only. One control transaction owns all resume state mutation and lifecycle
+events; entrypoints own only operator I/O.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus

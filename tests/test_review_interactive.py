@@ -518,7 +518,8 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
                     patch("app.entrypoints.run.build_graph", return_value=graph), \
                     patch("app.review.annotation_intake.collect_annotation_intake_selection", side_effect=RuntimeError("annotation intake cancelled")) as intake_prompt, \
-                    patch("app.control.lifecycle.resume_review_state") as resume_mock:
+                    patch("app.control.resume_transaction.validate_resume_review_state"), \
+                    patch("app.control.resume_transaction.resume_review_state") as resume_mock:
                 code = run_interactive_review(session_id, str(data_dir))
 
             self.assertEqual(code, 1)
@@ -568,9 +569,9 @@ class RunInteractiveReviewTests(unittest.TestCase):
             decision_path.write_text("{}\n", encoding="utf-8")
             with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
                  patch("app.entrypoints.run.build_graph", return_value=graph), \
-                 patch("app.entrypoints.review_interactive.applied_decision_artifact_path", return_value=decision_path), \
                  patch("app.review.annotation_intake.collect_annotation_intake_selection", return_value=None), \
-                 patch("app.control.lifecycle.resume_review_state", return_value={"supervision_state": "running_stage"}):
+                 patch("app.control.resume_transaction.validate_resume_review_state"), \
+                 patch("app.control.resume_transaction.resume_review_state", return_value={"supervision_state": "running_stage"}):
                 code = run_interactive_review(session_id, str(data_dir))
 
             self.assertEqual(code, 1)
@@ -619,15 +620,17 @@ class RunInteractiveReviewTests(unittest.TestCase):
             with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
                  patch("app.entrypoints.run.build_graph", return_value=graph), \
                  patch("app.review.annotation_intake.collect_annotation_intake_selection", return_value=intake_selection), \
-                 patch("app.review.annotation_intake.persist_annotation_intake_plan", side_effect=ValueError("missing provenance")), \
-                 patch("app.control.lifecycle.resume_review_state", return_value={"supervision_state": "running_stage"}):
+                 patch("app.control.resume_transaction.persist_annotation_intake_plan", side_effect=ValueError("missing provenance")), \
+                 patch("app.control.resume_transaction.validate_resume_review_state"), \
+                 patch("app.control.resume_transaction.resume_review_state", return_value={"supervision_state": "running_stage"}):
                 code = run_interactive_review(session_id, str(data_dir))
 
             self.assertEqual(code, 1)
             events = Ledger(data_dir).read_events(session_id)
-            rejected = [event for event in events if event["event_type"] == "resume_rejected"]
-            self.assertEqual(len(rejected), 1)
-            self.assertIn("ValueError: missing provenance", rejected[0]["error"])
+            failed = [event for event in events if event["event_type"] == "resume_failed"]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]["phase"], "annotation_intake")
+            self.assertIn("ValueError: missing provenance", failed[0]["error"])
 
     def test_dry_run_writes_decision_without_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

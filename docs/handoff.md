@@ -7,7 +7,8 @@ in phase documents and Git.
 
 **Updated:** 2026-07-20
 
-**Current baseline:** `e74b96d` plus the uncommitted unified-resource refactor
+**Current baseline:** unified-resource baseline `b610ad5`, followed by the
+artifact-publication and resume-transaction slice described below
 
 ## Read Order
 
@@ -29,6 +30,10 @@ in phase documents and Git.
 - AutoHiC is the only Hi-C execution method; parent routing decides whether the
   stage is entered.
 - The diagnostic route tail uses one shared limit of 16 entries.
+- Durable producers now write below stage `work/` and cross the existing atomic
+  publication boundary; already-published shell outputs use registration only.
+- All three resume entrypoints use `app.control.resume_transaction`; entrypoints
+  retain prompts, decision-file handling, and output formatting only.
 
 Data v2 is accepted but only partially conformant. Its code-audited debt table
 is the current list: [`architecture/data-v2.md`](architecture/data-v2.md#22-confirmed-conformance-debt).
@@ -60,14 +65,14 @@ recommendation signals now flow from the asset registry through
 ## Next Implementation Slice
 
 The resource handoff, typed stage cursor, frozen-attempt, review persistence,
-read-only storage audit, durable SQLite resume, and assembly-to-annotation E2E
-paths are implemented. The next slice is based on the 2026-07-20 code audit:
+atomic artifact publication, unified resume transaction, read-only storage
+audit, durable SQLite resume, and assembly-to-annotation E2E paths are
+implemented. The next slice is based on the 2026-07-20 code audit:
 
-1. remove direct writes to fixed `artifacts/` paths and enforce atomic publish-and-register;
-2. unify the three resume transaction implementations and their failure events;
-3. enforce whole-`TopLevelState`/active-interrupt budgets, then compact terminal checkpoints;
-4. expose the existing storage audit as a CLI; enable deletion only after post-compaction retention-root tests;
-5. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance.
+1. enforce whole-`TopLevelState`/active-interrupt budgets, then compact terminal checkpoints;
+2. expose the existing storage audit as a CLI; enable deletion only after post-compaction retention-root tests;
+3. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance;
+4. only then split large modules and add structured field metadata to `ask_interactive`.
 
 Detailed evidence and ordering live in
 [`architecture/refactor/architecture-contracts.md`](architecture/refactor/architecture-contracts.md#10-后续路线).

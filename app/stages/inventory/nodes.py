@@ -14,12 +14,14 @@ import yaml
 
 from app.storage.ledger import Ledger
 from app.schemas.assets import AssetRecord
+from app.schemas.artifacts import ArtifactMeta
 from app.schemas.manifest import InputManifest, validate_manifest
 from app.schemas.state import TopLevelState
 from app.schemas.resource_ref import ResourceRef
 from app.review.persistence import persist_review_decision
 from app.stages.base import append_route_trace, resolve_run_ref
 from app.storage.paths import SessionPaths
+from app.storage.artifacts import publish_artifact_record
 
 
 def _load_manifest(manifest_ref: str) -> InputManifest:
@@ -102,19 +104,31 @@ def _write_registry(
     data_dir: Path,
     session_id: str,
 ) -> Path:
-    """Write the asset registry JSON artifact and return its path."""
-    registry_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir("asset_registry")
-    registry_dir.mkdir(parents=True, exist_ok=True)
-    registry_path = registry_dir / "registry.json"
-    payload = {
+    """Publish the asset registry through the shared immutable boundary."""
+    paths = SessionPaths.from_run_dir(data_dir)
+    destination = paths.stage_artifacts_dir("asset_registry") / "registry.json"
+    source = paths.work_path("inventory", "registry.json")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
         "session_id": session_id,
         "assets": [r.model_dump(mode="json") for r in records],
     }
-    registry_path.write_text(
+    source.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return registry_path
+    artifact = ArtifactMeta.from_file(
+        source,
+        stage="inventory",
+        method_name="inventory.register_assets",
+        artifact_type="asset_registry",
+    )
+    return publish_artifact_record(
+        paths.run_dir,
+        session_id,
+        artifact,
+        destination=destination,
+    ).path
 
 
 def enter_inventory(state: TopLevelState) -> dict:

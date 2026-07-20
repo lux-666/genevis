@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -21,7 +21,7 @@ from app.schemas.artifacts import (
     ArtifactMeta,
 )
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.read_qc.constants import METHOD_NAME
 from app.stages.read_qc.method_application.lifecycle import (
     ReadQCMethodLifecycle,
@@ -59,11 +59,9 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
     if blocked is not None:
         return update_read_qc_output(state, blocked)
     working_dir = stage_work_dir(state, "read_qc", "seqkit_stats")
-    artifact_dir = stage_artifacts_dir(state, "read_qc")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output, "raw_long_reads_paths", "raw_long_reads_path")
-    stats_path = artifact_dir / "seqkit_stats.tsv"
+    stats_path = working_dir / "seqkit_stats.tsv"
     script_path = working_dir / "run_seqkit_stats.sh"
     script_path.write_text(
         "set -e\n" + f"seqkit stats -a -T {' '.join(shlex.quote(str(path)) for path in input_paths)} > {shlex.quote(str(stats_path))}\n",
@@ -107,25 +105,69 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
         expected_attempt_id=attempt.attempt_id,
         expected_method_name=METHOD_NAME,
     )
-    if not stats_path.exists():
+    stats_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "input_asset_ref": output.get("input_asset_ref"),
+        "input_asset_refs": output.get("input_asset_refs") or [],
+        "format": "tsv",
+        "tool": "seqkit",
+    }
+    try:
+        published_stats = publish_or_recover_work_artifact(
+            state.get("data_dir", "data"),
+            attempt.session_id,
+            stats_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_STATS,
+            metadata=stats_metadata,
+        )
+    except FileNotFoundError:
         reason = f"expected SeqKit stats output missing: {stats_path}"
-        Ledger(state.get("data_dir", "data")).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=reason)
+        Ledger(state.get("data_dir", "data")).record_attempt_failed(
+            attempt.session_id, attempt, return_code=0, error=reason
+        )
         return fail_update(state, reason)
-    artifacts = [
-        ArtifactMeta.from_file(stats_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_STATS,
-                               metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"),
-                                         "input_asset_refs": output.get("input_asset_refs") or [], "format": "tsv", "tool": "seqkit"})
-    ]
+    stats_path = published_stats.path
     summary = parse_seqkit_summary(stats_path)
-    summary_path = stats_path.parent / "read_qc_summary.json"
-    summary_path.write_text(json.dumps({"session_id": attempt.session_id, "method_name": METHOD_NAME,
+    summary_source = Path(attempt.working_dir) / "read_qc_summary.json"
+    summary_source.write_text(json.dumps({"session_id": attempt.session_id, "method_name": METHOD_NAME,
                                         "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [],
                                         "raw_long_reads_path": output.get("raw_long_reads_path"), "raw_long_reads_paths": output.get("raw_long_reads_paths") or [],
                                         "summary": summary}, indent=2), encoding="utf-8")
-    artifacts.append(ArtifactMeta.from_file(summary_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_SUMMARY,
-                                             metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"),
-                                                       "input_asset_refs": output.get("input_asset_refs") or [], "format": "json", "tool": "seqkit"}))
-    publish_artifact_records(state.get("data_dir", "data"), attempt.session_id, artifacts)
+    summary_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "input_asset_ref": output.get("input_asset_ref"),
+        "input_asset_refs": output.get("input_asset_refs") or [],
+        "format": "json",
+        "tool": "seqkit",
+    }
+    published_summary = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        summary_source,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        artifact_type=READ_QC_LONG_READ_SUMMARY,
+        metadata=summary_metadata,
+    )
+    summary_path = published_summary.path
+    artifacts = [
+        ArtifactMeta.from_file(
+            stats_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_STATS,
+            metadata=stats_metadata,
+        ),
+        ArtifactMeta.from_file(
+            summary_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_SUMMARY,
+            metadata=summary_metadata,
+        ),
+    ]
     ledger = Ledger(state.get("data_dir", "data"))
     payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=payloads)

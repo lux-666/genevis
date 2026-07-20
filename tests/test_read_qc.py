@@ -784,10 +784,11 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
 
     def test_relative_data_dir_resolves_to_absolute_paths_in_generated_script(self):
         # Regression: when --data-dir is relative, the generated seqkit_stats
-        # script writes its TSV to data_dir/artifacts/.../seqkit_stats.tsv.
+        # The tool writes its TSV below work/ so collection can atomically
+        # move and register it after successful execution.
         # The runner sets cwd to data_dir/work/.../seqkit_stats, so a raw
         # relative redirect target lands at a non-existent nested path. The
-        # script must therefore embed an absolute artifact path.
+        # script must therefore embed an absolute work path.
         from app.stages.read_qc.method_application.seqkit_stats import freeze_seqkit_attempt
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -837,12 +838,12 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 script_path = run_dir / "work/read_qc/seqkit_stats/run_seqkit_stats.sh"
                 self.assertTrue(script_path.exists())
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_artifact = run_dir / "artifacts/read_qc/seqkit_stats.tsv"
-                self.assertIn(str(expected_artifact), script_text)
+                expected_work_output = run_dir / "work/read_qc/seqkit_stats/seqkit_stats.tsv"
+                self.assertIn(str(expected_work_output), script_text)
                 # And the script must NOT carry the bare relative form
                 # that would resolve from the runner's cwd.
                 self.assertNotIn(
-                    " > out/runs/s1/artifacts/read_qc/seqkit_stats.tsv",
+                    " > out/runs/s1/work/read_qc/seqkit_stats/seqkit_stats.tsv",
                     script_text,
                 )
             finally:
@@ -903,8 +904,8 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             self.assertEqual(rc, 0)
 
             artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
-            stats = artifact_dir / "seqkit_stats.tsv"
-            summary = artifact_dir / "read_qc_summary.json"
+            stats = artifact_dir / "outputs" / "seqkit_stats" / "seqkit_stats.tsv"
+            summary = artifact_dir / "outputs" / "seqkit_stats" / "read_qc_summary.json"
             self.assertTrue(stats.exists(), f"seqkit_stats.tsv missing at {stats}")
             self.assertTrue(summary.exists(), f"read_qc_summary.json missing at {summary}")
             self.assertFalse((artifact_dir / "long_reads.fofn").exists())

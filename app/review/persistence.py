@@ -15,12 +15,11 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.state import TopLevelState
 from app.storage.paths import DataLayoutError, SessionPaths
-from app.storage.publish import publish_file
 
 
 class ReviewPersistenceError(ValueError):
@@ -304,21 +303,22 @@ def _publish_json(
     )
     temporary.parent.mkdir(parents=True, exist_ok=True)
     temporary.write_bytes(_pretty_bytes(payload))
-    try:
-        published = publish_file(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
     artifact = ArtifactMeta.from_file(
-        published,
+        temporary,
         stage=stage,
         method_name=method_name,
         artifact_type=artifact_type,
         metadata=metadata,
     )
-    refs = publish_artifact_records(paths.run_dir, session_id, [artifact])
-    if len(refs) != 1:
-        raise ReviewPersistenceError("artifact index did not return one review ref")
-    return refs[0]
+    try:
+        return publish_artifact_record(
+            paths.run_dir,
+            session_id,
+            artifact,
+            destination=destination,
+        ).ref
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _verify_ref(paths: SessionPaths, ref: ArtifactRef) -> Path:

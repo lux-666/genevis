@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.storage.ledger import Ledger
 from app.control.lifecycle import inspect_session
-from app.storage.artifacts import publish_artifact_records, read_artifact_records
+from app.storage.artifacts import read_artifact_records, register_artifact_records
 from app.reports.trace_writer import (
     SESSION_SUMMARY_JSON_FILENAME,
     SESSION_SUMMARY_MARKDOWN_FILENAME,
@@ -94,7 +94,7 @@ def _register_artifact(
         artifact_type=artifact_type,
         metadata=metadata or {},
     )
-    publish_artifact_records(paths.run_dir, paths.session_id, [artifact])
+    register_artifact_records(paths.run_dir, paths.session_id, [artifact])
     return file_path
 
 

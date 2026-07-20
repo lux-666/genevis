@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     execution_log_paths,
@@ -23,7 +23,7 @@ from app.schemas.artifacts import (
     ArtifactMeta,
 )
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.read_qc.constants import (
     LENGTH_FILTER_DECISIONS,
     LENGTH_FILTER_METHOD_NAME,
@@ -67,12 +67,10 @@ def freeze_length_filter_attempt(state: TopLevelState) -> dict:
         return update_read_qc_output(state, blocked)
     min_len = int(output["substeps"]["length_filter"]["thresholds"]["min_len"])
     working_dir = stage_work_dir(state, "read_qc", "length_filter")
-    artifact_dir = stage_artifacts_dir(state, "read_qc")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     input_paths = read_paths_from_output(output, "raw_long_reads_paths", "raw_long_reads_path")
-    filtered_paths = [filtered_long_reads_path(artifact_dir, input_path, index=index, total=len(input_paths), fmt=output.get("format")) for index, input_path in enumerate(input_paths, start=1)]
-    post_filter_stats_path = artifact_dir / "post_filter_seqkit_stats.tsv"
+    filtered_paths = [filtered_long_reads_path(working_dir, input_path, index=index, total=len(input_paths), fmt=output.get("format")) for index, input_path in enumerate(input_paths, start=1)]
+    post_filter_stats_path = working_dir / "post_filter_seqkit_stats.tsv"
     script_path = working_dir / "run_length_filter.sh"
     commands = [f"seqkit seq -m {min_len} {shlex.quote(str(input_path))} > {shlex.quote(str(filtered_path))}" for input_path, filtered_path in zip(input_paths, filtered_paths)]
     script_path.write_text("set -e\n" + "\n".join(commands) + "\n" + f"seqkit stats -a -T {' '.join(shlex.quote(str(path)) for path in filtered_paths)} > {shlex.quote(str(post_filter_stats_path))}\n", encoding="utf-8")
@@ -114,8 +112,29 @@ def collect_length_filter_artifacts(state: TopLevelState) -> dict:
     )
     paths = [Path(path) for path in attempt.metadata["filtered_long_reads_paths"]]
     stats_path = Path(attempt.metadata["post_filter_stats_path"])
-    missing = [str(path) for path in attempt.expected_outputs if not path.exists()]
-    if missing:
+    min_len = attempt.metadata["thresholds"]["min_len"]
+    filtered_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "input_asset_ref": output.get("input_asset_ref"),
+        "input_asset_refs": output.get("input_asset_refs") or [],
+        "thresholds": {"min_len": min_len},
+        "tool": "seqkit",
+    }
+    try:
+        paths = [
+            publish_or_recover_work_artifact(
+                state.get("data_dir", "data"),
+                attempt.session_id,
+                path,
+                stage="read_qc",
+                method_name=LENGTH_FILTER_METHOD_NAME,
+                artifact_type=READ_QC_FILTERED_LONG_READS,
+                metadata=filtered_metadata,
+            ).path
+            for path in paths
+        ]
+    except FileNotFoundError as exc:
+        missing = [str(exc.filename or exc)]
         stdout_path, stderr_path = execution_log_paths(state, result)
         stdout = stdout_path.read_text(encoding="utf-8")
         stderr = stderr_path.read_text(encoding="utf-8")
@@ -123,18 +142,72 @@ def collect_length_filter_artifacts(state: TopLevelState) -> dict:
         detail = "\n".join(part for part in [reason, stdout.strip(), stderr.strip()] if part)
         Ledger(state.get("data_dir", "data")).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=detail)
         return fail_update(state, detail)
-    min_len = attempt.metadata["thresholds"]["min_len"]
-    artifacts = [ArtifactMeta.from_file(path, stage="read_qc", method_name=LENGTH_FILTER_METHOD_NAME, artifact_type=READ_QC_FILTERED_LONG_READS,
-                                        metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "thresholds": {"min_len": min_len}, "tool": "seqkit"}) for path in paths]
-    artifacts.append(ArtifactMeta.from_file(stats_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_STATS,
-                                            metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "read_set": "post_filter", "format": "tsv", "thresholds": {"min_len": min_len}, "tool": "seqkit"}))
+    stats_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "input_asset_ref": output.get("input_asset_ref"),
+        "input_asset_refs": output.get("input_asset_refs") or [],
+        "read_set": "post_filter",
+        "format": "tsv",
+        "thresholds": {"min_len": min_len},
+        "tool": "seqkit",
+    }
+    stats_path = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        stats_path,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        artifact_type=READ_QC_LONG_READ_STATS,
+        metadata=stats_metadata,
+    ).path
     summary = parse_seqkit_summary(stats_path)
-    summary_path = stats_path.parent / "post_filter_read_qc_summary.json"
-    summary_path.write_text(json.dumps({"session_id": attempt.session_id, "method_name": METHOD_NAME, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "raw_long_reads_path": output.get("raw_long_reads_path"), "raw_long_reads_paths": output.get("raw_long_reads_paths") or [], "filtered_long_reads_path": str(paths[0]), "filtered_long_reads_paths": [str(path) for path in paths], "thresholds": {"min_len": min_len}, "read_set": "post_filter", "summary": summary}, indent=2), encoding="utf-8")
-    artifacts.append(ArtifactMeta.from_file(summary_path, stage="read_qc", method_name=METHOD_NAME, artifact_type=READ_QC_LONG_READ_SUMMARY,
-                                            metadata={"attempt_id": attempt.attempt_id, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "read_set": "post_filter", "format": "json", "thresholds": {"min_len": min_len}, "tool": "seqkit"}))
+    summary_source = Path(attempt.working_dir) / "post_filter_read_qc_summary.json"
+    summary_source.write_text(json.dumps({"session_id": attempt.session_id, "method_name": METHOD_NAME, "input_asset_ref": output.get("input_asset_ref"), "input_asset_refs": output.get("input_asset_refs") or [], "raw_long_reads_path": output.get("raw_long_reads_path"), "raw_long_reads_paths": output.get("raw_long_reads_paths") or [], "filtered_long_reads_path": str(paths[0]), "filtered_long_reads_paths": [str(path) for path in paths], "thresholds": {"min_len": min_len}, "read_set": "post_filter", "summary": summary}, indent=2), encoding="utf-8")
+    summary_metadata = {
+        "attempt_id": attempt.attempt_id,
+        "input_asset_ref": output.get("input_asset_ref"),
+        "input_asset_refs": output.get("input_asset_refs") or [],
+        "read_set": "post_filter",
+        "format": "json",
+        "thresholds": {"min_len": min_len},
+        "tool": "seqkit",
+    }
+    summary_path = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        summary_source,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        artifact_type=READ_QC_LONG_READ_SUMMARY,
+        metadata=summary_metadata,
+    ).path
+    artifacts = [
+        *[
+            ArtifactMeta.from_file(
+                path,
+                stage="read_qc",
+                method_name=LENGTH_FILTER_METHOD_NAME,
+                artifact_type=READ_QC_FILTERED_LONG_READS,
+                metadata=filtered_metadata,
+            )
+            for path in paths
+        ],
+        ArtifactMeta.from_file(
+            stats_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_STATS,
+            metadata=stats_metadata,
+        ),
+        ArtifactMeta.from_file(
+            summary_path,
+            stage="read_qc",
+            method_name=METHOD_NAME,
+            artifact_type=READ_QC_LONG_READ_SUMMARY,
+            metadata=summary_metadata,
+        ),
+    ]
     data_dir = state.get("data_dir", "data")
-    publish_artifact_records(data_dir, attempt.session_id, artifacts)
     ledger = Ledger(data_dir)
     payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=payloads)

@@ -24,7 +24,7 @@ from app.domains.assembly.selection import (
     route_from_read_type as _route_from_read_type,
 )
 from app.domains.genome_size import resolve_genome_size
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -76,7 +76,6 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import HIC_READS_SPEC, LONG_READS_SPEC
-from app.storage.publish import publish_file
 
 ROUTE_DECISION_MAP = {
     "select_cyclone": "cyclone",
@@ -672,7 +671,6 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         and assembly_out.get("primary_method") == HIFIASM_ONT_METHOD
     )
     candidate_refs: list[str] = []
-    artifacts: list[ArtifactMeta] = []
     selected_plans = []
     selection = _selection_from_output(assembly_out)
     for method_name in assembly_out["selected_methods"]:
@@ -732,19 +730,24 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        try:
-            publish_file(temporary, bundle_path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        candidate_refs.append(str(bundle_path))
         artifact = ArtifactMeta.from_file(
-            bundle_path,
+            temporary,
             stage="assembly",
             method_name=method_name,
             artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
             metadata={"candidate_id": bundle.candidate_id, "execution_enabled": execution_enabled},
         )
-        artifacts.append(artifact)
+        try:
+            published = publish_artifact_record(
+                data_dir,
+                session_id,
+                artifact,
+                destination=bundle_path,
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+        bundle_path = published.path
+        candidate_refs.append(str(bundle_path))
         selected_plans.append(
             AssemblyCandidatePlan(
                 method_name=method_name,
@@ -757,7 +760,6 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             ).model_dump(mode="json")
         )
 
-    publish_artifact_records(data_dir, session_id, artifacts)
     if local_flye:
         status = "flye_execution_planned"
     elif local_nextdenovo:
@@ -774,7 +776,7 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         {
             "status": status,
             "selected_candidate_refs": candidate_refs,
-            "candidate_artifact_refs": [str(artifact.file_path) for artifact in artifacts],
+            "candidate_artifact_refs": candidate_refs,
             "selected_candidate_plans": selected_plans,
             "substeps": {
                 **dict(assembly_out.get("substeps") or {}),
@@ -1123,20 +1125,22 @@ def _write_assembly_json_artifact(
     )
     temporary.parent.mkdir(parents=True, exist_ok=True)
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        publish_file(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
     artifact = ArtifactMeta.from_file(
-        path,
+        temporary,
         stage="assembly",
         method_name=method_name,
         artifact_type=artifact_type,
     )
-    refs = publish_artifact_records(data_dir, session_id, [artifact])
-    if len(refs) != 1:
-        raise ResumeValidationError("assembly artifact index did not return one ref")
-    return refs[0].model_dump(mode="json")
+    try:
+        published = publish_artifact_record(
+            data_dir,
+            session_id,
+            artifact,
+            destination=path,
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
+    return published.ref.model_dump(mode="json")
 
 
 def _build_input_profile(

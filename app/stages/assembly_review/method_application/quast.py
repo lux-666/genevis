@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -36,7 +36,7 @@ from app.stages.assembly_review.method_application.lifecycle import (
     update_review_output,
     update_signal,
 )
-from app.stages.base import absolute_data_dir, ordered_unique, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
 
 QUAST_METHOD = "assembly_review.eval.quast"
 FROZEN_STATUS = "quast_frozen"
@@ -82,11 +82,9 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
         working_dir = stage_work_dir(state, "assembly_review", "quast", safe_id)
-        artifact_dir = stage_artifacts_dir(state, "assembly_review", "quast", safe_id)
         working_dir.mkdir(parents=True, exist_ok=True)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
         script_path = working_dir / "run_quast.sh"
-        out_dir = artifact_dir / "quast_out"
+        out_dir = working_dir / "quast_out"
         report_tsv = out_dir / "report.tsv"
         assembly_ref = Path(candidate["final_assembly_ref"])
         script_path.write_text(
@@ -147,19 +145,48 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
         notes = ["thresholds_not_applied_without_human_approval"]
         metadata: dict[str, Any] = {"attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "quast_output_dir": attempt.metadata.get("quast_output_dir")}
         if result.success:
-            report_tsv = Path(attempt.metadata["report_tsv"])
-            artifacts.append(ArtifactMeta.from_file(report_tsv, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
+            artifact_metadata = {"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}
+            report_tsv = publish_or_recover_work_artifact(
+                data_dir,
+                session_id,
+                Path(attempt.metadata["report_tsv"]),
+                stage="assembly_review",
+                method_name=QUAST_METHOD,
+                artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
+                metadata=artifact_metadata,
+            ).path
+            artifacts.append(ArtifactMeta.from_file(report_tsv, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV, metadata=artifact_metadata))
             metric_refs.append(str(report_tsv))
             report_txt = Path(attempt.metadata["quast_output_dir"]) / "report.txt"
-            if report_txt.exists():
-                artifacts.append(ArtifactMeta.from_file(report_txt, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
+            try:
+                report_txt = publish_or_recover_work_artifact(
+                    data_dir,
+                    session_id,
+                    report_txt,
+                    stage="assembly_review",
+                    method_name=QUAST_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
+                    metadata=artifact_metadata,
+                ).path
+            except FileNotFoundError:
+                pass
+            else:
+                artifacts.append(ArtifactMeta.from_file(report_txt, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT, metadata=artifact_metadata))
                 metric_refs.append(str(report_txt))
             metrics = parse_quast_report_tsv(report_tsv)
-            summary_path = Path(attempt.metadata["quast_output_dir"]).parent / "quast_summary.json"
-            summary_path.write_text(json.dumps({"session_id": session_id, "method_name": QUAST_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "report_tsv_ref": str(report_tsv), "metrics": metrics, "notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
-            artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY, metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}))
+            summary_source = Path(attempt.working_dir) / "quast_summary.json"
+            summary_source.write_text(json.dumps({"session_id": session_id, "method_name": QUAST_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "report_tsv_ref": str(report_tsv), "metrics": metrics, "notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
+            summary_path = publish_or_recover_work_artifact(
+                data_dir,
+                session_id,
+                summary_source,
+                stage="assembly_review",
+                method_name=QUAST_METHOD,
+                artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY,
+                metadata=artifact_metadata,
+            ).path
+            artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY, metadata=artifact_metadata))
             metric_refs.append(str(summary_path))
-            publish_artifact_records(data_dir, session_id, artifacts)
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
             for artifact in payloads:

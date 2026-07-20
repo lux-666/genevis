@@ -11,6 +11,7 @@ from pathlib import Path
 from app.storage.artifacts import (
     publish_artifact_records,
     publish_artifact_record,
+    publish_or_recover_work_artifact,
     read_artifact_records,
     register_artifact_records,
     resolve_artifact_ref,
@@ -160,7 +161,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 metadata={"attempt_id": "inventory-0", "business_status": "must-not-be-indexed"},
             )
 
-            refs = publish_artifact_records(paths.run_dir, "s1", [artifact])
+            refs = register_artifact_records(paths.run_dir, "s1", [artifact])
             records = read_artifact_records(paths.run_dir, "s1")
 
             self.assertEqual(len(refs), 1)
@@ -245,6 +246,56 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             self.assertTrue(source.is_file())
             self.assertFalse(paths.artifact_index_path.exists())
 
+    def test_collect_replay_recovers_moved_work_output_and_index_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            source = paths.work_path("read_qc", "seqkit", "stats.tsv")
+            source.parent.mkdir(parents=True)
+            source.write_text("file\tnum_seqs\nreads.fq\t2\n", encoding="utf-8")
+
+            first = publish_or_recover_work_artifact(
+                paths.run_dir,
+                "s1",
+                source,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+            paths.artifact_index_path.unlink()
+
+            replay = publish_or_recover_work_artifact(
+                paths.run_dir,
+                "s1",
+                source,
+                stage="read_qc",
+                method_name="read_qc.long_read_stats.seqkit_stats",
+                artifact_type="read_qc.long_read_stats",
+            )
+
+            self.assertFalse(source.exists())
+            self.assertEqual(replay.path, first.path)
+            self.assertEqual(replay.ref, first.ref)
+            self.assertEqual(len(read_artifact_records(paths.run_dir, "s1")), 1)
+
+    def test_publication_rejects_a_source_already_below_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = self._paths(tmpdir)
+            destination = paths.artifact_path("inventory", "registry.json")
+            destination.parent.mkdir(parents=True)
+            destination.write_text("old bytes\n", encoding="utf-8")
+            artifact = ArtifactMeta.from_file(
+                destination,
+                stage="inventory",
+                method_name="inventory.register_assets",
+                artifact_type="asset_registry",
+            )
+
+            with self.assertRaisesRegex(DataLayoutError, "outside the declared stage workspace"):
+                publish_artifact_records(paths.run_dir, "s1", [artifact])
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), "old bytes\n")
+            self.assertFalse(paths.artifact_index_path.exists())
+
     def test_identical_replay_reuses_ref_and_conflicting_bytes_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = self._paths(tmpdir)
@@ -258,6 +309,8 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="command.stdout",
             )
             [first_ref] = publish_artifact_records(paths.run_dir, "s1", [first])
+            published_path = paths.resolve_ref(first_ref.path_ref)
+            first_records = read_artifact_records(paths.run_dir, "s1")
 
             source.write_text("first output\n", encoding="utf-8")
             replay = ArtifactMeta.from_file(
@@ -279,6 +332,12 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             )
             with self.assertRaises(FileExistsError):
                 publish_artifact_records(paths.run_dir, "s1", [conflict])
+            self.assertEqual(
+                published_path.read_text(encoding="utf-8"), "first output\n"
+            )
+            self.assertEqual(
+                read_artifact_records(paths.run_dir, "s1"), first_records
+            )
 
     def test_registration_rejects_external_reports_and_repeated_session_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:

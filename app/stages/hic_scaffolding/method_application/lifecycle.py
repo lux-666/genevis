@@ -10,7 +10,10 @@ from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 
 from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    register_artifact_records,
+)
 from app.execution.evidence import (
     ExecutionEvidence,
     build_execution_evidence,
@@ -247,16 +250,30 @@ def collect_method_artifacts(
             },
         )
     data_dir = absolute_data_dir(state)
-    artifact_dir = Path(str(attempt.metadata["artifact_dir"]))
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    work_output_dir = Path(str(attempt.metadata["work_output_dir"]))
+    work_output_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[ArtifactMeta] = []
+    published_paths: dict[str, Path] = {}
     notes = list(output.get("notes") or [])
 
     execution_succeeded = result.success
     execution_error = result.error
     if execution_succeeded:
         scaffold_fasta = Path(str(attempt.metadata["scaffold_fasta"]))
-        if not scaffold_fasta.exists():
+        try:
+            published = publish_or_recover_work_artifact(
+                data_dir,
+                attempt.session_id,
+                scaffold_fasta,
+                stage="hic_scaffolding",
+                method_name=lifecycle.method_name,
+                artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
+                metadata={
+                    "attempt_id": attempt.attempt_id,
+                    "review_required": True,
+                },
+            )
+        except FileNotFoundError:
             reason = (
                 f"expected {lifecycle.name} scaffold assembly missing: {scaffold_fasta}"
             )
@@ -266,9 +283,10 @@ def collect_method_artifacts(
             execution_succeeded = False
             execution_error = reason
         else:
+            published_paths["scaffold_fasta"] = published.path
             artifacts.append(
                 ArtifactMeta.from_file(
-                    scaffold_fasta,
+                    published.path,
                     stage="hic_scaffolding",
                     method_name=lifecycle.method_name,
                     artifact_type=HIC_SCAFFOLDED_ASSEMBLY,
@@ -282,10 +300,26 @@ def collect_method_artifacts(
     if execution_succeeded:
         for key, artifact_type in extra_artifacts:
             path_value = attempt.metadata.get(key)
-            if path_value and Path(str(path_value)).exists():
+            if path_value:
+                try:
+                    published = publish_or_recover_work_artifact(
+                        data_dir,
+                        attempt.session_id,
+                        Path(str(path_value)),
+                        stage="hic_scaffolding",
+                        method_name=lifecycle.method_name,
+                        artifact_type=artifact_type,
+                        metadata={
+                            "attempt_id": attempt.attempt_id,
+                            "review_required": True,
+                        },
+                    )
+                except FileNotFoundError:
+                    continue
+                published_paths[key] = published.path
                 artifacts.append(
                     ArtifactMeta.from_file(
-                        Path(str(path_value)),
+                        published.path,
                         stage="hic_scaffolding",
                         method_name=lifecycle.method_name,
                         artifact_type=artifact_type,
@@ -296,8 +330,8 @@ def collect_method_artifacts(
                     )
                 )
 
-        review_bundle_ref = artifact_dir / "hic_review_bundle.json"
-        review_bundle_ref.write_text(
+        review_bundle_source = work_output_dir / "hic_review_bundle.json"
+        review_bundle_source.write_text(
             json.dumps(
                 {
                     "session_id": attempt.session_id,
@@ -307,12 +341,24 @@ def collect_method_artifacts(
                     "output_assembly_ref": output.get(
                         "output_assembly_ref"
                     ),
-                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get(
-                        "scaffold_fasta"
+                    "chromosome_scaffolded_assembly_candidate_ref": str(
+                        published_paths["scaffold_fasta"]
                     ),
-                    "contact_map_ref": attempt.metadata.get("contact_map"),
-                    "assembly_file_ref": attempt.metadata.get("assembly_file"),
-                    "html_report_ref": attempt.metadata.get("html_report"),
+                    "contact_map_ref": (
+                        str(published_paths["contact_map"])
+                        if "contact_map" in published_paths
+                        else None
+                    ),
+                    "assembly_file_ref": (
+                        str(published_paths["assembly_file"])
+                        if "assembly_file" in published_paths
+                        else None
+                    ),
+                    "html_report_ref": (
+                        str(published_paths["html_report"])
+                        if "html_report" in published_paths
+                        else None
+                    ),
                     "review_required": True,
                     "execution_ref": execution_ref.model_dump(mode="json"),
                     "execution_summary": _execution_summary(result),
@@ -327,16 +373,16 @@ def collect_method_artifacts(
             ),
             encoding="utf-8",
         )
-        qc_report_ref = artifact_dir / "hic_qc_report.json"
-        qc_report_ref.write_text(
+        qc_report_source = work_output_dir / "hic_qc_report.json"
+        qc_report_source.write_text(
             json.dumps(
                 {
                     "session_id": attempt.session_id,
                     "method_name": lifecycle.method_name,
                     "status": "available",
                     "pre_hic_assembly_ref": output.get("pre_hic_assembly_ref"),
-                    "chromosome_scaffolded_assembly_candidate_ref": attempt.metadata.get(
-                        "scaffold_fasta"
+                    "chromosome_scaffolded_assembly_candidate_ref": str(
+                        published_paths["scaffold_fasta"]
                     ),
                     "execution_ref": execution_ref.model_dump(mode="json"),
                     "execution_summary": _execution_summary(result),
@@ -351,6 +397,30 @@ def collect_method_artifacts(
             ),
             encoding="utf-8",
         )
+        review_bundle_ref = publish_or_recover_work_artifact(
+            data_dir,
+            attempt.session_id,
+            review_bundle_source,
+            stage="hic_scaffolding",
+            method_name=lifecycle.method_name,
+            artifact_type=HIC_REVIEW_BUNDLE,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "review_required": True,
+            },
+        ).path
+        qc_report_ref = publish_or_recover_work_artifact(
+            data_dir,
+            attempt.session_id,
+            qc_report_source,
+            stage="hic_scaffolding",
+            method_name=lifecycle.method_name,
+            artifact_type=HIC_QC_REPORT,
+            metadata={
+                "attempt_id": attempt.attempt_id,
+                "review_required": True,
+            },
+        ).path
         artifacts.extend(
             [
                 ArtifactMeta.from_file(
@@ -385,17 +455,29 @@ def collect_method_artifacts(
         candidates = dict(output.get("method_candidates") or {})
         candidates[lifecycle.method_name] = {
             "status": "executed",
-            "scaffold_fasta": str(attempt.metadata["scaffold_fasta"]),
-            "contact_map": attempt.metadata.get("contact_map"),
-            "assembly_file": attempt.metadata.get("assembly_file"),
-            "html_report": attempt.metadata.get("html_report"),
+            "scaffold_fasta": str(published_paths["scaffold_fasta"]),
+            "contact_map": (
+                str(published_paths["contact_map"])
+                if "contact_map" in published_paths
+                else None
+            ),
+            "assembly_file": (
+                str(published_paths["assembly_file"])
+                if "assembly_file" in published_paths
+                else None
+            ),
+            "html_report": (
+                str(published_paths["html_report"])
+                if "html_report" in published_paths
+                else None
+            ),
             "review_bundle_ref": str(review_bundle_ref),
             "qc_report_ref": str(qc_report_ref),
         }
         update = {
             "status": "autohic_review_ready",
             "chromosome_scaffolded_assembly_candidate_ref": str(
-                attempt.metadata["scaffold_fasta"]
+                published_paths["scaffold_fasta"]
             ),
             "hic_review_bundle_ref": str(review_bundle_ref),
             "hic_qc_report_ref": str(qc_report_ref),
@@ -421,7 +503,7 @@ def collect_method_artifacts(
         }
 
     if artifacts:
-        publish_artifact_records(data_dir, attempt.session_id, artifacts)
+        register_artifact_records(data_dir, attempt.session_id, artifacts)
         payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
         ledger = Ledger(data_dir)
         if execution_succeeded:

@@ -23,7 +23,7 @@ from app.entrypoints.ask_planner import (
     build_run_config_payload,
     merge_clarification_response,
 )
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
 from app.schemas.state import TopLevelState
@@ -224,14 +224,23 @@ def persist_annotation_intake_plan(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    out_dir = SessionPaths.from_run_dir(data_dir).stage_artifacts_dir(ASSEMBLY_REVIEW_STAGE)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = SessionPaths.from_run_dir(data_dir)
+    out_dir = paths.stage_artifacts_dir(ASSEMBLY_REVIEW_STAGE)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-    path = out_dir / f"annotation_intake_plan_{ts}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    destination = out_dir / f"annotation_intake_plan_{ts}.json"
+    source_path = paths.work_path(
+        ASSEMBLY_REVIEW_STAGE,
+        "annotation_intake",
+        destination.name,
+    )
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     artifact = ArtifactMeta.from_file(
-        path,
+        source_path,
         stage=ASSEMBLY_REVIEW_STAGE,
         method_name=ANNOTATION_INTAKE_METHOD,
         artifact_type=ANNOTATION_INTAKE_PLAN,
@@ -242,7 +251,13 @@ def persist_annotation_intake_plan(
             "decision": request.decision,
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    published = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=destination,
+    )
+    path = published.path
 
     stage_outputs = dict(update.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get(ASSEMBLY_REVIEW_STAGE) or {})

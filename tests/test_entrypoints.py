@@ -2183,14 +2183,18 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             self.assertEqual(review_code, 1)
             self.assertNotIn("annotation_intake_plan:", review_stdout)
-            self.assertIn("resume rejected", review_stderr)
+            self.assertIn("resume annotation_intake failed", review_stderr)
             self.assertIn("database_provenance", review_stderr)
 
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertNotIn("annotation.intake_plan", artifact_types)
 
             events = Ledger(SessionPaths(data_dir, session_id).run_dir).read_events(session_id)
-            self.assertTrue(any(event["event_type"] == "resume_rejected" for event in events))
+            failed = [
+                event for event in events if event["event_type"] == "resume_failed"
+            ]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0]["phase"], "annotation_intake")
             self.assertFalse(any(event["event_type"] == "annotation_intake_planned" for event in events))
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
@@ -2551,7 +2555,7 @@ class InteractiveGateLoopTests(unittest.TestCase):
 
             with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
                     patch("app.review.annotation_intake.collect_annotation_intake_selection", side_effect=RuntimeError("annotation intake cancelled")) as intake_prompt, \
-                    patch("app.control.lifecycle.resume_review_state") as resume_mock:
+                    patch("app.control.resume_transaction.resume_review_state") as resume_mock:
                 result = _interactive_gate_loop(
                     graph,
                     {"configurable": {"thread_id": session_id}},
@@ -2714,10 +2718,10 @@ class ResumeCLITests(unittest.TestCase):
 
             with patch("app.entrypoints.run.build_graph", return_value=graph), \
                     patch(
-                        "app.control.lifecycle.resume_review_state",
+                        "app.control.resume_transaction.resume_review_state",
                         return_value={"current_stage": "done", "supervision_state": "completed"},
                     ), \
-                    patch("app.review.annotation_intake.maybe_collect_annotation_intake", return_value=None):
+                    patch("app.control.resume_transaction.maybe_collect_annotation_intake", return_value=None):
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
@@ -2792,7 +2796,7 @@ class ResumeCLITests(unittest.TestCase):
 
             with patch("app.entrypoints.run.build_graph", return_value=graph), \
                     patch(
-                        "app.control.lifecycle.resume_review_state",
+                        "app.control.resume_transaction.resume_review_state",
                         return_value={"current_stage": "done", "supervision_state": "completed"},
                     ), \
                     patch("app.review.annotation_intake.prompt_annotation_intake_plan") as intake_prompt:

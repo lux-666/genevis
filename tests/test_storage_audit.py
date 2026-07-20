@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import register_artifact_records
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.storage.audit import audit_run_storage, build_cleanup_manifest
 from app.integrity import sha256_file
@@ -42,7 +42,7 @@ class StorageAuditTests(unittest.TestCase):
             artifact_type=artifact_type,
             metadata=metadata,
         )
-        return publish_artifact_records(
+        return register_artifact_records(
             self.paths.run_dir,
             self.paths.session_id,
             [artifact],

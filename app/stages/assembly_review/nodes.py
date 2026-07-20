@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.workflow import is_terminal_failure
 from app.execution.evidence import (
@@ -422,7 +422,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
                     artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
                     metadata={"session_id": session_id},
                 )
-                publish_artifact_records(data_dir, session_id, [notebook_artifact])
+                register_artifact_records(data_dir, session_id, [notebook_artifact])
 
                 figure_artifacts = [
                     ArtifactMeta.from_file(
@@ -435,7 +435,7 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
                     for logical_name, abs_path in comparative_figures.items()
                 ]
                 if figure_artifacts:
-                    publish_artifact_records(data_dir, session_id, figure_artifacts)
+                    register_artifact_records(data_dir, session_id, figure_artifacts)
 
                 return {}
 
@@ -452,21 +452,30 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     figures_dir = stage_artifacts_dir(state, "assembly_review", "figures")
-    figure_paths = render_statistics_figures(statistics_pack, figures_dir, target_metrics=target_metrics)
+    work_figures_dir = stage_work_dir(state, "assembly_review", "figures")
+    figure_sources = render_statistics_figures(
+        statistics_pack,
+        work_figures_dir,
+        target_metrics=target_metrics,
+    )
 
-    figure_artifacts = []
-    for logical_name, abs_path in figure_paths.items():
-        figure_artifacts.append(
-            ArtifactMeta.from_file(
-                Path(abs_path),
-                stage="assembly_review",
-                method_name="assembly_review.contract",
-                artifact_type=f"assembly_review.figure.{logical_name}",
-                metadata={"figure_type": logical_name},
-            )
+    figure_paths: dict[str, str] = {}
+    for logical_name, abs_path in figure_sources.items():
+        source = Path(abs_path)
+        artifact = ArtifactMeta.from_file(
+            source,
+            stage="assembly_review",
+            method_name="assembly_review.contract",
+            artifact_type=f"assembly_review.figure.{logical_name}",
+            metadata={"figure_type": logical_name},
         )
-    if figure_artifacts:
-        publish_artifact_records(data_dir, session_id, figure_artifacts)
+        published = publish_artifact_record(
+            data_dir,
+            session_id,
+            artifact,
+            destination=figures_dir / source.name,
+        )
+        figure_paths[logical_name] = str(published.path)
 
     out_dir = stage_artifacts_dir(state, "assembly_review")
     statistics_pack_relpath = "related_species_statistics_pack.json"
@@ -483,16 +492,24 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     )
 
     notebook_path = out_dir / "assembly_review_report.ipynb"
-    write_notebook(notebook, notebook_path)
+    notebook_source = stage_work_dir(
+        state, "assembly_review", "assembly_review_report.ipynb"
+    )
+    write_notebook(notebook, notebook_source)
 
     notebook_artifact = ArtifactMeta.from_file(
-        notebook_path,
+        notebook_source,
         stage="assembly_review",
         method_name="assembly_review.contract",
         artifact_type=ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
         metadata={"session_id": session_id, "figure_count": len(figure_paths)},
     )
-    publish_artifact_records(data_dir, session_id, [notebook_artifact])
+    notebook_path = publish_artifact_record(
+        data_dir,
+        session_id,
+        notebook_artifact,
+        destination=notebook_path,
+    ).path
 
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = {
@@ -1274,7 +1291,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id, "rerun_index": rerun_index},
         )
     ]
-    publish_artifact_records(data_dir, session_id, artifacts)
+    register_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [a.model_dump(mode="json") for a in artifacts]
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
     for a in artifact_payloads:
@@ -1309,16 +1326,28 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         },
     )
     candidate_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path.write_text(
+    bundle_source = stage_work_dir(
+        state,
+        "assembly_review",
+        "reruns",
+        f"{candidate_id}.json",
+    )
+    bundle_source.parent.mkdir(parents=True, exist_ok=True)
+    bundle_source.write_text(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     bundle_artifact = ArtifactMeta.from_file(
-        bundle_path, stage="assembly", method_name=FLYE_METHOD,
+        bundle_source, stage="assembly", method_name=FLYE_METHOD,
         artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
         metadata={"candidate_id": candidate_id, "execution_enabled": True, "rerun_index": rerun_index},
     )
-    publish_artifact_records(data_dir, session_id, [bundle_artifact])
+    bundle_path = publish_artifact_record(
+        data_dir,
+        session_id,
+        bundle_artifact,
+        destination=bundle_path,
+    ).path
     ledger.record_artifact_registered(session_id, bundle_artifact.model_dump(mode="json"), attempt_id=attempt.attempt_id)
 
     bundle_ref = str(bundle_path)

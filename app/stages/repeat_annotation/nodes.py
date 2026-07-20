@@ -10,7 +10,7 @@ from typing import Any
 
 from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -174,6 +174,7 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
     out_dir = stage_artifacts_dir(state, "repeat_annotation")
     work_dir = stage_work_dir(state, "repeat_annotation")
     out_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     expected_outputs = {
         "repeat_library": repeat_out["repeat_library_ref"],
@@ -207,13 +208,14 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
         notes=notes,
         metadata={"execution_enabled": execution_enabled},
     )
-    plan_ref = out_dir / "repeat_annotation_plan.json"
-    plan_ref.write_text(
+    plan_destination = out_dir / "repeat_annotation_plan.json"
+    plan_source = work_dir / "repeat_annotation_plan.json"
+    plan_source.write_text(
         json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        plan_ref,
+        plan_source,
         stage="repeat_annotation",
         method_name=REPEAT_CONTRACT_METHOD,
         artifact_type=REPEAT_ANNOTATION_PLAN,
@@ -224,7 +226,12 @@ def plan_repeat_masking(state: TopLevelState) -> dict:
             "execution_enabled": execution_enabled,
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    plan_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=plan_destination,
+    ).path
     return _update_repeat_output(
         state,
         {
@@ -407,7 +414,7 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
                 metadata={"attempt_id": attempt.attempt_id},
             )
         )
-    publish_artifact_records(data_dir, session_id, artifacts)
+    register_artifact_records(data_dir, session_id, artifacts)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
     ledger = Ledger(data_dir)
     ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
@@ -475,13 +482,17 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
             "attempt_id": repeat_out.get("repeatmasker_attempt_id"),
         },
     )
-    bundle_ref = out_dir / "repeat_annotation_bundle.json"
-    bundle_ref.write_text(
+    bundle_destination = out_dir / "repeat_annotation_bundle.json"
+    bundle_source = stage_work_dir(
+        state, "repeat_annotation", "repeat_annotation_bundle.json"
+    )
+    bundle_source.parent.mkdir(parents=True, exist_ok=True)
+    bundle_source.write_text(
         json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     artifact = ArtifactMeta.from_file(
-        bundle_ref,
+        bundle_source,
         stage="repeat_annotation",
         method_name=REPEAT_CONTRACT_METHOD,
         artifact_type=REPEAT_ANNOTATION_BUNDLE,
@@ -492,7 +503,12 @@ def commit_repeat_annotation(state: TopLevelState) -> dict:
             "execution_enabled": bool(repeat_out.get("execution_enabled")),
         },
     )
-    publish_artifact_records(data_dir, session_id, [artifact])
+    bundle_ref = publish_artifact_record(
+        data_dir,
+        session_id,
+        artifact,
+        destination=bundle_destination,
+    ).path
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["repeat_annotation"] = {

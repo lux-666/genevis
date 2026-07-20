@@ -23,7 +23,7 @@ from app.schemas.artifacts import (
 )
 from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.lifecycle import (
     HiCMethodLifecycle,
     build_method_graph,
@@ -161,7 +161,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         )
 
     working_dir = stage_work_dir(state, "hic_scaffolding", "autohic")
-    artifact_dir = stage_artifacts_dir(state, "hic_scaffolding", "autohic")
+    output_dir = working_dir / "published_outputs"
     reference_dir = working_dir / "input" / "references"
     fastq_root = working_dir / "input" / "rawdata"
     fastq_dir = fastq_root / "fastq"
@@ -170,12 +170,12 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     top_result = result_root / job_name
     input_assembly = reference_dir / "contigs.fasta"
     config_path = working_dir / "cfg-autohic.txt"
-    scaffold_fasta = artifact_dir / "chromosome_scaffolded_assembly.fasta"
-    contact_map = artifact_dir / "contact_map.hic"
-    assembly_file = artifact_dir / "chromosome.assembly"
-    html_report = artifact_dir / "result.html"
+    scaffold_fasta = output_dir / "chromosome_scaffolded_assembly.fasta"
+    contact_map = output_dir / "contact_map.hic"
+    assembly_file = output_dir / "chromosome.assembly"
+    html_report = output_dir / "result.html"
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Freeze may be replayed after a crash between publication and checkpoint.
     # Remove only mutable work links/files before regenerating exact bytes; the
@@ -274,7 +274,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         env=output.get("env"),
         env_spec=env_spec,
         metadata={
-            "artifact_dir": str(artifact_dir),
+            "work_output_dir": str(output_dir),
             "autohic_result_dir": str(top_result),
             "scaffold_fasta": str(scaffold_fasta),
             "contact_map": str(contact_map),

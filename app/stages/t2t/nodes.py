@@ -14,7 +14,10 @@ from typing import Any, Iterable, Iterator
 
 from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import publish_artifact_records
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    register_artifact_records,
+)
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.evidence import (
     load_execution_evidence,
@@ -116,9 +119,8 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
         return _fail(state, f"t2t input assembly is not a valid FASTA: {assembly_ref}")
 
     reads_ref, reads_source = _ont_reads_ref(state, config.get("ont_reads_ref"))
-    out_dir = stage_artifacts_dir(state, "t2t", "t2t_finishing")
+    out_dir = stage_artifacts_dir(state, "t2t", "outputs", "t2t_finishing")
     work_dir = stage_work_dir(state, "t2t", "t2t_finishing")
-    out_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     return _update(
         state,
@@ -150,8 +152,16 @@ def scan_assembly_telomeres(state: TopLevelState) -> dict:
         rows = list(_scan_fasta_ends(Path(out["input_assembly_ref"]), out["telomere_motif"], out["thresholds"]))
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t assembly telomere scan failed: {exc}")
-    scan_path = Path(out["out_dir"]) / "assembly_telomere_scan.tsv"
-    _write_tsv(scan_path, rows, _ASSEMBLY_SCAN_FIELDS)
+    scan_source = Path(out["work_dir"]) / "assembly_telomere_scan.tsv"
+    _write_tsv(scan_source, rows, _ASSEMBLY_SCAN_FIELDS)
+    scan_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        scan_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
+    ).path
     chromosome_names = _load_chromosome_list(out.get("chromosome_list_ref"))
     warnings = list(out.get("notes") or [])
     if chromosome_names:
@@ -196,15 +206,15 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") != "reads_prepared":
         return {}
-    reads_scan = Path(out["out_dir"]) / "reads_telomere_scan.tsv"
-    telomeric_tsv = Path(out["out_dir"]) / "telomeric_reads.tsv"
+    reads_scan_source = Path(out["work_dir"]) / "reads_telomere_scan.tsv"
+    telomeric_tsv_source = Path(out["work_dir"]) / "telomeric_reads.tsv"
     telomeric_fasta = Path(out["work_dir"]) / "telomeric_reads.fa"
     read_count = 0
     telomeric_read_count = 0
     try:
         with (
-            reads_scan.open("w", encoding="utf-8", newline="") as reads_handle,
-            telomeric_tsv.open("w", encoding="utf-8", newline="") as telomeric_handle,
+            reads_scan_source.open("w", encoding="utf-8", newline="") as reads_handle,
+            telomeric_tsv_source.open("w", encoding="utf-8", newline="") as telomeric_handle,
             telomeric_fasta.open("w", encoding="utf-8") as fasta_handle,
         ):
             reads_writer = csv.DictWriter(reads_handle, fieldnames=_READ_SCAN_FIELDS, delimiter="\t", extrasaction="ignore")
@@ -229,6 +239,30 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
                     telomeric_read_count += 1
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t read telomere scan failed: {exc}")
+    reads_scan = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        reads_scan_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_READS_TELOMERE_SCAN,
+    ).path
+    telomeric_tsv = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        telomeric_tsv_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_TELOMERIC_READS,
+    ).path
+    telomeric_fasta = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        telomeric_fasta,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_TELOMERIC_READS,
+    ).path
     return _update(
         state,
         {
@@ -248,8 +282,16 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
     if out.get("status") != "reads_scanned":
         return {}
     if not out.get("telomeric_read_count"):
-        candidates_path = Path(out["out_dir"]) / "telomere_extension_candidates.tsv"
-        _write_tsv(candidates_path, [], _CANDIDATE_FIELDS)
+        candidates_source = Path(out["work_dir"]) / "telomere_extension_candidates.tsv"
+        _write_tsv(candidates_source, [], _CANDIDATE_FIELDS)
+        candidates_path = publish_or_recover_work_artifact(
+            absolute_data_dir(state),
+            state["session_id"],
+            candidates_source,
+            stage="t2t",
+            method_name=T2T_CONTRACT_METHOD,
+            artifact_type=T2T_EXTENSION_CANDIDATES,
+        ).path
         return _update(
             state,
             {
@@ -356,7 +398,7 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         expected_attempt_id=attempt.attempt_id,
         expected_method_name=T2T_ALIGNMENT_METHOD,
     )
-    candidates_path = Path(out["out_dir"]) / "telomere_extension_candidates.tsv"
+    candidates_source = Path(out["work_dir"]) / "telomere_extension_candidates.tsv"
     try:
         assembly_ends = {row["sequence"]: row for row in _read_tsv(Path(out["assembly_telomere_scan_ref"]))}
         read_signals = {row["read_id"]: row for row in _read_tsv(Path(out["telomeric_reads_ref"]))}
@@ -374,7 +416,15 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         )
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t candidate construction failed: {exc}")
-    _write_tsv(candidates_path, raw, _CANDIDATE_FIELDS)
+    _write_tsv(candidates_source, raw, _CANDIDATE_FIELDS)
+    candidates_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        candidates_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_EXTENSION_CANDIDATES,
+    ).path
     selected = sum(row["decision"] == "auto_patch" for row in raw)
     proposed = sum(row["decision"] == "proposed" for row in raw)
     return _update(
@@ -396,7 +446,9 @@ def apply_t2t_patches(state: TopLevelState) -> dict:
         return {}
     if out.get("mode") != "auto_patch":
         return _update(state, {"status": "patch_not_applied", "patch_reason": "no_auto_patch_candidates"})
-    materialized = _materialize_t2t_patches(out, allowed_decisions={"auto_patch"})
+    materialized = _materialize_t2t_patches(
+        state, out, allowed_decisions={"auto_patch"}
+    )
     if not materialized:
         return _update(state, {"status": "patch_not_applied", "patch_reason": "selected_read_sequence_unavailable"})
     return _update(
@@ -419,8 +471,16 @@ def validate_patched_assembly(state: TopLevelState) -> dict:
         rows = list(_scan_fasta_ends(Path(out["patched_assembly_ref"]), out["telomere_motif"], out["thresholds"]))
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t patched assembly validation failed: {exc}")
-    path = Path(out["out_dir"]) / "patched_telomere_scan.tsv"
-    _write_tsv(path, rows, _ASSEMBLY_SCAN_FIELDS)
+    source = Path(out["work_dir"]) / "patched_telomere_scan.tsv"
+    _write_tsv(source, rows, _ASSEMBLY_SCAN_FIELDS)
+    path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
+    ).path
     return _update(state, {"status": "patched_validated", "patched_telomere_scan_ref": str(path)})
 
 
@@ -429,7 +489,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") == "failed":
         return {}
-    summary_path = Path(out["out_dir"]) / "telomere_status_summary.tsv"
+    summary_source = Path(out["work_dir"]) / "telomere_status_summary.tsv"
     scan_ref = out.get("patched_telomere_scan_ref") or out.get("assembly_telomere_scan_ref")
     rows = _read_tsv(Path(scan_ref)) if scan_ref and Path(scan_ref).exists() else []
     summary = [
@@ -441,12 +501,28 @@ def write_t2t_report(state: TopLevelState) -> dict:
         }
         for row in rows
     ]
-    _write_tsv(summary_path, summary, ["sequence", "left_telomere", "right_telomere", "status"])
-    report_path = Path(out["out_dir"]) / "t2t_finishing_report.md"
-    report_path.write_text(_report_markdown(out, summary), encoding="utf-8")
+    _write_tsv(summary_source, summary, ["sequence", "left_telomere", "right_telomere", "status"])
+    report_source = Path(out["work_dir"]) / "t2t_finishing_report.md"
+    report_source.write_text(_report_markdown(out, summary), encoding="utf-8")
+    summary_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        summary_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_STATUS_SUMMARY,
+    ).path
+    report_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        report_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_FINISHING_REPORT,
+    ).path
     final_status = _final_status(out, summary)
     artifacts = _register_artifacts(state, out, summary_path, report_path)
-    bundle_path = Path(out["out_dir"]) / "t2t_finishing_bundle.json"
+    bundle_source = Path(out["work_dir"]) / "t2t_finishing_bundle.json"
     bundle = T2TFinishingBundle(
         session_id=state["session_id"],
         status=final_status,
@@ -459,9 +535,15 @@ def write_t2t_report(state: TopLevelState) -> dict:
         notes=list(out.get("notes") or []),
         metadata={"source_stage": out.get("source_stage"), "execution_enabled": out.get("execution_enabled")},
     )
-    bundle_path.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
-    bundle_artifact = ArtifactMeta.from_file(bundle_path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type="t2t.bundle")
-    publish_artifact_records(absolute_data_dir(state), state["session_id"], [bundle_artifact])
+    bundle_source.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    bundle_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        bundle_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type="t2t.bundle",
+    ).path
     final_assembly = out.get("output_assembly_ref") or out["input_assembly_ref"]
     return _update(
         state,
@@ -546,20 +628,17 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
         unknown = sorted(set(request.candidate_ids).difference(selectable))
         if unknown:
             raise ResumeValidationError(f"unknown t2t candidate_ids: {', '.join(unknown)}")
-        materialized = _materialize_t2t_patches(out, selected_candidate_ids=set(request.candidate_ids), allowed_decisions={"proposed", "auto_patch"})
+        materialized = _materialize_t2t_patches(
+            state,
+            out,
+            selected_candidate_ids=set(request.candidate_ids),
+            allowed_decisions={"proposed", "auto_patch"},
+        )
         if not materialized:
             raise ResumeValidationError("t2t selected candidates could not be materialized into a patched assembly")
         output_assembly_ref = materialized["patched_assembly_ref"]
         patched_assembly_ref = materialized["patched_assembly_ref"]
         patch_records_ref = materialized["patch_records_ref"]
-        publish_artifact_records(
-            data_dir,
-            session_id,
-            [
-                ArtifactMeta.from_file(Path(patched_assembly_ref), stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type=T2T_PATCHED_ASSEMBLY),
-                ArtifactMeta.from_file(Path(patch_records_ref), stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type=T2T_PATCH_RECORDS),
-            ],
-        )
         status = "completed"
     else:
         output_assembly_ref = out["input_assembly_ref"]
@@ -913,6 +992,7 @@ def _review_candidates(path: Path) -> list[dict[str, Any]]:
 
 
 def _materialize_t2t_patches(
+    state: TopLevelState,
     out: dict[str, Any],
     *,
     selected_candidate_ids: set[str] | None = None,
@@ -958,10 +1038,26 @@ def _materialize_t2t_patches(
         )
     if not patches:
         return None
-    patched_path = Path(out["out_dir"]) / "patched_assembly.fa"
-    _write_patched_fasta(Path(out["input_assembly_ref"]), patched_path, patches)
-    records_path = Path(out["out_dir"]) / "patch_records.tsv"
-    _write_tsv(records_path, records, _PATCH_RECORD_FIELDS)
+    patched_source = Path(out["work_dir"]) / "patched_assembly.fa"
+    _write_patched_fasta(Path(out["input_assembly_ref"]), patched_source, patches)
+    records_source = Path(out["work_dir"]) / "patch_records.tsv"
+    _write_tsv(records_source, records, _PATCH_RECORD_FIELDS)
+    patched_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        patched_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_PATCHED_ASSEMBLY,
+    ).path
+    records_path = publish_or_recover_work_artifact(
+        absolute_data_dir(state),
+        state["session_id"],
+        records_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
+        artifact_type=T2T_PATCH_RECORDS,
+    ).path
     return {"patched_assembly_ref": str(patched_path), "patch_records_ref": str(records_path)}
 
 
@@ -1089,7 +1185,7 @@ def _register_artifacts(state: TopLevelState, out: dict[str, Any], summary_path:
             paths.append(path)
             artifacts.append(ArtifactMeta.from_file(path, stage="t2t", method_name=T2T_CONTRACT_METHOD, artifact_type=artifact_type))
     if artifacts:
-        publish_artifact_records(absolute_data_dir(state), state["session_id"], artifacts)
+        register_artifact_records(absolute_data_dir(state), state["session_id"], artifacts)
     return paths
 
 

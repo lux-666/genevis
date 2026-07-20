@@ -270,6 +270,16 @@ def resume_review_state(
         ) from exc
 
 
+def validate_resume_review_state(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+) -> None:
+    """Validate blocked-state identity and allowed decision without side effects."""
+
+    _active_interrupt, request_record = _validated_resume_context(state, request)
+    _ensure_decision_allowed_by_request(request_record, request)
+
+
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
     if operation in {"retry", "rerun", "rebuild", "rebuild-from"}:
         raise UnsupportedLifecycleOperationError(

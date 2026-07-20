@@ -10,7 +10,7 @@ from app.execution.evidence import load_frozen_attempt, persist_frozen_attempt
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_KMER_DB, GENOME_SURVEY_KMER_HIST
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_artifacts_dir, stage_work_dir
+from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.lifecycle import (
     attempt_artifacts,
     build_method_graph,
@@ -90,12 +90,10 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
         return update_genome_survey_output(state, blocked)
 
     working_dir = stage_work_dir(state, "genome_survey", "jellyfish")
-    artifact_dir = stage_artifacts_dir(state, "genome_survey")
     working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    kmer_db = artifact_dir / "jellyfish_kmers.jf"
-    kmer_hist = artifact_dir / "kmer_hist.tsv"
+    kmer_db = working_dir / "jellyfish_kmers.jf"
+    kmer_hist = working_dir / "kmer_hist.tsv"
     script_path = working_dir / "run_jellyfish.sh"
     reads_arg = " ".join(shlex.quote(path) for path in read_paths)
     script_path.write_text(
@@ -162,6 +160,7 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
     )
     validate_attempt_execution(state, attempt, output[EXECUTION_RESULT_KEY])
     artifacts = attempt_artifacts(
+        state,
         attempt,
         {
             str(Path(output["kmer_db_path"])): GENOME_SURVEY_KMER_DB,
@@ -169,6 +168,8 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
         },
     )
     record_attempt_success(state, attempt, artifacts)
+    kmer_db_ref = str(artifacts[0].file_path)
+    kmer_hist_ref = str(artifacts[1].file_path)
 
     substeps = dict(output.get("substeps") or {})
     substeps["kmer_count"] = {
@@ -176,15 +177,17 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
         "name": "kmer_count",
         "status": "executed",
         "method_name": attempt.method_name,
-        "kmer_db_ref": output["kmer_db_path"],
-        "kmer_hist_ref": output["kmer_hist_path"],
+        "kmer_db_ref": kmer_db_ref,
+        "kmer_hist_ref": kmer_hist_ref,
     }
     return update_genome_survey_output(
         state,
         {
             "status": COLLECTED_STATUS,
-            "kmer_db_artifact_ref": output["kmer_db_path"],
-            "kmer_hist_artifact_ref": output["kmer_hist_path"],
+            "kmer_db_path": kmer_db_ref,
+            "kmer_hist_path": kmer_hist_ref,
+            "kmer_db_artifact_ref": kmer_db_ref,
+            "kmer_hist_artifact_ref": kmer_hist_ref,
             "artifact_refs": [
                 *list(output.get("artifact_refs") or []),
                 *[str(artifact.file_path) for artifact in artifacts],

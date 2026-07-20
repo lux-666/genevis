@@ -125,8 +125,8 @@ gene-agent --help
 | Checkpoint 预算 | 部分实现 | 单 stage cursor、整个 `stage_outputs` 和 `resource_refs` 已有硬上限；完整 `TopLevelState` 和 `active_interrupt` 仍没有统一上限，memory graph 实测可接受 2,000,000 字节的单条 `review_notes` |
 | Storage audit | 核心已实现 | `app.storage.audit` 已能只读审计六层目录、checkpoint 字段、artifact 完整性/可达性、重复内容和 reclaimable reports/work，并能生成纯 dry-run cleanup manifest；缺少 CLI 和任何删除执行 |
 | Durable resume/E2E | 已有实质覆盖 | 已有真实 parent graph + SQLite 关闭/重开 resume 测试，以及 existing assembly → review → RepeatMasker/provided annotation → function completion/failure E2E；缺口是 raw reads 起点经过 read_qc/genome_survey/assembly 的整链入口测试 |
-| Artifact publication | 基础设施已实现，但存在绕过缺陷 | `publish_file`、`publish_artifact_record` 和 replay recovery 已存在且有测试；多个 stage 仍先直接写 `artifacts/` 固定路径再调用注册。实测第二次写入会先改变文件，随后注册抛 `FileExistsError`，留下 index hash 与文件不一致 |
-| Resume 事务 | 功能可用，但入口重复 | `_run_resume`、进程内 interactive gate、`run_interactive_review` 各自复制 validate/persist/update/invoke/ledger 流程；两个路径没有捕获 `graph.update_state` 异常，事件字段和失败语义也不完全一致 |
+| Artifact publication | 已收口 | durable producer 先写 `work/`，再直接调用既有 `publish_artifact_record` 或 `publish_or_recover_work_artifact`；shell 已原子发布的输出只调用 `register_artifact_records`。自动 publication 拒绝 `artifacts/` 来源，冲突回归同时验证旧文件和 index 不变；没有新增一层 JSON/helper 包装 |
+| Resume 事务 | 已收口 | `app.control.resume_transaction.execute_resume_transaction` 统一拥有 snapshot 校验、decision 应用、annotation intake、lifecycle event、checkpoint update、invoke 和 terminal report；三个入口只保留 I/O，并统一记录带 phase 的 `resume_failed` |
 | CI/打包 | 未固化 | 仓库没有 CI workflow；当前环境缺少 `hatchling`，因此 wheel 构建无法在现有开发环境复现，不能把 source-checkout 的 CWD smoke test 等同于 wheel 安装验收 |
 | 模块复杂度 | 高，但不是首个正确性修复 | `gene_annotation/nodes.py` 2364 行、`assembly_review/nodes.py` 2022 行、`ask_interactive.py` 1817 行、`control/lifecycle.py` 1542 行；`ask_interactive` 的字符串前缀识别是真实 TODO，但当前风险低于 publication/resume 边界 |
 
@@ -139,8 +139,9 @@ gene-agent --help
 - `git diff --check` 通过；
 - 资源、state、Runner、CWD 专项测试通过；
 - `/private/tmp` 中成功加载 descriptor registry 并运行 `gene-agent --help`；
-- 全量测试：1266 passed，1 skipped，240 subtests passed；
-- storage、artifact path、durable resume、entrypoint E2E 专项复验：113 passed，4 subtests passed；
+- 全量 `unittest`：1028 tests passed，1 skipped；
+- artifact publication 与 stage 专项复验：207 tests passed；
+- resume transaction 与 entrypoint 专项复验：131 tests passed；
 - checkpoint 探针确认完整 state 总量没有统一门禁；artifact 覆盖探针确认“先写已发布路径再注册”会破坏 index/file 一致性；
 - 新增文件通过完整 Ruff，全部变更 Python 文件通过 Ruff/Pyflakes `F` 检查。
 
@@ -159,11 +160,11 @@ rg 'assembly_input_fofn|filtered_reads_fofn' app --glob '*.py'
 
 按实际正确性风险和依赖排序，下一阶段应依次推进：
 
-1. **先修 durable artifact 不可变性。** 将直接写入 `artifacts/` 的 plan、bundle、summary 和 registry 改为先写 stage work 临时文件，再通过一个共享 JSON publication helper 原子发布并注册。增加回归测试，保证重复执行无副作用、冲突失败后旧 artifact 和 index 仍一致。这是当前已经复现的数据完整性缺陷。
-2. **统一 resume transaction。** 把“验证 decision → 可选 annotation intake → 写 lifecycle event → update checkpoint → invoke → terminal/report”收进一个 control service，三个入口只负责 I/O。必须覆盖 `update_state` 抛错/返回失败、invoke 抛错、重复 decision 和事件顺序。
-3. **补完整 checkpoint 边界，再做终态压缩。** 在统一 checkpoint 写入边界校验完整 `TopLevelState` 与 `active_interrupt`，限制自由文本字段；随后确保 ledger/artifact 足以独立重建终态，再压缩 terminal checkpoint。不能只给已有的两个大字段继续加局部限制。
+1. **已完成：修 durable artifact 不可变性。** Durable producer 统一从 `work/` 经过既有 publication primitive；已经由 runner/shell 发布的文件只注册。没有增加新的通用 JSON helper。重复执行、publication 后 checkpoint 前恢复、冲突后旧 artifact/index 不变均有回归覆盖。
+2. **已完成：统一 resume transaction。** “snapshot 校验 → decision → 可选 annotation intake → lifecycle event → update checkpoint → invoke → terminal/report”由一个 control service 拥有；三个入口只负责 I/O。`update_state` 抛错/返回 `False`、invoke 抛错、无 checkpoint、重复 decision 和事件顺序进入同一失败语义。
+3. **下一步：补完整 checkpoint 边界，再做终态压缩。** 在统一 checkpoint 写入边界校验完整 `TopLevelState` 与 `active_interrupt`，限制自由文本字段；随后确保 ledger/artifact 足以独立重建终态，再压缩 terminal checkpoint。不能只给已有的两个大字段继续加局部限制。
 4. **暴露已有 storage audit，暂缓删除型 GC。** 先给 `audit_run_storage`/`build_cleanup_manifest` 接只读 CLI 和 JSON 输出。只有在 terminal compaction 后的 retention-root 测试证明 audit replay 所需 artifact 全部可达，才实现带 hash 复核、dry-run manifest 和显式确认的删除；`work/` 继续排除在自动 GC 外。
 5. **补 E2E 的真正空白并建立 CI。** 新增 raw reads → inventory → read_qc → genome_survey → assembly → review 的入口级工具-shim E2E；再把现有全量测试、SQLite resume、wheel 构建/临时安装、仓库外 CWD smoke 和新增代码 Ruff 固化为 CI。现有 assembly 后半程 E2E 不应重复建设。
-6. **最后拆大模块。** 优先抽取 resume transaction 和 durable JSON publication 这两个已经暴露边界问题的模块；之后才处理 `ask_interactive` 字段 metadata 和超大 stage node 文件。按职责/副作用边界拆分，不按行数机械切文件。
+6. **最后拆大模块。** Resume transaction 已按副作用边界抽出；其余大模块仍按职责拆分，不按行数机械切文件。最后再处理 `ask_interactive` structured field metadata。
 
 优先级 1–3 是数据正确性与恢复语义，应该先完成；4–5 是可运维和防回归能力；6 是长期可维护性。Ruff 历史清理可并行分批推进，但不应挤占前三项。
