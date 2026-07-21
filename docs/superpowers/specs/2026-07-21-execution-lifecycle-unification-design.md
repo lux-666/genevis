@@ -211,9 +211,11 @@ Before execution, the shared run node fails closed unless all of these match:
 
 Every started process must produce durable stdout and stderr refs. Both success
 and failure persist canonical `ExecutionEvidence`. A process failure records
-the evidence first and then returns a bounded failed state delta. An evidence
-write failure is an execution-boundary failure and must not be reported as a
-successful run.
+the evidence first. Under `fail_fast` it then returns a bounded failed lifecycle
+delta. Under `collect_all` it marks only the matching attempt cursor failed,
+continues the ordered batch, and keeps the lifecycle routable to collect. An
+evidence write failure is an execution-boundary failure and must not be
+reported as a successful run.
 
 The shared run node accepts an ordered attempt list. `fail_fast` stops after the
 first failed attempt and marks the lifecycle failed. `collect_all` runs every
@@ -279,8 +281,10 @@ stage.
    rerun request, clears the interrupt, and returns a running-stage delta. The
    existing resume transaction checkpoints that delta and invokes the graph;
    Assembly Review routing then enters the shared direct lifecycle before
-   reevaluation. This preserves the control-layer transaction while adding the
-   normal freeze/run/collect checkpoint boundaries.
+   reevaluation. The rerun attempt retains canonical stage ID `assembly`;
+   `assembly_review` owns only the rerun request, decision evidence, and route
+   back to evaluation. This preserves the control-layer transaction while
+   adding the normal freeze/run/collect checkpoint boundaries.
 7. Remove obsolete state keys, routing helpers, mirror exports, compatibility
    tests, and dead artifact types.
 8. Update architecture conformance documents only after all runtime consumers
