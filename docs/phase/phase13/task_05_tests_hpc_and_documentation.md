@@ -43,6 +43,10 @@ Add cross-stage regression coverage for:
 - a one-key response remains a one-key recommendation and approval payload;
 - no absent-key/catalog-difference list is created;
 - a retry mapping is not merged with its predecessor;
+- a retry prompt includes the ordered sparse recommendations, effective
+  execution evidence, and outcomes for all earlier attempts;
+- retry-history code does not calculate a parameter patch or require any key to
+  be retained, removed, or changed;
 - an Assembly attempt `0` with two keys followed by attempt `1` with one key
   gives attempt `1` exactly that one L2 key and emits only that key;
 - an explicitly returned L2 value remains L2 and is emitted even when it equals
@@ -76,6 +80,8 @@ Add regression coverage for:
 - sparse initial and retry mappings, including `{}`;
 - response-shape-only parsing and mandatory approval;
 - initial attempt, execution-failure retry, and review-feedback retry;
+- an attempt `2` prompt containing the bounded evidence for attempts `0` and
+  `1`, including their execution/review outcomes;
 - immutable predecessor seals and retry evidence hydration;
 - replay after recommendation, approval, freeze, run, and collect;
 - retry exhaustion without fallback;
@@ -116,7 +122,10 @@ After implementation, update:
 Documentation must repeat the Phase 13 parameter boundary precisely: species
 facts are supplied; `parameters` is an attempt-local sparse mapping; absent
 catalog keys are neither listed nor individually reviewed; retry mappings are
-not merged; every shape-valid recommendation is human-reviewed; and only the
+not merged; every retry prompt contains bounded chronological recommendation
+and execution evidence for all earlier attempts; application code does not
+derive parameter deltas, require key changes, or make retry decisions from that
+history; every shape-valid recommendation is human-reviewed; and only the
 normal post-approval executability check may stop freeze.
 
 ## Verification Commands

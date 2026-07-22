@@ -59,6 +59,30 @@ only to attempt 0 and has no state in attempt 1.
 The previous attempt remains immutable retry evidence. It is never a parameter
 baseline and never a source used to complete the new mapping.
 
+### Retry prompt history
+
+For retry attempt `N`, the prompt receives a bounded chronological projection
+of attempts `0..N-1`. For each earlier attempt, include the available immutable
+evidence needed to understand what was tried and what happened:
+
+- the exact sparse recommendation and human approval decision;
+- the frozen effective parameter/config provenance when execution was built;
+- execution status and bounded result evidence, including relevant metrics and
+  log excerpts;
+- collect, failure, and human-review outcomes when present.
+
+An earlier attempt that was rejected or failed before execution remains in the
+history with that outcome; the prompt must not make it look as though it ran.
+Large records stay artifact-backed, while the prompt uses a deterministic,
+bounded projection whose rendered messages are persisted exactly.
+
+Code owns evidence collection, ordering, integrity checks, and prompt
+projection only. It does not derive a parameter delta, select which keys must
+change, require a previous value to be retained or removed, or turn an earlier
+result into an automatic retry decision. The model may repeat a value, change
+it, return different keys, or return `{}`. Any shape-valid result still goes to
+the human approval gate as the new attempt's exact sparse mapping.
+
 ### Defaults remain outside the recommendation
 
 The recommendation artifact and approval payload contain only the sparse L2
@@ -99,7 +123,8 @@ key or synthesize a value to make the command pass.
 The model receives:
 
 - typed species facts supplied by the caller;
-- bounded stage facts and prior-attempt evidence relevant to the task;
+- bounded stage facts and the chronological recommendation/execution history
+  required by a retry task;
 - the complete adjustable parameter catalog as available choices;
 - stage-specific guidance and selected evidence cases when configured.
 
@@ -198,6 +223,10 @@ Phase 13 Assembly cleanup is limited to the contract inconsistency:
 
 - remove required `retry_disposition` from retry responses;
 - remove `stop` / `expert_review` model routing before the approval gate;
+- hydrate every Assembly retry prompt with the bounded chronological evidence
+  for all earlier parameter attempts and their execution/review outcomes;
+- keep retry-history code evidence-only: it must not compute or enforce the
+  next mapping;
 - remove retry-only cursor/status variants that no longer have a human or
   operator owner;
 - route every shape-valid retry mapping to `parameter_approval`;
@@ -289,7 +318,7 @@ the approved recommendation unchanged.
 
 ## Implementation Surface
 
-- `app/llm/parameters/assembly/response.py`
+- `app/llm/parameters/assembly/`
 - `app/stages/assembly/parameters/workflow.py`
 - `app/stages/assembly/routing.py`
 - `app/review/gates.py`
@@ -313,6 +342,10 @@ the approved recommendation unchanged.
 - Response parsing does not require every catalog key or persist an absent-key
   list.
 - Attempt 1 is not merged with attempt 0.
+- A later retry prompt contains the ordered recommendations and execution
+  outcomes of all earlier attempts, including attempts that did not execute.
+- Retry-history projection does not enforce a parameter delta or constrain
+  which sparse keys the model may return.
 - Executor defaults never appear as LLM-recommended values.
 - An explicitly returned L2 value remains recommended and is emitted even when
   it happens to equal the documented tool default.
@@ -331,6 +364,9 @@ the approved recommendation unchanged.
 - [ ] Sparse `parameters` mappings, including `{}`, are accepted.
 - [ ] No recommendation or attempt stores an absent-key/catalog-difference list.
 - [ ] Retry mappings are attempt-local and never merge with a predecessor.
+- [ ] Retry prompts contain bounded, ordered recommendation and execution
+      evidence for all earlier attempts.
+- [ ] Retry-history code supplies evidence without making parameter decisions.
 - [ ] Defaults and facts remain separate from LLM-recommended values.
 - [ ] Absent CLI parameters are not emitted.
 - [ ] Required wrapper defaults are recorded as executor-owned when used.

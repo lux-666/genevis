@@ -62,8 +62,12 @@ Use sequential integer attempt IDs. Each retry recommendation records:
 Older attempts are immutable. Before creating attempt `N + 1`, seal and verify
 attempt `N`.
 
-The previous parameter mapping is prompt evidence only. The recommendation for
-attempt `N + 1` is the exact mapping returned for that attempt:
+The direct predecessor relation protects chain integrity. Separately, the retry
+prompt receives a bounded chronological projection of every earlier attempt's
+recommendation, approval, frozen effective config, execution result, and
+collect/review outcome. Earlier attempts are prompt evidence only. The
+recommendation for attempt `N + 1` is the exact mapping returned for that
+attempt:
 
 ```text
 attempt N parameters       -> retry context only
@@ -71,6 +75,12 @@ attempt N+1 parameters     -> attempt N+1 L2 source
 ```
 
 No merge operation exists between those mappings.
+
+The history builder verifies and hydrates evidence; it does not score attempts,
+calculate a parameter patch, require a particular change, or choose whether a
+retry should be created or continued. The model only proposes the current
+sparse mapping. Human decisions and operator-owned retry budget/policy own
+whether another attempt is requested or allowed.
 
 ## Execution-Failure Retry
 
@@ -83,9 +93,10 @@ gate writes a ref-only retry request containing:
 - previous approved sparse parameters;
 - constructed config and execution refs.
 
-The recommender receives a bounded projection of that evidence and returns a
-new sparse mapping. Every shape-valid mapping, including `{}`, enters a new
-human parameter-approval gate before freeze.
+The recommender receives that failure evidence together with the bounded
+history of all earlier attempts and returns a new sparse mapping. Every
+shape-valid mapping, including `{}`, enters a new human parameter-approval gate
+before freeze.
 
 Retry budgets are operator configuration. Exhaustion stops with an explicit
 reason and does not copy a prior mapping or synthesize defaults.
@@ -170,6 +181,10 @@ decision artifact.
 - Attempt `0` initial recommendation blocks at parameter approval.
 - Execution failure seals attempt `0` and creates retry request `1`.
 - Retry context contains attempt `0` parameters as evidence only.
+- Attempt `2` retry context contains ordered recommendation and execution
+  outcomes for attempts `0` and `1`.
+- History projection does not require any key to be retained, removed, or
+  changed.
 - Attempt `1` sparse mapping is not merged with attempt `0`.
 - `parameters: {}` on retry still opens approval.
 - No retry response field can route around approval.
