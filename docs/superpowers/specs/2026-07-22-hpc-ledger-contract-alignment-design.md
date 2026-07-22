@@ -11,6 +11,8 @@ failures caused by stale test helpers.
 ## Scope
 
 - Correct nested ledger reference extraction for asset identifiers.
+- Replace transient `ArtifactMeta` identifiers with canonical indexed refs
+  before artifact evidence is written to the ledger.
 - Add regression coverage for asset value references and retention auditing.
 - Bound HPC runs with `requested_stages` as well as `local_exec`.
 - Update HPC ledger assertions for the raw ledger v2 envelope.
@@ -34,6 +36,13 @@ extraction will distinguish two durable forms:
 Artifact paths continue to be normalized by `SessionPaths`; no audit checks are
 weakened. The retention scanner naturally ignores value-only references while
 preserving them as bounded ledger evidence.
+
+Method collectors may reconstruct `ArtifactMeta` after publication. Those
+objects carry a descriptive transient ID such as `read_qc:method:file`, while
+the v2 index owns an opaque canonical `art_<hex>` ID. When an artifact-role ref
+is written, the ledger will resolve its normalized path against the index and
+persist the indexed identity. A conflicting canonical-looking ID or mismatched
+hash, size, or type still fails closed.
 
 Existing v2 ledgers may already contain roles ending in `_asset_ref` encoded as
 `path_ref`. Retention auditing will recognize only those legacy asset-identity
@@ -67,13 +76,13 @@ whose key explicitly denotes an asset identity are converted to value refs.
 The implementation will not infer reference type from punctuation in the
 value, because colons and slashes may occur in either IDs or paths.
 
-The supplied HPC ledger proves that asset identities are currently encoded with
-the wrong reference kind, but it does not include `artifacts/index.jsonl`, so it
-cannot by itself identify the exact index conflict that triggered terminal
-compaction. Audit exceptions will therefore include the offending context,
-role, artifact ID, and path. The asset-reference fix and improved diagnostics
-are both required; the design does not claim that an unobserved index mismatch
-is repaired without a reproducer.
+The supplied HPC ledger proves both observed reference defects. Asset identities
+are encoded with the wrong reference kind, and artifact evidence uses transient
+IDs such as `read_qc:...` even though the v2 index validator only accepts
+canonical `art_<32hex>` IDs. The latter explains the terminal-compaction
+`dangling or conflicting ArtifactRef` failure. Audit exceptions will also
+include the offending context, role, artifact ID, and path so any distinct
+future mismatch is directly diagnosable.
 
 ## Verification
 
@@ -81,6 +90,8 @@ is repaired without a reproducer.
   present and `path_ref` is absent.
 - A regression path covering `references_from` to a persisted ledger event and
   then `verify_checkpoint_free_artifact_retention`.
+- A real Read-QC publication/ledger path that passes a complete storage audit
+  with canonical indexed artifact IDs.
 - A compatibility test showing a legacy `_asset_ref` role encoded as `path_ref`
   remains readable without weakening validation for artifact roles.
 - Audit error-message coverage that identifies the specific conflicting
