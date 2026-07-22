@@ -9,8 +9,13 @@ from pathlib import Path
 
 from app.storage.artifacts import register_artifact_records
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
-from app.storage.audit import audit_run_storage, build_cleanup_manifest
+from app.storage.audit import (
+    audit_run_storage,
+    build_cleanup_manifest,
+    verify_checkpoint_free_artifact_retention,
+)
 from app.integrity import sha256_file
+from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 
@@ -191,6 +196,93 @@ class StorageAuditTests(unittest.TestCase):
         self.paths.resolve_ref(ref.path_ref).write_text('{"ok": false}\n', encoding="utf-8")
         with self.assertRaisesRegex(DataLayoutError, "integrity mismatch"):
             audit_run_storage(self.paths.run_dir)
+
+    def test_legacy_ledger_asset_path_ref_is_ignored_by_retention_scan(self) -> None:
+        ledger = Ledger(self.paths.run_dir)
+        ledger.create_session(self.paths.session_id, "control/manifest.yaml")
+        ledger.record_session_terminal(
+            self.paths.session_id,
+            outcome="completed",
+            stage="done",
+            refs=[
+                {
+                    "role": "terminal.completed.stage_outputs.read_qc.input_asset_ref",
+                    "path_ref": "art_session:raw_long_reads:reads.fastq",
+                }
+            ],
+        )
+
+        audit = audit_run_storage(self.paths.run_dir)
+        retention = verify_checkpoint_free_artifact_retention(
+            self.paths.run_dir,
+            {
+                "stage_outputs": {
+                    "read_qc": {
+                        "input_asset_ref": "art_session:raw_long_reads:reads.fastq"
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(audit["artifact_index"]["record_count"], 0)
+        self.assertEqual(retention["missing_artifact_ids"], [])
+
+    def test_ledger_replaces_transient_artifact_id_with_indexed_ref(self) -> None:
+        indexed_ref = self._register_json(
+            "attempt-output.json",
+            {"value": 1},
+            artifact_type="test.attempt_output",
+        )
+        transient = ArtifactMeta.from_file(
+            self.paths.resolve_ref(indexed_ref.path_ref),
+            stage="assembly",
+            method_name="audit-test",
+            artifact_type="test.attempt_output",
+        )
+        self.assertNotEqual(transient.artifact_id, indexed_ref.artifact_id)
+        ledger = Ledger(self.paths.run_dir)
+        ledger.create_session(self.paths.session_id, "control/manifest.yaml")
+
+        ledger.record_event(
+            self.paths.session_id,
+            "attempt_succeeded",
+            {"artifacts": [transient.model_dump(mode="json")]},
+            stage="assembly",
+            subject_id="attempt-001",
+        )
+
+        row = ledger.read_event_rows(self.paths.session_id)[-1]
+        self.assertEqual(row["refs"][0]["artifact_id"], indexed_ref.artifact_id)
+        self.assertEqual(row["refs"][0]["path_ref"], indexed_ref.path_ref)
+        audit = audit_run_storage(self.paths.run_dir)
+        self.assertEqual(audit["artifact_index"]["reachable_record_count"], 1)
+
+    def test_conflicting_artifact_ref_error_identifies_role_id_and_path(self) -> None:
+        first = self._register_json(
+            "first.json",
+            {"value": 1},
+            artifact_type="test.first",
+        )
+        second = self._register_json(
+            "second.json",
+            {"value": 2},
+            artifact_type="test.second",
+        )
+        conflict = first.model_dump(mode="json")
+        conflict["role"] = "stage.assembly.output_artifact_ref"
+        conflict["path_ref"] = second.path_ref
+        self.paths.run_config_path.write_text(
+            json.dumps({"result_artifact_ref": conflict}),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(DataLayoutError) as raised:
+            audit_run_storage(self.paths.run_dir)
+
+        message = str(raised.exception)
+        self.assertIn("role=stage.assembly.output_artifact_ref", message)
+        self.assertIn(f"artifact_id={first.artifact_id}", message)
+        self.assertIn(f"path_ref={second.path_ref}", message)
 
     def test_unsafe_checkpoint_serialization_is_only_a_warning(self) -> None:
         self._write_checkpoint("pickle", b"not loaded")

@@ -82,16 +82,27 @@ assert_ledger_has_method_attempt() {
     # Require a successful attempt for one exact method, rather than merely
     # finding a stage name somewhere in the JSONL ledger.
     local events="$1" method_name="$2" desc="${3:-ledger succeeded: $2}"
-    if python3 - "$events" "$method_name" <<'PY' 2>/dev/null
+    if python3 - "$events" "$method_name" <<'PY'
 import json
 import sys
 
 events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-assert any(
+method_name = sys.argv[2]
+
+def event_method(event):
+    return event.get("method_name") or (event.get("summary") or {}).get("method_name")
+
+if not any(
     event.get("event_type") == "attempt_succeeded"
-    and event.get("method_name") == sys.argv[2]
+    and event_method(event) == method_name
     for event in events
-)
+):
+    print(f"No attempt_succeeded row found for method {method_name!r}.", file=sys.stderr)
+    print("Attempt rows in ledger:", file=sys.stderr)
+    for event in events:
+        if str(event.get("event_type", "")).startswith("attempt_"):
+            print(json.dumps(event, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+    raise SystemExit(1)
 PY
     then
         pass "$desc"
@@ -103,7 +114,7 @@ PY
 assert_no_duplicate_method_attempts() {
     # Replaying a blocked session must not re-run a completed method attempt.
     local events="$1" desc="${2:-no duplicate method attempts}"
-    if python3 - "$events" <<'PY' 2>/dev/null
+    if python3 - "$events" <<'PY'
 import collections
 import json
 import sys
@@ -115,10 +126,15 @@ for line in open(sys.argv[1], encoding="utf-8"):
     event = json.loads(line)
     if event.get("event_type") != "attempt_started":
         continue
-    key = (event.get("stage"), event.get("method_name"), event.get("attempt_id"))
+    summary = event.get("summary") or {}
+    method_name = event.get("method_name") or summary.get("method_name")
+    attempt_id = event.get("attempt_id") or event.get("subject_id")
+    key = (event.get("stage"), method_name, attempt_id)
     counts[key] += 1
 duplicates = {key: count for key, count in counts.items() if count > 1}
-assert not duplicates, duplicates
+if duplicates:
+    print(f"Duplicate attempt_started rows: {duplicates}", file=sys.stderr)
+    raise SystemExit(1)
 PY
     then
         pass "$desc"
@@ -311,7 +327,10 @@ write_run_config_stages() {
     python3 -c "
 import json, sys
 stages = [$(printf '"%s",' "$@" | sed 's/,$//')]
-rc = {'local_exec': stages}
+rc = {
+    'local_exec': stages,
+    'requested_stages': stages,
+}
 
 # Shared parameters
 genome_size_text = '''${GENOME_SIZE_ESTIMATE:-}'''.strip()
@@ -430,6 +449,7 @@ import sys
 json.dump(
     {
         "local_exec": ["read_qc", "genome_survey"],
+        "requested_stages": ["read_qc", "genome_survey"],
         "read_qc": {"length_filter": {"method": "skip", "approved": False, "thresholds": {}}},
         "genome_survey": {"survey_parameters": {"kmer_size": 21, "hash_size": "1G", "threads": 4}},
     },

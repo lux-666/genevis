@@ -111,7 +111,22 @@ write_run_config_stages "$RC" "read_qc" "assembly"
 
 # Note: assembly_dedup is not in LocalExecStage, it runs automatically
 # when there is a materialized assembly and long reads.
-# We don't add it to local_exec explicitly.
+# Request it as a workflow target without adding it to local_exec explicitly.
+python3 - "$RC" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+requested = list(config.get("requested_stages") or [])
+if "assembly_dedup" not in requested:
+    requested.append("assembly_dedup")
+config["requested_stages"] = requested
+assert "assembly_dedup" not in config.get("local_exec", []), config
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
 
 # ---- Run ----
 cd "${PROJECT_ROOT}"
@@ -370,7 +385,11 @@ events_path = run_dir / "ledger" / "events.jsonl"
 assert events_path.is_file(), f"missing ledger events: {events_path}"
 events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 assert any(
-    event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
+    event.get("event_type") == "attempt_succeeded"
+    and (
+        event.get("method_name")
+        or (event.get("summary") or {}).get("method_name")
+    ) == method_id
     for event in events
 ), f"ledger has no attempt_succeeded for {method_id}"
 
