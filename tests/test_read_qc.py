@@ -16,12 +16,42 @@ from app.storage.ledger import Ledger
 from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.storage.audit import audit_run_storage
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 from app.stages.read_qc.builder import build_stage
 from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
 from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
 from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
+
+
+def _write_phase4_smoke_fixture(root: Path) -> tuple[Path, Path]:
+    fixture = root / "smoke.fastq"
+    fixture.write_text(
+        "@read_1\nACGTACGTACGTACGTACGTACGTACGTACGT\n+\n"
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n"
+        "@read_2\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n+\n"
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n"
+        "@read_3\nACGTACGTACGTACGTACGTACGT\n+\n"
+        "IIIIIIIIIIIIIIIIIIIIIIII\n",
+        encoding="utf-8",
+    )
+    manifest = root / "read_qc_manifest.yaml"
+    manifest.write_text(
+        "session_id: phase4-readqc-smoke\n"
+        "sample_id: phase4_smoke\n"
+        "target_assembly_level: contig\n"
+        "assets:\n"
+        "  - asset_type: raw_long_reads\n"
+        "    paths:\n"
+        f"      - {json.dumps(str(fixture))}\n"
+        "    platform: cycloneseq\n"
+        "    layout: single\n"
+        "    format: fastq\n"
+        "    compression: none\n",
+        encoding="utf-8",
+    )
+    return fixture, manifest
 
 
 class ReadQCSeqKitDescriptorTests(unittest.TestCase):
@@ -255,6 +285,8 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
             self.assertIn("artifact_registered", event_types)
+            audit = audit_run_storage(result["data_dir"])
+            self.assertGreaterEqual(audit["artifact_index"]["reachable_record_count"], 2)
 
     def test_multi_file_quality_summary_weights_by_bases_before_read_count(self):
         from app.stages.read_qc.method_application.support import parse_seqkit_summary
@@ -770,17 +802,14 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("seqkit", result["stage_outputs"]["read_qc"]["missing_tools"])
 
-    def test_phase4_fixture_manifest_registers_as_raw_long_reads(self):
-        # Sanity: the committed fixture file exists and is non-empty, so both
-        # tests and a documented smoke command can rely on it.
-        fixture = Path("tests/fixtures/phase4/smoke.fastq")
-        manifest = Path("tests/fixtures/phase4/read_qc_manifest.yaml")
-        self.assertTrue(fixture.exists())
-        self.assertGreater(fixture.stat().st_size, 0)
-        self.assertTrue(manifest.exists())
-        text = manifest.read_text(encoding="utf-8")
-        self.assertIn("raw_long_reads", text)
-        self.assertIn("- smoke.fastq", text)
+    def test_phase4_smoke_manifest_registers_generated_raw_long_reads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture, manifest = _write_phase4_smoke_fixture(Path(tmpdir))
+
+            self.assertGreater(fixture.stat().st_size, 0)
+            text = manifest.read_text(encoding="utf-8")
+            self.assertIn("raw_long_reads", text)
+            self.assertIn(str(fixture), text)
 
     def test_relative_data_dir_resolves_to_absolute_paths_in_generated_script(self):
         # Regression: when --data-dir is relative, the generated seqkit_stats
@@ -872,17 +901,18 @@ def _env_geno_exec_has_seqkit() -> bool:
     "env_geno_exec conda env with seqkit not available; skipping real smoke",
 )
 class Phase4ReadQCRealSmokeTests(unittest.TestCase):
-    """Real-data smoke: committed fixture -> env_geno_exec conda env -> SeqKit.
+    """Real-tool smoke: generated fixture -> env_geno_exec conda env -> SeqKit.
 
     Skipped automatically when conda or env_geno_exec is not present so the
     broader suite stays green on hosts without the bioinformatics env.
     """
 
-    def test_committed_fixture_smoke_produces_stats_summary_and_fofn(self):
+    def test_generated_fixture_smoke_produces_stats_summary_and_fofn(self):
         from app.entrypoints.run import main as run_main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "phase4-readqc-smoke"
+            _fixture, manifest = _write_phase4_smoke_fixture(Path(tmpdir))
             run_config = Path(tmpdir) / "read_qc_only_run_config.json"
             run_config.write_text(
                 json.dumps(
@@ -896,7 +926,7 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             argv = [
                 "run",
                 "--session-id", session_id,
-                "--manifest", "tests/fixtures/phase4/read_qc_manifest.yaml",
+                "--manifest", str(manifest),
                 "--data-dir", tmpdir,
                 "--run-config", str(run_config),
             ]

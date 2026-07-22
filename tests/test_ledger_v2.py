@@ -196,6 +196,67 @@ class LedgerV2Tests(unittest.TestCase):
             self.assertEqual(event["error"], "tool failed")
             self.assertEqual(event["refs"][0]["path_ref"], paths.to_ref(evidence))
 
+    def test_nested_asset_ids_are_persisted_as_value_refs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _run(tmp)
+            ledger = Ledger(paths.run_dir)
+            ledger.create_session("s1", str(paths.manifest_path))
+
+            refs = ledger.references_from(
+                {
+                    "stage_outputs": {
+                        "read_qc": {
+                            "input_asset_ref": "s1:raw_long_reads:reads.fastq",
+                            "input_asset_refs": [
+                                "s1:raw_long_reads:reads.fastq",
+                                "s1:raw_long_reads:reads-2.fastq",
+                            ],
+                            "summary_artifact_ref": "artifacts/read_qc/summary.json",
+                        }
+                    }
+                },
+                role_prefix="terminal.completed",
+            )
+            ledger.record_session_terminal(
+                "s1",
+                outcome="completed",
+                stage="done",
+                refs=refs,
+            )
+
+            row_refs = ledger.read_event_rows("s1")[-1]["refs"]
+            by_role = {ref["role"]: ref for ref in row_refs}
+            self.assertEqual(
+                by_role[
+                    "terminal.completed.stage_outputs.read_qc.input_asset_ref"
+                ]["value"],
+                "s1:raw_long_reads:reads.fastq",
+            )
+            self.assertNotIn(
+                "path_ref",
+                by_role[
+                    "terminal.completed.stage_outputs.read_qc.input_asset_ref"
+                ],
+            )
+            self.assertEqual(
+                by_role[
+                    "terminal.completed.stage_outputs.read_qc.input_asset_refs.0"
+                ]["value"],
+                "s1:raw_long_reads:reads.fastq",
+            )
+            self.assertEqual(
+                by_role[
+                    "terminal.completed.stage_outputs.read_qc.input_asset_refs.1"
+                ]["value"],
+                "s1:raw_long_reads:reads-2.fastq",
+            )
+            self.assertEqual(
+                by_role[
+                    "terminal.completed.stage_outputs.read_qc.summary_artifact_ref"
+                ]["path_ref"],
+                "artifacts/read_qc/summary.json",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
