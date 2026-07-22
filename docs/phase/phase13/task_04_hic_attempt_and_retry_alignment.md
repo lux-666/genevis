@@ -6,113 +6,135 @@
 
 ## Goal
 
-Bring AutoHiC attempt progression and retry behavior into the same durable
-shape as Assembly while retaining the Hi-C-specific model DTO, execution
-adapter, and final adoption review.
+Bring AutoHiC attempt sequencing and retry behavior into the same durable shape
+as Assembly while using the sparse recommendation contract from Task 03.
 
-This task does not expand the parameter catalog. Task 03 owns which parameters
-are visible or adjustable. This task owns attempt sequencing, retry evidence,
-routing, and recovery.
+Each Hi-C attempt owns its own sparse parameter mapping. A retry recommendation
+uses the previous attempt only as evidence and never as a mapping to update or
+complete.
 
 ## Current State
 
 AutoHiC already has:
 
 - an immutable recommendation manifest;
-- a hash-bound mandatory parameter approval gate;
-- a compact `ParameterAttempt` created after approval;
-- `ParameterAttemptOwner` for the shared execution lifecycle;
-- a separate human adoption gate after collect.
+- a hash-bound parameter approval gate;
+- a compact `ParameterAttempt` after approval;
+- `ParameterAttemptOwner` for shared `freeze -> run -> collect` execution;
+- a separate adoption review after collect.
 
-The current flow supports only recommendation attempt `0`. An execution
-failure terminates the stage, and adoption review cannot request another
-parameter recommendation using report/contact-map feedback. The attempt array
-is initialized as a one-item special case rather than managed as a validated
-chain.
+The current flow supports only recommendation attempt `0`. Execution failure
+terminates the stage, adoption review cannot request a parameter retry, and the
+attempt array is managed as a one-item special case.
 
-## Design
+## Attempt Tasks
 
-### Attempt tasks
-
-Support these Hi-C recommendation tasks:
+Use the existing canonical task names:
 
 - `recommend_initial`;
 - `retry_after_execution_failure`;
 - `retry_after_review_failure`.
 
-These values reuse the existing canonical `ParameterAttemptTask` literals and
-extend the Hi-C request DTO beyond its current initial-only task. The response
-remains the complete Hi-C parameter mapping defined by Task 03. There is no
-model-controlled retry disposition.
+Every task returns the same response shape:
 
-Every task produces a new immutable recommendation record. A valid response
-always enters the parameter approval gate. No retry recommendation is executed
-automatically.
+```json
+{
+  "parameters": {
+    "only_the_current_attempt_override": "value"
+  },
+  "summary": "Optional reviewer-facing explanation"
+}
+```
 
-### Attempt chain
+`parameters` may be empty. There is no `retry_disposition`, parameter patch,
+full-catalog response, or absent-key list.
 
-Use sequential integer attempt IDs. Each retry attempt records:
+## Attempt Chain
+
+Use sequential integer attempt IDs. Each retry recommendation records:
 
 - `previous_attempt_id`;
-- the previous sealed attempt manifest ref and seal hash;
-- the retry task;
-- immutable refs to the failure or review feedback supplied to the model;
-- the new recommendation, approval decision, frozen attempt, execution
-  evidence, and collect/review result as they become available.
+- previous sealed-attempt manifest ref and seal hash;
+- retry task;
+- immutable failure/review-evidence refs;
+- the new sparse recommendation and its approval decision.
 
-Older attempts are never overwritten. Before creating attempt `N + 1`, seal
-attempt `N` and verify the predecessor relation. Keep only compact cursors and
-refs in checkpoint state; hydrate large logs, reports, and model bodies from
-artifacts.
+Older attempts are immutable. Before creating attempt `N + 1`, seal and verify
+attempt `N`.
 
-### Execution-failure retry
+The previous parameter mapping is prompt evidence only. The recommendation for
+attempt `N + 1` is the exact mapping returned for that attempt:
 
-After the shared lifecycle persists a failed execution result, a Hi-C retry
-gate may create a ref-only retry request containing:
+```text
+attempt N parameters       -> retry context only
+attempt N+1 parameters     -> attempt N+1 L2 source
+```
+
+No merge operation exists between those mappings.
+
+## Execution-Failure Retry
+
+After the shared lifecycle persists a failed execution result, the Hi-C retry
+gate writes a ref-only retry request containing:
 
 - previous attempt ID and seal hash;
 - process return code and bounded failure classification;
 - stdout/stderr refs and a bounded log tail;
-- previous approved parameters and constructed config ref.
+- previous approved sparse parameters;
+- constructed config and execution refs.
 
-Routing then returns to the recommender. The new recommendation pauses at the
-same hash-bound human approval gate as the initial recommendation.
+The recommender receives a bounded projection of that evidence and returns a
+new sparse mapping. Every shape-valid mapping, including `{}`, enters a new
+human parameter-approval gate before freeze.
 
-Retry budgets remain operator configuration, represented as a typed Hi-C stage
-run-config field rather than a recommended parameter. Exhaustion stops with an
-explicit terminal reason and does not synthesize a fallback parameter set.
+Retry budgets are operator configuration. Exhaustion stops with an explicit
+reason and does not copy a prior mapping or synthesize defaults.
 
-Even when the model summary recommends stopping or escalating, a shape-valid
-parameter mapping still opens the human approval gate. Only the human decision
-or an exhausted operator-owned retry budget may stop the loop.
+## Review-Failure Retry
 
-### Review-feedback retry
+Keep the final decisions:
 
-Keep the existing final decisions `accept_candidate`, `keep_prior_assembly`,
-and `stop_human_review`. Add an explicit `request_parameter_retry` decision for
-reviewers who want another AutoHiC attempt.
+- `accept_candidate`;
+- `keep_prior_assembly`;
+- `stop_human_review`.
 
-That decision persists a review-failure artifact containing reviewer notes
-and refs to the AutoHiC report, contact map, scaffold FASTA, and assembly file.
-It seals the current attempt and routes to the canonical
-`retry_after_review_failure` task.
-The review decision does not invoke AutoHiC directly.
+Add `request_parameter_retry` for a reviewer who wants another AutoHiC attempt.
+That decision persists reviewer notes plus refs to the AutoHiC report, contact
+map, scaffold FASTA, and assembly file. It seals the current attempt and routes
+to `retry_after_review_failure`.
 
-### Status and recovery
+The review decision does not execute AutoHiC and does not prefill the next
+mapping. The next mapping comes only from the new recommendation response and
+again requires human parameter approval.
 
-The stage router must distinguish:
+## Status and Recovery
+
+Routing must distinguish:
 
 - pending parameter approval;
-- approved parameters ready for freeze;
-- frozen and executed recovery markers owned by the shared lifecycle;
+- approved sparse parameters ready for freeze;
+- lifecycle-owned frozen and executed recovery markers;
 - retry requested after execution failure;
-- retry requested after review feedback;
+- retry requested after review failure;
 - retry budget exhausted;
 - accepted, prior assembly retained, or terminally stopped.
 
-Resume from a parameter gate must verify request ID, request hash,
-recommendation hash, attempt ID, task, and predecessor binding. Resume from
-freeze or run follows the shared lifecycle and must not rebuild or re-execute.
+Resume from a parameter gate verifies request ID/hash, recommendation hash,
+attempt ID, task, and predecessor binding. Resume from freeze or run follows the
+shared lifecycle and does not rebuild or re-execute.
+
+Checkpoint state stores compact cursors and refs. Logs, model bodies, reports,
+effective config values, and default-source details remain in artifacts.
+
+## Human Approval Rule
+
+Every shape-valid initial or retry recommendation enters `parameter_approval`.
+The model cannot stop, approve, reject, or divert the retry through a response
+field.
+
+Human approval binds the exact current sparse mapping. It does not approve a
+merged mapping and does not ask separately about catalog keys that are absent
+from the mapping.
 
 ## Implementation Surface
 
@@ -126,48 +148,43 @@ freeze or run follows the shared lifecycle and must not rebuild or re-execute.
 - `app/llm/parameters/hic/response.py`
 - `app/schemas/artifacts.py`
 - `app/entrypoints/review_interactive.py`
-- parameter-attempt schemas/helpers already shared with Assembly
+- shared parameter-attempt sealing/timeline helpers
 
-Reuse the Assembly attempt-chain and sealing concepts where their contracts are
-stage-neutral. Do not share Assembly biological DTOs, prompt profiles, or
-quality interpretation code with Hi-C.
-
-Extend `HiCScaffoldDecisionArtifact.decision` and the interactive review adapter
-with `request_parameter_retry`. Do not add a parallel decision artifact or a
-stage-local retry schema.
+Extend `HiCScaffoldDecisionArtifact.decision` with
+`request_parameter_retry`. Do not add a stage-local attempt schema or parallel
+decision artifact.
 
 ## Failure Behavior
 
-- Missing or changed predecessor evidence fails closed before a retry prompt.
-- Invalid model shape creates immutable invalid-response evidence and does not
-  open an approval gate.
+- Missing or changed predecessor evidence fails before model invocation.
+- Invalid response structure persists invalid-response evidence and does not
+  open approval.
+- Every structurally valid sparse mapping opens approval.
 - Rejected parameters do not execute.
-- A valid retry recommendation cannot bypass human approval.
-- Retry exhaustion cannot fall back to defaults or a previous parameter set.
+- Retry exhaustion does not reuse a prior mapping.
+- Post-approval executability failure leaves the recommendation unchanged.
 - `keep_prior_assembly` remains a valid non-retry outcome.
 
 ## Tests
 
-- Initial recommendation still blocks at attempt `0` approval.
+- Attempt `0` initial recommendation blocks at parameter approval.
 - Execution failure seals attempt `0` and creates retry request `1`.
-- Retry prompt is hydrated from immutable failure evidence.
-- Every shape-valid retry response, including unusual values, opens approval.
+- Retry context contains attempt `0` parameters as evidence only.
+- Attempt `1` sparse mapping is not merged with attempt `0`.
+- `parameters: {}` on retry still opens approval.
 - No retry response field can route around approval.
-- Retry recommendation blocks at a new human approval gate.
-- Approved retry freezes and executes attempt `1` without changing attempt `0`.
-- Review `request_parameter_retry` carries reviewer notes and AutoHiC evidence
-  refs into the retry request.
-- Stale predecessor seals, recommendation hashes, and approval bindings fail.
-- Retry budgets are deterministic and replay-safe.
-- Resume after freeze and run remains idempotent.
+- Approved attempt `1` freezes and executes without changing attempt `0`.
+- `request_parameter_retry` binds reviewer notes and AutoHiC evidence refs.
+- Stale seals, hashes, and approval bindings fail closed.
+- Retry budgets and resume after freeze/run are deterministic.
 
 ## Acceptance Criteria
 
 - [ ] AutoHiC supports a validated multi-attempt chain.
-- [ ] Execution failures can request a new recommendation.
-- [ ] Human review can explicitly request a parameter retry.
-- [ ] Every valid initial or retry recommendation enters human approval.
+- [ ] Every attempt owns only its own sparse mapping.
+- [ ] Previous mappings are retry evidence and are never merge inputs.
+- [ ] Execution and review failures can request a new recommendation.
+- [ ] Every shape-valid initial or retry mapping enters human approval.
+- [ ] No model-controlled retry disposition or automatic fallback exists.
 - [ ] Retry evidence is artifact-backed and ref-only in checkpoint state.
-- [ ] No automatic fallback, automatic approval, or direct retry execution
-      exists.
 - [ ] Lifecycle and review-resume tests cover attempts beyond `0`.

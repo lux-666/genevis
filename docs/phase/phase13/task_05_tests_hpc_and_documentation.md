@@ -6,10 +6,10 @@
 
 ## Goal
 
-Prove the completed Hi-C and T2T behavior through focused unit tests,
-integration/replay tests, artifact and ledger assertions, and real-tool HPC
-smoke scripts. Update the stable architecture and operator documentation only
-after the implemented contracts pass.
+Prove the Phase 13 Assembly, Hi-C, and T2T parameter contract plus the completed
+T2T/Hi-C execution behavior through focused tests, replay assertions, artifact
+and ledger checks, and real-tool HPC smoke scripts. Update stable documentation
+only after the implemented contracts pass.
 
 ## Current State
 
@@ -35,6 +35,23 @@ Use four complementary layers:
 
 Tests must assert durable facts and refs, not only final status strings.
 
+### Sparse parameter contract coverage
+
+Add cross-stage regression coverage for:
+
+- `parameters: {}` is structurally valid and reaches human approval;
+- a one-key response remains a one-key recommendation and approval payload;
+- no absent-key/catalog-difference list is created;
+- a retry mapping is not merged with its predecessor;
+- an Assembly attempt `0` with two keys followed by attempt `1` with one key
+  gives attempt `1` exactly that one L2 key and emits only that key;
+- an explicitly returned L2 value remains L2 and is emitted even when it equals
+  the documented executor/tool default;
+- defaults used during freeze remain executor/tool-owned evidence;
+- absent CLI keys are not emitted;
+- every shape-valid initial or retry mapping reaches human approval;
+- Assembly retry no longer accepts or routes on `retry_disposition`.
+
 ### T2T coverage
 
 Add regression coverage for:
@@ -45,6 +62,7 @@ Add regression coverage for:
 - PAF publication, artifact-index registration, and `attempt_succeeded`;
 - candidate-to-attempt/execution provenance;
 - mandatory parameter approval and unchanged execution handoff;
+- T2T `parameter_approval` gate registration and resume dispatch;
 - `ParameterAttemptOwner` freeze/run/collect replay;
 - collect failure after process success;
 - manual patch review after parameter approval;
@@ -55,6 +73,7 @@ Add regression coverage for:
 Add regression coverage for:
 
 - the expanded request/catalog surface;
+- sparse initial and retry mappings, including `{}`;
 - response-shape-only parsing and mandatory approval;
 - initial attempt, execution-failure retry, and review-feedback retry;
 - immutable predecessor seals and retry evidence hydration;
@@ -88,16 +107,17 @@ high, but the approval and artifact contracts must still be exercised.
 After implementation, update:
 
 - `docs/architecture/parameter-recommenders.md`;
-- `docs/architecture/execution-lifecycle.md` if T2T ownership changes its
-  conformance list;
+- `docs/architecture/execution-lifecycle.md`, including T2T's
+  `ParameterAttemptOwner` conformance entry;
 - `docs/stage_contracts.md`;
 - `docs/user_guide/parameter_recommendation.md`;
 - HPC quick-start documentation and current run-config examples.
 
 Documentation must repeat the Phase 13 parameter boundary precisely: species
-facts are supplied, response processing is shape-only, every valid
-recommendation is human-reviewed, and only the normal post-approval
-executability check may stop freeze.
+facts are supplied; `parameters` is an attempt-local sparse mapping; absent
+catalog keys are neither listed nor individually reviewed; retry mappings are
+not merged; every shape-valid recommendation is human-reviewed; and only the
+normal post-approval executability check may stop freeze.
 
 ## Verification Commands
 
@@ -109,6 +129,8 @@ PYTHONDONTWRITEBYTECODE=1 conda run -n gene_agent \
   tests.test_t2t \
   tests.test_hic_scaffolding \
   tests.test_execution_lifecycle \
+  tests.test_parameter_recommendation \
+  tests.test_assembly_parameter_request \
   tests.test_parameter_attempt_schema \
   tests.test_phase11_parameter_approval -v
 ```
@@ -122,7 +144,9 @@ when AutoHiC, minimap2, models, or real data are unavailable.
 - [ ] Focused unit and integration suites pass.
 - [ ] T2T lifecycle, provenance, multi-input, and junction regressions pass.
 - [ ] Hi-C initial and retry attempt regressions pass.
-- [ ] Parameter tests prove shape-only parsing and mandatory human approval.
+- [ ] Parameter tests prove sparse mappings, no predecessor merge, shape-only
+      parsing, and mandatory human approval.
+- [ ] Assembly retry has no model-controlled approval bypass.
 - [ ] Collect failures cannot produce successful durable output.
 - [ ] T2T HPC smoke uses `output_assembly_ref`.
 - [ ] HPC smoke requires an immutable registered PAF after real execution.

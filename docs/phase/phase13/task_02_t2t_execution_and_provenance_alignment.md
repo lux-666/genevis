@@ -43,8 +43,8 @@ Freeze must not publish the PAF and must not expose its work path as a durable
 stage artifact ref. The frozen attempt is the recovery relation for that path.
 
 The collect implementation must stay owner-neutral by using
-`load_method_executions(...)`. Task 03 may change the lifecycle from a direct
-attempt owner to a parameter attempt owner without creating a second collect
+`load_method_executions(...)`. Task 03 will change the lifecycle from a direct
+attempt owner to `ParameterAttemptOwner` without creating a second collect
 path.
 
 ### Collect boundary
