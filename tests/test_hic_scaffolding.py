@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from app.control.lifecycle import ResumeValidationError
 from app.execution.evidence import load_frozen_attempt
-from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest
 from app.schemas.artifacts import (
     ArtifactRef,
@@ -36,6 +35,8 @@ from app.stages.hic_scaffolding.parameters.workflow import (
     apply_autohic_parameter_approval_decision,
     recommend_autohic_parameters,
 )
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 from tests.data_v2 import v2_run_dir
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
@@ -761,8 +762,13 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "artifacts/hic_scaffolding/attempts/000/command.json",
             )
             self.assertEqual(
-                executed_attempt["execution_ref"]["path_ref"],
-                "artifacts/hic_scaffolding/attempts/000/execution.json",
+                executed_attempt["execution_ref"]["artifact_type"],
+                "hic_scaffolding.execution_result",
+            )
+            self.assertTrue(
+                executed_attempt["execution_ref"]["path_ref"].startswith(
+                    "artifacts/hic_scaffolding/attempts/autohic/execution."
+                )
             )
             self.assertEqual(
                 executed_attempt["frozen_attempt_ref"]["artifact_type"],
@@ -957,6 +963,47 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 hic.get("notes") or [],
             )
             self.assertIsNone(result.get("active_interrupt"))
+
+    def test_missing_scaffold_uses_shared_collect_failure_boundary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir,
+                error_model,
+                chromosome_model,
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads)
+                )
+            )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)},
+                ),
+                patch(
+                    "app.stages.hic_scaffolding.method_application.support."
+                    "publish_or_recover_work_artifact",
+                    side_effect=FileNotFoundError("scaffold output disappeared"),
+                ),
+            ):
+                result = build_stage().invoke(approved)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "failed")
+            self.assertEqual(hic["failure_kind"], "collect")
+            self.assertIn("scaffold output disappeared", hic["reason"])
+            self.assertEqual(hic["parameter_attempts"][0]["status"], "executed")
+
+            event_types = [
+                event["event_type"]
+                for event in Ledger(result["data_dir"]).read_events("s1")
+            ]
+            self.assertIn("attempt_failed", event_types)
+            self.assertIn("stage_failed", event_types)
+            self.assertNotIn("attempt_succeeded", event_types)
 
 
 if __name__ == "__main__":

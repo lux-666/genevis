@@ -1,0 +1,911 @@
+"""Contract tests for the shared executable-method lifecycle."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.evidence import execution_log_paths
+from app.execution.fake_runner import FakeRunner
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
+    run_method_attempts,
+)
+from app.execution.method_runner import build_frozen_attempt
+from app.schemas.artifacts import ArtifactRef, ParameterAttempt
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult
+from app.schemas.state import initial_state
+from app.stages.base import stage_output, update_stage_output
+from app.storage.artifacts import read_artifact_records
+from tests.data_v2 import v2_run_dir
+
+DIRECT_LIFECYCLE = MethodExecutionLifecycle(
+    stage="function_annotation",
+    name="contract method",
+    method_name="contract.method",
+    frozen_status="contract_frozen",
+    ran_status="contract_ran",
+)
+
+
+def _state(tmpdir: str, *, stage: str = "function_annotation") -> dict:
+    state = initial_state(
+        session_id="s1",
+        input_manifest_ref="control/manifest.yaml",
+        data_dir=str(v2_run_dir(tmpdir, "s1")),
+    )
+    state["stage_outputs"] = {stage: {"status": "planned"}}
+    return state
+
+
+def _attempt(
+    state: dict,
+    *,
+    attempt_id: str = "s1:contract:0",
+    stage: str = "function_annotation",
+    method_name: str = "contract.method",
+    parameter_attempt_id: int | None = None,
+) -> FrozenAttemptSpec:
+    work_dir = Path(state["data_dir"]) / "work" / stage / attempt_id.replace(":", "_")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    script = work_dir / "run.sh"
+    script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    script.chmod(0o755)
+    return build_frozen_attempt(
+        attempt_id=attempt_id,
+        session_id=state["session_id"],
+        stage=stage,
+        method_name=method_name,
+        script_path=script,
+        working_dir=work_dir,
+        expected_outputs=[work_dir / "output.txt"],
+        env=None,
+        env_spec=None,
+        metadata=(
+            {"parameter_attempt_id": parameter_attempt_id}
+            if parameter_attempt_id is not None
+            else None
+        ),
+    )
+
+
+def _merge(state: dict, update: dict) -> dict:
+    return {**state, **update}
+
+
+def _freeze_contract(state: dict) -> dict:
+    if stage_output(state, DIRECT_LIFECYCLE.stage).get("status") != "planned":
+        return {}
+    return freeze_method_attempts(
+        state,
+        DIRECT_LIFECYCLE,
+        [_attempt(state)],
+    )
+
+
+def _collect_contract(state: dict) -> dict:
+    executions = load_method_executions(state, DIRECT_LIFECYCLE)
+    if len(executions) != 1:
+        raise AssertionError("expected one contract execution")
+    return update_stage_output(
+        state,
+        DIRECT_LIFECYCLE.stage,
+        {"status": "collected"},
+    )
+
+
+class _OutcomeRunner:
+    def __init__(self, failures: set[str]):
+        self.failures = failures
+        self.attempt_ids: list[str] = []
+
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        self.attempt_ids.append(spec.attempt_id)
+        spec.working_dir.mkdir(parents=True, exist_ok=True)
+        stdout = spec.working_dir / "stdout.log"
+        stderr = spec.working_dir / "stderr.log"
+        stdout.write_text("", encoding="utf-8")
+        failed = spec.attempt_id in self.failures
+        stderr.write_text("expected failure" if failed else "", encoding="utf-8")
+        if not failed:
+            for output in spec.expected_outputs:
+                output.write_text("ok\n", encoding="utf-8")
+        return ExecutionResult(
+            attempt_id=spec.attempt_id,
+            success=not failed,
+            return_code=7 if failed else 0,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            output_paths=list(spec.expected_outputs),
+            status="failed" if failed else "ok",
+        )
+
+
+class _RaisingRunner:
+    def __init__(self) -> None:
+        self.attempt_ids: list[str] = []
+
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        self.attempt_ids.append(spec.attempt_id)
+        raise FileNotFoundError("runner binary missing")
+
+
+class _BuggyRunner:
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        raise RuntimeError(f"runner contract bug for {spec.attempt_id}")
+
+
+class _ContractValueErrorRunner:
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        raise ValueError(f"runner contract bug for {spec.attempt_id}")
+
+
+class _MismatchedRunner(_OutcomeRunner):
+    def __init__(self) -> None:
+        super().__init__(set())
+
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        result = super().run(spec)
+        return result.model_copy(update={"attempt_id": "s1:wrong:99"})
+
+
+class _LargeStderrRunner:
+    def __init__(self, stderr_text: str) -> None:
+        self.stderr_text = stderr_text
+
+    def run(self, spec: FrozenAttemptSpec) -> ExecutionResult:
+        stdout = spec.working_dir / "stdout.log"
+        stderr = spec.working_dir / "stderr.log"
+        stdout.write_text("", encoding="utf-8")
+        stderr.write_text(self.stderr_text, encoding="utf-8")
+        return ExecutionResult(
+            attempt_id=spec.attempt_id,
+            success=False,
+            return_code=7,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            output_paths=list(spec.expected_outputs),
+            status="failed",
+        )
+
+
+def _ref(name: str, artifact_type: str) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_id=f"art_{name * 32}",
+        path_ref=f"artifacts/assembly/{name}.json",
+        sha256=name * 64,
+        size_bytes=1,
+        artifact_type=artifact_type,
+    )
+
+
+class ExecutionLifecycleContractTests(unittest.TestCase):
+    def test_direct_graph_uses_injected_runner_and_collects(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            runner = FakeRunner()
+            graph = build_method_graph(
+                DIRECT_LIFECYCLE,
+                _freeze_contract,
+                _collect_contract,
+                runner=runner,
+            )
+
+            result = graph.invoke(state)
+
+            output = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "collected")
+            self.assertEqual(len(runner.executed_commands), 1)
+            self.assertEqual(output["execution_attempts"][0]["status"], "executed")
+
+    def test_ran_reentry_collects_without_reexecuting(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+            ran = _merge(
+                frozen,
+                run_method_attempts(
+                    frozen,
+                    DIRECT_LIFECYCLE,
+                    runner=FakeRunner(),
+                ),
+            )
+            replay_runner = FakeRunner()
+            def fail_if_refrozen(_state: dict) -> dict:
+                raise AssertionError("ran checkpoint must bypass freeze")
+
+            graph = build_method_graph(
+                DIRECT_LIFECYCLE,
+                fail_if_refrozen,
+                _collect_contract,
+                runner=replay_runner,
+            )
+
+            result = graph.invoke(ran)
+
+            self.assertEqual(
+                result["stage_outputs"]["function_annotation"]["status"],
+                "collected",
+            )
+            self.assertEqual(replay_runner.executed_commands, [])
+
+    def test_frozen_reentry_runs_without_rebuilding_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+            frozen_ref = frozen["stage_outputs"]["function_annotation"][
+                "execution_attempts"
+            ][0]["frozen_attempt_ref"]
+            runner = FakeRunner()
+            def fail_if_refrozen(_state: dict) -> dict:
+                raise AssertionError("frozen checkpoint must bypass freeze")
+
+            graph = build_method_graph(
+                DIRECT_LIFECYCLE,
+                fail_if_refrozen,
+                _collect_contract,
+                runner=runner,
+            )
+
+            result = graph.invoke(frozen)
+
+            output = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "collected")
+            self.assertEqual(len(runner.executed_commands), 1)
+            self.assertEqual(
+                output["execution_attempts"][0]["frozen_attempt_ref"],
+                frozen_ref,
+            )
+
+    def test_direct_cursor_identity_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+            frozen["stage_outputs"]["function_annotation"]["execution_attempts"][0][
+                "method_id"
+            ] = "contract.other"
+
+            update = run_method_attempts(frozen, DIRECT_LIFECYCLE)
+
+            output = update["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("wrong method identity", output["reason"])
+
+    def test_direct_run_rejects_executed_cursor_when_stage_is_rewound(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+            ran = _merge(
+                frozen,
+                run_method_attempts(
+                    frozen,
+                    DIRECT_LIFECYCLE,
+                    runner=FakeRunner(),
+                ),
+            )
+            ran["stage_outputs"]["function_annotation"]["status"] = (
+                DIRECT_LIFECYCLE.frozen_status
+            )
+            replay_runner = FakeRunner()
+
+            update = run_method_attempts(
+                ran,
+                DIRECT_LIFECYCLE,
+                runner=replay_runner,
+            )
+
+            output = update["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["execution_attempts"][0]["status"], "executed")
+            self.assertIn("not frozen", output["reason"])
+            self.assertEqual(replay_runner.executed_commands, [])
+
+    def test_collect_mode_persists_mixed_batch_in_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            lifecycle = MethodExecutionLifecycle(
+                stage="function_annotation",
+                name="contract batch",
+                method_name="contract.method",
+                frozen_status="batch_frozen",
+                ran_status="batch_ran",
+                process_failure="collect",
+            )
+            attempts = [
+                _attempt(state, attempt_id="s1:contract:0"),
+                _attempt(state, attempt_id="s1:contract:1"),
+            ]
+            frozen = _merge(
+                state,
+                freeze_method_attempts(state, lifecycle, attempts),
+            )
+            runner = _OutcomeRunner({"s1:contract:0"})
+
+            ran = _merge(
+                frozen,
+                run_method_attempts(frozen, lifecycle, runner=runner),
+            )
+
+            output = ran["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "batch_ran")
+            self.assertEqual(runner.attempt_ids, ["s1:contract:0", "s1:contract:1"])
+            self.assertEqual(
+                [cursor["status"] for cursor in output["execution_attempts"]],
+                ["execution_failed", "executed"],
+            )
+            self.assertEqual(
+                [
+                    execution.evidence.success
+                    for execution in load_method_executions(ran, lifecycle)
+                ],
+                [False, True],
+            )
+
+    def test_runner_exception_becomes_bounded_failed_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            runner = _RaisingRunner()
+            graph = build_method_graph(
+                DIRECT_LIFECYCLE,
+                _freeze_contract,
+                _collect_contract,
+                runner=runner,
+            )
+
+            result = graph.invoke(state)
+
+            output = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("runner binary missing", output["reason"])
+            self.assertLessEqual(len(output["reason"]), 2048)
+            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            [execution] = load_method_executions(result, DIRECT_LIFECYCLE)
+            self.assertFalse(execution.evidence.success)
+            self.assertIn("runner binary missing", execution.evidence.error)
+
+    def test_runner_programming_error_remains_visible(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+
+            with self.assertRaisesRegex(RuntimeError, "runner contract bug"):
+                run_method_attempts(
+                    frozen,
+                    DIRECT_LIFECYCLE,
+                    runner=_BuggyRunner(),
+                )
+
+    def test_runner_value_error_remains_visible(self):
+        # A ValueError escaping the runner is a contract bug, not an expected
+        # execution failure; it must propagate instead of becoming a bounded
+        # failed status.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+
+            with self.assertRaisesRegex(ValueError, "runner contract bug"):
+                run_method_attempts(
+                    frozen,
+                    DIRECT_LIFECYCLE,
+                    runner=_ContractValueErrorRunner(),
+                )
+
+    def test_run_publication_value_error_remains_visible(self):
+        """Only declared infrastructure failures are bounded after Runner return."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            frozen = _merge(state, _freeze_contract(state))
+
+            with patch(
+                "app.execution.method_runner.publish_execution_logs",
+                side_effect=ValueError("publication contract bug"),
+            ):
+                with self.assertRaisesRegex(ValueError, "publication contract bug"):
+                    run_method_attempts(
+                        frozen,
+                        DIRECT_LIFECYCLE,
+                        runner=_OutcomeRunner(set()),
+                    )
+
+    def test_large_stderr_is_bounded_in_state_but_retained_in_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            stderr_text = "failure detail\n" * 5_000
+            frozen = _merge(state, _freeze_contract(state))
+
+            update = run_method_attempts(
+                frozen,
+                DIRECT_LIFECYCLE,
+                runner=_LargeStderrRunner(stderr_text),
+            )
+            failed = _merge(frozen, update)
+
+            output = failed["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertLessEqual(len(output["reason"]), 2048)
+            [execution] = load_method_executions(failed, DIRECT_LIFECYCLE)
+            self.assertLessEqual(len(execution.evidence.error), 2048)
+            _, stderr_path = execution_log_paths(failed, execution.evidence)
+            self.assertEqual(stderr_path.read_text(encoding="utf-8"), stderr_text)
+
+    def test_attempt_identity_mismatch_stops_collect_mode_before_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            lifecycle = MethodExecutionLifecycle(
+                stage="function_annotation",
+                name="contract batch",
+                method_name="contract.method",
+                frozen_status="batch_frozen",
+                ran_status="batch_ran",
+                process_failure="collect",
+            )
+            frozen = _merge(
+                state,
+                freeze_method_attempts(
+                    state,
+                    lifecycle,
+                    [
+                        _attempt(state, attempt_id="s1:contract:0"),
+                        _attempt(state, attempt_id="s1:contract:1"),
+                    ],
+                ),
+            )
+            runner = _MismatchedRunner()
+
+            update = run_method_attempts(frozen, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("attempt_id mismatch", output["reason"])
+            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                [cursor["status"] for cursor in output["execution_attempts"]],
+                ["frozen", "frozen"],
+            )
+            self.assertTrue(
+                all(
+                    cursor["execution_ref"] is None
+                    for cursor in output["execution_attempts"]
+                )
+            )
+            artifact_types = {
+                record["artifact_type"]
+                for record in read_artifact_records(
+                    frozen["data_dir"], frozen["session_id"]
+                )
+            }
+            self.assertNotIn("command.stdout", artifact_types)
+            self.assertNotIn("command.stderr", artifact_types)
+
+    def test_collect_mode_aborts_on_runner_boundary_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            lifecycle = MethodExecutionLifecycle(
+                stage="function_annotation",
+                name="contract batch",
+                method_name="contract.method",
+                frozen_status="batch_frozen",
+                ran_status="batch_ran",
+                process_failure="collect",
+            )
+            frozen = _merge(
+                state,
+                freeze_method_attempts(
+                    state,
+                    lifecycle,
+                    [
+                        _attempt(state, attempt_id="s1:contract:0"),
+                        _attempt(state, attempt_id="s1:contract:1"),
+                    ],
+                ),
+            )
+            runner = _RaisingRunner()
+
+            update = run_method_attempts(frozen, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(runner.attempt_ids, ["s1:contract:0"])
+            self.assertEqual(
+                [cursor["status"] for cursor in output["execution_attempts"]],
+                ["execution_failed", "frozen"],
+            )
+
+    def test_failed_ledger_event_error_does_not_escape_graph(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            graph = build_method_graph(
+                DIRECT_LIFECYCLE,
+                _freeze_contract,
+                _collect_contract,
+                runner=_OutcomeRunner({"s1:contract:0"}),
+            )
+
+            with patch(
+                "app.execution.method_runner.Ledger.record_attempt_failed",
+                side_effect=OSError("ledger is read-only"),
+            ):
+                result = graph.invoke(state)
+
+            output = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(
+                output["execution_attempts"][0]["status"],
+                "execution_failed",
+            )
+            self.assertLessEqual(len(output["reason"]), 2048)
+
+    def test_collect_mode_persistence_failure_keeps_prior_cursor_relations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir)
+            lifecycle = MethodExecutionLifecycle(
+                stage="function_annotation",
+                name="contract batch",
+                method_name="contract.method",
+                frozen_status="batch_frozen",
+                ran_status="batch_ran",
+                process_failure="collect",
+            )
+            frozen = _merge(
+                state,
+                freeze_method_attempts(
+                    state,
+                    lifecycle,
+                    [
+                        _attempt(state, attempt_id="s1:contract:0"),
+                        _attempt(state, attempt_id="s1:contract:1"),
+                    ],
+                ),
+            )
+            from app.execution.lifecycle import persist_execution_result as persist
+
+            calls = 0
+
+            def fail_second_persist(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated evidence write failure")
+                return persist(*args, **kwargs)
+
+            runner = _OutcomeRunner(set())
+            with patch(
+                "app.execution.lifecycle.persist_execution_result",
+                side_effect=fail_second_persist,
+            ):
+                update = run_method_attempts(frozen, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(runner.attempt_ids, ["s1:contract:0", "s1:contract:1"])
+            self.assertEqual(
+                [cursor["status"] for cursor in output["execution_attempts"]],
+                ["executed", "frozen"],
+            )
+            self.assertIsNotNone(output["execution_attempts"][0]["execution_ref"])
+            self.assertIsNone(output["execution_attempts"][1]["execution_ref"])
+
+    def test_parameterized_run_updates_authoritative_attempt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:0",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=0,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            parameter_attempt = ParameterAttempt(
+                attempt_id=0,
+                method_id="assembly.contract",
+                status="frozen",
+                task="recommend_initial",
+                recommendation_manifest_ref=_ref(
+                    "a", "assembly.parameter.recommendation_manifest"
+                ),
+                approval_decision_ref=_ref(
+                    "b", "assembly.parameter_approval.decision"
+                ),
+                frozen_attempt_ref=frozen_ref,
+            )
+            state["stage_outputs"]["assembly"] = {
+                "status": "parameter_frozen",
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [parameter_attempt.model_dump(mode="json")],
+            }
+
+            update = run_method_attempts(
+                state,
+                lifecycle,
+                runner=FakeRunner(),
+            )
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], "parameter_ran")
+            current = output["parameter_attempts"][0]
+            self.assertEqual(current["status"], "executed")
+            self.assertIsNotNone(current["execution_ref"])
+
+    def test_parameterized_failure_persists_execution_before_failing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:0",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=0,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            state["stage_outputs"]["assembly"] = {
+                "status": "parameter_frozen",
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [
+                    ParameterAttempt(
+                        attempt_id=0,
+                        method_id="assembly.contract",
+                        status="frozen",
+                        task="recommend_initial",
+                        recommendation_manifest_ref=_ref(
+                            "a", "assembly.parameter.recommendation_manifest"
+                        ),
+                        approval_decision_ref=_ref(
+                            "b", "assembly.parameter_approval.decision"
+                        ),
+                        frozen_attempt_ref=frozen_ref,
+                    ).model_dump(mode="json")
+                ],
+            }
+
+            update = run_method_attempts(
+                state,
+                lifecycle,
+                runner=_OutcomeRunner({attempt.attempt_id}),
+            )
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], "failed")
+            current = output["parameter_attempts"][0]
+            self.assertEqual(current["status"], "execution_failed")
+            self.assertIsNotNone(current["execution_ref"])
+
+    def test_parameter_owner_rejects_completed_attempt_when_stage_is_rewound(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:0",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=0,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            state["stage_outputs"]["assembly"] = {
+                "status": lifecycle.frozen_status,
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [
+                    ParameterAttempt(
+                        attempt_id=0,
+                        method_id="assembly.contract",
+                        status="frozen",
+                        task="recommend_initial",
+                        recommendation_manifest_ref=_ref(
+                            "a", "assembly.parameter.recommendation_manifest"
+                        ),
+                        approval_decision_ref=_ref(
+                            "b", "assembly.parameter_approval.decision"
+                        ),
+                        frozen_attempt_ref=frozen_ref,
+                    ).model_dump(mode="json")
+                ],
+            }
+            ran = _merge(
+                state,
+                run_method_attempts(state, lifecycle, runner=FakeRunner()),
+            )
+            ran["stage_outputs"]["assembly"]["status"] = lifecycle.frozen_status
+            replay_runner = FakeRunner()
+
+            update = run_method_attempts(ran, lifecycle, runner=replay_runner)
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], "failed")
+            self.assertEqual(output["parameter_attempts"][0]["status"], "executed")
+            self.assertIn("not frozen", output["reason"])
+            self.assertEqual(replay_runner.executed_commands, [])
+
+    def test_parameter_owner_rejects_rewound_cursor_with_execution_ref(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:0",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=0,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            state["stage_outputs"]["assembly"] = {
+                "status": lifecycle.frozen_status,
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [
+                    ParameterAttempt(
+                        attempt_id=0,
+                        method_id="assembly.contract",
+                        status="frozen",
+                        task="recommend_initial",
+                        recommendation_manifest_ref=_ref(
+                            "a", "assembly.parameter.recommendation_manifest"
+                        ),
+                        approval_decision_ref=_ref(
+                            "b", "assembly.parameter_approval.decision"
+                        ),
+                        frozen_attempt_ref=frozen_ref,
+                        execution_ref=_ref("c", "assembly.execution_result"),
+                    ).model_dump(mode="json")
+                ],
+            }
+            runner = FakeRunner()
+
+            update = run_method_attempts(state, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("completion evidence", output["reason"])
+            self.assertEqual(runner.executed_commands, [])
+
+    def test_parameter_owner_does_not_revalidate_history_before_starting_runner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:1",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=1,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            current = ParameterAttempt(
+                attempt_id=1,
+                method_id="assembly.contract",
+                status="frozen",
+                task="retry_after_execution_failure",
+                previous_attempt_id=0,
+                previous_attempt_seal_hash="c" * 64,
+                recommendation_manifest_ref=_ref(
+                    "a", "assembly.parameter.recommendation_manifest"
+                ),
+                approval_decision_ref=_ref(
+                    "b", "assembly.parameter_approval.decision"
+                ),
+                frozen_attempt_ref=frozen_ref,
+            )
+            state["stage_outputs"]["assembly"] = {
+                "status": lifecycle.frozen_status,
+                "current_parameter_attempt_id": 1,
+                "parameter_attempts": [
+                    {"attempt_id": 0},
+                    current.model_dump(mode="json"),
+                ],
+            }
+            runner = FakeRunner()
+
+            update = run_method_attempts(state, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], lifecycle.ran_status)
+            self.assertEqual(len(runner.executed_commands), 1)
+            self.assertEqual(output["parameter_attempts"][0], {"attempt_id": 0})
+            self.assertEqual(output["parameter_attempts"][1]["status"], "executed")
+
+    def test_parameter_owner_rejects_frozen_attempt_for_another_parameter_cursor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = _state(tmpdir, stage="assembly")
+            lifecycle = MethodExecutionLifecycle(
+                stage="assembly",
+                name="parameter contract",
+                method_name="assembly.contract",
+                frozen_status="parameter_frozen",
+                ran_status="parameter_ran",
+                owner=ParameterAttemptOwner(),
+            )
+            attempt = _attempt(
+                state,
+                attempt_id="s1:assembly:parameter:0",
+                stage="assembly",
+                method_name="assembly.contract",
+                parameter_attempt_id=1,
+            )
+            from app.execution.evidence import persist_frozen_attempt
+
+            frozen_ref = persist_frozen_attempt(state, attempt)
+            state["stage_outputs"]["assembly"] = {
+                "status": lifecycle.frozen_status,
+                "current_parameter_attempt_id": 0,
+                "parameter_attempts": [
+                    ParameterAttempt(
+                        attempt_id=0,
+                        method_id="assembly.contract",
+                        status="frozen",
+                        task="recommend_initial",
+                        recommendation_manifest_ref=_ref(
+                            "a", "assembly.parameter.recommendation_manifest"
+                        ),
+                        approval_decision_ref=_ref(
+                            "b", "assembly.parameter_approval.decision"
+                        ),
+                        frozen_attempt_ref=frozen_ref,
+                    ).model_dump(mode="json")
+                ],
+            }
+            runner = FakeRunner()
+
+            update = run_method_attempts(state, lifecycle, runner=runner)
+
+            output = update["stage_outputs"]["assembly"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("does not match current cursor 0", output["reason"])
+            self.assertEqual(runner.executed_commands, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

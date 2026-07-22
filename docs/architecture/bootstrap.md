@@ -13,7 +13,8 @@ Gene Agent
 
 `gene-agent bootstrap` should help a user create the project configuration that
 Gene Agent actually consumes. It should generate as few files as possible and
-should not create runtime, audit, or placeholder files for future features.
+should not create runtime, audit, or placeholder files without a current
+consumer.
 
 This specification defines only project configuration initialization. External
 software conformance remains outside this design and can be handled separately
@@ -50,7 +51,7 @@ inspect existing .env and config/envs.yaml
   -> load the result through the existing runtime consumers
 ```
 
-The initial implementation keeps the current `gene-agent bootstrap` entrypoint.
+The implementation keeps the current `gene-agent bootstrap` entrypoint.
 It adds initialization before the current validation behavior rather than
 introducing a family of new commands.
 
@@ -65,8 +66,7 @@ introducing a family of new commands.
   new `.env` with user-only permissions.
 - Validate the generated files with the same loaders used by the application.
 
-These rules are sufficient for the first implementation. More elaborate merge,
-recovery, plugin, and package-management contracts remain future decisions.
+These rules define the implemented bootstrap boundary.
 
 ## 5. AutoHiC Setup Fields
 
@@ -83,7 +83,7 @@ These are machine/project setup values and are loaded through `EnvResolver` by
 the AutoHiC adapter. The Hi-C reads, adopted assembly, and restriction enzyme
 remain run-level inputs handled by the Hi-C stage.
 
-## 6. Implementation Changes
+## 6. Implemented Behavior
 
 1. Define the minimal fields currently consumed from `.env` and
    `config/envs.yaml`.

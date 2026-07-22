@@ -162,7 +162,7 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
                     0,
                     task="recommend_initial",
                     status="execution_failed",
-                    execution_ref=_ref("c0", "assembly.parameter.execution"),
+                    execution_ref=_ref("c0", "assembly.execution_result"),
                 ),
             )
             retry = _attempt(
@@ -264,7 +264,7 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
         )
         self.assertEqual(selected.attempt_id, 0)
 
-    def test_historical_attempt_validation_is_wrapped_as_state_error(self):
+    def test_execution_cursor_preserves_corrupt_history_without_revalidating_it(self):
         output = {
             "current_parameter_attempt_id": 0,
             "parameter_attempts": [
@@ -273,17 +273,18 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(
-            ParameterAttemptStateError,
-            "historical parameter attempt at index 1 is invalid",
-        ) as raised:
-            update_current_parameter_attempt(
-                output,
-                method_id="assembly.candidate.hifiasm_ont",
-                label="hifiasm-ont",
-            )
+        attempts = update_current_parameter_attempt(
+            output,
+            method_id="assembly.candidate.hifiasm_ont",
+            label="hifiasm-ont",
+        )
 
-        self.assertIsInstance(raised.exception.__cause__, ValidationError)
+        self.assertEqual(attempts[1], output["parameter_attempts"][1])
+        self.assertEqual(attempts[0]["status"], "recommended")
+
+        # Full-chain validation remains an explicit control-boundary check.
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValidationError):
+            _validate_parameter_attempt_chain(_state(Path(tmp)), attempts)
 
     def test_sealed_chain_rejects_reorder_delete_and_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -310,7 +311,7 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
     def test_execution_retry_gate_emits_ref_only_request_without_spending_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = _state(Path(tmp))
-            execution_ref = _ref("c0", "assembly.parameter.execution")
+            execution_ref = _ref("c0", "assembly.execution_result")
             attempt = _attempt(
                 0,
                 task="recommend_initial",

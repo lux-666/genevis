@@ -212,5 +212,5 @@ data_hpc_test/runs/hpc-test09-e2e-YYYYMMDD-HHMMSS/
 
 遇到问题请查看：
 - 主项目 `AGENTS.md` / 会话内项目说明 - 编码原则
-- Phase 文档 `docs/phases/`
+- 当前架构规范 `docs/architecture/` 与交接说明 `docs/handoff.md`
 - 执行日志 `ledger/events.jsonl`

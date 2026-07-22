@@ -202,7 +202,7 @@ register_review_gate(
         related_parameter_gate=("assembly", "parameter_approval"),
         parameter_recommendation_notes=(
             "Phase 11 quality-gate failures route to assembly parameter recommendation and approval.",
-            "A human-selected rerun still uses the legacy manual Flye parameter path.",
+            "A human-selected rerun is checkpointed and executes through the shared Flye lifecycle.",
         ),
     )
 )

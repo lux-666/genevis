@@ -14,9 +14,9 @@ from app.execution.evidence import load_frozen_attempt
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.descriptors import DescriptorRegistry
+from app.schemas.resource_ref import ResourceRef
 from app.schemas.run_config import RunConfig
 from app.schemas.state import initial_state
-from app.schemas.resource_ref import ResourceRef
 from app.stages.repeat_annotation.nodes import resolve_repeat_inputs
 from app.stages.t2t.builder import build_stage
 from app.stages.t2t.nodes import build_t2t_candidates, scan_read_telomeres
@@ -368,7 +368,7 @@ class T2TStageTests(unittest.TestCase):
             self.assertEqual(t2t["telomeric_read_count"], 2)
             attempt = load_frozen_attempt(
                 result,
-                t2t["alignment_attempt_ref"],
+                t2t["execution_attempts"][0]["frozen_attempt_ref"],
                 expected_stage="t2t",
                 expected_method_name="t2t.alignment.minimap2",
             )

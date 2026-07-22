@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
+from app.workflow import is_terminal_failure
 
 
 def _output(state: TopLevelState) -> dict:
@@ -29,22 +29,14 @@ def route_after_read_prepare(state: TopLevelState) -> str:
 
 
 def route_after_read_scan(state: TopLevelState) -> str:
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "freeze_alignment"
+    return "fail" if is_terminal_failure(_output(state).get("status")) else "alignment"
 
 
-def route_after_alignment_freeze(state: TopLevelState) -> str:
+def route_after_alignment(state: TopLevelState) -> str:
     output = _output(state)
     if is_terminal_failure(output.get("status")):
         return "fail"
-    return "run_alignment" if output.get("status") == "alignment_frozen" else "report"
-
-
-def route_after_alignment_run(state: TopLevelState) -> str:
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "build_candidates"
-
-
-def route_after_candidates(state: TopLevelState) -> str:
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "apply_patches"
+    return "apply_patches" if output.get("status") == "candidates_built" else "report"
 
 
 def route_after_patches(state: TopLevelState) -> str:

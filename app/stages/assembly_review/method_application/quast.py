@@ -7,13 +7,13 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
@@ -23,36 +23,48 @@ from app.schemas.artifacts import (
     ArtifactMeta,
 )
 from app.schemas.state import TopLevelState
-from app.stages.assembly_review.method_application.lifecycle import (
-    build_method_graph,
+from app.stages.assembly_review.method_application.support import (
     local_execution_enabled,
     mark_missing_signals,
     materialized_candidates,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
-    run_attempts,
     safe_candidate_id,
     update_review_output,
     update_signal,
 )
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
+from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.ledger import Ledger
 
 QUAST_METHOD = "assembly_review.eval.quast"
 FROZEN_STATUS = "quast_frozen"
 RAN_STATUS = "quast_ran"
-ATTEMPTS_KEY = "quast_frozen_attempt_refs"
-RESULTS_KEY = "quast_execution_results"
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly_review",
+    name="QUAST",
+    method_name=QUAST_METHOD,
+    frozen_status=FROZEN_STATUS,
+    ran_status=RAN_STATUS,
+    cleanup_outputs=False,
+    process_failure="collect",
+)
 
 
 def build_quast_graph():
-    return build_method_graph(freeze_quast_attempts, run_quast_attempts, collect_quast_artifacts, frozen_status=FROZEN_STATUS, ran_status=RAN_STATUS)
+    return build_method_graph(
+        LIFECYCLE,
+        freeze_quast_attempts,
+        collect_quast_artifacts,
+    )
 
 
 def freeze_quast_attempts(state: TopLevelState) -> dict:
     """Freeze local QUAST attempts for materialized assembly candidates."""
     output = review_output(state)
-    if output.get("status") == "failed" or not local_execution_enabled(output):
+    review_plan = output.get("review_plan") or {}
+    if review_plan.get("status") != "evaluating" or not local_execution_enabled(output):
         return {}
     descriptor_error = review_methods_error([QUAST_METHOD])
     if descriptor_error:
@@ -102,14 +114,13 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
             metadata={"candidate_id": candidate_id, "draft_assembly_ref": str(assembly_ref),
                       "quast_output_dir": str(out_dir), "report_tsv": str(report_tsv), "threads": threads},
         )
-        attempts.append(persist_frozen_attempt(state, attempt).model_dump(mode="json"))
-    return update_review_output(state, {"status": FROZEN_STATUS, "signals": signals, ATTEMPTS_KEY: attempts})
-
-
-def run_quast_attempts(state: TopLevelState) -> dict:
-    return run_attempts(state, frozen_status=FROZEN_STATUS, attempts_key=ATTEMPTS_KEY,
-                        ran_status=RAN_STATUS, results_key=RESULTS_KEY,
-                        method_name=QUAST_METHOD, fail_label="QUAST")
+        attempts.append(attempt)
+    return freeze_method_attempts(
+        state,
+        LIFECYCLE,
+        attempts,
+        stage_updates={"signals": signals},
+    )
 
 
 def collect_quast_artifacts(state: TopLevelState) -> dict:
@@ -117,28 +128,15 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
     output = review_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
-    attempts = {}
-    for payload in output.get(ATTEMPTS_KEY, []):
-        attempt = load_frozen_attempt(
-            state,
-            payload,
-            expected_stage="assembly_review",
-            expected_method_name=QUAST_METHOD,
-        )
-        attempts[attempt.attempt_id] = attempt
+    executions = load_method_executions(state, LIFECYCLE)
     signals = list(output.get("signals") or [])
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     artifact_refs = list(output.get("artifact_refs") or [])
     ledger = Ledger(data_dir)
-    for result_ref in output.get(RESULTS_KEY, []):
-        result = load_execution_evidence(
-            state,
-            result_ref,
-            expected_stage="assembly_review",
-            expected_method_name=QUAST_METHOD,
-        )
-        attempt = attempts[result.attempt_id]
+    for execution in executions:
+        attempt = execution.attempt
+        result = execution.evidence
         candidate_id = str(attempt.metadata.get("candidate_id"))
         artifacts: list[ArtifactMeta] = []
         metric_refs: list[str] = []
@@ -199,7 +197,10 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[], notes=["quast_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
     update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": ordered_unique(artifact_refs)}, status="evaluating")
     outputs = update["stage_outputs"]
-    outputs["assembly_review"] = {**outputs["assembly_review"], ATTEMPTS_KEY: [], RESULTS_KEY: []}
+    outputs["assembly_review"] = {
+        **outputs["assembly_review"],
+        DIRECT_ATTEMPTS_KEY: [],
+    }
     return {"stage_outputs": outputs}
 
 

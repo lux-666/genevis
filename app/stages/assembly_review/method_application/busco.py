@@ -8,13 +8,13 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_or_recover_work_artifact
+from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
@@ -24,36 +24,48 @@ from app.schemas.artifacts import (
 )
 from app.schemas.descriptors import FrozenAttemptSpec
 from app.schemas.state import TopLevelState
-from app.stages.assembly_review.method_application.lifecycle import (
-    build_method_graph,
+from app.stages.assembly_review.method_application.support import (
     local_execution_enabled,
     mark_missing_signals,
     materialized_candidates,
     review_methods_error,
     review_output,
     rewrite_eval_bundle,
-    run_attempts,
     safe_candidate_id,
     update_review_output,
     update_signal,
 )
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
+from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.ledger import Ledger
 
 BUSCO_METHOD = "assembly_review.eval.busco"
 FROZEN_STATUS = "busco_frozen"
 RAN_STATUS = "busco_ran"
-ATTEMPTS_KEY = "busco_frozen_attempt_refs"
-RESULTS_KEY = "busco_execution_results"
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly_review",
+    name="BUSCO",
+    method_name=BUSCO_METHOD,
+    frozen_status=FROZEN_STATUS,
+    ran_status=RAN_STATUS,
+    cleanup_outputs=False,
+    process_failure="collect",
+)
 
 
 def build_busco_graph():
-    return build_method_graph(freeze_busco_attempts, run_busco_attempts, collect_busco_artifacts, frozen_status=FROZEN_STATUS, ran_status=RAN_STATUS)
+    return build_method_graph(
+        LIFECYCLE,
+        freeze_busco_attempts,
+        collect_busco_artifacts,
+    )
 
 
 def freeze_busco_attempts(state: TopLevelState) -> dict:
     """Freeze BUSCO attempts when offline lineage parameters are supplied."""
     output = review_output(state)
-    if output.get("status") == "failed" or not local_execution_enabled(output):
+    review_plan = output.get("review_plan") or {}
+    if review_plan.get("status") != "evaluating" or not local_execution_enabled(output):
         return {}
     descriptor_error = review_methods_error([BUSCO_METHOD])
     if descriptor_error:
@@ -113,14 +125,13 @@ def freeze_busco_attempts(state: TopLevelState) -> dict:
                       "lineage_version": params["lineage_version"], "lineage_source": params["lineage_source"],
                       "mode": params["mode"], "threads": params["threads"]},
         )
-        attempts.append(persist_frozen_attempt(state, attempt).model_dump(mode="json"))
-    return update_review_output(state, {"status": FROZEN_STATUS, "signals": signals, ATTEMPTS_KEY: attempts})
-
-
-def run_busco_attempts(state: TopLevelState) -> dict:
-    return run_attempts(state, frozen_status=FROZEN_STATUS, attempts_key=ATTEMPTS_KEY,
-                        ran_status=RAN_STATUS, results_key=RESULTS_KEY,
-                        method_name=BUSCO_METHOD, fail_label="BUSCO")
+        attempts.append(attempt)
+    return freeze_method_attempts(
+        state,
+        LIFECYCLE,
+        attempts,
+        stage_updates={"signals": signals},
+    )
 
 
 def collect_busco_artifacts(state: TopLevelState) -> dict:
@@ -128,28 +139,15 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
     output = review_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
-    attempts = {}
-    for payload in output.get(ATTEMPTS_KEY, []):
-        attempt = load_frozen_attempt(
-            state,
-            payload,
-            expected_stage="assembly_review",
-            expected_method_name=BUSCO_METHOD,
-        )
-        attempts[attempt.attempt_id] = attempt
+    executions = load_method_executions(state, LIFECYCLE)
     signals = list(output.get("signals") or [])
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     artifact_refs = list(output.get("artifact_refs") or [])
     ledger = Ledger(data_dir)
-    for result_ref in output.get(RESULTS_KEY, []):
-        result = load_execution_evidence(
-            state,
-            result_ref,
-            expected_stage="assembly_review",
-            expected_method_name=BUSCO_METHOD,
-        )
-        attempt = attempts[result.attempt_id]
+    for execution in executions:
+        attempt = execution.attempt
+        result = execution.evidence
         candidate_id = str(attempt.metadata.get("candidate_id"))
         artifacts: list[ArtifactMeta] = []
         metric_refs: list[str] = []
@@ -193,7 +191,10 @@ def collect_busco_artifacts(state: TopLevelState) -> dict:
             signals = update_signal(signals, signal_name="busco", method_name=BUSCO_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[], notes=["busco_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
     update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": ordered_unique(artifact_refs)}, status="evaluating")
     outputs = update["stage_outputs"]
-    outputs["assembly_review"] = {**outputs["assembly_review"], ATTEMPTS_KEY: [], RESULTS_KEY: []}
+    outputs["assembly_review"] = {
+        **outputs["assembly_review"],
+        DIRECT_ATTEMPTS_KEY: [],
+    }
     return {"stage_outputs": outputs}
 
 

@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
-from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
-from app.execution.evidence import validate_execution_evidence
+from app.execution.evidence import load_execution_evidence
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -46,7 +45,6 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
     ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_EXECUTION,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
@@ -75,6 +73,7 @@ from app.stages.assembly.parameters.storage import (
     write_recommendation_json_artifact,
 )
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.storage.ledger import Ledger
 
 
 def recommend_assembly_parameters(state: TopLevelState) -> dict:
@@ -885,21 +884,11 @@ def hydrate_parameter_attempt(
             }
         )
     if attempt.execution_ref is not None:
-        execution = read_json_artifact(
+        hydrated["execution_result"] = load_execution_evidence(
             state,
             attempt.execution_ref,
-            expected_type=ASSEMBLY_PARAMETER_EXECUTION,
-        )
-        if (
-            execution.get("attempt_id") != attempt.attempt_id
-            or execution.get("method_id") != attempt.method_id
-        ):
-            raise ParameterPersistenceError(
-                "execution evidence is not bound to the parameter attempt"
-            )
-        hydrated["execution_result"] = validate_execution_evidence(
-            state,
-            execution.get("result") or {},
+            expected_stage="assembly",
+            expected_method_name=attempt.method_id,
         ).model_dump(mode="json")
     if attempt.review_ref is not None:
         review = read_json_artifact(state, attempt.review_ref)

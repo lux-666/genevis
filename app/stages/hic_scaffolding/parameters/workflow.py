@@ -46,10 +46,10 @@ from app.schemas.artifacts import (
 )
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir
-from app.stages.hic_scaffolding.method_application.lifecycle import (
+from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
-from app.stages.hic_scaffolding.method_application.lifecycle import (
+from app.stages.hic_scaffolding.method_application.support import (
     update_hic_output as _update_hic_output,
 )
 from app.stages.hic_scaffolding.parameters.catalog import (

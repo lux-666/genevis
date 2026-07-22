@@ -9,10 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from app.storage.ledger import Ledger
-from app.storage.materialization import materialize_run_layout
 from app.entrypoints.run import _snapshot_resume_decision
-from app.storage.artifacts import artifact_ref_for_path, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.env_resolver import EnvResolver, EnvSpec
 from app.execution.method_runner import build_frozen_attempt
@@ -24,10 +21,13 @@ from app.stages.assembly_dedup.nodes import _read_mapping_preset
 from app.stages.assembly_dedup.routing import (
     route_after_enter,
     route_after_plan,
-    route_after_run,
+    route_after_purge_dups,
 )
-from app.storage.paths import DataLayoutError, SessionPaths
 from app.stages.inventory.nodes import validate_inputs
+from app.storage.artifacts import artifact_ref_for_path, register_artifact_records
+from app.storage.ledger import Ledger
+from app.storage.materialization import materialize_run_layout
+from app.storage.paths import DataLayoutError, SessionPaths
 from tests.data_v2 import v2_run_dir
 
 
@@ -249,7 +249,7 @@ class ExecutionRefactorContractTests(unittest.TestCase):
                 state = {"stage_outputs": {"assembly_dedup": {"status": status}}}
                 self.assertEqual(route_after_enter(state), "fail")
                 self.assertEqual(route_after_plan(state), "fail")
-                self.assertEqual(route_after_run(state), "fail")
+                self.assertEqual(route_after_purge_dups(state), "fail")
 
     def test_hifi_reads_use_hifi_mapping_preset(self):
         self.assertEqual(

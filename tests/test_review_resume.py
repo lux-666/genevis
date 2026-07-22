@@ -14,14 +14,14 @@ from pydantic import ValidationError
 from app.control.lifecycle import (
     ResumeValidationError,
     _decision_requirements_from_artifact,
-    inspect_session,
     build_resume_decision_template,
+    inspect_session,
     inspect_state,
     resume_review_state,
 )
+from app.reports.review_report import write_operator_report
 from app.review.base import ResumeReviewRequest, load_resume_review_request
 from app.review.persistence import persist_review_request
-from app.reports.review_report import write_operator_report
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -440,7 +440,12 @@ class ReviewResumeTests(unittest.TestCase):
             proposal["related_parameter_gate"],
             {"stage": "assembly", "gate_id": "parameter_approval"},
         )
-        self.assertTrue(any("legacy manual Flye" in note for note in proposal["parameter_recommendation_notes"]))
+        self.assertTrue(
+            any(
+                "shared Flye lifecycle" in note
+                for note in proposal["parameter_recommendation_notes"]
+            )
+        )
         template = build_resume_decision_template(summary)
         self.assertEqual(template["metadata"]["template_guidance"]["runtime_proposal"], proposal)
 

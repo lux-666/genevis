@@ -177,6 +177,19 @@ class Ledger:
             idempotency_key=f"attempt:{attempt.attempt_id}:failed",
         )
 
+    def has_attempt_success(self, session_id: str, attempt_id: str) -> bool:
+        """Return True when the attempt already owns a terminal success event.
+
+        Collect adapters own ``attempt_succeeded``; the shared failure
+        boundary records ``attempt_failed`` only while the attempt has not
+        already succeeded, so one attempt never carries both terminal facts.
+        """
+        return any(
+            row["event_type"] == "attempt_succeeded"
+            and row["subject_id"] == attempt_id
+            for row in self.read_event_rows(session_id)
+        )
+
     def record_artifact_registered(
         self,
         session_id: str,

@@ -257,7 +257,7 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertIn("artifact_registered", event_types)
 
     def test_multi_file_quality_summary_weights_by_bases_before_read_count(self):
-        from app.stages.read_qc.method_application.lifecycle import parse_seqkit_summary
+        from app.stages.read_qc.method_application.support import parse_seqkit_summary
 
         with tempfile.TemporaryDirectory() as tmpdir:
             stats_path = Path(tmpdir) / "seqkit_stats.tsv"

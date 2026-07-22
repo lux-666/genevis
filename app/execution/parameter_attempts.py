@@ -7,9 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.execution.evidence import load_frozen_attempt
 from app.schemas.artifacts import ParameterAttempt
-from app.schemas.descriptors import FrozenAttemptSpec
 
 _APPEND_ONCE_FIELDS = frozenset(
     {
@@ -33,11 +31,12 @@ def current_parameter_attempt(
     method_id: str | None = None,
     label: str,
 ) -> ParameterAttempt:
-    """Return the unique typed attempt selected by the stage cursor.
+    """Return the typed attempt selected by the stage cursor.
 
     ``method_id`` is required at method execution boundaries. Generic retry and
     routing code may omit it when the selected attempt itself is the source of
-    method identity.
+    method identity. This boundary intentionally validates only the current
+    cursor and attempt; append/retry/seal/timeline owners validate history.
     """
 
     if "current_parameter_attempt_id" not in output:
@@ -51,22 +50,29 @@ def current_parameter_attempt(
             f"{label} current_parameter_attempt_id must be an explicit "
             f"non-negative integer, got {attempt_id!r}"
         )
-    matches = [
-        item
-        for item in (output.get("parameter_attempts") or [])
-        if isinstance(item, dict) and item.get("attempt_id") == attempt_id
-    ]
-    if len(matches) != 1:
+    raw = output.get("parameter_attempts")
+    if not isinstance(raw, list) or not raw:
+        raise ParameterAttemptStateError(f"{label} has no parameter attempt chain")
+    if attempt_id >= len(raw):
         raise ParameterAttemptStateError(
-            f"{label} requires exactly one current ParameterAttempt "
-            f"with attempt_id={attempt_id}"
+            f"{label} current_parameter_attempt_id={attempt_id} has no matching attempt"
+        )
+    item = raw[attempt_id]
+    if not isinstance(item, Mapping):
+        raise ParameterAttemptStateError(
+            f"{label} current parameter attempt at index {attempt_id} is not a mapping"
         )
     try:
-        attempt = ParameterAttempt.model_validate(matches[0])
+        attempt = ParameterAttempt.model_validate(item)
     except ValidationError as exc:
         raise ParameterAttemptStateError(
             f"{label} current parameter attempt is invalid: {exc}"
         ) from exc
+    if attempt.attempt_id != attempt_id:
+        raise ParameterAttemptStateError(
+            f"{label} current parameter attempt identity does not match cursor "
+            f"{attempt_id}"
+        )
     if method_id is not None and attempt.method_id != method_id:
         raise ParameterAttemptStateError(
             f"{label} current parameter attempt method_id {attempt.method_id!r} "
@@ -81,7 +87,7 @@ def update_current_parameter_attempt(
     method_id: str,
     label: str,
     **updates: Any,
-) -> list[dict[str, Any]]:
+) -> list[Any]:
     """Update the current compact cursor while preserving the attempt chain."""
 
     attempt = current_parameter_attempt(output, method_id=method_id, label=label)
@@ -111,44 +117,11 @@ def update_current_parameter_attempt(
             f"{label} parameter attempt update is invalid: {exc}"
         ) from exc
 
-    attempts: list[dict[str, Any]] = []
-    for index, item in enumerate(output.get("parameter_attempts") or []):
-        if not isinstance(item, dict):
-            raise ParameterAttemptStateError(
-                f"{label} parameter attempt chain contains a non-mapping entry"
-            )
-        if item.get("attempt_id") == attempt.attempt_id:
-            attempts.append(updated)
-        else:
-            try:
-                historical = ParameterAttempt.model_validate(item)
-            except ValidationError as exc:
-                raise ParameterAttemptStateError(
-                    f"{label} historical parameter attempt at index {index} "
-                    f"is invalid: {exc}"
-                ) from exc
-            attempts.append(historical.model_dump(mode="json"))
+    raw = output.get("parameter_attempts")
+    if not isinstance(raw, list) or not raw:
+        raise ParameterAttemptStateError(f"{label} has no parameter attempt chain")
+    # Preserve historical entries byte-for-byte. Their chain semantics belong
+    # to append/retry/seal/timeline boundaries, not execution cursor validation.
+    attempts = list(raw)
+    attempts[attempt.attempt_id] = updated
     return attempts
-
-
-def load_current_frozen_attempt(
-    state: Mapping[str, Any],
-    output: Mapping[str, Any],
-    *,
-    stage: str,
-    method_id: str,
-    label: str,
-) -> FrozenAttemptSpec:
-    """Resolve the runner input owned by the current ParameterAttempt."""
-
-    attempt = current_parameter_attempt(output, method_id=method_id, label=label)
-    if attempt.frozen_attempt_ref is None:
-        raise ParameterAttemptStateError(
-            f"{label} current parameter attempt has no frozen_attempt_ref"
-        )
-    return load_frozen_attempt(
-        state,
-        attempt.frozen_attempt_ref,
-        expected_stage=stage,
-        expected_method_name=method_id,
-    )

@@ -6,17 +6,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
+from app.execution.collect import collect_with_failure_boundary
 from app.execution.evidence import load_execution_evidence, load_frozen_attempt
+from app.execution.lifecycle import run_method_attempts
 from app.schemas.state import initial_state
 from app.stages.function_annotation.nodes import (
+    DIAMOND_LIFECYCLE,
     collect_diamond_artifacts,
     commit_function_annotation,
     freeze_diamond_attempt,
-    run_diamond_attempt,
 )
-from app.storage.paths import DataLayoutError
+from app.storage.artifacts import read_artifact_records, resolve_artifact_ref
 from tests.data_v2 import v2_run_dir
+
+
+def run_diamond_attempt(state: dict) -> dict:
+    return run_method_attempts(state, DIAMOND_LIFECYCLE)
+
+
+def _execution_cursor(output: dict) -> dict:
+    [cursor] = output["execution_attempts"]
+    return cursor
 
 
 def _fake_diamond_bin(tmpdir: str, *, fail: bool = False) -> str:
@@ -135,7 +145,7 @@ class DiamondFreezeTests(unittest.TestCase):
             self.assertEqual(func_out["status"], "diamond_frozen")
             attempt = load_frozen_attempt(
                 state,
-                func_out["diamond_attempt_ref"],
+                _execution_cursor(func_out)["frozen_attempt_ref"],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )
@@ -166,7 +176,7 @@ class DiamondFreezeTests(unittest.TestCase):
             func_out = result["stage_outputs"]["function_annotation"]
             attempt = load_frozen_attempt(
                 state,
-                func_out["diamond_attempt_ref"],
+                _execution_cursor(func_out)["frozen_attempt_ref"],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )
@@ -197,7 +207,7 @@ class DiamondFreezeTests(unittest.TestCase):
             func_out = result["stage_outputs"]["function_annotation"]
             attempt = load_frozen_attempt(
                 state,
-                func_out["diamond_attempt_ref"],
+                _execution_cursor(func_out)["frozen_attempt_ref"],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )
@@ -240,7 +250,7 @@ class DiamondRunTests(unittest.TestCase):
             self.assertEqual(func_out["status"], "diamond_ran")
             execution = load_execution_evidence(
                 frozen_state,
-                func_out["diamond_execution_ref"],
+                _execution_cursor(func_out)["execution_ref"],
                 expected_stage="function_annotation",
                 expected_attempt_id="s1:function_annotation:diamond",
                 expected_method_name="function_annotation.candidate.diamond",
@@ -257,7 +267,7 @@ class DiamondRunTests(unittest.TestCase):
             execution_record = json.loads(
                 (
                     Path(state["data_dir"])
-                    / func_out["diamond_execution_ref"]["path_ref"]
+                    / _execution_cursor(func_out)["execution_ref"]["path_ref"]
                 ).read_text(encoding="utf-8")
             )
             self.assertIn("stdout_ref", execution_record["result"])
@@ -291,9 +301,9 @@ class DiamondCollectTests(unittest.TestCase):
             ran_state = {**state, "stage_outputs": run_result["stage_outputs"]}
             attempt = load_frozen_attempt(
                 ran_state,
-                run_result["stage_outputs"]["function_annotation"][
-                    "diamond_attempt_ref"
-                ],
+                _execution_cursor(
+                    run_result["stage_outputs"]["function_annotation"]
+                )["frozen_attempt_ref"],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )
@@ -351,7 +361,7 @@ class DiamondCollectTests(unittest.TestCase):
             func_out = run_result["stage_outputs"]["function_annotation"]
             attempt = load_frozen_attempt(
                 ran_state,
-                func_out["diamond_attempt_ref"],
+                _execution_cursor(func_out)["frozen_attempt_ref"],
                 expected_stage="function_annotation",
                 expected_method_name="function_annotation.candidate.diamond",
             )
@@ -359,10 +369,15 @@ class DiamondCollectTests(unittest.TestCase):
             for p in attempt.expected_outputs:
                 if p.exists():
                     p.unlink()
-            result = collect_diamond_artifacts(ran_state)
+            result = collect_with_failure_boundary(
+                ran_state,
+                lifecycle=DIAMOND_LIFECYCLE,
+                collect=collect_diamond_artifacts,
+            )
             collected = result["stage_outputs"]["function_annotation"]
             self.assertEqual(collected["status"], "failed")
-            self.assertIn("missing", collected["reason"])
+            self.assertEqual(collected["failure_kind"], "collect")
+            self.assertIn("diamond collect failed", collected["reason"])
 
 
 class DiamondFullPathTests(unittest.TestCase):
@@ -372,7 +387,7 @@ class DiamondFullPathTests(unittest.TestCase):
             state = _provenance_state(tmpdir, env={"PATH": fake_path})
             freeze_result = freeze_diamond_attempt(state)
             frozen = freeze_result["stage_outputs"]["function_annotation"]
-            attempt_ref = frozen["diamond_attempt_ref"]
+            attempt_ref = _execution_cursor(frozen)["frozen_attempt_ref"]
             ref_fields = {
                 "schema_version",
                 "artifact_id",
@@ -387,7 +402,10 @@ class DiamondFullPathTests(unittest.TestCase):
             state["stage_outputs"] = freeze_result["stage_outputs"]
             run_result = run_diamond_attempt(state)
             ran = run_result["stage_outputs"]["function_annotation"]
-            self.assertEqual(set(ran["diamond_execution_ref"]), ref_fields)
+            self.assertEqual(
+                set(_execution_cursor(ran)["execution_ref"]),
+                ref_fields,
+            )
             self.assertNotIn("diamond_frozen_attempt", ran)
             self.assertNotIn("diamond_execution_result", ran)
             checkpoint = json.dumps(ran, sort_keys=True)
@@ -405,14 +423,17 @@ class DiamondFullPathTests(unittest.TestCase):
             state = _provenance_state(tmpdir, env={"PATH": _fake_diamond_bin(tmpdir)})
             freeze_result = freeze_diamond_attempt(state)
             frozen = freeze_result["stage_outputs"]["function_annotation"]
-            frozen["diamond_attempt_ref"] = {
-                **frozen["diamond_attempt_ref"],
+            cursor = _execution_cursor(frozen)
+            cursor["frozen_attempt_ref"] = {
+                **cursor["frozen_attempt_ref"],
                 "sha256": "0" * 64,
             }
             state["stage_outputs"] = freeze_result["stage_outputs"]
 
-            with self.assertRaises(DataLayoutError):
-                run_diamond_attempt(state)
+            result = run_diamond_attempt(state)
+            output = result["stage_outputs"]["function_annotation"]
+            self.assertEqual(output["status"], "failed")
+            self.assertIn("frozen attempt is invalid", output["reason"])
 
     def test_end_to_end_diamond_flow(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -4,13 +4,11 @@
 
 **Accepted:** 2026-07-15
 
-**Implementation:** Partial. The v2 run layout, immutable refs, ledger/report
-ownership, recommendation persistence, typed bounded stage cursors, universal
-frozen-attempt refs, process-result evidence, read-only storage audit, and a
-report-only dry-run cleanup manifest are in use. Whole-checkpoint budgets,
-verified single-terminal-checkpoint compaction, and the unified read-only
-`storage-audit` CLI were completed on 2026-07-20. Deletion-performing artifact
-GC and artifact-index compaction after GC remain incomplete.
+**Implementation:** Implemented. The v2 run layout, immutable refs,
+ledger/report ownership, recommendation persistence, typed bounded stage
+cursors, universal frozen-attempt refs, process-result evidence, whole-state
+checkpoint budgets, verified single-terminal-checkpoint compaction, and the
+read-only `storage-audit` CLI are in use.
 
 **Scope:** New workflow sessions created after the v2 cutover
 
@@ -24,14 +22,12 @@ must make those workflows auditable without allowing the same mutable fact to
 spread through artifacts, the artifact index, ledger events, checkpoints, and
 reports.
 
-Data v2 establishes one shared contract for all stages. Assembly and AutoHiC
-have parameter-recommendation loops; a future T2T parameter recommender must
-reuse the same contract rather than introducing
-stage-specific audit envelopes.
+Data v2 establishes one shared contract for all stages. The implemented
+Assembly and AutoHiC parameter-recommendation loops use the same persistence
+contract rather than stage-specific audit envelopes.
 
-This specification supersedes data-layout and persistence assumptions in phase
-documents. Biological and stage contracts remain governed by their existing
-documents.
+This specification supersedes earlier data-layout and persistence assumptions.
+Biological and stage contracts remain governed by their current specifications.
 
 ## 2. Accepted Product Decisions
 
@@ -44,8 +40,8 @@ documents.
    gate. Arbitrary historical-node time travel is not a product requirement.
 4. Existing report filenames and artifact types are not external compatibility
    contracts.
-5. “Planner” in the current roadmap means a stage parameter recommender. It does
-   not mean method selection or parent-graph planning.
+5. “Planner” in current parameter code means a stage parameter recommender. It
+   does not mean method selection or parent-graph planning.
 
 ## 3. Replay Terminology
 
@@ -123,10 +119,10 @@ control and resume must not depend on a report.
 
 ### 4.7 Shared stage contract
 
-Assembly, Hi-C, T2T, and later executable stages use the same storage concepts:
-parameter recommendation, response parsing, approval, frozen attempt, execution,
-review, and retry. A stage may add typed artifact content but not a new storage
-layer or ownership model.
+Implemented executable stages use the same storage concepts: immutable
+evidence, approval where required, frozen attempt, execution, review, and
+retry. A stage may add typed artifact content but not a new storage layer or
+ownership model.
 
 ### 4.8 Boundedness is enforced
 
@@ -198,8 +194,6 @@ data/
         │   │   ├── attempts/
         │   │   └── outputs/
         │   ├── t2t/
-        │   │   ├── parameter_recommendations/
-        │   │   ├── attempts/
         │   │   └── outputs/
         │   └── reviews/
         │       └── <review_request_id>/
@@ -220,8 +214,8 @@ Rules:
 - Numeric recommendation and attempt directories use zero-padded, stage-local
   IDs such as `000`, `001`, and `002`.
 - `work/` is mutable while an attempt is being prepared, then retained as part
-  of that run's resumable execution workspace. Built-in cleanup and GC do not
-  delete it.
+  of that run's resumable execution workspace. Resume validates referenced
+  scripts in place.
 - `reports/` is outside `artifacts/` because reports are projections.
 - There is no `data/artifacts/` global runtime namespace and no global object
   store in the logical reference contract.
@@ -349,11 +343,12 @@ including the exact `frozen_attempt_ref` consumed by the runner.
 
 An operator-directed Assembly rerun at the review gate has a different
 parameter source and is outside that `ParameterAttempt` ownership rule. Its
-durable relation is `ReviewDecision -> FrozenAttempt -> ExecutionResult ->
-CandidateBundle`: the review decision owns the operator-supplied parameters,
-and the candidate bundle binds the exact frozen and execution refs. This path
-must not invoke the model again or synthesize recommendation/approval evidence
-solely to imitate the recommendation lifecycle.
+review decision owns the operator-supplied parameters and schedules a compact
+rerun request. The shared direct-attempt cursor then owns the exact frozen and
+execution refs through freeze and run; collect publishes the resulting
+candidate bundle. This path must not invoke the model again or synthesize
+recommendation/approval evidence solely to imitate the recommendation
+lifecycle.
 
 For a non-parameterized method, its typed stage cursor may own the frozen-attempt
 and execution-record refs directly. In both cases resume loads the frozen record
@@ -484,8 +479,9 @@ must not be used to accommodate an embedded artifact.
 
 While a run is active or blocked, retain the latest resumable checkpoint.
 Intermediate historical checkpoints are not a supported API. After a terminal
-event is committed and audit reconstruction passes, the database may be
-compacted to one terminal checkpoint or removed by retention policy.
+event is committed and ledger reconstruction plus checkpoint-free artifact
+reachability pass, the database is compacted to one standalone terminal
+checkpoint.
 
 ## 15. Reports v2
 
@@ -565,34 +561,7 @@ Model and command records use an allowlisted configuration projection. When a
 secret influences execution, record its presence and source name, not its
 value.
 
-## 19. Retention and Garbage Collection
-
-GC is reachability-based, never filename- or age-only deletion.
-
-Roots include:
-
-- control manifests and configuration refs;
-- ledger event refs;
-- the latest nonterminal checkpoint refs;
-- sealed recommendation manifests and any sealed attempt manifests that exist;
-- review requests and decisions;
-- retained externally delivered evidence exports.
-
-Policies:
-
-- `work/` is outside automatic cleanup and GC. An operator may remove it only
-  by explicitly accepting that affected attempts can no longer resume.
-- `reports/` may be removed and regenerated.
-- intermediate checkpoints may be pruned according to section 14.
-- immutable artifacts are deleted only when unreachable from every root and
-  the session is terminal.
-- GC first produces a dry-run manifest with paths, hashes, sizes, and reasons.
-- Artifact-index compaction occurs only after artifact GC succeeds.
-
-Because runtime refs are session-local, deleting another run or a global cache
-cannot break the retained run.
-
-## 20. Cutover Policy
+## 19. Cutover Policy
 
 Data v2 uses a clean cutover:
 
@@ -609,97 +578,47 @@ authorization on 2026-07-15. The committed `data/` tree retains only the v2
 `layout.json` marker and reference data still used by the application. Runtime
 code must not recreate or silently mix legacy data into the v2 root.
 
-## 21. Implementation Sequence
+## 20. Implementation Status
 
 | Step | Status | Implementation state |
 |---|---|---|
 | 1. Add `layout.json`, run-root paths, ArtifactRef v2, and immutable writers | Complete | The repository and runtime use the strict v2 layout and run-relative, hash-verifiable immutable artifact references. |
 | 2. Add ledger v2 envelope, event IDs, sequences, idempotency, and route events | Complete | Ledger v2 owns bounded lifecycle events and request-ID-bound review decisions. |
-| 3. Introduce typed compact stage cursors and remove embedded attempt bodies from checkpoints | Complete | `stage_outputs` accepts only known stage keys and bounded recursive JSON cursors; the LangGraph channel rejects non-JSON values, oversized cursors, and embedded `FrozenAttemptSpec` bodies. Every resumable freeze/run lifecycle checkpoints the shared immutable attempt ref. Model-recommended Assembly/AutoHiC executions own it through `ParameterAttempt`; operator-directed Assembly review reruns bind it through `ReviewDecision` and `CandidateBundle`; non-parameterized lifecycles may own it directly. Same-node helper commands persist the same record before execution. |
-| 4. Extract the shared parameter-recommendation persistence contract | Complete for shared persistence, Assembly, and AutoHiC adoption | Future stage recommenders, including T2T, must reuse the same storage helper; this step does not authorize new recommendation behavior. |
-| 5. Persist exact model requests/responses and policy/knowledge references | Complete for the implemented parameter-recommendation path | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
+| 3. Introduce typed compact stage cursors and remove embedded attempt bodies from checkpoints | Complete | `stage_outputs` accepts only known stage keys and bounded recursive JSON cursors; the LangGraph channel rejects non-JSON values, oversized cursors, and embedded `FrozenAttemptSpec` bodies. Every resumable freeze/run lifecycle checkpoints the shared immutable attempt ref. Model-recommended Assembly/AutoHiC executions own it through `ParameterAttempt`; ordinary methods, ordered batches, and operator-directed Assembly reruns own it through the shared direct-attempt cursor. Same-node helper commands persist the same record before execution. |
+| 4. Extract the shared parameter-recommendation persistence contract | Complete | Assembly and AutoHiC use the shared persistence, approval, resume, and attempt contracts while retaining stage-specific model DTOs. |
+| 5. Persist exact model requests/responses and policy/knowledge references | Complete | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
 | 6. Move reports out of the artifact index and generate shared report views | Complete | `current_status.json`, `assembly_review.md`, and `session_summary.{json,md}` are derived projections rather than workflow truth. |
-| 7. Add storage audit, checkpoint compaction, and mark-and-sweep artifact GC | Partial | Read-only storage audit, the unified JSON `storage-audit` CLI, report-only dry-run manifests, whole-state checkpoint budgets, and verified terminal SQLite compaction are implemented. Compaction retains one standalone top-level terminal checkpoint and removes its thread's historical/subgraph checkpoint rows only after ledger reconstruction and checkpoint-free artifact-retention proofs pass. Deletion-performing artifact GC and artifact-index compaction after GC are not implemented. Work cleanup remains outside automatic GC. |
-| 8. Remove legacy layout data/code and validate the clean cutover | Partial | Legacy fallback behavior and the old local sessions/samples are removed. Real SQLite resume and existing-assembly-to-annotation entrypoint E2E tests exist; the outstanding clean-v2 acceptance path starts from raw reads and crosses read_qc/genome_survey/assembly before review. |
+| 7. Enforce whole-state budgets and compact verified terminal checkpoints | Complete | One saver decorator validates full checkpoints and pending writes for MemorySaver, SqliteSaver, and injected savers. Terminal compaction keeps one standalone top-level checkpoint only after ledger reconstruction and checkpoint-free artifact reachability succeed. |
+| 8. Expose read-only storage audit and complete the clean cutover | Complete | `gene-agent storage-audit` reports storage integrity and reachability as JSON and can include a dry-run manifest. Legacy fallback behavior and old local sessions/samples are removed; real SQLite resume and existing-assembly-to-annotation entrypoint E2E tests cover the v2 path. |
 
-## 22. Confirmed Conformance Debt
-
-The following gaps were confirmed against the current implementation on
-2026-07-20. They are bounded follow-up work, not precedents for new stages.
-
-| Priority | Area | Confirmed gap | Required ownership boundary |
-|---|---|---|---|
-| P1 | Deletion-performing GC | Terminal compaction and checkpoint-free retention-root verification are implemented, but there is intentionally no filesystem deletion executor or `--apply` CLI. | Require a terminal session, revalidate every manifest path/hash/size immediately before deletion, require explicit confirmation, delete only unreachable immutable artifacts and regenerable reports, reject every `work/` entry, and compact the artifact index last. |
-| P2 | Run identity | Several internal APIs accept a run-root path and a second session ID even though the run root already owns identity. | Pass a typed run context/`SessionPaths` internally; keep one session identity owner. |
-
-The former Gene collection and checkpoint gaps were resolved on 2026-07-16:
-collection now returns and consumes the durable published path, and Gene
-checkpoints retain only immutable frozen-attempt and execution refs.
-
-The former Assembly/AutoHiC attempt-ownership gap was resolved on 2026-07-17:
-each `ParameterAttempt` now owns its exact frozen runner-input ref and execution
-ref; method-specific current-stage duplicates were removed, and sealed manifests
-retain those relations across retries.
-
-The former review-recommendation, review-request-identity, and session-inspection
-gaps were verified resolved on 2026-07-20. Recommendation files are scoped by
-`review_request_id` and reference the canonical request without embedding it;
-request bodies reject duplicate envelope fields; lifecycle classification reads
-ledger/artifact facts and treats report files only as optional paths.
-
-The former artifact-publication and duplicated-resume-transaction gaps were
-resolved on 2026-07-20. Durable producers now cross the existing atomic
-`work/` publication boundary, while already-published outputs use registration
-only. One control transaction owns all resume state mutation and lifecycle
-events; entrypoints own only operator I/O.
-
-The former whole-checkpoint budget and terminal-retention gaps were resolved on
-2026-07-20. One saver decorator validates both full checkpoints and pending
-writes for built-in and injected savers. Terminal/stage/failure events retain
-the refs needed by audit replay; terminal SQLite compaction is fail-closed and
-keeps one standalone top-level checkpoint only after durable terminal
-reconstruction and checkpoint-free artifact reachability succeed. Initial-run
-and resume paths share one terminal finalizer instead of owning parallel report,
-failure-ledger, checkpoint-persistence, and compaction-event branches. The
-read-only `storage-audit` CLI is available, while deletion-performing GC remains
-separate and `work/` is excluded from its manifest candidates.
+The implementation uses one publication boundary, one resume transaction, one
+terminal finalizer, one checkpoint-budget decorator, and one read-only storage
+audit path. Entry points and stages do not retain parallel legacy branches.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus
 artifact ref, and JSON report plus regenerable Markdown.
 
-## 23. Acceptance Criteria
+## 21. Enforced Acceptance Criteria
 
-Data v2 is complete only when all of the following hold:
+The current Data v2 implementation enforces the following:
 
 - A new run contains no repeated session ID below its run root.
 - Every durable internal ref is session-relative and hash-verifiable.
 - Copying a run to a different absolute path preserves audit replay.
 - A blocked review resumes from the latest frontier using only checkpoint plus
   verified run-local refs.
-- Removing checkpoint after terminal compaction does not prevent reconstruction
-  of stage order, skip reasons, decisions, failures, and terminal outcome.
+- Terminal compaction preserves reconstruction of stage order, skip reasons,
+  decisions, failures, and terminal outcome while retaining one standalone
+  checkpoint.
 - Corrupting a referenced artifact causes replay/resume to fail closed.
 - Replaying a node does not duplicate ledger effects or artifact-index rows.
 - Recommendation rejection creates no execution attempt and consumes no retry
   budget.
-- Assembly, Hi-C, and T2T parameter recommenders can share artifact cursors and
-  storage helpers without sharing one biological/model DTO or stage-specific path rules.
+- Assembly and Hi-C parameter recommenders share persistence and artifact
+  cursors without sharing one biological/model DTO.
 - Checkpoint size budgets are enforced in tests.
 - Reports can be deleted and regenerated without changing audit facts.
-- A storage-audit command reports bytes by layer, largest checkpoint fields,
+- The storage-audit command reports bytes by layer, largest checkpoint fields,
   duplicate content, unreachable artifacts, retained work bytes, and
   reclaimable report data.
-
-## 24. Non-Goals
-
-Data v2 does not provide:
-
-- compatibility with old sessions;
-- arbitrary historical checkpoint time travel;
-- global hash-only runtime references;
-- a parameter recommender that chooses methods or workflow stages;
-- mutable evidence artifacts;
-- report-driven workflow control;
-- automatic reproduction of an external LLM response by calling the model
-  again.

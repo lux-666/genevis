@@ -15,18 +15,13 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.control.lifecycle import resume_review_state
-from app.storage.artifacts import (
-    publish_artifact_record,
-    read_artifact_records,
-    resolve_artifact_ref,
-)
-from app.execution.evidence import ExecutionEvidence
+from app.execution.evidence import load_execution_evidence, persist_execution_result
+from app.integrity import sha256_file
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_EXECUTION,
     ASSEMBLY_PARAMETER_INPUT_PROFILE,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
@@ -38,7 +33,7 @@ from app.schemas.artifacts import (
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
-from app.integrity import sha256_file
+from app.schemas.execution import ExecutionResult
 from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import initial_state
 from app.stages.assembly.command_builder import (
@@ -65,7 +60,6 @@ from app.stages.assembly.parameters.profile import (
 from app.stages.assembly.parameters.storage import (
     load_recommendation_bundle,
     read_json_artifact,
-    write_attempt_json_artifact,
     write_recommendation_json_artifact,
 )
 from app.stages.assembly.parameters.workflow import (
@@ -77,6 +71,11 @@ from app.stages.assembly.parameters.workflow import (
 from app.stages.assembly.routing import route_after_method_subgraph
 from app.stages.assembly_review.builder import (
     build_stage as build_assembly_review_stage,
+)
+from app.storage.artifacts import (
+    publish_artifact_record,
+    read_artifact_records,
+    resolve_artifact_ref,
 )
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
@@ -285,7 +284,7 @@ def _persist_parameter_attempt(
         stderr_source = log_dir / f"attempt_{attempt_id}.stderr.log"
         stdout_source.write_text("", encoding="utf-8")
         stderr_source.write_text(execution_stderr, encoding="utf-8")
-        stdout_ref = publish_artifact_record(
+        stdout_published = publish_artifact_record(
             state["data_dir"],
             state["session_id"],
             ArtifactMeta.from_file(
@@ -298,8 +297,8 @@ def _persist_parameter_attempt(
             destination=paths.artifact_path(
                 "assembly", "logs", f"parameter_attempt_{attempt_id}.stdout.log"
             ),
-        ).ref
-        stderr_ref = publish_artifact_record(
+        )
+        stderr_published = publish_artifact_record(
             state["data_dir"],
             state["session_id"],
             ArtifactMeta.from_file(
@@ -312,29 +311,23 @@ def _persist_parameter_attempt(
             destination=paths.artifact_path(
                 "assembly", "logs", f"parameter_attempt_{attempt_id}.stderr.log"
             ),
-        ).ref
-        durable_result = ExecutionEvidence(
+        )
+        runtime_result = ExecutionResult(
             attempt_id=f"{state['session_id']}:assembly:parameter-{attempt_id}",
             success=bool(execution_result.get("success", False)),
             return_code=int(execution_result.get("return_code", 1)),
+            stdout_path=stdout_published.path,
+            stderr_path=stderr_published.path,
+            output_paths=[],
             status=execution_result.get("status", "failed"),
             status_detail=str(execution_result.get("status_detail", "")),
-            error=str(execution_result.get("error", "")),
-            stdout_ref=stdout_ref,
-            stderr_ref=stderr_ref,
         )
-        execution_ref = write_attempt_json_artifact(
+        execution_ref = persist_execution_result(
             state,
-            attempt_id,
-            "execution.json",
-            {
-                "schema_version": 2,
-                "attempt_id": attempt_id,
-                "method_id": method_id,
-                "result": durable_result.model_dump(mode="json"),
-            },
-            artifact_type=ASSEMBLY_PARAMETER_EXECUTION,
+            stage="assembly",
             method_name=method_id,
+            result=runtime_result,
+            error=str(execution_result.get("error", "")),
         )
     return ParameterAttempt(
         attempt_id=attempt_id,
@@ -1227,21 +1220,22 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
 
             result = execution_retry_gate(state)
             assembly = result["stage_outputs"]["assembly"]
-            execution = read_json_artifact(
+            execution = load_execution_evidence(
                 state,
                 assembly["parameter_retry_request"]["failure_ref"],
-                expected_type=ASSEMBLY_PARAMETER_EXECUTION,
+                expected_stage="assembly",
+                expected_method_name="assembly.candidate.hifiasm_ont",
             )
 
             self.assertEqual(assembly["status"], "retry_parameters_after_execution_failure")
             self.assertEqual(assembly["current_parameter_attempt_id"], 0)
             self.assertEqual(assembly["proposed_parameter_attempt_id"], 1)
             self.assertNotIn("execution_failure_log_tail", assembly)
-            self.assertNotIn("stderr_path", execution["result"])
+            self.assertNotIn("stderr_path", execution.model_dump(mode="json"))
             stderr_path = resolve_artifact_ref(
                 state["data_dir"],
                 state["session_id"],
-                execution["result"]["stderr_ref"],
+                execution.stderr_ref,
             )
             self.assertIn("line 149", stderr_path.read_text(encoding="utf-8"))
             self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
@@ -1614,7 +1608,7 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
         self.assertIn("ParameterAttempt", assembly["reason"])
         self.assertIn("task", assembly["reason"])
 
-    def test_hifiasm_ont_freeze_wraps_corrupt_historical_attempt(self):
+    def test_hifiasm_ont_freeze_ignores_corrupt_non_current_attempt(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._state(
                 tmpdir,
@@ -1631,11 +1625,9 @@ class MethodFreezeParameterFailureTests(unittest.TestCase):
                 result = freeze_hifiasm_ont_attempt(state)
 
         assembly = result["stage_outputs"]["assembly"]
-        self.assertEqual(assembly["status"], "failed")
-        self.assertIn(
-            "historical parameter attempt at index 1 is invalid",
-            assembly["reason"],
-        )
+        self.assertEqual(assembly["status"], "hifiasm_ont_frozen")
+        self.assertEqual(assembly["parameter_attempts"][0]["status"], "frozen")
+        self.assertEqual(assembly["parameter_attempts"][1], {"attempt_id": 1})
 
     def test_hifiasm_ont_freeze_writes_command_artifact_ref(self):
         with tempfile.TemporaryDirectory() as tmpdir:

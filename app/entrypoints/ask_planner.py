@@ -166,8 +166,8 @@ def build_initial_plan_draft(plan: AskPlanState) -> AskPlanState | None:
     operator-confirmed ones. The caller must show it for approval and only treat
     it as the live plan (persist it / feed it to next_clarification) once the
     operator accepts; on reject it must be discarded, never saved. A dedicated
-    AskPlanDraft model was deliberately not introduced — see the data-boundary
-    note in docs/phases/phase7/10_natural_language_draft_plan_approval.md.
+    AskPlanDraft model is unnecessary because this value is an unpersisted view
+    of the existing plan schema.
     """
     target = _intent_requested_stages(plan)
     if not target:

@@ -8,18 +8,16 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.storage.ledger import Ledger
+from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import publish_artifact_record, register_artifact_records
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_execution_result,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.workflow import next_stage_name
+from app.execution.method_runner import build_frozen_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.review.policy import evaluate
@@ -33,7 +31,6 @@ from app.schemas.artifacts import (
     RepeatAnnotationBundle,
     RepeatAnnotationPlan,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -46,12 +43,33 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_SPEC
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.publish import shell_publish_file
+from app.workflow import next_stage_name
 
 REPEAT_LIBRARY_CANDIDATES: list[str] = []
 REPEAT_HELPER_METHODS: list[str] = []
 REPEAT_MASKING_METHOD = "repeat_annotation.masking.repeatmasker"
 REPEAT_CONTRACT_METHOD = "repeat_annotation.contract"
+REPEATMASKER_LIFECYCLE = MethodExecutionLifecycle(
+    stage="repeat_annotation",
+    name="RepeatMasker",
+    method_name=REPEAT_MASKING_METHOD,
+    frozen_status="repeatmasker_frozen",
+    ran_status="repeatmasker_ran",
+    cleanup_outputs=False,
+)
+
+
+def build_repeatmasker_graph():
+    """Build the shared RepeatMasker execution lifecycle."""
+
+    return build_method_graph(
+        REPEATMASKER_LIFECYCLE,
+        freeze_repeatmasker_attempt,
+        collect_repeatmasker_artifacts,
+    )
 
 
 def _repeat_output(state: TopLevelState) -> dict[str, Any]:
@@ -320,52 +338,7 @@ def freeze_repeatmasker_attempt(state: TopLevelState) -> dict:
             "hardmasked_genome": str(hardmasked_genome),
         },
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-    return _update_repeat_output(
-        state,
-        {
-            "status": "repeatmasker_frozen",
-            "repeatmasker_frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
-
-
-def run_repeatmasker_attempt(state: TopLevelState) -> dict:
-    """Run the frozen RepeatMasker attempt locally."""
-    repeat_out = _repeat_output(state)
-    if repeat_out.get("status") != "repeatmasker_frozen":
-        return {}
-
-    attempt = load_frozen_attempt(
-        state,
-        repeat_out["repeatmasker_frozen_attempt_ref"],
-        expected_stage="repeat_annotation",
-        expected_method_name=REPEAT_MASKING_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="RepeatMasker",
-        cleanup_outputs=False,
-    )
-    result_ref = persist_execution_result(
-        state,
-        stage="repeat_annotation",
-        method_name=REPEAT_MASKING_METHOD,
-        result=outcome.result,
-        error=outcome.error,
-    ).model_dump(mode="json")
-    if not outcome.success:
-        return _update_repeat_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                "repeatmasker_execution_result": result_ref,
-            },
-        )
-    return _update_repeat_output(state, {"status": "repeatmasker_ran", "repeatmasker_execution_result": result_ref})
+    return freeze_method_attempts(state, REPEATMASKER_LIFECYCLE, [attempt])
 
 
 def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
@@ -374,19 +347,10 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
     if repeat_out.get("status") != "repeatmasker_ran":
         return {}
 
-    attempt = load_frozen_attempt(
-        state,
-        repeat_out["repeatmasker_frozen_attempt_ref"],
-        expected_stage="repeat_annotation",
-        expected_method_name=REPEAT_MASKING_METHOD,
-    )
-    load_execution_evidence(
-        state,
-        repeat_out.get("repeatmasker_execution_result") or {},
-        expected_stage="repeat_annotation",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=REPEAT_MASKING_METHOD,
-    )
+    executions = load_method_executions(state, REPEATMASKER_LIFECYCLE)
+    if len(executions) != 1:
+        raise ValueError("RepeatMasker requires exactly one execution attempt")
+    attempt = executions[0].attempt
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     artifacts: list[ArtifactMeta] = []
@@ -448,8 +412,6 @@ def collect_repeatmasker_artifacts(state: TopLevelState) -> dict:
             "notes": notes,
             "execution_enabled": True,
             "repeatmasker_attempt_id": attempt.attempt_id,
-            "repeatmasker_frozen_attempt_ref": None,
-            "repeatmasker_execution_result": None,
         },
     )
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
+from app.workflow import is_terminal_failure
 
 
 def _output(state: TopLevelState) -> dict:
@@ -19,9 +19,9 @@ def route_after_plan(state: TopLevelState) -> str:
     if is_terminal_failure(status):
         return "fail"
     if status == "ready_to_run":
-        return "run"
+        return "purge_dups"
     return "commit"
 
 
-def route_after_run(state: TopLevelState) -> str:
+def route_after_purge_dups(state: TopLevelState) -> str:
     return "fail" if is_terminal_failure(_output(state).get("status")) else "commit"

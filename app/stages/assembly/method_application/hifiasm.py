@@ -5,17 +5,24 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
+from app.configuration import load_descriptor_registry
+from app.domains.assembly.constants import HIFIASM_METHOD
 from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.parameter_attempts import load_current_frozen_attempt
-from app.configuration import load_descriptor_registry
-from app.schemas.state import TopLevelState
-from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
-from app.domains.assembly.constants import HIFIASM_METHOD
-from app.stages.assembly.method_application.lifecycle import (
-    MethodLifecycle,
-    blocked_parameters,
+from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
     build_method_graph,
+    load_method_executions,
+)
+from app.schemas.state import TopLevelState
+from app.stages.assembly.command_builder import (
+    ParameterCommandError,
+    build_command,
+    build_parameter_sources,
+)
+from app.stages.assembly.method_application.support import (
+    blocked_parameters,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -28,14 +35,13 @@ from app.storage.paths import SessionPaths
 
 HIFIASM_READ_TYPE_FLAGS = {"hifi": ""}
 
-LIFECYCLE = MethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly",
     name="hifiasm",
     method_name=HIFIASM_METHOD,
-    planned_status="hifiasm_execution_planned",
     frozen_status="hifiasm_frozen",
     ran_status="hifiasm_ran",
-    draft_assembly_key="hifiasm_draft_assembly_path",
-    substep_key="hifiasm_assembly",
+    owner=ParameterAttemptOwner(),
 )
 
 
@@ -48,7 +54,7 @@ def build_hifiasm_graph():
 def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
     """Freeze a local hifiasm attempt for the selected primary candidate."""
     output = stage_output(state, "assembly")
-    if output.get("status") != LIFECYCLE.planned_status:
+    if output.get("status") != "hifiasm_execution_planned":
         return {}
     if HIFIASM_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{HIFIASM_METHOD!r}]")
@@ -168,25 +174,19 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
         },
         stage_updates={
             "hifiasm_output_dir": str(output_dir),
-            LIFECYCLE.draft_assembly_key: str(draft),
         },
     )
 
 
 def collect_hifiasm_artifacts(state: TopLevelState) -> dict:
-    output = stage_output(state, "assembly")
-    attempt = load_current_frozen_attempt(
-        state,
-        output,
-        stage="assembly",
-        method_id=HIFIASM_METHOD,
-        label="Hifiasm",
-    )
+    [execution] = load_method_executions(state, LIFECYCLE)
+    attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
     return collect_method_artifacts(
         state,
         LIFECYCLE,
-        attempt=attempt,
+        execution=execution,
+        substep_name="hifiasm_assembly",
         extra_artifacts=[],
         bundle_logs={},
         bundle_metadata={

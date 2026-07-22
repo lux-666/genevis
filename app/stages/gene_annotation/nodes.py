@@ -9,15 +9,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
-from app.storage.ledger import Ledger
+from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import (
-    publish_artifact_record,
-    publish_or_recover_work_artifact,
-)
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.workflow import next_stage_name
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
+)
+from app.execution.method_runner import build_frozen_attempt
 from app.review.annotation_intake import (
     DOWNSTREAM_STAGES,
     load_annotation_intake_plan,
@@ -36,7 +37,6 @@ from app.schemas.artifacts import (
     GeneAnnotationBundle,
     GeneAnnotationPlan,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
@@ -47,14 +47,14 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
-from app.stages.resource_specs import MASKED_ASSEMBLY_SPEC, assembly_resource_spec
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
-from app.stages.gene_annotation.persistence import (
-    load_gene_attempt,
-    load_gene_execution,
-    persist_gene_attempt,
-    persist_gene_execution,
+from app.stages.resource_specs import MASKED_ASSEMBLY_SPEC, assembly_resource_spec
+from app.storage.artifacts import (
+    publish_artifact_record,
+    publish_or_recover_work_artifact,
 )
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 GENE_CANDIDATE_METHODS = [
     "gene_annotation.candidate.augustus",
@@ -1196,16 +1196,22 @@ def apply_final_gene_set_review_decision(
 
 # --- method execution (Phase 7 task 04) ---------------------------------------
 
+MINIPROT_METHOD = "gene_annotation.candidate.miniprot"
+AUGUSTUS_METHOD = "gene_annotation.candidate.augustus"
+GFFREAD_METHOD = "gene_annotation.materialize.gffread"
+EVM_METHOD = "gene_annotation.merge.evm"
+GENE_BUSCO_METHOD = "gene_annotation.busco"
+
 # Each entry maps a confirmed method to its execution statuses and naming
 # conventions.  Adding a new executable method only requires a new entry here,
 # the corresponding freeze / run / collect nodes, and the builder edge wiring.
 GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
-    "gene_annotation.candidate.miniprot": {
+    MINIPROT_METHOD: {
         "suffix": "miniprot",
         "frozen_status": "miniprot_frozen",
         "ran_status": "miniprot_ran",
     },
-    "gene_annotation.candidate.augustus": {
+    AUGUSTUS_METHOD: {
         "suffix": "augustus",
         "frozen_status": "augustus_frozen",
         "ran_status": "augustus_ran",
@@ -1213,9 +1219,87 @@ GENE_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
 }
 
 CANDIDATE_GFF_TYPE = "gene_annotation.candidate_gff"
-AUGUSTUS_METHOD = "gene_annotation.candidate.augustus"
-GFFREAD_METHOD = "gene_annotation.materialize.gffread"
-CANDIDATE_PROTEINS_TYPE = "gene_annotation.candidate_proteins"
+FINAL_GFF_TYPE = "gene_annotation.final_gff"
+BUSCO_SUMMARY_TYPE = "gene_annotation.busco_summary"
+
+MINIPROT_LIFECYCLE = MethodExecutionLifecycle(
+    stage="gene_annotation",
+    name="gene annotation miniprot",
+    method_name=MINIPROT_METHOD,
+    frozen_status="miniprot_frozen",
+    ran_status="miniprot_ran",
+)
+AUGUSTUS_LIFECYCLE = MethodExecutionLifecycle(
+    stage="gene_annotation",
+    name="gene annotation augustus",
+    method_name=AUGUSTUS_METHOD,
+    frozen_status="augustus_frozen",
+    ran_status="augustus_ran",
+)
+GFFREAD_LIFECYCLE = MethodExecutionLifecycle(
+    stage="gene_annotation",
+    name="gene annotation gffread",
+    method_name=GFFREAD_METHOD,
+    frozen_status="gffread_frozen",
+    ran_status="gffread_ran",
+    process_failure="collect",
+)
+EVM_LIFECYCLE = MethodExecutionLifecycle(
+    stage="gene_annotation",
+    name="gene annotation EVM",
+    method_name=EVM_METHOD,
+    frozen_status="evm_frozen",
+    ran_status="evm_ran",
+)
+GENE_BUSCO_LIFECYCLE = MethodExecutionLifecycle(
+    stage="gene_annotation",
+    name="gene annotation BUSCO",
+    method_name=GENE_BUSCO_METHOD,
+    frozen_status="busco_frozen",
+    ran_status="busco_ran",
+    cleanup_outputs=False,
+    process_failure="collect",
+)
+
+
+def build_miniprot_graph():
+    return build_method_graph(
+        MINIPROT_LIFECYCLE,
+        freeze_miniprot_attempt,
+        collect_miniprot_artifacts,
+    )
+
+
+def build_augustus_graph():
+    return build_method_graph(
+        AUGUSTUS_LIFECYCLE,
+        freeze_augustus_attempt,
+        collect_augustus_artifacts,
+    )
+
+
+def build_gffread_graph():
+    return build_method_graph(
+        GFFREAD_LIFECYCLE,
+        freeze_candidate_materialization,
+        collect_candidate_materialization,
+    )
+
+
+def build_evm_graph():
+    return build_method_graph(
+        EVM_LIFECYCLE,
+        freeze_evm_attempt,
+        collect_evm_artifacts,
+    )
+
+
+def build_gene_busco_graph():
+    return build_method_graph(
+        GENE_BUSCO_LIFECYCLE,
+        freeze_gene_busco_attempt,
+        collect_gene_busco_artifacts,
+    )
 
 # Per-candidate EVM evidence class, keyed by method. Used both for EVM weight
 # selection and for the standardized candidate bundle. Methods absent here
@@ -1241,24 +1325,43 @@ _EVM_CLASS_WEIGHT_KEY = {
 }
 
 
-def _materialize_candidate_proteins(
-    state: TopLevelState,
-    *,
-    method_name: str,
-    suffix: str,
-    output_gff3: Path,
-) -> tuple[Path | None, Path | None, str | None]:
-    """Translate proteins.fa + cds.fa from a candidate GFF via gffread.
-
-    Returns ``(proteins_fa, cds_fa, None)`` on success, or ``(None, None, error)``
-    when gffread fails or yields empty output. Methods without native protein
-    output must call this before a candidate bundle is recorded; nothing may
-    publish a proteins path that is not materialized on disk.
-    """
+def freeze_candidate_materialization(state: TopLevelState) -> dict:
+    """Freeze gffread materialization for a candidate or merged EVM GFF."""
     gene_out = _gene_output(state)
+    status = gene_out.get("status")
+    materialization_target = ""
+    method_name = ""
+    suffix = ""
+    output_gff3: Path | None = None
+    for candidate_method, cfg in GENE_EXECUTABLE_METHODS.items():
+        if status == f"{cfg['suffix']}_collected":
+            source_gff3 = (gene_out.get("candidate_refs") or {}).get(candidate_method)
+            if not source_gff3:
+                return _fail_update(
+                    state,
+                    f"{cfg['suffix']} materialization requires a source GFF3",
+                )
+            materialization_target = "candidate"
+            method_name = candidate_method
+            suffix = cfg["suffix"]
+            output_gff3 = Path(str(source_gff3))
+            break
+    if status == "evm_outputs_collected":
+        source_gff3 = gene_out.get("final_gff_ref")
+        if not source_gff3:
+            return _fail_update(state, "evm materialization requires a source GFF3")
+        materialization_target = "evm"
+        method_name = EVM_METHOD
+        suffix = "evm"
+        output_gff3 = Path(str(source_gff3))
+    if not materialization_target:
+        return {}
+    if output_gff3 is None:
+        return _fail_update(state, f"{suffix} materialization requires a source GFF3")
+
     genome_ref = gene_out.get("genome_input_ref")
     if not genome_ref:
-        return None, None, f"{suffix} materialization requires genome_input_ref"
+        return _fail_update(state, f"{suffix} materialization requires genome_input_ref")
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -1276,7 +1379,7 @@ def _materialize_candidate_proteins(
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return None, None, str(blocked.get("reason") or "gffread env preflight blocked")
+        return _update_gene_output(state, blocked)
 
     script = (
         "set -e\n"
@@ -1298,30 +1401,88 @@ def _materialize_candidate_proteins(
         expected_outputs=[proteins_fa],
         env=gene_out.get("env"),
         env_spec=env_spec,
-        metadata={"source_gff3": str(output_gff3), "candidate_method": method_name},
+        metadata={
+            "source_gff3": str(output_gff3),
+            "candidate_method": method_name,
+            "suffix": suffix,
+            "materialization_target": materialization_target,
+            "proteins_fa": str(proteins_fa),
+            "cds_fa": str(cds_fa),
+        },
     )
-    attempt_ref = persist_gene_attempt(state, attempt)
-    attempt = load_gene_attempt(
-        state,
-        attempt_ref,
-        expected_method_name=GFFREAD_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label=f"{suffix} materialization",
-    )
-    persist_gene_execution(
-        state,
-        method_name=GFFREAD_METHOD,
-        result=outcome.result,
-        error=outcome.error,
-    )
-    if not outcome.success:
-        return None, None, outcome.error or f"{suffix} protein materialization failed"
+    return freeze_method_attempts(state, GFFREAD_LIFECYCLE, [attempt])
+
+
+def collect_candidate_materialization(state: TopLevelState) -> dict:
+    """Consume gffread outputs and finish candidate or EVM collection."""
+    gene_out = _gene_output(state)
+    if gene_out.get("status") != "gffread_ran":
+        return {}
+    executions = load_method_executions(state, GFFREAD_LIFECYCLE)
+    if len(executions) != 1:
+        return _fail_update(state, "gffread requires exactly one execution attempt")
+    attempt = executions[0].attempt
+    evidence = executions[0].evidence
+    suffix = str(attempt.metadata["suffix"])
+    if not evidence.success:
+        return _update_gene_output(
+            state,
+            {
+                "status": "materialization_failed",
+                "reason": evidence.error or f"{suffix} protein materialization failed",
+            },
+        )
+
+    proteins_fa = Path(str(attempt.metadata["proteins_fa"]))
+    cds_fa = Path(str(attempt.metadata["cds_fa"]))
+    if not proteins_fa.exists() or proteins_fa.stat().st_size == 0:
+        return _update_gene_output(
+            state,
+            {
+                "status": "materialization_failed",
+                "reason": f"{suffix} protein materialization produced no proteins",
+            },
+        )
     cds_ref = cds_fa if cds_fa.exists() else None
-    return proteins_fa, cds_ref, None
+
+    if attempt.metadata["materialization_target"] == "evm":
+        return _update_gene_output(
+            state,
+            {
+                "status": "evm_collected",
+                "final_proteins_ref": str(proteins_fa),
+                "final_cds_ref": str(cds_ref) if cds_ref else None,
+            },
+        )
+
+    method_name = str(attempt.metadata["candidate_method"])
+    output_gff3 = Path(str(attempt.metadata["source_gff3"]))
+    gene_count = int((gene_out.get("candidate_gene_counts") or {}).get(method_name, 0))
+    bundle = _write_candidate_bundle(
+        state,
+        method_name=method_name,
+        suffix=suffix,
+        output_gff3=output_gff3,
+        proteins_fa=proteins_fa,
+        cds_fa=cds_ref,
+        gene_count=gene_count,
+    )
+    candidate_bundles = dict(gene_out.get("candidate_bundles") or {})
+    candidate_bundles[method_name] = bundle
+    executed = list(gene_out.get("executed_methods") or [])
+    if method_name not in executed:
+        executed.append(method_name)
+    confirmed = list(gene_out.get("confirmed_methods") or [])
+    executable = [method for method in confirmed if method in GENE_EXECUTABLE_METHODS]
+    pending = [method for method in executable if method not in executed]
+    return _update_gene_output(
+        state,
+        {
+            "status": "pending_execution" if pending else "candidates_ready",
+            "candidate_bundles": candidate_bundles,
+            "executed_methods": executed,
+        },
+    )
 
 
 def _write_candidate_bundle(
@@ -1400,6 +1561,7 @@ def _evm_argument_bucket(evm_class: str) -> str:
 def _freeze_gene_method_attempt(
     state: TopLevelState,
     *,
+    lifecycle: MethodExecutionLifecycle,
     method_name: str,
     cfg: dict[str, str],
     script_body: str,
@@ -1453,99 +1615,38 @@ def _freeze_gene_method_attempt(
             **(extra_metadata or {}),
         },
     )
-    attempt_ref = persist_gene_attempt(state, attempt)
-
-    return _update_gene_output(
-        state,
-        {
-            "status": cfg["frozen_status"],
-            f"{cfg['suffix']}_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
-
-
-def _run_gene_method_attempt(
-    state: TopLevelState,
-    *,
-    method_name: str,
-    cfg: dict[str, str],
-) -> dict:
-    """Shared run path: hydrate a verified FrozenAttemptSpec and execute it."""
-    gene_out = _gene_output(state)
-    attempt = load_gene_attempt(
-        state,
-        gene_out[f"{cfg['suffix']}_attempt_ref"],
-        expected_method_name=method_name,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label=cfg["suffix"],
-    )
-    execution_ref = persist_gene_execution(
-        state,
-        method_name=attempt.method_name,
-        result=outcome.result,
-        error=outcome.error,
-    )
-    if not outcome.success:
-        return _update_gene_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
-            },
-        )
-    return _update_gene_output(
-        state,
-        {
-            "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, lifecycle, [attempt])
 
 
 def _collect_gene_method_artifacts(
-    state: TopLevelState, *, method_name: str, cfg: dict[str, str]
+    state: TopLevelState,
+    *,
+    lifecycle: MethodExecutionLifecycle,
+    method_name: str,
+    cfg: dict[str, str],
 ) -> dict:
     """Shared collect path: register GFF3 artifact and advance execution state."""
     gene_out = _gene_output(state)
-    attempt = load_gene_attempt(
-        state,
-        gene_out[f"{cfg['suffix']}_attempt_ref"],
-        expected_method_name=method_name,
-    )
-    load_gene_execution(
-        state,
-        gene_out[f"{cfg['suffix']}_execution_ref"],
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=method_name,
-    )
+    executions = load_method_executions(state, lifecycle)
+    if len(executions) != 1:
+        return _fail_update(
+            state,
+            f"{cfg['suffix']} requires exactly one execution attempt",
+        )
+    attempt = executions[0].attempt
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_gff3 = Path(str(attempt.metadata["output_gff3"]))
 
-    try:
-        published = publish_or_recover_work_artifact(
-            data_dir,
-            session_id,
-            output_gff3,
-            stage="gene_annotation",
-            method_name=method_name,
-            artifact_type=CANDIDATE_GFF_TYPE,
-            metadata={"attempt_id": attempt.attempt_id},
-        )
-    except FileNotFoundError:
-        reason = f"expected {cfg['suffix']} GFF3 missing: {output_gff3}"
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=0,
-            error=reason,
-        )
-        return _update_gene_output(state, {"status": "failed", "reason": reason})
+    published = publish_or_recover_work_artifact(
+        data_dir,
+        session_id,
+        output_gff3,
+        stage="gene_annotation",
+        method_name=method_name,
+        artifact_type=CANDIDATE_GFF_TYPE,
+        metadata={"attempt_id": attempt.attempt_id},
+    )
     published_gff3 = published.path
 
     Ledger(data_dir).record_attempt_succeeded(
@@ -1573,62 +1674,20 @@ def _collect_gene_method_artifacts(
     candidate_gene_counts = dict(gene_out.get("candidate_gene_counts") or {})
     candidate_gene_counts[method_name] = gene_count
 
-    # Materialize a real proteins.fa (+ cds.fa) from the candidate GFF. A
-    # candidate is only valid with a structural GFF AND an on-disk proteins
-    # FASTA; nothing may publish a fabricated protein path downstream.
-    proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
-        state,
-        method_name=method_name,
-        suffix=cfg["suffix"],
-        output_gff3=published_gff3,
-    )
-    if mat_error:
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=0,
-            error=mat_error,
-        )
-        return _update_gene_output(
-            state, {"status": "materialization_failed", "reason": mat_error}
-        )
-
-    bundle = _write_candidate_bundle(
-        state,
-        method_name=method_name,
-        suffix=cfg["suffix"],
-        output_gff3=published_gff3,
-        proteins_fa=proteins_fa,
-        cds_fa=cds_fa,
-        gene_count=gene_count,
-    )
-    candidate_bundles = dict(gene_out.get("candidate_bundles") or {})
-    candidate_bundles[method_name] = bundle
-
-    executed = list(gene_out.get("executed_methods") or [])
-    executed.append(method_name)
-    confirmed = list(gene_out.get("confirmed_methods") or [])
-    executable = [m for m in confirmed if m in GENE_EXECUTABLE_METHODS]
-    pending = [m for m in executable if m not in executed]
-
     return _update_gene_output(
         state,
         {
-            "status": "pending_execution" if pending else "candidates_ready",
+            "status": f"{cfg['suffix']}_collected",
             "candidate_refs": candidate_refs,
             "candidate_artifact_refs": candidate_artifact_refs,
-            "candidate_bundles": candidate_bundles,
             "candidate_gene_counts": candidate_gene_counts,
             "candidate_gff_ref": str(published_gff3),
             f"{cfg['suffix']}_gene_count": gene_count,
-            "executed_methods": executed,
         },
     )
 
 
 # --- miniprot freeze / run / collect ------------------------------------------
-
-MINIPROT_METHOD = "gene_annotation.candidate.miniprot"
 
 
 def freeze_miniprot_attempt(state: TopLevelState) -> dict:
@@ -1657,21 +1716,11 @@ def freeze_miniprot_attempt(state: TopLevelState) -> dict:
     )
     return _freeze_gene_method_attempt(
         state,
+        lifecycle=MINIPROT_LIFECYCLE,
         method_name=MINIPROT_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
         script_body=script,
         extra_metadata={"protein_evidence_refs": [str(ref) for ref in protein_refs]},
-    )
-
-
-def run_miniprot_attempt(state: TopLevelState) -> dict:
-    gene_out = _gene_output(state)
-    if gene_out.get("status") != "miniprot_frozen":
-        return {}
-    return _run_gene_method_attempt(
-        state,
-        method_name=MINIPROT_METHOD,
-        cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
     )
 
 
@@ -1681,6 +1730,7 @@ def collect_miniprot_artifacts(state: TopLevelState) -> dict:
         return {}
     return _collect_gene_method_artifacts(
         state,
+        lifecycle=MINIPROT_LIFECYCLE,
         method_name=MINIPROT_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[MINIPROT_METHOD],
     )
@@ -1728,21 +1778,11 @@ def freeze_augustus_attempt(state: TopLevelState) -> dict:
     )
     return _freeze_gene_method_attempt(
         state,
+        lifecycle=AUGUSTUS_LIFECYCLE,
         method_name=AUGUSTUS_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
         script_body=script,
         extra_metadata={"species": str(species), "readiness_warnings": warnings},
-    )
-
-
-def run_augustus_attempt(state: TopLevelState) -> dict:
-    gene_out = _gene_output(state)
-    if gene_out.get("status") != "augustus_frozen":
-        return {}
-    return _run_gene_method_attempt(
-        state,
-        method_name=AUGUSTUS_METHOD,
-        cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
     )
 
 
@@ -1752,17 +1792,13 @@ def collect_augustus_artifacts(state: TopLevelState) -> dict:
         return {}
     return _collect_gene_method_artifacts(
         state,
+        lifecycle=AUGUSTUS_LIFECYCLE,
         method_name=AUGUSTUS_METHOD,
         cfg=GENE_EXECUTABLE_METHODS[AUGUSTUS_METHOD],
     )
 
 
 # --- EVM merge + BUSCO execution (Phase 7 task 05) ----------------------------
-
-EVM_METHOD = "gene_annotation.merge.evm"
-GENE_BUSCO_METHOD = "gene_annotation.busco"
-FINAL_GFF_TYPE = "gene_annotation.final_gff"
-BUSCO_SUMMARY_TYPE = "gene_annotation.busco_summary"
 
 
 def freeze_evm_attempt(state: TopLevelState) -> dict:
@@ -1871,57 +1907,7 @@ def freeze_evm_attempt(state: TopLevelState) -> dict:
             "output_gff3": str(output_gff3),
         },
     )
-    attempt_ref = persist_gene_attempt(state, attempt)
-
-    return _update_gene_output(
-        state,
-        {
-            "status": "evm_frozen",
-            "evm_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
-
-
-def run_evm_attempt(state: TopLevelState) -> dict:
-    """Run the frozen EVM attempt locally."""
-    gene_out = _gene_output(state)
-    if gene_out.get("status") != "evm_frozen":
-        return {}
-
-    attempt = load_gene_attempt(
-        state,
-        gene_out["evm_attempt_ref"],
-        expected_method_name=EVM_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="evm",
-    )
-    execution_ref = persist_gene_execution(
-        state,
-        method_name=attempt.method_name,
-        result=outcome.result,
-        error=outcome.error,
-    )
-    if not outcome.success:
-        return _update_gene_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                "evm_execution_ref": execution_ref.model_dump(mode="json"),
-            },
-        )
-
-    return _update_gene_output(
-        state,
-        {
-            "status": "evm_ran",
-            "evm_execution_ref": execution_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, EVM_LIFECYCLE, [attempt])
 
 
 def collect_evm_artifacts(state: TopLevelState) -> dict:
@@ -1930,37 +1916,23 @@ def collect_evm_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "evm_ran":
         return {}
 
-    attempt = load_gene_attempt(
-        state,
-        gene_out["evm_attempt_ref"],
-        expected_method_name=EVM_METHOD,
-    )
-    load_gene_execution(
-        state,
-        gene_out["evm_execution_ref"],
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=EVM_METHOD,
-    )
+    executions = load_method_executions(state, EVM_LIFECYCLE)
+    if len(executions) != 1:
+        return _fail_update(state, "EVM requires exactly one execution attempt")
+    attempt = executions[0].attempt
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_gff3 = Path(str(attempt.metadata["output_gff3"]))
 
-    try:
-        published = publish_or_recover_work_artifact(
-            data_dir,
-            session_id,
-            output_gff3,
-            stage="gene_annotation",
-            method_name=EVM_METHOD,
-            artifact_type=FINAL_GFF_TYPE,
-            metadata={"attempt_id": attempt.attempt_id},
-        )
-    except FileNotFoundError:
-        reason = f"expected EVM merged GFF3 missing: {output_gff3}"
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=reason
-        )
-        return _update_gene_output(state, {"status": "failed", "reason": reason})
+    published = publish_or_recover_work_artifact(
+        data_dir,
+        session_id,
+        output_gff3,
+        stage="gene_annotation",
+        method_name=EVM_METHOD,
+        artifact_type=FINAL_GFF_TYPE,
+        metadata={"attempt_id": attempt.attempt_id},
+    )
     published_gff3 = published.path
     Ledger(data_dir).record_attempt_succeeded(
         attempt.session_id,
@@ -1968,31 +1940,13 @@ def collect_evm_artifacts(state: TopLevelState) -> dict:
         artifacts=[published.ref.model_dump(mode="json")],
     )
 
-    # Materialize proteins from the merged GFF so the final gene set carries a
-    # real proteins.fa before BUSCO and commit.
-    proteins_fa, cds_fa, mat_error = _materialize_candidate_proteins(
-        state,
-        method_name=EVM_METHOD,
-        suffix="evm",
-        output_gff3=published_gff3,
-    )
-    if mat_error:
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=mat_error
-        )
-        return _update_gene_output(
-            state, {"status": "materialization_failed", "reason": mat_error}
-        )
-
     return _update_gene_output(
         state,
         {
-            "status": "evm_collected",
+            "status": "evm_outputs_collected",
             "merge_method": "evm",
             "final_gff_ref": str(published_gff3),
             "final_gff_artifact_ref": published.ref.model_dump(mode="json"),
-            "final_proteins_ref": str(proteins_fa),
-            "final_cds_ref": str(cds_fa) if cds_fa else None,
         },
     )
 
@@ -2108,59 +2062,7 @@ def freeze_gene_busco_attempt(state: TopLevelState) -> dict:
             "short_summary_ref": str(short_summary),
         },
     )
-    attempt_ref = persist_gene_attempt(state, attempt)
-
-    return _update_gene_output(
-        state,
-        {
-            "status": "busco_frozen",
-            "busco_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
-
-
-def run_gene_busco_attempt(state: TopLevelState) -> dict:
-    """Run the frozen BUSCO attempt locally."""
-    gene_out = _gene_output(state)
-    if gene_out.get("status") != "busco_frozen":
-        return {}
-
-    attempt = load_gene_attempt(
-        state,
-        gene_out["busco_attempt_ref"],
-        expected_method_name=GENE_BUSCO_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="busco",
-        cleanup_outputs=False,
-    )
-    execution_ref = persist_gene_execution(
-        state,
-        method_name=attempt.method_name,
-        result=outcome.result,
-        error=outcome.error,
-    )
-    if not outcome.success:
-        return _update_gene_output(
-            state,
-            {
-                "status": "merge_accepted",
-                "busco_completeness_status": "missing",
-                "busco_note": f"busco failed: {outcome.error}",
-                "busco_execution_ref": execution_ref.model_dump(mode="json"),
-            },
-        )
-
-    return _update_gene_output(
-        state,
-        {
-            "status": "busco_ran",
-            "busco_execution_ref": execution_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, GENE_BUSCO_LIFECYCLE, [attempt])
 
 
 def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
@@ -2169,46 +2071,33 @@ def collect_gene_busco_artifacts(state: TopLevelState) -> dict:
     if gene_out.get("status") != "busco_ran":
         return {}
 
-    attempt = load_gene_attempt(
-        state,
-        gene_out["busco_attempt_ref"],
-        expected_method_name=GENE_BUSCO_METHOD,
-    )
-    load_gene_execution(
-        state,
-        gene_out["busco_execution_ref"],
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=GENE_BUSCO_METHOD,
-    )
-    data_dir = Path(state.get("data_dir", "data"))
-    session_id = state["session_id"]
-    short_summary = Path(str(attempt.metadata["short_summary_ref"]))
-
-    try:
-        published = publish_or_recover_work_artifact(
-            data_dir,
-            session_id,
-            short_summary,
-            stage="gene_annotation",
-            method_name=GENE_BUSCO_METHOD,
-            artifact_type=BUSCO_SUMMARY_TYPE,
-            metadata={"attempt_id": attempt.attempt_id},
-        )
-    except FileNotFoundError:
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=0,
-            error=f"BUSCO short summary missing: {short_summary}",
-        )
+    executions = load_method_executions(state, GENE_BUSCO_LIFECYCLE)
+    if len(executions) != 1:
+        return _fail_update(state, "BUSCO requires exactly one execution attempt")
+    attempt = executions[0].attempt
+    evidence = executions[0].evidence
+    if not evidence.success:
         return _update_gene_output(
             state,
             {
                 "status": "merge_accepted",
                 "busco_completeness_status": "missing",
-                "busco_note": "busco short_summary.txt not found",
+                "busco_note": f"busco failed: {evidence.error}",
             },
         )
+    data_dir = Path(state.get("data_dir", "data"))
+    session_id = state["session_id"]
+    short_summary = Path(str(attempt.metadata["short_summary_ref"]))
+
+    published = publish_or_recover_work_artifact(
+        data_dir,
+        session_id,
+        short_summary,
+        stage="gene_annotation",
+        method_name=GENE_BUSCO_METHOD,
+        artifact_type=BUSCO_SUMMARY_TYPE,
+        metadata={"attempt_id": attempt.attempt_id},
+    )
 
     metrics = _parse_busco_short_summary(published.path)
     busco_score = metrics.get("complete_percent")

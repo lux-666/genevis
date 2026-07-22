@@ -6,20 +6,27 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from app.configuration import load_descriptor_registry
+from app.domains.assembly.constants import NEXTDENOVO_METHOD
 from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
+from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    load_method_executions,
+)
 from app.execution.parameter_attempts import (
     current_parameter_attempt,
-    load_current_frozen_attempt,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
-from app.stages.assembly.command_builder import ParameterCommandError, build_parameter_sources, validate_parameter_sources
-from app.domains.assembly.constants import NEXTDENOVO_METHOD
-from app.stages.assembly.method_application.lifecycle import (
-    MethodLifecycle,
+from app.stages.assembly.command_builder import (
+    ParameterCommandError,
+    build_parameter_sources,
+    validate_parameter_sources,
+)
+from app.stages.assembly.method_application.support import (
     blocked_parameters,
-    build_method_graph,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -31,14 +38,13 @@ from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.storage.paths import SessionPaths
 from app.storage.publish import publish_file, shell_publish_file
 
-LIFECYCLE = MethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly",
     name="nextdenovo",
     method_name=NEXTDENOVO_METHOD,
-    planned_status="nextdenovo_execution_planned",
     frozen_status="nextdenovo_frozen",
     ran_status="nextdenovo_ran",
-    draft_assembly_key="nextdenovo_draft_assembly_path",
-    substep_key="nextdenovo_assembly",
+    owner=ParameterAttemptOwner(),
 )
 _READ_TYPES = {"ont", "clr", "hifi"}
 
@@ -50,7 +56,7 @@ def build_nextdenovo_graph():
 def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     """Freeze a local NextDenovo attempt for the selected primary candidate."""
     output = stage_output(state, "assembly")
-    if output.get("status") != LIFECYCLE.planned_status:
+    if output.get("status") != "nextdenovo_execution_planned":
         return {}
     if NEXTDENOVO_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{NEXTDENOVO_METHOD!r}]")
@@ -190,20 +196,14 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         stage_updates={
             "nextdenovo_run_cfg_path": str(run_cfg),
             "nextdenovo_work_dir": str(nextdenovo_work_dir),
-            LIFECYCLE.draft_assembly_key: str(draft),
         },
     )
 
 
 def collect_nextdenovo_artifacts(state: TopLevelState) -> dict:
     output = stage_output(state, "assembly")
-    attempt = load_current_frozen_attempt(
-        state,
-        output,
-        stage="assembly",
-        method_id=NEXTDENOVO_METHOD,
-        label="NextDenovo",
-    )
+    [execution] = load_method_executions(state, LIFECYCLE)
+    attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
     run_cfg_value = output.get("nextdenovo_run_cfg_path")
     if not run_cfg_value:
@@ -229,7 +229,8 @@ def collect_nextdenovo_artifacts(state: TopLevelState) -> dict:
     collected = collect_method_artifacts(
         state,
         LIFECYCLE,
-        attempt=attempt,
+        execution=execution,
+        substep_name="nextdenovo_assembly",
         extra_artifacts=[(durable_run_cfg, "assembly.nextdenovo_run_cfg")],
         bundle_logs={
             "primary_log": str(durable_run_cfg),

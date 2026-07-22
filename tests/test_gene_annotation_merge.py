@@ -6,24 +6,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import register_artifact_records
-from app.schemas.execution import ExecutionResult
+from app.execution.collect import collect_with_failure_boundary
+from app.execution.evidence import (
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
+from app.execution.lifecycle import run_method_attempts
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult, MethodExecutionAttempt
 from app.schemas.state import initial_state
 from app.stages.gene_annotation.nodes import (
+    EVM_LIFECYCLE,
+    GENE_BUSCO_LIFECYCLE,
     collect_evm_artifacts,
     collect_gene_busco_artifacts,
     freeze_evm_attempt,
     freeze_gene_busco_attempt,
-    run_evm_attempt,
-    run_gene_busco_attempt,
 )
-from app.stages.gene_annotation.persistence import (
-    load_gene_attempt,
-    persist_gene_attempt,
-    persist_gene_execution,
-)
+from app.storage.artifacts import register_artifact_records
 from app.storage.publish import publish_execution_logs
 from tests.data_v2 import v2_run_dir
 
@@ -58,7 +60,7 @@ def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
     attempt.script_path.parent.mkdir(parents=True, exist_ok=True)
     if not attempt.script_path.exists():
         attempt.script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    return persist_gene_attempt(state, attempt).model_dump(mode="json")
+    return persist_frozen_attempt(state, attempt).model_dump(mode="json")
 
 
 def _persist_successful_execution(
@@ -98,10 +100,31 @@ def _persist_successful_execution(
             )
         ],
     )
-    return persist_gene_execution(
+    return persist_execution_result(
         state,
+        stage="gene_annotation",
         method_name=attempt.method_name,
         result=result,
+    ).model_dump(mode="json")
+
+
+def _execution_cursor(
+    state: dict,
+    attempt: FrozenAttemptSpec,
+    output_paths: list[Path] | None = None,
+) -> dict:
+    frozen_ref = _persist_attempt(state, attempt)
+    execution_ref = (
+        _persist_successful_execution(state, attempt, output_paths)
+        if output_paths is not None
+        else None
+    )
+    return MethodExecutionAttempt(
+        attempt_id=attempt.attempt_id,
+        method_id=attempt.method_name,
+        status="executed" if execution_ref else "frozen",
+        frozen_attempt_ref=frozen_ref,
+        execution_ref=execution_ref,
     ).model_dump(mode="json")
 
 
@@ -198,7 +221,11 @@ class EVMFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "evm_frozen")
-            attempt = load_gene_attempt(state, gene["evm_attempt_ref"])
+            attempt = load_frozen_attempt(
+                state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             script = attempt.script_path.read_text(encoding="utf-8")
             weights = (attempt.working_dir / "weights.txt").read_text(encoding="utf-8")
             self.assertIn("evidence_modeler.pl", script)
@@ -263,7 +290,7 @@ class EVMRunTests(unittest.TestCase):
             "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
             "gene_annotation": {
                 "status": status,
-                "evm_attempt_ref": _persist_attempt(state, attempt),
+                "execution_attempts": [_execution_cursor(state, attempt)],
             },
         }
         return state
@@ -272,14 +299,14 @@ class EVMRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = self._fake_evm_bin(tmpdir)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_evm_attempt(state)
+            result = run_method_attempts(state, EVM_LIFECYCLE)
             self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "evm_ran")
 
     def test_run_failure_sets_failed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = self._fake_evm_bin(tmpdir, fail=True)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_evm_attempt(state)
+            result = run_method_attempts(state, EVM_LIFECYCLE)
             self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "failed")
 
 
@@ -307,10 +334,9 @@ class EVMCollectTests(unittest.TestCase):
                 "status": "evm_ran",
                 "genome_input_ref": str(genome),
                 "env": {"PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-                "evm_attempt_ref": _persist_attempt(state, attempt),
-                "evm_execution_ref": _persist_successful_execution(
-                    state, attempt, [output_gff3]
-                ),
+                "execution_attempts": [
+                    _execution_cursor(state, attempt, [output_gff3])
+                ],
             },
         }
         return state
@@ -321,7 +347,7 @@ class EVMCollectTests(unittest.TestCase):
             result = collect_evm_artifacts(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
-            self.assertEqual(gene["status"], "evm_collected")
+            self.assertEqual(gene["status"], "evm_outputs_collected")
             self.assertEqual(gene["merge_method"], "evm")
             self.assertIn("final_gff_ref", gene)
 
@@ -332,8 +358,14 @@ class EVMCollectTests(unittest.TestCase):
     def test_collect_fails_when_gff3_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir, gff3_exists=False)
-            result = collect_evm_artifacts(state)
-            self.assertEqual(result["stage_outputs"]["gene_annotation"]["status"], "failed")
+            result = collect_with_failure_boundary(
+                state,
+                lifecycle=EVM_LIFECYCLE,
+                collect=collect_evm_artifacts,
+            )
+            gene = result["stage_outputs"]["gene_annotation"]
+            self.assertEqual(gene["status"], "failed")
+            self.assertEqual(gene["failure_kind"], "collect")
 
 
 class GeneBUSBOTests(unittest.TestCase):
@@ -378,7 +410,11 @@ class GeneBUSBOTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "busco_frozen")
-            attempt = load_gene_attempt(state, gene["busco_attempt_ref"])
+            attempt = load_frozen_attempt(
+                state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("busco -i", script)
             self.assertEqual(attempt.metadata["busco_input"], str(final_proteins))
@@ -392,7 +428,7 @@ class GeneBUSBOTests(unittest.TestCase):
             self.assertEqual(result, {})
 
     def test_busco_run_failure_downgrades_to_missing(self):
-        # run_gene_busco_attempt: guard for busco_frozen, then run, on fail → merge_accepted + missing
+        # BUSCO process failure is collected as missing completeness evidence.
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = Path(tmpdir) / "bin"
             bin_dir.mkdir(exist_ok=True)
@@ -419,10 +455,14 @@ class GeneBUSBOTests(unittest.TestCase):
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     "status": "busco_frozen",
-                    "busco_attempt_ref": _persist_attempt(state, attempt),
+                    "execution_attempts": [_execution_cursor(state, attempt)],
                 },
             }
-            result = run_gene_busco_attempt(state)
+            ran = run_method_attempts(state, GENE_BUSCO_LIFECYCLE)
+            state["stage_outputs"]["gene_annotation"] = ran["stage_outputs"][
+                "gene_annotation"
+            ]
+            result = collect_gene_busco_artifacts(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "merge_accepted")
@@ -456,10 +496,9 @@ class GeneBUSBOTests(unittest.TestCase):
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     "status": "busco_ran",
-                    "busco_attempt_ref": _persist_attempt(state, attempt),
-                    "busco_execution_ref": _persist_successful_execution(
-                        state, attempt, [short_summary]
-                    ),
+                    "execution_attempts": [
+                        _execution_cursor(state, attempt, [short_summary])
+                    ],
                     "final_gff_ref": str(Path(tmpdir) / "final.gff3"),
                 },
             }
@@ -527,7 +566,11 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
             busco_bin.write_text("#!/bin/sh\necho fake busco failed >&2\nexit 1\n", encoding="utf-8")
             busco_bin.chmod(0o755)
 
-            attempt = load_gene_attempt(busco_state, gene["busco_attempt_ref"])
+            attempt = load_frozen_attempt(
+                busco_state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             attempt_dict = attempt.model_dump(mode="json")
             attempt_dict["env"]["PATH"] = f"{bin_dir}{os.pathsep}{attempt_dict['env'].get('PATH', os.environ.get('PATH', ''))}"
             updated_attempt = FrozenAttemptSpec.model_validate(attempt_dict)
@@ -538,10 +581,16 @@ class EVMBUSCOFullPathTests(unittest.TestCase):
                 "assembly_review": {"annotation_intake_plan_ref": _write_intake_plan(tmpdir)},
                 "gene_annotation": {
                     "status": "busco_frozen",
-                    "busco_attempt_ref": _persist_attempt(run_state, updated_attempt),
+                    "execution_attempts": [
+                        _execution_cursor(run_state, updated_attempt)
+                    ],
                 },
             }
-            busco_run = run_gene_busco_attempt(run_state)
+            busco_ran = run_method_attempts(run_state, GENE_BUSCO_LIFECYCLE)
+            run_state["stage_outputs"]["gene_annotation"] = busco_ran[
+                "stage_outputs"
+            ]["gene_annotation"]
+            busco_run = collect_gene_busco_artifacts(run_state)
             gene = busco_run["stage_outputs"]["gene_annotation"]
             # BUSCO fails → downgrades to missing
             self.assertEqual(gene["status"], "merge_accepted")

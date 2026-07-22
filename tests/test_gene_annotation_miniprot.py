@@ -6,25 +6,28 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import register_artifact_records
-from app.schemas.execution import ExecutionResult
+from app.execution.collect import collect_with_failure_boundary
+from app.execution.evidence import (
+    load_execution_evidence,
+    load_frozen_attempt,
+    persist_execution_result,
+    persist_frozen_attempt,
+)
+from app.execution.lifecycle import run_method_attempts
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult, MethodExecutionAttempt
 from app.schemas.state import initial_state
 from app.stages.gene_annotation.nodes import (
+    AUGUSTUS_LIFECYCLE,
+    MINIPROT_LIFECYCLE,
+    build_gffread_graph,
     collect_augustus_artifacts,
     collect_miniprot_artifacts,
     freeze_augustus_attempt,
     freeze_miniprot_attempt,
-    run_augustus_attempt,
-    run_miniprot_attempt,
 )
-from app.stages.gene_annotation.persistence import (
-    load_gene_attempt,
-    load_gene_execution,
-    persist_gene_attempt,
-    persist_gene_execution,
-)
+from app.storage.artifacts import register_artifact_records
 from app.storage.publish import publish_execution_logs
 from tests.data_v2 import v2_run_dir
 
@@ -64,7 +67,7 @@ def _persist_attempt(state: dict, attempt: FrozenAttemptSpec) -> dict:
     attempt.script_path.parent.mkdir(parents=True, exist_ok=True)
     if not attempt.script_path.exists():
         attempt.script_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    return persist_gene_attempt(state, attempt).model_dump(mode="json")
+    return persist_frozen_attempt(state, attempt).model_dump(mode="json")
 
 
 def _persist_successful_execution(
@@ -108,10 +111,31 @@ def _persist_successful_execution(
             )
         ],
     )
-    return persist_gene_execution(
+    return persist_execution_result(
         state,
+        stage="gene_annotation",
         method_name=attempt.method_name,
         result=result,
+    ).model_dump(mode="json")
+
+
+def _execution_cursor(
+    state: dict,
+    attempt: FrozenAttemptSpec,
+    output_paths: list[Path] | None = None,
+) -> dict:
+    frozen_ref = _persist_attempt(state, attempt)
+    execution_ref = (
+        _persist_successful_execution(state, attempt, output_paths)
+        if output_paths is not None
+        else None
+    )
+    return MethodExecutionAttempt(
+        attempt_id=attempt.attempt_id,
+        method_id=attempt.method_name,
+        status="executed" if execution_ref else "frozen",
+        frozen_attempt_ref=frozen_ref,
+        execution_ref=execution_ref,
     ).model_dump(mode="json")
 
 
@@ -247,7 +271,11 @@ class MiniprotFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "miniprot_frozen")
-            attempt = load_gene_attempt(state, gene["miniprot_attempt_ref"])
+            attempt = load_frozen_attempt(
+                state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             self.assertEqual(attempt.method_name, "gene_annotation.candidate.miniprot")
             self.assertIn("miniprot", attempt.script_path.name)
 
@@ -307,7 +335,7 @@ class MiniprotRunTests(unittest.TestCase):
             },
             "gene_annotation": {
                 "status": status,
-                "miniprot_attempt_ref": _persist_attempt(state, attempt),
+                "execution_attempts": [_execution_cursor(state, attempt)],
             },
         }
         return state
@@ -316,20 +344,21 @@ class MiniprotRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = _fake_miniprot_bin(tmpdir)
             state = self._run_state(tmpdir, bin_dir, status="pending_execution")
-            result = run_miniprot_attempt(state)
+            result = run_method_attempts(state, MINIPROT_LIFECYCLE)
             self.assertEqual(result, {})
 
     def test_run_success_sets_miniprot_ran(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = _fake_miniprot_bin(tmpdir)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_miniprot_attempt(state)
+            result = run_method_attempts(state, MINIPROT_LIFECYCLE)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "miniprot_ran")
-            execution = load_gene_execution(
+            execution = load_execution_evidence(
                 state,
-                gene["miniprot_execution_ref"],
+                gene["execution_attempts"][0]["execution_ref"],
+                expected_stage="gene_annotation",
                 expected_attempt_id="s1:gene_annotation:miniprot",
             )
             self.assertTrue(execution.success)
@@ -338,7 +367,7 @@ class MiniprotRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = _fake_miniprot_bin(tmpdir, fail=True)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_miniprot_attempt(state)
+            result = run_method_attempts(state, MINIPROT_LIFECYCLE)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "failed")
@@ -400,10 +429,9 @@ class MiniprotCollectTests(unittest.TestCase):
                 "env": {
                     "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                 },
-                "miniprot_attempt_ref": _persist_attempt(state, attempt),
-                "miniprot_execution_ref": _persist_successful_execution(
-                    state, attempt, [output_gff3]
-                ),
+                "execution_attempts": [
+                    _execution_cursor(state, attempt, [output_gff3])
+                ],
                 "candidate_refs": {
                     "gene_annotation.candidate.miniprot": str(output_gff3)
                 },
@@ -432,7 +460,7 @@ class MiniprotCollectTests(unittest.TestCase):
             result = collect_miniprot_artifacts(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
-            self.assertEqual(gene["status"], "candidates_ready")
+            self.assertEqual(gene["status"], "miniprot_collected")
             self.assertEqual(
                 gene["candidate_gff_ref"],
                 str(
@@ -477,7 +505,7 @@ class MiniprotCollectTests(unittest.TestCase):
 
             first_gene = first["stage_outputs"]["gene_annotation"]
             replay_gene = replay["stage_outputs"]["gene_annotation"]
-            self.assertEqual(replay_gene["status"], "candidates_ready")
+            self.assertEqual(replay_gene["status"], "miniprot_collected")
             self.assertEqual(
                 replay_gene["candidate_artifact_refs"],
                 first_gene["candidate_artifact_refs"],
@@ -499,7 +527,11 @@ class MiniprotCollectTests(unittest.TestCase):
             state["stage_outputs"]["gene_annotation"]["env"] = {
                 "PATH": f"{fail_bin}{os.pathsep}{os.environ.get('PATH', '')}"
             }
-            result = collect_miniprot_artifacts(state)
+            collected = collect_miniprot_artifacts(state)
+            state["stage_outputs"]["gene_annotation"] = collected["stage_outputs"][
+                "gene_annotation"
+            ]
+            result = build_gffread_graph().invoke(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "materialization_failed")
@@ -508,11 +540,19 @@ class MiniprotCollectTests(unittest.TestCase):
     def test_collect_fails_when_gff3_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir, gff3_exists=False)
-            result = collect_miniprot_artifacts(state)
+            collected = collect_with_failure_boundary(
+                state,
+                lifecycle=MINIPROT_LIFECYCLE,
+                collect=collect_miniprot_artifacts,
+            )
+            state["stage_outputs"]["gene_annotation"] = collected["stage_outputs"][
+                "gene_annotation"
+            ]
+            result = build_gffread_graph().invoke(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "failed")
-            self.assertIn("missing", gene["reason"])
+            self.assertIn("miniprot.gff3", gene["reason"])
 
     def test_collect_loops_when_more_executable_methods_pending(self):
         """When miniprot is done but augustus is still pending, status stays pending_execution."""
@@ -522,7 +562,11 @@ class MiniprotCollectTests(unittest.TestCase):
                 "gene_annotation.candidate.miniprot",
                 "gene_annotation.candidate.augustus",
             ]
-            result = collect_miniprot_artifacts(state)
+            collected = collect_miniprot_artifacts(state)
+            state["stage_outputs"]["gene_annotation"] = collected["stage_outputs"][
+                "gene_annotation"
+            ]
+            result = build_gffread_graph().invoke(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "pending_execution")
@@ -566,7 +610,7 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 },
                 "gene_annotation": freeze_result["stage_outputs"]["gene_annotation"],
             }
-            run_result = run_miniprot_attempt(run_state)
+            run_result = run_method_attempts(run_state, MINIPROT_LIFECYCLE)
             self.assertEqual(
                 run_result["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran"
             )
@@ -590,8 +634,12 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 },
             }
             collect_result = collect_miniprot_artifacts(collect_state)
+            collect_state["stage_outputs"]["gene_annotation"] = collect_result[
+                "stage_outputs"
+            ]["gene_annotation"]
+            materialized = build_gffread_graph().invoke(collect_state)
 
-            gene = collect_result["stage_outputs"]["gene_annotation"]
+            gene = materialized["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "candidates_ready")
             self.assertIn("candidate_gff_ref", gene)
             self.assertTrue(Path(gene["candidate_gff_ref"]).exists())
@@ -613,7 +661,8 @@ class MiniprotFullSliceTests(unittest.TestCase):
             frozen = freeze_miniprot_attempt(freeze_state)["stage_outputs"][
                 "gene_annotation"
             ]
-            attempt_ref = frozen["miniprot_attempt_ref"]
+            cursor = frozen["execution_attempts"][0]
+            attempt_ref = cursor["frozen_attempt_ref"]
             self.assertEqual(
                 set(attempt_ref),
                 {
@@ -628,7 +677,11 @@ class MiniprotFullSliceTests(unittest.TestCase):
             self.assertNotIn("env", attempt_ref)
             self.assertNotIn("s1_gene_annotation", attempt_ref["path_ref"])
             self.assertEqual(
-                load_gene_attempt(freeze_state, attempt_ref).attempt_id,
+                load_frozen_attempt(
+                    freeze_state,
+                    attempt_ref,
+                    expected_stage="gene_annotation",
+                ).attempt_id,
                 "s1:gene_annotation:miniprot",
             )
 
@@ -640,11 +693,19 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 },
                 "gene_annotation": frozen,
             }
-            ran = run_miniprot_attempt(run_state)["stage_outputs"]["gene_annotation"]
-            execution_ref = ran["miniprot_execution_ref"]
+            ran = run_method_attempts(run_state, MINIPROT_LIFECYCLE)[
+                "stage_outputs"
+            ]["gene_annotation"]
+            execution_ref = ran["execution_attempts"][0]["execution_ref"]
             self.assertEqual(set(execution_ref), set(attempt_ref))
             self.assertNotIn("env", execution_ref)
-            self.assertTrue(load_gene_execution(run_state, execution_ref).success)
+            self.assertTrue(
+                load_execution_evidence(
+                    run_state,
+                    execution_ref,
+                    expected_stage="gene_annotation",
+                ).success
+            )
 
             self.assertNotIn("miniprot_frozen_attempt", ran)
             self.assertNotIn("miniprot_execution_result", ran)
@@ -714,7 +775,11 @@ class AugustusFreezeTests(unittest.TestCase):
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "augustus_frozen")
-            attempt = load_gene_attempt(state, gene["augustus_attempt_ref"])
+            attempt = load_frozen_attempt(
+                state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             self.assertEqual(attempt.method_name, "gene_annotation.candidate.augustus")
 
             script = attempt.script_path.read_text(encoding="utf-8")
@@ -731,7 +796,11 @@ class AugustusFreezeTests(unittest.TestCase):
             result = freeze_augustus_attempt(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
-            attempt = load_gene_attempt(state, gene["augustus_attempt_ref"])
+            attempt = load_frozen_attempt(
+                state,
+                gene["execution_attempts"][0]["frozen_attempt_ref"],
+                expected_stage="gene_annotation",
+            )
             script = attempt.script_path.read_text(encoding="utf-8")
             self.assertIn("--species=human", script)
 
@@ -779,7 +848,7 @@ class AugustusRunTests(unittest.TestCase):
             },
             "gene_annotation": {
                 "status": status,
-                "augustus_attempt_ref": _persist_attempt(state, attempt),
+                "execution_attempts": [_execution_cursor(state, attempt)],
             },
         }
         return state
@@ -788,7 +857,7 @@ class AugustusRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = _fake_augustus_bin(tmpdir)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_augustus_attempt(state)
+            result = run_method_attempts(state, AUGUSTUS_LIFECYCLE)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "augustus_ran")
@@ -797,7 +866,7 @@ class AugustusRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = _fake_augustus_bin(tmpdir, fail=True)
             state = self._run_state(tmpdir, bin_dir)
-            result = run_augustus_attempt(state)
+            result = run_method_attempts(state, AUGUSTUS_LIFECYCLE)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "failed")
@@ -843,10 +912,9 @@ class AugustusCollectTests(unittest.TestCase):
                 "env": {
                     "PATH": f"{gffread_bin}{os.pathsep}{os.environ.get('PATH', '')}"
                 },
-                "augustus_attempt_ref": _persist_attempt(state, attempt),
-                "augustus_execution_ref": _persist_successful_execution(
-                    state, attempt, [output_gff3]
-                ),
+                "execution_attempts": [
+                    _execution_cursor(state, attempt, [output_gff3])
+                ],
                 "candidate_refs": {
                     "gene_annotation.candidate.augustus": str(output_gff3)
                 },
@@ -860,7 +928,11 @@ class AugustusCollectTests(unittest.TestCase):
     def test_collect_registers_candidate_gff_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir)
-            result = collect_augustus_artifacts(state)
+            collected = collect_augustus_artifacts(state)
+            state["stage_outputs"]["gene_annotation"] = collected["stage_outputs"][
+                "gene_annotation"
+            ]
+            result = build_gffread_graph().invoke(state)
 
             gene = result["stage_outputs"]["gene_annotation"]
             self.assertEqual(gene["status"], "candidates_ready")
@@ -920,7 +992,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
                 },
                 "gene_annotation": mp_freeze["stage_outputs"]["gene_annotation"],
             }
-            mp_run = run_miniprot_attempt(run_state)
+            mp_run = run_method_attempts(run_state, MINIPROT_LIFECYCLE)
             self.assertEqual(
                 mp_run["stage_outputs"]["gene_annotation"]["status"], "miniprot_ran"
             )
@@ -953,7 +1025,11 @@ class MultiMethodExecutionTests(unittest.TestCase):
                     "executed_methods": [],
                 },
             }
-            mp_collect = collect_miniprot_artifacts(collect_state)
+            mp_collected = collect_miniprot_artifacts(collect_state)
+            collect_state["stage_outputs"]["gene_annotation"] = mp_collected[
+                "stage_outputs"
+            ]["gene_annotation"]
+            mp_collect = build_gffread_graph().invoke(collect_state)
             gene = mp_collect["stage_outputs"]["gene_annotation"]
             # Should still be pending_execution because augustus is not yet executed
             self.assertEqual(gene["status"], "pending_execution")
@@ -985,7 +1061,7 @@ class MultiMethodExecutionTests(unittest.TestCase):
                 },
                 "gene_annotation": aug_freeze["stage_outputs"]["gene_annotation"],
             }
-            aug_run = run_augustus_attempt(run2)
+            aug_run = run_method_attempts(run2, AUGUSTUS_LIFECYCLE)
             self.assertEqual(
                 aug_run["stage_outputs"]["gene_annotation"]["status"], "augustus_ran"
             )
@@ -1018,7 +1094,11 @@ class MultiMethodExecutionTests(unittest.TestCase):
                     "executed_methods": ["gene_annotation.candidate.miniprot"],
                 },
             }
-            aug_collect = collect_augustus_artifacts(coll2)
+            aug_collected = collect_augustus_artifacts(coll2)
+            coll2["stage_outputs"]["gene_annotation"] = aug_collected[
+                "stage_outputs"
+            ]["gene_annotation"]
+            aug_collect = build_gffread_graph().invoke(coll2)
             gene = aug_collect["stage_outputs"]["gene_annotation"]
             # Both methods done → candidates_ready
             self.assertEqual(gene["status"], "candidates_ready")

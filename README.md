@@ -390,12 +390,13 @@ Intentional boundaries:
 - Function annotation requires explicit database provenance before terminal completion.
 - Large biological files stay outside graph state.
 
-Known remaining work is tracked in `docs/handoff.md` and the phase documents
-under `docs/phases/`.
+Known remaining work is tracked in `docs/handoff.md` and the accepted
+specifications under `docs/architecture/`.
 
 ## Read More
 
 - `docs/architecture.md`：系统架构和模块边界
+- `docs/architecture/execution-lifecycle.md`：可执行方法的统一 freeze/run/collect 生命周期
 - `docs/architecture/data-v2.md`：新 session 的数据、参数推荐、审计、恢复与保留规范
 - `docs/stage_contracts.md`：各阶段输入/输出合同
 - `docs/beginner_mainline_guide.md`：从业务到源码的阅读地图

@@ -9,20 +9,15 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import (
-    publish_artifact_record,
-    publish_or_recover_work_artifact,
-)
+from app.configuration import load_descriptor_registry
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_execution_result,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.workflow import next_stage_name
+from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ArtifactMeta,
     FunctionAnnotationBundle,
@@ -30,7 +25,6 @@ from app.schemas.artifacts import (
     FunctionDatabaseProvenance,
     FunctionMethodResult,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     append_route_trace,
@@ -41,6 +35,12 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource
 from app.stages.resource_specs import PREDICTED_PROTEINS_SPEC
+from app.storage.artifacts import (
+    publish_artifact_record,
+    publish_or_recover_work_artifact,
+)
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 FUNCTION_CANDIDATE_METHODS = [
     "function_annotation.candidate.diamond",
@@ -48,6 +48,13 @@ FUNCTION_CANDIDATE_METHODS = [
 FUNCTION_CONTRACT_METHOD = "function_annotation.contract"
 
 DIAMOND_METHOD = "function_annotation.candidate.diamond"
+DIAMOND_LIFECYCLE = MethodExecutionLifecycle(
+    stage="function_annotation",
+    name="diamond",
+    method_name=DIAMOND_METHOD,
+    frozen_status="diamond_frozen",
+    ran_status="diamond_ran",
+)
 
 FUNCTION_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
     "function_annotation.candidate.diamond": {
@@ -56,6 +63,16 @@ FUNCTION_EXECUTABLE_METHODS: dict[str, dict[str, str]] = {
         "ran_status": "diamond_ran",
     },
 }
+
+
+def build_diamond_graph():
+    """Build the shared DIAMOND execution lifecycle."""
+
+    return build_method_graph(
+        DIAMOND_LIFECYCLE,
+        freeze_diamond_attempt,
+        collect_diamond_artifacts,
+    )
 
 
 def _function_output(state: TopLevelState) -> dict[str, Any]:
@@ -271,101 +288,30 @@ def _freeze_func_method_attempt(
             **(extra_metadata or {}),
         },
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-
-    return _update_function_output(
-        state,
-        {
-            "status": cfg["frozen_status"],
-            f"{cfg['suffix']}_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
-
-
-def _run_func_method_attempt(
-    state: TopLevelState,
-    *,
-    method_name: str,
-    cfg: dict[str, str],
-) -> dict:
-    function_out = _function_output(state)
-    attempt = load_frozen_attempt(
-        state,
-        function_out[f"{cfg['suffix']}_attempt_ref"],
-        expected_stage="function_annotation",
-        expected_method_name=method_name,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=state.get("data_dir", "data"),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label=cfg["suffix"],
-    )
-    execution_ref = persist_execution_result(
-        state,
-        stage="function_annotation",
-        method_name=attempt.method_name,
-        result=outcome.result,
-        error=outcome.error,
-    )
-    if not outcome.success:
-        return _update_function_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
-            },
-        )
-    return _update_function_output(
-        state,
-        {
-            "status": cfg["ran_status"],
-            f"{cfg['suffix']}_execution_ref": execution_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, DIAMOND_LIFECYCLE, [attempt])
 
 
 def _collect_func_method_artifacts(
     state: TopLevelState, *, method_name: str, cfg: dict[str, str], artifact_type: str
 ) -> dict:
     function_out = _function_output(state)
-    attempt = load_frozen_attempt(
-        state,
-        function_out[f"{cfg['suffix']}_attempt_ref"],
-        expected_stage="function_annotation",
-        expected_method_name=method_name,
-    )
-    load_execution_evidence(
-        state,
-        function_out[f"{cfg['suffix']}_execution_ref"],
-        expected_stage="function_annotation",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=method_name,
-    )
+    executions = load_method_executions(state, DIAMOND_LIFECYCLE)
+    if len(executions) != 1:
+        return _fail_update(state, "DIAMOND requires exactly one execution attempt")
+    attempt = executions[0].attempt
     data_dir = Path(state.get("data_dir", "data"))
     session_id = state["session_id"]
     output_tsv = Path(str(attempt.metadata["output_tsv"]))
 
-    try:
-        published = publish_or_recover_work_artifact(
-            data_dir,
-            session_id,
-            output_tsv,
-            stage="function_annotation",
-            method_name=method_name,
-            artifact_type=artifact_type,
-            metadata={"attempt_id": attempt.attempt_id},
-        )
-    except FileNotFoundError:
-        reason = f"expected {cfg['suffix']} TSV missing: {output_tsv}"
-        Ledger(data_dir).record_attempt_failed(
-            attempt.session_id,
-            attempt,
-            return_code=0,
-            error=reason,
-        )
-        return _update_function_output(state, {"status": "failed", "reason": reason})
+    published = publish_or_recover_work_artifact(
+        data_dir,
+        session_id,
+        output_tsv,
+        stage="function_annotation",
+        method_name=method_name,
+        artifact_type=artifact_type,
+        metadata={"attempt_id": attempt.attempt_id},
+    )
 
     Ledger(data_dir).record_attempt_succeeded(
         attempt.session_id,
@@ -460,17 +406,6 @@ def freeze_diamond_attempt(state: TopLevelState) -> dict:
             "dmnd_index": str(dmnd_index),
             "threads": threads,
         },
-    )
-
-
-def run_diamond_attempt(state: TopLevelState) -> dict:
-    function_out = _function_output(state)
-    if function_out.get("status") != "diamond_frozen":
-        return {}
-    return _run_func_method_attempt(
-        state,
-        method_name=DIAMOND_METHOD,
-        cfg=FUNCTION_EXECUTABLE_METHODS[DIAMOND_METHOD],
     )
 
 
@@ -606,23 +541,9 @@ def _function_method_results(
             record for record in provenance if record.method_name == DIAMOND_METHOD
         ]
         metadata: dict[str, Any] = {"outfmt": "6"}
-        attempt_ref = function_out.get("diamond_attempt_ref")
-        if attempt_ref:
-            attempt = load_frozen_attempt(
-                state,
-                attempt_ref,
-                expected_stage="function_annotation",
-                expected_method_name=DIAMOND_METHOD,
-            )
-            execution_ref = function_out.get("diamond_execution_ref")
-            if execution_ref:
-                load_execution_evidence(
-                    state,
-                    execution_ref,
-                    expected_stage="function_annotation",
-                    expected_attempt_id=attempt.attempt_id,
-                    expected_method_name=DIAMOND_METHOD,
-                )
+        executions = load_method_executions(state, DIAMOND_LIFECYCLE)
+        if len(executions) == 1:
+            attempt = executions[0].attempt
             if attempt.metadata.get("dmnd_index"):
                 metadata["database_index_ref"] = attempt.metadata["dmnd_index"]
             if attempt.metadata.get("database_source_ref"):

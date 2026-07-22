@@ -7,24 +7,21 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.configuration import load_descriptor_registry
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_execution_result,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.workflow import next_stage_name
+from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
     ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_DRAFT_ASSEMBLY,
     ArtifactMeta,
     AssemblyCandidateBundle,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -36,8 +33,29 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC, LONG_READS_SPEC
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 ASSEMBLY_DEDUP_METHOD = "assembly_dedup.purge_dups"
+PURGE_DUPS_LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly_dedup",
+    name="assembly_dedup purge_dups",
+    method_name=ASSEMBLY_DEDUP_METHOD,
+    frozen_status="dedup_frozen",
+    ran_status="dedup_ran",
+    cleanup_outputs=False,
+)
+
+
+def build_purge_dups_graph():
+    """Build the shared purge_dups execution lifecycle."""
+
+    return build_method_graph(
+        PURGE_DUPS_LIFECYCLE,
+        freeze_purge_dups_attempt,
+        collect_purge_dups_attempt,
+    )
 
 
 def _output(state: TopLevelState) -> dict[str, Any]:
@@ -105,14 +123,13 @@ def plan_purge_dups(state: TopLevelState) -> dict:
     )
 
 
-def run_purge_dups(state: TopLevelState) -> dict:
+def freeze_purge_dups_attempt(state: TopLevelState) -> dict:
     dedup_out = _output(state)
     if dedup_out.get("status") != "ready_to_run":
         return {}
 
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
-    input_manifest_ref = state.get("input_manifest_ref", "")
     registry = load_descriptor_registry()
     if ASSEMBLY_DEDUP_METHOD not in registry.methods:
         return _fail(state, f"assembly dedup descriptor missing: {ASSEMBLY_DEDUP_METHOD}")
@@ -123,7 +140,7 @@ def run_purge_dups(state: TopLevelState) -> dict:
         method_name=ASSEMBLY_DEDUP_METHOD,
         session_id=session_id,
         data_dir=data_dir,
-        input_manifest_ref=input_manifest_ref,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
         return _update_output(state, blocked)
@@ -205,45 +222,16 @@ def run_purge_dups(state: TopLevelState) -> dict:
             "dups_bed_ref": str(dups_bed),
         },
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-    attempt = load_frozen_attempt(
-        state,
-        attempt_ref,
-        expected_stage="assembly_dedup",
-        expected_method_name=ASSEMBLY_DEDUP_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=data_dir,
-        input_manifest_ref=input_manifest_ref,
-        fail_label="assembly_dedup purge_dups",
-        cleanup_outputs=False,
-    )
-    result_ref = persist_execution_result(
-        state,
-        stage="assembly_dedup",
-        method_name=ASSEMBLY_DEDUP_METHOD,
-        result=outcome.result,
-        error=outcome.error,
-    ).model_dump(mode="json")
-    if not outcome.success:
-        return _update_output(
-            state,
-            {
-                "status": "failed",
-                "reason": outcome.error,
-                "execution_result": result_ref,
-                "frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
-            },
-        )
-    return _update_output(
-        state,
-        {
-            "status": "dedup_ran",
-            "execution_result": result_ref,
-            "frozen_attempt_ref": attempt_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, PURGE_DUPS_LIFECYCLE, [attempt])
+
+
+def collect_purge_dups_attempt(state: TopLevelState) -> dict:
+    """Validate the completed purge_dups attempt before stage commit."""
+
+    executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
+    if len(executions) != 1:
+        return _fail(state, "purge_dups requires exactly one execution attempt")
+    return _update_output(state, {"status": "dedup_ran"})
 
 
 def commit_assembly_dedup(state: TopLevelState) -> dict:
@@ -253,19 +241,10 @@ def commit_assembly_dedup(state: TopLevelState) -> dict:
 
     attempt = None
     if dedup_out.get("status") == "dedup_ran":
-        attempt = load_frozen_attempt(
-            state,
-            dedup_out["frozen_attempt_ref"],
-            expected_stage="assembly_dedup",
-            expected_method_name=ASSEMBLY_DEDUP_METHOD,
-        )
-        load_execution_evidence(
-            state,
-            dedup_out["execution_result"],
-            expected_stage="assembly_dedup",
-            expected_attempt_id=attempt.attempt_id,
-            expected_method_name=ASSEMBLY_DEDUP_METHOD,
-        )
+        executions = load_method_executions(state, PURGE_DUPS_LIFECYCLE)
+        if len(executions) != 1:
+            return _fail(state, "purge_dups requires exactly one execution attempt")
+        attempt = executions[0].attempt
 
     input_assembly_ref = dedup_out.get("input_assembly_ref")
     output_assembly_ref = dedup_out.get("output_assembly_ref") or input_assembly_ref

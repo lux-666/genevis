@@ -21,10 +21,10 @@ from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, append_route_trace
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import HIC_READS_SPEC, assembly_resource_spec
-from app.stages.hic_scaffolding.method_application.lifecycle import (
+from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
-from app.stages.hic_scaffolding.method_application.lifecycle import (
+from app.stages.hic_scaffolding.method_application.support import (
     update_hic_output as _update_hic_output,
 )
 

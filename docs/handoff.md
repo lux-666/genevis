@@ -2,22 +2,23 @@
 
 Current work snapshot for repository takeover. This file is intentionally short
 and non-normative. Architecture decisions live in
-[`architecture/README.md`](architecture/README.md); implementation history lives
-in phase documents and Git.
+[`architecture/README.md`](architecture/README.md); superseded implementation
+and design records live in Git history.
 
-**Updated:** 2026-07-20
+**Updated:** 2026-07-22
 
-**Current baseline:** unified-resource baseline `b610ad5`, followed by the
-artifact-publication, resume-transaction, and checkpoint/storage-audit slices
-described below
+**Current baseline:** unified resource handoff, shared execution lifecycle,
+atomic artifact publication, unified resume, whole-state budgets, terminal
+checkpoint compaction, and read-only storage audit
 
 ## Read Order
 
 1. `docs/architecture/README.md` for specification ownership and conformance.
 2. `docs/architecture.md` for the system overview.
-3. `docs/architecture/data-v2.md` for run data and checkpoint boundaries.
-4. This file for the next local task.
-5. `README.md` and `docs/stage_contracts.md` for current executable/domain scope.
+3. `docs/architecture/execution-lifecycle.md` for executable-method boundaries.
+4. `docs/architecture/data-v2.md` for run data and checkpoint boundaries.
+5. This file for the current implementation snapshot.
+6. `README.md` and `docs/stage_contracts.md` for current executable/domain scope.
 
 ## Current Status
 
@@ -26,6 +27,8 @@ described below
 - Runtime `ExecutionResult` paths now terminate at the publication boundary;
   durable process results use the strict, path-free `ExecutionEvidence` body.
 - The shared runner publishes and indexes stdout/stderr once, including failure.
+- Every executable production method uses the shared freeze/run/collect graph;
+  direct and parameter attempts differ only in compact ref ownership.
 - Assembly and AutoHiC parameter recommendation persist exact model requests,
   raw responses, parsed recommendations, approvals, and compact attempt refs.
 - AutoHiC is the only Hi-C execution method; parent routing decides whether the
@@ -35,9 +38,13 @@ described below
   publication boundary; already-published shell outputs use registration only.
 - All three resume entrypoints use `app.control.resume_transaction`; entrypoints
   retain prompts, decision-file handling, and output formatting only.
-
-Data v2 is accepted but only partially conformant. Its code-audited debt table
-is the current list: [`architecture/data-v2.md`](architecture/data-v2.md#22-confirmed-conformance-debt).
+- MemorySaver, SqliteSaver, and injected savers all pass through the same
+  whole-state budget boundary.
+- A terminal run retains one standalone checkpoint after ledger reconstruction
+  and artifact-reachability verification; active, blocked, and failed
+  verification paths keep their checkpoint history.
+- `gene-agent storage-audit` provides read-only JSON audit and dry-run manifest
+  output.
 
 ## Current Architecture Decision
 
@@ -59,22 +66,25 @@ approved/frozen parameters, the command record, the complete frozen runner
 input, execution evidence, and review evidence. The stage cursor only selects
 the current attempt and retains the ordered chain; method-specific
 frozen/execution cursor keys have been removed. Operator-directed Assembly
-review reruns remain outside this ownership rule. Assembly RNA-seq
-recommendation signals now flow from the asset registry through
-`AssemblyInputProfile`, not through a pseudo-stage output.
+review reruns remain outside this parameter-attempt ownership rule and use the
+shared direct `execution_attempts` cursor. Assembly RNA-seq recommendation
+signals now flow from the asset registry through `AssemblyInputProfile`, not
+through a pseudo-stage output.
 
-## Next Implementation Slice
+## Remaining Simplification Refactor
 
-The resource handoff, typed stage cursor, frozen-attempt, review persistence,
-atomic artifact publication, unified resume transaction, whole-state saver
-budgets, unified terminal finalization, verified single-terminal-checkpoint compaction, read-only
-`storage-audit` CLI, durable SQLite resume, and assembly-to-annotation E2E paths
-are implemented. The next slice is based on the 2026-07-20 code audit:
+The remaining work is limited to reducing duplicate ownership and making the
+existing code easier to change:
 
-1. add the missing raw-read-to-assembly entrypoint E2E and package/CI acceptance;
-2. implement deletion-performing GC only as a separate change with terminal gating, manifest revalidation, explicit confirmation, no `work/` deletion, and artifact-index compaction last;
-3. reduce duplicate session identity parameters through a typed run context;
-4. only then split large modules and add structured field metadata to `ask_interactive`.
+1. replace duplicate run-root plus `session_id` parameters with one typed run
+   context and delete the old signatures;
+2. split large modules along existing responsibility and side-effect
+   boundaries, deleting moved implementations and duplicate helpers in the
+   same change;
+3. replace `ask_interactive` string-prefix and field-name inference with
+   structured field metadata, then remove the old representation;
+4. automate the existing full-suite, durable-resume, CWD and entrypoint checks
+   as refactor guardrails without adding a test-only runtime architecture.
 
 Storage audit usage:
 
@@ -83,12 +93,8 @@ gene-agent storage-audit --session-id <id> --data-dir <data-root> --format json
 gene-agent storage-audit --session-id <id> --data-dir <data-root> --format json --dry-run-manifest
 ```
 
-There is deliberately no `--apply` option. The dry-run manifest contains only
-regenerable report candidates; retained `work/` bytes remain visible in audit
-statistics but are excluded from automatic cleanup candidates.
-
 Detailed evidence and ordering live in
-[`architecture/refactor/architecture-contracts.md`](architecture/refactor/architecture-contracts.md#10-后续路线).
+[`architecture/refactor/architecture-contracts.md`](architecture/refactor/architecture-contracts.md#10-剩余减负重构).
 
 ## Verification
 

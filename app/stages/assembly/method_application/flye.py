@@ -2,21 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 from pathlib import Path
 from typing import Any
 
+from app.configuration import load_descriptor_registry
+from app.domains.assembly.constants import FLYE_METHOD
 from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.parameter_attempts import load_current_frozen_attempt
-from app.configuration import load_descriptor_registry
-from app.schemas.state import TopLevelState
-from app.stages.assembly.command_builder import ParameterCommandError, build_command, build_parameter_sources
-from app.domains.assembly.constants import FLYE_METHOD
-from app.stages.assembly.method_application.lifecycle import (
-    MethodLifecycle,
-    blocked_parameters,
+from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
     build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
+)
+from app.execution.method_runner import build_frozen_attempt
+from app.schemas.artifacts import (
+    ASSEMBLY_CANDIDATE_BUNDLE,
+    ArtifactMeta,
+    AssemblyCandidateBundle,
+)
+from app.schemas.state import TopLevelState
+from app.stages.assembly.command_builder import (
+    ParameterCommandError,
+    build_command,
+    build_parameter_sources,
+)
+from app.stages.assembly.method_application.support import (
+    blocked_parameters,
     collect_method_artifacts,
     fail_update,
     freeze_parameterized_attempt,
@@ -24,7 +39,16 @@ from app.stages.assembly.method_application.lifecycle import (
     positive_int,
 )
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.base import (
+    absolute_data_dir,
+    ordered_unique,
+    stage_output,
+    update_stage_output,
+)
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_file
 
@@ -35,14 +59,22 @@ FLYE_READ_TYPE_FLAGS = {
     "pacbio-hifi": "--pacbio-hifi",
 }
 
-LIFECYCLE = MethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly",
     name="flye",
     method_name=FLYE_METHOD,
-    planned_status="flye_execution_planned",
     frozen_status="flye_frozen",
     ran_status="flye_ran",
-    draft_assembly_key="flye_draft_assembly_path",
-    substep_key="flye_assembly",
+    owner=ParameterAttemptOwner(),
+)
+RERUN_LIFECYCLE = MethodExecutionLifecycle(
+    stage="assembly",
+    name="flye rerun",
+    method_name=FLYE_METHOD,
+    frozen_status="flye_rerun_frozen",
+    ran_status="flye_rerun_ran",
+    cleanup_outputs=False,
+    process_failure="collect",
 )
 
 
@@ -50,10 +82,282 @@ def build_flye_graph():
     return build_method_graph(LIFECYCLE, freeze_flye_attempt, collect_flye_artifacts)
 
 
+def build_flye_rerun_graph():
+    """Build the direct lifecycle for an operator-requested Flye rerun."""
+
+    return build_method_graph(
+        RERUN_LIFECYCLE,
+        freeze_flye_rerun_attempt,
+        collect_flye_rerun_artifacts,
+    )
+
+
+def freeze_flye_rerun_attempt(state: TopLevelState) -> dict:
+    """Freeze the checkpointed Assembly Review rerun request."""
+
+    output = stage_output(state, "assembly")
+    if output.get("status") != "flye_rerun_planned":
+        return {}
+    request = output.get("rerun_request")
+    if not isinstance(request, dict):
+        return fail_update(state, "Flye rerun request is missing")
+    params = request.get("parameters")
+    if not isinstance(params, dict):
+        return fail_update(state, "Flye rerun parameters are missing")
+    try:
+        read_paths = resolve_assembly_read_paths(
+            output.get("input_ref"),
+            output.get("input_type"),
+        )
+    except AssemblyInputError as exc:
+        return fail_update(state, f"Flye rerun {exc}")
+
+    session_id = state["session_id"]
+    data_dir = absolute_data_dir(state)
+    env_spec, _packages, blocked = resolve_method_env(
+        output,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
+        input_manifest_ref=state.get("input_manifest_ref", ""),
+    )
+    if blocked is not None:
+        return update_stage_output(state, "assembly", blocked)
+
+    rerun_index = int(request["rerun_index"])
+    paths = SessionPaths.from_run_dir(data_dir)
+    working_dir = paths.work_path("assembly", f"flye_rerun_{rerun_index}")
+    output_dir = working_dir / "flye_out"
+    artifact_dir = paths.artifact_path("assembly", f"flye_rerun_{rerun_index}")
+    working_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    draft = artifact_dir / "draft_assembly.fasta"
+    script = working_dir / "run_flye.sh"
+    read_flag = FLYE_READ_TYPE_FLAGS[str(params["read_type"])]
+    reads_arg = " ".join(shlex.quote(str(path)) for path in read_paths)
+    script.write_text(
+        "set -e\n"
+        f"flye {read_flag} {reads_arg}"
+        f" --out-dir {shlex.quote(str(output_dir))}"
+        f" --genome-size {shlex.quote(str(params['estimated_genome_size']))}"
+        f" --threads {int(params['threads'])}\n"
+        f"test -f {shlex.quote(str(output_dir / 'assembly.fasta'))}\n"
+        f"{shell_publish_file(output_dir / 'assembly.fasta', draft)}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    attempt = build_frozen_attempt(
+        attempt_id=f"{session_id}:assembly:flye:rerun_{rerun_index}",
+        session_id=session_id,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        script_path=script,
+        working_dir=working_dir,
+        expected_outputs=[draft],
+        env=output.get("env"),
+        env_spec=env_spec,
+        metadata={
+            "input_ref": output.get("input_ref"),
+            "input_type": output.get("input_type"),
+            "read_paths": [str(path) for path in read_paths],
+            "read_profile": params["read_type"],
+            "estimated_genome_size": params["estimated_genome_size"],
+            "threads": params["threads"],
+            "flye_output_dir": str(output_dir),
+            "draft_assembly_path": str(draft),
+            "rerun_index": rerun_index,
+            "candidate_id": request["candidate_id"],
+            "source_candidate_id": request.get("source_candidate_id"),
+            "rerun_reason": request.get("rerun_reason"),
+        },
+    )
+    return freeze_method_attempts(state, RERUN_LIFECYCLE, [attempt])
+
+
+def collect_flye_rerun_artifacts(state: TopLevelState) -> dict:
+    """Materialize the rerun candidate bundle and return Assembly to draft_ready."""
+
+    output = stage_output(state, "assembly")
+    if output.get("status") != RERUN_LIFECYCLE.ran_status:
+        return {}
+    executions = load_method_executions(state, RERUN_LIFECYCLE)
+    if len(executions) != 1:
+        return fail_update(state, "Flye rerun requires exactly one execution attempt")
+    attempt = executions[0].attempt
+    execution = executions[0].evidence
+    metadata = dict(attempt.metadata)
+    data_dir = absolute_data_dir(state)
+    session_id = state["session_id"]
+    ledger = Ledger(data_dir)
+    candidate_id = str(metadata["candidate_id"])
+    rerun_index = int(metadata["rerun_index"])
+    if not execution.success:
+        ledger.record_event(
+            session_id,
+            "rerun_failed",
+            {
+                "candidate_id": candidate_id,
+                "error": execution.error,
+                "rerun_index": rerun_index,
+            },
+        )
+        return fail_update(state, f"rerun Flye execution failed: {execution.error}")
+
+    draft = Path(str(metadata["draft_assembly_path"]))
+    if not draft.exists():
+        raise FileNotFoundError(f"rerun Flye draft assembly missing: {draft}")
+
+    draft_artifact = ArtifactMeta.from_file(
+        draft,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        artifact_type="assembly.draft_assembly",
+        metadata={
+            "attempt_id": attempt.attempt_id,
+            "candidate_id": candidate_id,
+            "rerun_index": rerun_index,
+        },
+    )
+    register_artifact_records(data_dir, session_id, [draft_artifact])
+    draft_payload = draft_artifact.model_dump(mode="json")
+    ledger.record_attempt_succeeded(session_id, attempt, artifacts=[draft_payload])
+    ledger.record_artifact_registered(
+        session_id,
+        draft_payload,
+        attempt_id=attempt.attempt_id,
+    )
+
+    cursor = output["execution_attempts"][0]
+    bundle = AssemblyCandidateBundle(
+        session_id=session_id,
+        candidate_id=candidate_id,
+        method_name=FLYE_METHOD,
+        status="executed",
+        input_ref=str(output.get("input_ref")),
+        input_type=str(output.get("input_type")),
+        genome_size_prior=output.get("genome_size_prior"),
+        expected_outputs={"draft_assembly_fasta": str(draft)},
+        logs={
+            "stdout": execution.stdout_ref.path_ref,
+            "stderr": execution.stderr_ref.path_ref,
+        },
+        metadata={
+            "execution_enabled": True,
+            "attempt_id": attempt.attempt_id,
+            "draft_assembly_artifact_ref": str(draft),
+            "draft_assembly_ref_status": "materialized",
+            "read_profile": metadata.get("read_profile"),
+            "estimated_genome_size": metadata.get("estimated_genome_size"),
+            "threads": metadata.get("threads"),
+            "rerun_index": rerun_index,
+            "source_candidate_id": metadata.get("source_candidate_id"),
+            "rerun_reason": metadata.get("rerun_reason"),
+            "execution_ref": cursor["execution_ref"],
+            "frozen_attempt_ref": cursor["frozen_attempt_ref"],
+        },
+    )
+    paths = SessionPaths.from_run_dir(data_dir)
+    bundle_source = Path(attempt.working_dir) / f"flye_rerun_{rerun_index}_candidate.json"
+    bundle_source.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    bundle_artifact = ArtifactMeta.from_file(
+        bundle_source,
+        stage="assembly",
+        method_name=FLYE_METHOD,
+        artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
+        metadata={
+            "candidate_id": candidate_id,
+            "execution_enabled": True,
+            "rerun_index": rerun_index,
+        },
+    )
+    bundle_path = publish_artifact_record(
+        data_dir,
+        session_id,
+        bundle_artifact,
+        destination=paths.artifact_path(
+            "assembly",
+            "candidates",
+            f"flye_rerun_{rerun_index}_candidate.json",
+        ),
+    ).path
+    ledger.record_artifact_registered(
+        session_id,
+        bundle_artifact.model_dump(mode="json"),
+        attempt_id=attempt.attempt_id,
+    )
+    bundle_ref = str(bundle_path)
+    selected_refs = ordered_unique(
+        [*list(output.get("selected_candidate_refs") or []), bundle_ref]
+    )
+    ledger.record_event(
+        session_id,
+        "rerun_completed",
+        {
+            "candidate_id": candidate_id,
+            "rerun_index": rerun_index,
+            "parameters": {
+                "read_type": metadata.get("read_profile"),
+                "estimated_genome_size": metadata.get("estimated_genome_size"),
+                "threads": metadata.get("threads"),
+            },
+            "draft_assembly_ref": str(draft),
+            "bundle_ref": bundle_ref,
+            "frozen_attempt_ref": cursor["frozen_attempt_ref"],
+        },
+    )
+    update = update_stage_output(
+        state,
+        "assembly",
+        {
+            "status": "draft_ready",
+            "rerun_request": None,
+            "selected_candidate_refs": selected_refs,
+            "candidate_assembly_refs": ordered_unique(
+                [*list(output.get("candidate_assembly_refs") or []), str(draft)]
+            ),
+            "executed_candidate_refs": ordered_unique(
+                [*list(output.get("executed_candidate_refs") or []), bundle_ref]
+            ),
+        },
+    )
+    return {
+        **update,
+        "resource_refs": rerun_resource_refs(state, selected_refs),
+    }
+
+
+def rerun_resource_refs(state: TopLevelState, candidate_refs: list[str]) -> dict:
+    """Publish materialized rerun candidates through the central resource table."""
+
+    current = resolve_stage_resource(state, resource_spec=ASSEMBLY_CANDIDATES_SPEC)
+    paths: list[str] = []
+    for candidate_ref in candidate_refs:
+        path = Path(candidate_ref)
+        if not path.exists():
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        draft = (payload.get("expected_outputs") or {}).get("draft_assembly_fasta")
+        if draft:
+            paths.append(str(draft))
+    metadata = dict(current.metadata)
+    metadata["candidate_bundle_refs"] = list(candidate_refs)
+    return update_resource_ref(
+        state,
+        "assembly",
+        paths or current.paths,
+        "assembly",
+        metadata,
+    )
+
+
 def freeze_flye_attempt(state: TopLevelState) -> dict:
     """Freeze a local Flye attempt for the selected primary candidate."""
     output = stage_output(state, "assembly")
-    if output.get("status") != LIFECYCLE.planned_status:
+    if output.get("status") != "flye_execution_planned":
         return {}
     if FLYE_METHOD not in load_descriptor_registry().methods:
         return fail_update(state, f"assembly descriptors missing: [{FLYE_METHOD!r}]")
@@ -168,25 +472,20 @@ def freeze_flye_attempt(state: TopLevelState) -> dict:
         },
         stage_updates={
             "flye_output_dir": str(output_dir),
-            LIFECYCLE.draft_assembly_key: str(draft),
         },
     )
 
 
 def collect_flye_artifacts(state: TopLevelState) -> dict:
     output = stage_output(state, "assembly")
-    attempt = load_current_frozen_attempt(
-        state,
-        output,
-        stage="assembly",
-        method_id=FLYE_METHOD,
-        label="Flye",
-    )
+    [execution] = load_method_executions(state, LIFECYCLE)
+    attempt = execution.attempt
     metadata = dict(attempt.metadata or {})
     return collect_method_artifacts(
         state,
         LIFECYCLE,
-        attempt=attempt,
+        execution=execution,
+        substep_name="flye_assembly",
         extra_artifacts=[(Path(output.get("flye_output_dir", "")) / "flye.log", "assembly.flye_log")],
         bundle_logs={},
         bundle_metadata={

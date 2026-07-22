@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import re
-import shlex
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,18 +21,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-from app.storage.ledger import Ledger
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import publish_artifact_record, register_artifact_records
-from app.execution.env_dispatch import resolve_method_env
-from app.workflow import is_terminal_failure
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_execution_result,
-    persist_frozen_attempt,
-)
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
 from app.reference.ncbi_metazoa import (
     build_related_species_evidence_pack as _build_related_species_evidence_pack,
 )
@@ -46,7 +34,6 @@ from app.review.persistence import persist_review_decision, persist_review_reque
 from app.review.policy import evaluate
 from app.review.recommender import RecommendationError, recommend_review_decision
 from app.schemas.artifacts import (
-    ASSEMBLY_CANDIDATE_BUNDLE,
     ASSEMBLY_CANDIDATE_COMPARISON,
     ASSEMBLY_REVIEW_ACTION,
     ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK,
@@ -55,7 +42,6 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK,
     ArtifactMeta,
-    AssemblyCandidateBundle,
     AssemblyEvalBundle,
     AssemblyEvalSignal,
     AssemblyReviewActionArtifact,
@@ -63,11 +49,10 @@ from app.schemas.artifacts import (
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import TopLevelState
-from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
-from app.stages.assembly_review.method_application.lifecycle import (
+from app.stages.assembly_review.method_application.support import (
     read_eval_bundle as _read_eval_bundle,
 )
-from app.stages.assembly_review.method_application.lifecycle import (
+from app.stages.assembly_review.method_application.support import (
     write_json_artifact as _write_json_artifact,
 )
 from app.stages.assembly_review.notebook import (
@@ -85,7 +70,9 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import ASSEMBLY_CANDIDATES_SPEC
-from app.storage.publish import shell_publish_file
+from app.storage.artifacts import publish_artifact_record, register_artifact_records
+from app.storage.ledger import Ledger
+from app.workflow import is_terminal_failure
 
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
@@ -1054,9 +1041,12 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
 
 
 def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
-    """Execute a Flye rerun with adjusted parameters and re-enter assembly_review."""
+    """Persist a validated Flye rerun request for the Assembly lifecycle."""
     from app.domains.assembly.constants import FLYE_METHOD
-    from app.stages.assembly.method_application.flye import FLYE_READ_TYPE_FLAGS
+    from app.stages.assembly.method_application.flye import (
+        FLYE_READ_TYPE_FLAGS,
+        rerun_resource_refs,
+    )
 
     stage_outputs = dict(state.get("stage_outputs") or {})
     ar_out = dict(stage_outputs.get("assembly_review") or {})
@@ -1089,9 +1079,6 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         raise ResumeValidationError("rerun requires assembly stage input_ref (no inventory rebuild)")
 
     candidate_dir = stage_artifacts_dir(state, "assembly", "candidates")
-    read_type = params["read_type"]
-    genome_size = params["estimated_genome_size"]
-    threads = params["threads"]
     rerun_index, existing_bundle_ref = _next_rerun_index(
         state,
         candidate_dir,
@@ -1127,11 +1114,6 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         review_request_id=review_request_id,
     )
     candidate_id = f"{session_id}:{FLYE_METHOD}:rerun_{rerun_index}"
-    working_dir = stage_work_dir(state, "assembly", f"flye_rerun_{rerun_index}")
-    flye_out_dir = working_dir / "flye_out"
-    artifact_dir = stage_artifacts_dir(state, "assembly", f"flye_rerun_{rerun_index}")
-    draft_assembly = artifact_dir / "draft_assembly.fasta"
-    script_path = working_dir / "run_flye.sh"
     bundle_path = candidate_dir / f"flye_rerun_{rerun_index}_candidate.json"
 
     if existing_bundle_ref is not None:
@@ -1148,7 +1130,13 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         )
         if existing_bundle_ref not in existing_refs:
             existing_refs = [*existing_refs, existing_bundle_ref]
-        assembly_out["selected_candidate_refs"] = existing_refs
+        assembly_out.update(
+            {
+                "status": "draft_ready",
+                "rerun_request": None,
+                "selected_candidate_refs": existing_refs,
+            }
+        )
         preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
         preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
         stage_outputs["assembly"] = assembly_out
@@ -1158,7 +1146,7 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
             "supervision_state": "running_stage",
             "active_interrupt": None,
             "stage_outputs": stage_outputs,
-            "resource_refs": _rerun_resource_refs(state, existing_refs),
+            "resource_refs": rerun_resource_refs(state, existing_refs),
         }
 
     ledger.record_event(session_id, "rerun_requested", {
@@ -1169,200 +1157,19 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         "source_candidate_id": request.candidate_id,
     })
 
-    try:
-        read_paths = resolve_assembly_read_paths(input_ref, input_type)
-    except AssemblyInputError as exc:
-        read_error = f"rerun {exc}"
-        ledger.record_event(session_id, "rerun_failed", {
-            "candidate_id": candidate_id, "error": read_error,
-        })
-        raise ResumeValidationError(f"rerun read path resolution failed: {read_error}")
-
-    env_spec, _packages, blocked = resolve_method_env(
-        assembly_out,
-        stage="assembly",
-        method_name=FLYE_METHOD,
-        session_id=session_id,
-        data_dir=data_dir,
-        input_manifest_ref=state.get("input_manifest_ref", ""),
+    assembly_out.update(
+        {
+            "status": "flye_rerun_planned",
+            "rerun_request": {
+                "candidate_id": candidate_id,
+                "rerun_index": rerun_index,
+                "parameters": params,
+                "source_candidate_id": request.candidate_id,
+                "rerun_reason": request.metadata.get("rerun_reason"),
+                "review_decision_ref": review_decision_ref.model_dump(mode="json"),
+            },
+        }
     )
-    if blocked is not None:
-        ledger.record_event(session_id, "rerun_failed", {
-            "candidate_id": candidate_id, "error": "env_blocked",
-        })
-        raise ResumeValidationError("rerun blocked on environment resolution")
-
-    working_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    read_flag = FLYE_READ_TYPE_FLAGS[read_type]
-    reads_arg = " ".join(shlex.quote(str(p)) for p in read_paths)
-    script_path.write_text(
-        "set -e\n"
-        f"flye {read_flag} {reads_arg}"
-        f" --out-dir {shlex.quote(str(flye_out_dir))}"
-        f" --genome-size {shlex.quote(str(genome_size))}"
-        f" --threads {threads}\n"
-        f"test -f {shlex.quote(str(flye_out_dir / 'assembly.fasta'))}\n"
-        f"{shell_publish_file(flye_out_dir / 'assembly.fasta', draft_assembly)}\n",
-        encoding="utf-8",
-    )
-    script_path.chmod(0o755)
-
-    attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:assembly:flye:rerun_{rerun_index}",
-        session_id=session_id,
-        stage="assembly",
-        method_name=FLYE_METHOD,
-        script_path=script_path,
-        working_dir=working_dir,
-        expected_outputs=[draft_assembly],
-        env=assembly_out.get("env"),
-        env_spec=env_spec,
-        metadata={
-            "input_ref": input_ref,
-            "input_type": input_type,
-            "read_paths": [str(p) for p in read_paths],
-            "read_profile": read_type,
-            "estimated_genome_size": genome_size,
-            "threads": threads,
-            "flye_output_dir": str(flye_out_dir),
-            "draft_assembly_path": str(draft_assembly),
-            "rerun_index": rerun_index,
-            "source_candidate_id": request.candidate_id,
-        },
-    )
-    frozen_attempt_ref = persist_frozen_attempt(state, attempt)
-    attempt = load_frozen_attempt(
-        state,
-        frozen_attempt_ref,
-        expected_stage="assembly",
-        expected_method_name=FLYE_METHOD,
-    )
-
-    # Rerun is a resume-path special case: it reuses the shared run core (so
-    # attempt_started/attempt_failed bookkeeping matches normal runs) but adds a
-    # rerun_failed event and raises ResumeValidationError instead of writing a
-    # failed stage status. cleanup_outputs=False preserves partial outputs for
-    # post-mortem, matching the pre-helper behavior.
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=data_dir,
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="flye rerun",
-        cleanup_outputs=False,
-        ledger=ledger,
-    )
-    result = outcome.result
-    execution_ref = persist_execution_result(
-        state,
-        stage="assembly",
-        method_name=FLYE_METHOD,
-        result=result,
-        error=outcome.error,
-    )
-    execution = load_execution_evidence(
-        state,
-        execution_ref,
-        expected_stage="assembly",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=FLYE_METHOD,
-    )
-
-    if not outcome.success:
-        ledger.record_event(session_id, "rerun_failed", {
-            "candidate_id": candidate_id, "error": outcome.error, "rerun_index": rerun_index,
-        })
-        raise ResumeValidationError(f"rerun Flye execution failed: {outcome.error}")
-
-    if not draft_assembly.exists():
-        error_msg = f"rerun Flye draft assembly missing: {draft_assembly}"
-        ledger.record_attempt_failed(session_id, attempt, return_code=0, error=error_msg)
-        ledger.record_event(session_id, "rerun_failed", {
-            "candidate_id": candidate_id, "error": error_msg,
-        })
-        raise ResumeValidationError(error_msg)
-
-    artifacts = [
-        ArtifactMeta.from_file(
-            draft_assembly,
-            stage="assembly",
-            method_name=FLYE_METHOD,
-            artifact_type="assembly.draft_assembly",
-            metadata={"attempt_id": attempt.attempt_id, "candidate_id": candidate_id, "rerun_index": rerun_index},
-        )
-    ]
-    register_artifact_records(data_dir, session_id, artifacts)
-    artifact_payloads = [a.model_dump(mode="json") for a in artifacts]
-    ledger.record_attempt_succeeded(session_id, attempt, artifacts=artifact_payloads)
-    for a in artifact_payloads:
-        ledger.record_artifact_registered(session_id, a, attempt_id=attempt.attempt_id)
-
-    bundle = AssemblyCandidateBundle(
-        session_id=session_id,
-        candidate_id=candidate_id,
-        method_name=FLYE_METHOD,
-        status="executed",
-        input_ref=str(input_ref),
-        input_type=str(input_type),
-        genome_size_prior=assembly_out.get("genome_size_prior"),
-        expected_outputs={"draft_assembly_fasta": str(draft_assembly)},
-        logs={
-            "stdout": execution.stdout_ref.path_ref,
-            "stderr": execution.stderr_ref.path_ref,
-        },
-        metadata={
-            "execution_enabled": True,
-            "attempt_id": attempt.attempt_id,
-            "draft_assembly_artifact_ref": str(draft_assembly),
-            "draft_assembly_ref_status": "materialized",
-            "read_profile": read_type,
-            "estimated_genome_size": genome_size,
-            "threads": threads,
-            "rerun_index": rerun_index,
-            "source_candidate_id": request.candidate_id,
-            "rerun_reason": request.metadata.get("rerun_reason"),
-            "execution_ref": execution_ref.model_dump(mode="json"),
-            "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
-        },
-    )
-    candidate_dir.mkdir(parents=True, exist_ok=True)
-    bundle_source = stage_work_dir(
-        state,
-        "assembly_review",
-        "reruns",
-        f"{candidate_id}.json",
-    )
-    bundle_source.parent.mkdir(parents=True, exist_ok=True)
-    bundle_source.write_text(
-        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    bundle_artifact = ArtifactMeta.from_file(
-        bundle_source, stage="assembly", method_name=FLYE_METHOD,
-        artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
-        metadata={"candidate_id": candidate_id, "execution_enabled": True, "rerun_index": rerun_index},
-    )
-    bundle_path = publish_artifact_record(
-        data_dir,
-        session_id,
-        bundle_artifact,
-        destination=bundle_path,
-    ).path
-    ledger.record_artifact_registered(session_id, bundle_artifact.model_dump(mode="json"), attempt_id=attempt.attempt_id)
-
-    bundle_ref = str(bundle_path)
-    updated_refs = existing_refs if bundle_ref in existing_refs else [*existing_refs, bundle_ref]
-    assembly_out["selected_candidate_refs"] = updated_refs
-
-    ledger.record_event(session_id, "rerun_completed", {
-        "candidate_id": candidate_id,
-        "rerun_index": rerun_index,
-        "parameters": params,
-        "draft_assembly_ref": str(draft_assembly),
-        "bundle_ref": str(bundle_path),
-        "frozen_attempt_ref": frozen_attempt_ref.model_dump(mode="json"),
-    })
-
     preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
     preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
 
@@ -1374,7 +1181,6 @@ def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) ->
         "supervision_state": "running_stage",
         "active_interrupt": None,
         "stage_outputs": stage_outputs,
-        "resource_refs": _rerun_resource_refs(state, updated_refs),
     }
 
 
@@ -1933,7 +1739,8 @@ def fail_assembly_review(state: TopLevelState) -> dict:
     """Record assembly review failure and stop."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
-    status = ar_out.get("status", "failed")
+    assembly_out = stage_outputs.get("assembly", {})
+    status = ar_out.get("status") or assembly_out.get("status") or "failed"
     default_reason = {
         "blocked_env": "assembly_review blocked on missing conda environment",
         "missing_tool": "assembly_review blocked on missing tool",
@@ -1941,7 +1748,7 @@ def fail_assembly_review(state: TopLevelState) -> dict:
     return {
         "current_stage": "assembly_review",
         "supervision_state": "failed_terminal",
-        "last_error": ar_out.get("reason", default_reason),
+        "last_error": ar_out.get("reason") or assembly_out.get("reason") or default_reason,
     }
 
 
@@ -1963,27 +1770,6 @@ def _load_selected_candidate_refs(candidate_refs: list[str]) -> list[dict[str, A
         payload["bundle_ref"] = str(path)
         candidates.append(payload)
     return candidates
-
-
-def _rerun_resource_refs(state: TopLevelState, candidate_refs: list[str]) -> dict:
-    """Publish all materialized rerun candidates through the central table."""
-    current = resolve_stage_resource(state, resource_spec=ASSEMBLY_CANDIDATES_SPEC)
-    paths = [
-        str((candidate.get("expected_outputs") or {}).get("draft_assembly_fasta"))
-        for candidate in _load_selected_candidate_refs(candidate_refs)
-        if (candidate.get("expected_outputs") or {}).get("draft_assembly_fasta")
-    ]
-    if not paths:
-        paths = current.paths
-    metadata = dict(current.metadata)
-    metadata["candidate_bundle_refs"] = list(candidate_refs)
-    return update_resource_ref(
-        state,
-        "assembly",
-        paths,
-        "assembly",
-        metadata,
-    )
 
 
 def _existing_assembly_ref(registry_ref: str) -> str | None:

@@ -127,10 +127,9 @@ container / upstream installs (not a Phase 4 / 5 mainline concern):
 Search-and-replace targets when standing the new host up:
 
 - `README.md`, `docs/handoff.md`, `docs/governance.md`,
-  `docs/architecture.md`, and several `docs/phases/phase*/...` files
-  reference `/Users/a1/Documents/BGIwork/rna_agent` (a sibling reference
-  project, not a runtime dependency). Update or drop these mentions on the
-  new host as needed.
+  and `docs/architecture.md` may reference
+  `/Users/a1/Documents/BGIwork/rna_agent` (a sibling reference project, not a
+  runtime dependency). Update or drop these mentions on the new host as needed.
 - `data/phase4_real_smoke/manifest.yaml` carries an absolute path to the
   Phase 4 smoke FASTA. `data/` is gitignored, so this file does not
   migrate with git; recreate it from

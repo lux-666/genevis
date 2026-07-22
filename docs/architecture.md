@@ -1,13 +1,17 @@
 # Gene Agent Architecture
 
-Gene Agent follows the BioAgent V2 pattern from the reference `rna_agent` project, but the biological workflow is the ONT/CLR long-read genome pipeline described in `deep-research-report.md`.
+Gene Agent follows the BioAgent V2 pattern from the reference `rna_agent`
+project, but the biological workflow is the ONT/CLR long-read genome pipeline
+described in `docs/archive/deep-research-report.md`.
 
 This document is the system-level architecture. For operational handoff, read
 `docs/handoff.md`. For coordinator rules, read `docs/governance.md`. For
 stage-by-stage inputs and outputs, read `docs/stage_contracts.md`. Accepted
 cross-cutting specifications live under `docs/architecture/`; the accepted Data
 Architecture v2 contract is `docs/architecture/data-v2.md`, and the runtime to
-durable process boundary is `docs/architecture/execution-evidence.md`.
+durable process boundary is `docs/architecture/execution-evidence.md`. The
+shared executable-method graph and recovery contract are normative in
+`docs/architecture/execution-lifecycle.md`.
 
 ## Principles
 
@@ -20,7 +24,8 @@ durable process boundary is `docs/architecture/execution-evidence.md`.
    rather than rebuilding it from current configuration.
 6. Put human-in-the-loop gates at review boundaries, especially assembly evaluation and Hi-C review.
 7. Use one shared parameter-recommendation persistence contract after method
-   selection; Assembly, Hi-C, and T2T must not invent separate audit layouts.
+   selection; the implemented Assembly and Hi-C recommenders do not own
+   separate audit layouts.
 8. Treat each session run directory as the data-ownership boundary. Keep
    checkpoints bounded and ref-oriented: they identify the frozen input and
    durable result needed to resume, but do not become a second owner of them.
@@ -68,7 +73,7 @@ app/
   stages/      domain subgraphs and method-family routes
   llm/         stage-specific request DTOs, prompt rendering, model adapters
   schemas/     state, asset, plan, descriptor, artifact contracts
-  execution/   local subprocess runner + shared freeze/run helpers (no in-agent remote execution)
+  execution/   shared lifecycle, attempt owners, evidence boundary, local runner
   storage/     run layout, ledger, artifact publication/index, durable evidence
   review/      rule checks and interrupt-backed human gates
   control/     lifecycle commands
@@ -85,7 +90,7 @@ Module ownership:
 | `stages/` | Stage subgraphs, method selection/routing, parameter profiles and immutable recommendation bases | Provider prompt rendering or package-level script generation internals |
 | `llm/parameters/<stage>/` | Stage-specific strict request DTOs, deterministic message rendering, model invocation, and response-shape parsing | Full audit profiles, persistence, biological/catalog validation, approval, or execution |
 | `schemas/` | Cross-module contracts | Side effects |
-| `execution/` | Running frozen attempts locally, shared freeze/run helpers (`method_runner`), and publishing process logs/evidence | Collecting stage-owned biological outputs or in-agent remote orchestration |
+| `execution/` | Shared freeze/run/collect graph, attempt ownership, running frozen attempts locally, and publishing process logs/evidence | Stage-specific command construction, biological collection, or in-agent remote orchestration |
 | `review/` | Rule checks and human gates | Writing checkpoint state directly |
 | `storage/` | Run layout, immutable artifact publication/index, parameter evidence, and Ledger persistence | Biological method choice |
 | `control/` | Lifecycle semantics | Durable storage implementation, starting tools, or reading huge data files |
@@ -115,10 +120,9 @@ record. Environment mappings, paths, and script identity may therefore exist in
 the frozen evidence without being embedded again in the checkpoint.
 
 Data-specific ownership, path, checkpoint-size, parameter-recommendation,
-attempt, review, report, and retention rules are normative in
-`docs/architecture/data-v2.md`. The v2 cutover is complete; any remaining
-implementation gap must be listed explicitly in that specification's
-conformance table rather than hidden behind a compatibility period.
+attempt, review, report, audit, and terminal-compaction rules are normative in
+`docs/architecture/data-v2.md`. The v2 cutover is complete and has no legacy
+compatibility branch.
 
 State categories:
 
@@ -144,7 +148,10 @@ enter -> validate_inputs -> plan_methods -> method_family_subgraph
 -> collect_outputs -> review_outputs -> commit_stage
 ```
 
-The method family subgraph owns package-specific logic. For example, `assembly` can later contain `flye`, `nextdenovo`, and `canu` families without changing the parent graph.
+The method family subgraph owns package-specific logic. Existing assembly
+methods share this boundary without changing the parent graph. Executable
+method subgraphs conform to
+[`architecture/execution-lifecycle.md`](architecture/execution-lifecycle.md).
 
 ## Current Implementation Status
 
@@ -154,9 +161,9 @@ individually scoped: unsupported methods are represented as planning contracts,
 while supported methods freeze an auditable command and run through the shared
 execution lifecycle.
 
-## Extension Rule
+## Executable Method Contract
 
-When adding a real method:
+A supported executable method follows this single lifecycle:
 
 1. Add or update asset and method descriptors.
 2. Add a focused test for method-selection behavior and, when present,
@@ -171,6 +178,3 @@ When adding a real method:
 7. Collect artifacts.
 8. Review outputs.
 9. Commit compact references to state and bounded causal events to the ledger.
-
-Skipping these steps is allowed only for temporary local experiments outside the
-main graph.

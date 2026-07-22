@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
+from app.workflow import is_terminal_failure
 
 
 def _output(state: TopLevelState) -> dict:
@@ -31,21 +31,8 @@ def route_after_masking_plan(state: TopLevelState) -> str:
     if is_terminal_failure(repeat_out.get("status")):
         return "fail"
     if repeat_out.get("execution_enabled"):
-        return "freeze_repeatmasker"
+        return "repeatmasker"
     return "commit"
-
-
-def route_after_repeatmasker_freeze(state: TopLevelState) -> str:
-    """Route after freezing RepeatMasker execution."""
-    status = _output(state).get("status")
-    if is_terminal_failure(status):
-        return "fail"
-    return "run_repeatmasker" if status == "repeatmasker_frozen" else "fail"
-
-
-def route_after_repeatmasker_run(state: TopLevelState) -> str:
-    """Route after running RepeatMasker."""
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "collect_repeatmasker"
 
 
 def route_after_repeatmasker_collect(state: TopLevelState) -> str:

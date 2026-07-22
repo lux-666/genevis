@@ -6,13 +6,12 @@ import json
 import shlex
 from pathlib import Path
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
@@ -23,27 +22,31 @@ from app.schemas.artifacts import (
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.read_qc.constants import METHOD_NAME
-from app.stages.read_qc.method_application.lifecycle import (
-    ReadQCMethodLifecycle,
-    build_method_graph,
+from app.stages.read_qc.method_application.support import (
     fail_update,
     parse_seqkit_summary,
     read_paths_from_output,
     read_qc_output,
     update_read_qc_output,
 )
+from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.ledger import Ledger
 
-LIFECYCLE = ReadQCMethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="read_qc",
     name="seqkit stats",
+    method_name=METHOD_NAME,
     frozen_status="frozen",
     ran_status="ran",
-    frozen_attempt_key="frozen_attempt_ref",
-    execution_result_key="execution_result",
 )
 
 
 def build_seqkit_stats_graph():
-    return build_method_graph(LIFECYCLE, freeze_seqkit_attempt, collect_seqkit_artifacts)
+    return build_method_graph(
+        LIFECYCLE,
+        freeze_seqkit_attempt,
+        collect_seqkit_artifacts,
+    )
 
 
 def freeze_seqkit_attempt(state: TopLevelState) -> dict:
@@ -76,14 +79,11 @@ def freeze_seqkit_attempt(state: TopLevelState) -> dict:
                   "raw_long_reads_path": str(input_paths[0]), "raw_long_reads_paths": [str(path) for path in input_paths],
                   "stats_path": str(stats_path)},
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-    return update_read_qc_output(
+    return freeze_method_attempts(
         state,
-        {
-            "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: attempt_ref.model_dump(mode="json"),
-            "stats_output_path": str(stats_path),
-        },
+        LIFECYCLE,
+        [attempt],
+        stage_updates={"stats_output_path": str(stats_path)},
     )
 
 
@@ -91,20 +91,11 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
     output = read_qc_output(state)
     if output.get("status") != LIFECYCLE.ran_status:
         return {}
-    attempt = load_frozen_attempt(
-        state,
-        output[LIFECYCLE.frozen_attempt_key],
-        expected_stage="read_qc",
-        expected_method_name=METHOD_NAME,
-    )
+    executions = load_method_executions(state, LIFECYCLE)
+    if len(executions) != 1:
+        return fail_update(state, "SeqKit stats requires exactly one execution attempt")
+    attempt = executions[0].attempt
     stats_path = Path(output["stats_output_path"])
-    load_execution_evidence(
-        state,
-        output["execution_result"],
-        expected_stage="read_qc",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=METHOD_NAME,
-    )
     stats_metadata = {
         "attempt_id": attempt.attempt_id,
         "input_asset_ref": output.get("input_asset_ref"),
@@ -112,22 +103,15 @@ def collect_seqkit_artifacts(state: TopLevelState) -> dict:
         "format": "tsv",
         "tool": "seqkit",
     }
-    try:
-        published_stats = publish_or_recover_work_artifact(
-            state.get("data_dir", "data"),
-            attempt.session_id,
-            stats_path,
-            stage="read_qc",
-            method_name=METHOD_NAME,
-            artifact_type=READ_QC_LONG_READ_STATS,
-            metadata=stats_metadata,
-        )
-    except FileNotFoundError:
-        reason = f"expected SeqKit stats output missing: {stats_path}"
-        Ledger(state.get("data_dir", "data")).record_attempt_failed(
-            attempt.session_id, attempt, return_code=0, error=reason
-        )
-        return fail_update(state, reason)
+    published_stats = publish_or_recover_work_artifact(
+        state.get("data_dir", "data"),
+        attempt.session_id,
+        stats_path,
+        stage="read_qc",
+        method_name=METHOD_NAME,
+        artifact_type=READ_QC_LONG_READ_STATS,
+        metadata=stats_metadata,
+    )
     stats_path = published_stats.path
     summary = parse_seqkit_summary(stats_path)
     summary_source = Path(attempt.working_dir) / "read_qc_summary.json"

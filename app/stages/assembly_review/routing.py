@@ -7,12 +7,30 @@ Routes to:
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
+from app.workflow import is_terminal_failure
 
 
 def _output(state: TopLevelState) -> dict:
     return (state.get("stage_outputs") or {}).get("assembly_review") or {}
+
+
+def _assembly_output(state: TopLevelState) -> dict:
+    return (state.get("stage_outputs") or {}).get("assembly") or {}
+
+
+def route_after_enter(state: TopLevelState) -> str:
+    status = _assembly_output(state).get("status")
+    if status in {"flye_rerun_planned", "flye_rerun_frozen", "flye_rerun_ran"}:
+        return "flye_rerun"
+    return "resolve_candidates"
+
+
+def route_after_rerun(state: TopLevelState) -> str:
+    assembly_out = _assembly_output(state)
+    if is_terminal_failure(assembly_out.get("status")):
+        return "fail"
+    return "resolve_candidates" if assembly_out.get("status") == "draft_ready" else "fail"
 
 
 def route_after_plan_metrics(state: TopLevelState) -> str:

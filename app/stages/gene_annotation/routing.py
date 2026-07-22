@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
-from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
+from app.stages.gene_annotation.nodes import (
+    GENE_EXECUTABLE_METHODS,
+    GFFREAD_LIFECYCLE,
+)
 
 TERMINAL_STATES = frozenset({"blocked_human", "failed_terminal"})
 
@@ -11,9 +14,14 @@ TERMINAL_STATES = frozenset({"blocked_human", "failed_terminal"})
 # automatically includes its intermediate statuses here.
 _METHOD_EXEC = GENE_EXECUTABLE_METHODS
 
-_INTERMEDIATE_STATUSES = frozenset({"pending_execution"}).union(
-    *(cfg["frozen_status"] for cfg in _METHOD_EXEC.values()),
-    *(cfg["ran_status"] for cfg in _METHOD_EXEC.values()),
+_INTERMEDIATE_STATUSES = frozenset(
+    {
+        "pending_execution",
+        GFFREAD_LIFECYCLE.frozen_status,
+        GFFREAD_LIFECYCLE.ran_status,
+        *(cfg["frozen_status"] for cfg in _METHOD_EXEC.values()),
+        *(cfg["ran_status"] for cfg in _METHOD_EXEC.values()),
+    }
 )
 
 
@@ -35,12 +43,14 @@ def _next_pending_method(state: TopLevelState) -> str | None:
 
 
 def _route_method_status(status: str) -> str | None:
-    """Map a method-specific frozen/ran status to the next routing label."""
+    """Map a method-specific frozen/ran status to its lifecycle subgraph."""
     for cfg in _METHOD_EXEC.values():
         if status == cfg["frozen_status"]:
-            return f"{cfg['suffix']}_run"
+            return cfg["suffix"]
         if status == cfg["ran_status"]:
-            return f"{cfg['suffix']}_collect"
+            return cfg["suffix"]
+    if status in {GFFREAD_LIFECYCLE.frozen_status, GFFREAD_LIFECYCLE.ran_status}:
+        return "materialize"
     return None
 
 
@@ -82,18 +92,16 @@ def route_after_method_plan(state: TopLevelState) -> str:
         return "merge_prep"
     if status == "merge_ready":
         return "block_merge"
+    if status in {"miniprot_collected", "augustus_collected", "evm_outputs_collected"}:
+        return "materialize"
     if status == "merge_accepted":
-        return "evm_freeze"
-    if status == "evm_frozen":
-        return "evm_run"
-    if status == "evm_ran":
-        return "evm_collect"
+        return "evm"
+    if status in {"evm_frozen", "evm_ran"}:
+        return "evm"
     if status == "evm_collected":
-        return "busco_freeze"
-    if status == "busco_frozen":
-        return "busco_run"
-    if status == "busco_ran":
-        return "busco_collect"
+        return "busco"
+    if status in {"busco_frozen", "busco_ran"}:
+        return "busco"
     if status == "review_passed":
         return "commit"
     return "fail"
@@ -121,88 +129,45 @@ def route_after_run_methods(state: TopLevelState) -> str:
     if status == "pending_execution":
         next_method = _next_pending_method(state)
         if next_method:
-            return f"{_METHOD_EXEC[next_method]['suffix']}_freeze"
+            return _METHOD_EXEC[next_method]["suffix"]
     if status == "candidates_ready":
         return "block_candidates"
     return "block_candidates"
 
 
-# --- per-method freeze / run / collect routing ----------------------------------
-# Each freeze and run has a per-method router (trivial fail-check), built by a
-# factory so adding a method needs no new wrapper. The returned callables carry a
-# descriptive ``__name__`` so LangGraph traces read clearly.
-# All collect nodes share a single router that can loop back to the next
-# pending method's freeze when multiple executable methods are confirmed.
-
-def route_after_freeze_for(suffix: str):
-    """Return a named router: fail on failure, else advance to ``{suffix}_run``."""
-    def router(state: TopLevelState) -> str:
-        return "fail" if _output(state).get("status") == "failed" else f"{suffix}_run"
-
-    router.__name__ = f"route_after_{suffix}_freeze"
-    router.__qualname__ = router.__name__
-    return router
-
-
-def route_after_run_for(suffix: str):
-    """Return a named router: fail on failure, else advance to ``{suffix}_collect``."""
-    def router(state: TopLevelState) -> str:
-        return "fail" if _output(state).get("status") == "failed" else f"{suffix}_collect"
-
-    router.__name__ = f"route_after_{suffix}_run"
-    router.__qualname__ = router.__name__
-    return router
-
-
-def route_after_method_collect(state: TopLevelState) -> str:
-    """After any method collect: loop to next pending method or proceed to review."""
+def route_after_candidate_method(state: TopLevelState) -> str:
     status = _output(state).get("status")
-    if status in ("failed", "materialization_failed"):
+    if status in {"failed", "materialization_failed"}:
+        return "fail"
+    return "materialize" if status in {"miniprot_collected", "augustus_collected"} else "fail"
+
+
+def route_after_materialization(state: TopLevelState) -> str:
+    status = _output(state).get("status")
+    if status in {"failed", "materialization_failed"}:
         return "fail"
     if status == "pending_execution":
         return "run_methods"
-    return "block_candidates"
-
-
-# --- EVM / BUSCO routing (Phase 7 task 05) ------------------------------------
-
-def route_after_evm_freeze(state: TopLevelState) -> str:
-    status = _output(state).get("status")
-    if status == "failed":
-        return "fail"
+    if status == "candidates_ready":
+        return "block_candidates"
     if status == "evm_collected":
-        return "busco_freeze"
-    return "evm_run"
+        return "busco"
+    return "fail"
 
 
-def route_after_evm_run(state: TopLevelState) -> str:
-    return "fail" if _output(state).get("status") == "failed" else "evm_collect"
-
-
-def route_after_evm_collect(state: TopLevelState) -> str:
-    return "fail" if _output(state).get("status") in ("failed", "materialization_failed") else "busco_freeze"
-
-
-def route_after_busco_freeze(state: TopLevelState) -> str:
+def route_after_evm(state: TopLevelState) -> str:
     status = _output(state).get("status")
-    if status == "failed":
+    if status in {"failed", "materialization_failed"}:
         return "fail"
-    if status == "merge_accepted":
-        return "block_final"
-    return "busco_run"
+    if status == "evm_outputs_collected":
+        return "materialize"
+    if status == "evm_collected":
+        return "busco"
+    return "fail"
 
 
-def route_after_busco_run(state: TopLevelState) -> str:
-    status = _output(state).get("status")
-    if status == "failed":
-        return "fail"
-    if status == "merge_accepted":
-        return "block_final"
-    return "busco_collect"
-
-
-def route_after_busco_collect(state: TopLevelState) -> str:
-    return "block_final"
+def route_after_busco(state: TopLevelState) -> str:
+    return "fail" if _output(state).get("status") == "failed" else "block_final"
 
 
 def route_after_candidate_gate(state: TopLevelState) -> str:
@@ -223,7 +188,7 @@ def route_after_merge_gate(state: TopLevelState) -> str:
     """After merge gate: proceed to EVM merge execution or stop."""
     if _supervision(state) in TERMINAL_STATES:
         return "end" if _supervision(state) == "blocked_human" else "fail"
-    return "evm_freeze"
+    return "evm"
 
 
 def route_after_final_gate(state: TopLevelState) -> str:

@@ -6,14 +6,16 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from app.configuration import load_descriptor_registry
+from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import persist_frozen_attempt
-from app.execution.method_runner import build_frozen_attempt
-from app.execution.parameter_attempts import (
-    ParameterAttemptStateError,
-    current_parameter_attempt,
-    update_current_parameter_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
 )
+from app.execution.method_runner import build_frozen_attempt
+from app.execution.parameter_attempts import current_parameter_attempt
 from app.schemas.artifacts import (
     HIC_ASSEMBLY_FILE,
     HIC_CONTACT_MAP,
@@ -21,12 +23,9 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_FROZEN_PARAMETERS,
     ParameterAttempt,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
-from app.stages.hic_scaffolding.method_application.lifecycle import (
-    HiCMethodLifecycle,
-    build_method_graph,
+from app.stages.hic_scaffolding.method_application.support import (
     collect_method_artifacts,
     hic_output,
     update_hic_output,
@@ -46,11 +45,16 @@ from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
 
 METHOD = "hic_scaffolding.candidate.autohic"
-LIFECYCLE = HiCMethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="hic_scaffolding",
     name="autohic",
     method_name=METHOD,
     frozen_status="autohic_frozen",
     ran_status="autohic_ran",
+    cleanup_outputs=False,
+    process_failure="collect",
+    failure_kind="execution_evidence",
+    owner=ParameterAttemptOwner(),
 )
 
 
@@ -274,6 +278,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         env=output.get("env"),
         env_spec=env_spec,
         metadata={
+            "parameter_attempt_id": parameter_attempt.attempt_id,
             "work_output_dir": str(output_dir),
             "autohic_result_dir": str(top_result),
             "scaffold_fasta": str(scaffold_fasta),
@@ -292,7 +297,6 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         },
     )
     try:
-        frozen_attempt_ref = persist_frozen_attempt(state, attempt)
         command_ref = write_autohic_parameter_artifact(
             state,
             parameter_attempt.attempt_id,
@@ -309,20 +313,10 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
             method_name=METHOD,
             scope="attempt",
         )
-        parameter_attempts = update_current_parameter_attempt(
-            output,
-            method_id=METHOD,
-            label=LIFECYCLE.name,
-            status="frozen",
-            frozen_parameters_ref=frozen_parameters_ref.model_dump(mode="json"),
-            command_ref=command_ref.model_dump(mode="json"),
-            frozen_attempt_ref=frozen_attempt_ref.model_dump(mode="json"),
-        )
     except (
         OSError,
         ValueError,
         AutoHiCParameterPersistenceError,
-        ParameterAttemptStateError,
     ) as exc:
         return update_hic_output(
             state,
@@ -332,11 +326,13 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
                 "reason": f"AutoHiC command could not be frozen: {exc}",
             },
         )
-    return update_hic_output(
+    return freeze_method_attempts(
         state,
-        {
-            "status": LIFECYCLE.frozen_status,
-            "parameter_attempts": parameter_attempts,
+        LIFECYCLE,
+        [attempt],
+        owner_metadata={
+            "frozen_parameters_ref": frozen_parameters_ref.model_dump(mode="json"),
+            "command_ref": command_ref.model_dump(mode="json"),
         },
     )
 

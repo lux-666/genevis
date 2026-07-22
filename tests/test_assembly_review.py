@@ -27,11 +27,17 @@ from app.schemas.artifacts import (
     ReviewDecisionArtifact,
 )
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.state import initial_state
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.assembly_review.builder import build_stage
-from app.stages.assembly_review.method_application.busco import build_busco_graph
-from app.stages.assembly_review.method_application.quast import build_quast_graph
+from app.stages.assembly_review.method_application.busco import (
+    build_busco_graph,
+    freeze_busco_attempts,
+)
+from app.stages.assembly_review.method_application.quast import (
+    build_quast_graph,
+    freeze_quast_attempts,
+)
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
 
@@ -89,6 +95,55 @@ class AssemblyReviewStageTests(unittest.TestCase):
             ]
             self.assertNotIn("app.stages.assembly_review.nodes", imports)
             self.assertNotIn("app.stages.assembly_review.routing", imports)
+
+    def test_metric_freeze_callbacks_only_prepare_evaluating_state(self):
+        state = {
+            "session_id": "s1",
+            "stage_outputs": {
+                "assembly_review": {
+                    "status": "evaluated",
+                    "execution_mode": "local",
+                }
+            },
+        }
+
+        self.assertEqual(freeze_quast_attempts(state), {})
+        self.assertEqual(freeze_busco_attempts(state), {})
+
+    def test_metric_graphs_resume_ran_checkpoint_at_collect(self):
+        for module_name, build_graph, ran_status in [
+            (
+                "app.stages.assembly_review.method_application.quast",
+                build_quast_graph,
+                "quast_ran",
+            ),
+            (
+                "app.stages.assembly_review.method_application.busco",
+                build_busco_graph,
+                "busco_ran",
+            ),
+        ]:
+            with self.subTest(module=module_name):
+                state = {
+                    "session_id": "s1",
+                    "stage_outputs": {
+                        "assembly_review": {"status": ran_status}
+                    },
+                }
+                with (
+                    patch(
+                        f"{module_name}.freeze_{module_name.rsplit('.', 1)[-1]}_attempts",
+                        side_effect=AssertionError("ran checkpoint must bypass freeze"),
+                    ) as freeze,
+                    patch(
+                        f"{module_name}.collect_{module_name.rsplit('.', 1)[-1]}_artifacts",
+                        return_value={},
+                    ) as collect,
+                ):
+                    build_graph().invoke(state)
+
+                freeze.assert_not_called()
+                collect.assert_called_once()
 
     def _build_state(
         self,
@@ -1246,6 +1301,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     "execution_mode": "local",
                     "env": {"PATH": "/nonexistent"},
                     "quast_parameters": {"threads": 1},
+                    "review_plan": {"status": "evaluating"},
                     "candidates": [
                         {
                             "candidate_id": "s1:assembly.candidate.flye",
@@ -1263,11 +1319,15 @@ class AssemblyReviewStageTests(unittest.TestCase):
                     return_value=(EnvSpec(conda_env="env_geno_exec"), [], None),
                 ):
                     result = freeze_quast_attempts(state)
-                attempts = result.get("stage_outputs", {}).get("assembly_review", {}).get("quast_frozen_attempt_refs", [])
+                attempts = (
+                    result.get("stage_outputs", {})
+                    .get("assembly_review", {})
+                    .get("execution_attempts", [])
+                )
                 self.assertTrue(attempts, "expected at least one frozen attempt")
                 attempt = load_frozen_attempt(
                     {**state, **result},
-                    attempts[0],
+                    attempts[0]["frozen_attempt_ref"],
                     expected_stage="assembly_review",
                     expected_method_name="assembly_review.eval.quast",
                 )
@@ -1483,6 +1543,43 @@ class AssemblyRerunTests(unittest.TestCase):
             **self._review_binding(state),
         )
 
+    @staticmethod
+    def _run_scheduled_rerun(state: dict, request):
+        from app.control.lifecycle import resume_review_state
+        from app.stages.assembly.method_application.flye import (
+            build_flye_rerun_graph,
+        )
+
+        update = resume_review_state(state, request)
+        scheduled = {**state, **update}
+        return update, build_flye_rerun_graph().invoke(scheduled)
+
+    @staticmethod
+    def _sqlite_round_trip(state: dict) -> dict:
+        """Persist one rerun boundary and reload it through SQLite."""
+
+        from langgraph.graph import END, START, StateGraph
+
+        from app.graph.checkpointer import get_checkpointer
+        from app.schemas.state import TopLevelState
+
+        graph = StateGraph(TopLevelState)
+        graph.add_node("done", lambda _state: {})
+        graph.add_edge(START, "done")
+        graph.add_edge("done", END)
+        config = {"configurable": {"thread_id": state["session_id"]}}
+
+        saver = get_checkpointer("sqlite", data_dir=state["data_dir"])
+        compiled = graph.compile(checkpointer=saver)
+        compiled.update_state(config, state)
+        saver.conn.close()
+
+        reloaded_saver = get_checkpointer("sqlite", data_dir=state["data_dir"])
+        reloaded = graph.compile(checkpointer=reloaded_saver)
+        snapshot = reloaded.get_state(config)
+        reloaded_saver.conn.close()
+        return dict(snapshot.values)
+
     def _renew_review_request(self, state: dict, marker: str) -> dict:
         """Model a new human-gate cycle after the prior request was decided."""
         from app.storage.ledger import Ledger
@@ -1563,7 +1660,6 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_creates_distinct_candidate_with_provenance(self):
         """Rerun produces a new candidate; original candidate is preserved."""
-        from app.control.lifecycle import resume_review_state
         from app.review.base import ResumeReviewRequest
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1587,13 +1683,21 @@ class AssemblyRerunTests(unittest.TestCase):
                 **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
-                update = resume_review_state(state, request)
+                update, completed = self._run_scheduled_rerun(state, request)
 
             self.assertEqual(update["current_stage"], "assembly_review")
             self.assertEqual(update["supervision_state"], "running_stage")
             self.assertIsNone(update.get("active_interrupt"))
+            self.assertEqual(
+                update["stage_outputs"]["assembly"]["status"],
+                "flye_rerun_planned",
+            )
+            self.assertNotIn(
+                "execution_attempts",
+                update["stage_outputs"]["assembly"],
+            )
 
-            new_refs = update["stage_outputs"]["assembly"]["selected_candidate_refs"]
+            new_refs = completed["stage_outputs"]["assembly"]["selected_candidate_refs"]
             self.assertEqual(len(new_refs), len(original_refs) + 1)
             for ref in original_refs:
                 self.assertIn(ref, new_refs)
@@ -1607,11 +1711,77 @@ class AssemblyRerunTests(unittest.TestCase):
             self.assertNotIn("execution_mode", bundle["metadata"])
             self.assertEqual(bundle["status"], "executed")
 
+    def test_sqlite_recovery_preserves_flye_rerun_boundaries(self):
+        """A restarted process resumes the request, frozen, and ran boundaries."""
+
+        from app.control.lifecycle import resume_review_state
+        from app.execution.lifecycle import run_method_attempts
+        from app.stages.assembly.method_application.flye import (
+            RERUN_LIFECYCLE,
+            collect_flye_rerun_artifacts,
+            freeze_flye_rerun_attempt,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = self._fake_flye_bin(tmpdir)
+            state = self._build_blocked_state(tmpdir)
+            request = self._rerun_request(state)
+            scheduled = {**state, **resume_review_state(state, request)}
+
+            planned = self._sqlite_round_trip(scheduled)
+            self.assertEqual(
+                planned["stage_outputs"]["assembly"]["status"],
+                "flye_rerun_planned",
+            )
+            self.assertNotIn(
+                "execution_attempts", planned["stage_outputs"]["assembly"]
+            )
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                frozen = {
+                    **planned,
+                    **freeze_flye_rerun_attempt(planned),
+                }
+            self.assertEqual(
+                frozen["stage_outputs"]["assembly"]["status"],
+                RERUN_LIFECYCLE.frozen_status,
+            )
+            frozen = self._sqlite_round_trip(frozen)
+            self.assertEqual(
+                frozen["stage_outputs"]["assembly"]["status"],
+                RERUN_LIFECYCLE.frozen_status,
+            )
+            [cursor] = frozen["stage_outputs"]["assembly"]["execution_attempts"]
+            frozen_ref = cursor["frozen_attempt_ref"]
+
+            with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                ran = {
+                    **frozen,
+                    **run_method_attempts(frozen, RERUN_LIFECYCLE),
+                }
+            self.assertEqual(
+                ran["stage_outputs"]["assembly"]["status"],
+                RERUN_LIFECYCLE.ran_status,
+            )
+            ran = self._sqlite_round_trip(ran)
+            [ran_cursor] = ran["stage_outputs"]["assembly"]["execution_attempts"]
+            self.assertEqual(ran_cursor["frozen_attempt_ref"], frozen_ref)
+            self.assertEqual(ran_cursor["status"], "executed")
+
+            completed = {
+                **ran,
+                **collect_flye_rerun_artifacts(ran),
+            }
+            self.assertEqual(
+                completed["stage_outputs"]["assembly"]["status"],
+                "draft_ready",
+            )
+
     def test_rerun_replay_reuses_existing_completed_bundle_without_side_effects(self):
         """Replaying stale checkpoint state reuses the completed rerun bundle."""
-        from app.storage.ledger import Ledger
         from app.control.lifecycle import resume_review_state
         from app.storage.artifacts import read_artifact_records
+        from app.storage.ledger import Ledger
 
         with tempfile.TemporaryDirectory() as tmpdir:
             success_bin = self._fake_flye_bin(tmpdir, name="bin_success")
@@ -1620,7 +1790,7 @@ class AssemblyRerunTests(unittest.TestCase):
             request = self._rerun_request(state)
 
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
-                first_update = resume_review_state(state, request)
+                _scheduled, first_update = self._run_scheduled_rerun(state, request)
 
             first_refs = first_update["stage_outputs"]["assembly"]["selected_candidate_refs"]
             rerun_ref = first_refs[-1]
@@ -1656,7 +1826,6 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_after_failed_attempt_uses_next_index(self):
         """Failed rerun output does not block the next parameter adjustment."""
-        from app.control.lifecycle import ResumeValidationError, resume_review_state
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fail_bin = self._fake_flye_bin(tmpdir, fail=True, name="bin_fail")
@@ -1664,12 +1833,18 @@ class AssemblyRerunTests(unittest.TestCase):
             state = self._build_blocked_state(tmpdir)
 
             with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
-                with self.assertRaises(ResumeValidationError):
-                    resume_review_state(state, self._rerun_request(state, genome_size=150000000))
+                _scheduled, failed = self._run_scheduled_rerun(
+                    state,
+                    self._rerun_request(state, genome_size=150000000),
+                )
+            self.assertEqual(failed["stage_outputs"]["assembly"]["status"], "failed")
 
             state = self._renew_review_request(state, "rerun_1_failed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
-                update = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
+                _scheduled, update = self._run_scheduled_rerun(
+                    state,
+                    self._rerun_request(state, genome_size=200000000),
+                )
 
             rerun_ref = update["stage_outputs"]["assembly"]["selected_candidate_refs"][-1]
             self.assertIn("flye_rerun_2_candidate.json", rerun_ref)
@@ -1679,7 +1854,6 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_after_failed_then_successful_attempt_uses_next_free_index(self):
         """A selected rerun after a failed attempt does not get mistaken for stale replay."""
-        from app.control.lifecycle import ResumeValidationError, resume_review_state
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fail_bin = self._fake_flye_bin(tmpdir, fail=True, name="bin_fail")
@@ -1687,17 +1861,26 @@ class AssemblyRerunTests(unittest.TestCase):
             state = self._build_blocked_state(tmpdir)
 
             with patch.dict(os.environ, {"PATH": f"{fail_bin}:{os.environ['PATH']}"}):
-                with self.assertRaises(ResumeValidationError):
-                    resume_review_state(state, self._rerun_request(state, genome_size=150000000))
+                _scheduled, failed = self._run_scheduled_rerun(
+                    state,
+                    self._rerun_request(state, genome_size=150000000),
+                )
+            self.assertEqual(failed["stage_outputs"]["assembly"]["status"], "failed")
 
             state = self._renew_review_request(state, "rerun_1_failed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
-                first_success = resume_review_state(state, self._rerun_request(state, genome_size=200000000))
+                _scheduled, first_success = self._run_scheduled_rerun(
+                    state,
+                    self._rerun_request(state, genome_size=200000000),
+                )
 
             state["stage_outputs"]["assembly"]["selected_candidate_refs"] = first_success["stage_outputs"]["assembly"]["selected_candidate_refs"]
             state = self._renew_review_request(state, "rerun_2_completed")
             with patch.dict(os.environ, {"PATH": f"{success_bin}:{os.environ['PATH']}"}):
-                second_success = resume_review_state(state, self._rerun_request(state, genome_size=250000000))
+                _scheduled, second_success = self._run_scheduled_rerun(
+                    state,
+                    self._rerun_request(state, genome_size=250000000),
+                )
 
             rerun_ref = second_success["stage_outputs"]["assembly"]["selected_candidate_refs"][-1]
             self.assertIn("flye_rerun_3_candidate.json", rerun_ref)
@@ -1771,7 +1954,6 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_rerun_failed_assembly_does_not_discard_prior_candidates(self):
         """A failed rerun raises but does not modify prior candidate refs."""
-        from app.control.lifecycle import ResumeValidationError, resume_review_state
         from app.review.base import ResumeReviewRequest
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1788,8 +1970,9 @@ class AssemblyRerunTests(unittest.TestCase):
                 **self._review_binding(state),
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
-                with self.assertRaises(ResumeValidationError):
-                    resume_review_state(state, request)
+                _scheduled, failed = self._run_scheduled_rerun(state, request)
+
+            self.assertEqual(failed["stage_outputs"]["assembly"]["status"], "failed")
 
             self.assertEqual(
                 state["stage_outputs"]["assembly"]["selected_candidate_refs"],
@@ -1798,9 +1981,9 @@ class AssemblyRerunTests(unittest.TestCase):
 
     def test_candidate_comparison_replay_reuses_existing_artifact(self):
         """Comparison generation is idempotent when candidates and signals are unchanged."""
-        from app.storage.ledger import Ledger
-        from app.storage.artifacts import read_artifact_records
         from app.stages.assembly_review.nodes import generate_candidate_comparison
+        from app.storage.artifacts import read_artifact_records
+        from app.storage.ledger import Ledger
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._build_blocked_state(tmpdir, rerun_count=1)
@@ -1832,8 +2015,8 @@ class AssemblyRerunTests(unittest.TestCase):
             self.assertEqual(Ledger(state["data_dir"]).read_events(state["session_id"]), events_before)
 
     def test_review_report_replay_does_not_duplicate_artifact_records(self):
-        from app.storage.artifacts import read_artifact_records
         from app.stages.assembly_review.nodes import human_review_gate
+        from app.storage.artifacts import read_artifact_records
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._build_blocked_state(tmpdir, persist_request=False)
@@ -1886,12 +2069,10 @@ class AssemblyRerunTests(unittest.TestCase):
             )
             with patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
                 update = resume_review_state(state, request)
-
-            merged = {**state, **update}
-            # Clear execution_mode so graph skips QUAST/BUSCO (no tools in test env)
-            merged["stage_outputs"]["assembly_review"].pop("execution_mode", None)
-            graph = build_stage()
-            result = graph.invoke(merged)
+                merged = {**state, **update}
+                # Skip QUAST/BUSCO after the rerun; this test covers rerun routing.
+                merged["stage_outputs"]["assembly_review"].pop("execution_mode", None)
+                result = build_stage().invoke(merged)
 
             ar_out = result["stage_outputs"]["assembly_review"]
             self.assertIn("candidate_comparison_ref", ar_out)

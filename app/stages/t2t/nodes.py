@@ -12,21 +12,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from app.storage.ledger import Ledger
+from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.storage.artifacts import (
-    publish_or_recover_work_artifact,
-    register_artifact_records,
-)
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_execution_result,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
-from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.workflow import next_stage_name
+from app.execution.method_runner import build_frozen_attempt
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_decision, persist_review_request
 from app.schemas.artifacts import (
@@ -42,7 +37,6 @@ from app.schemas.artifacts import (
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -52,11 +46,24 @@ from app.stages.base import (
     stage_work_dir,
     update_stage_output,
 )
-from app.stages.resource_specs import assembly_resource_spec
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import assembly_resource_spec
+from app.storage.artifacts import (
+    publish_or_recover_work_artifact,
+    register_artifact_records,
+)
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 T2T_ALIGNMENT_METHOD = "t2t.alignment.minimap2"
 T2T_CONTRACT_METHOD = "t2t.contract"
+T2T_ALIGNMENT_LIFECYCLE = MethodExecutionLifecycle(
+    stage="t2t",
+    name="t2t minimap2",
+    method_name=T2T_ALIGNMENT_METHOD,
+    frozen_status="alignment_frozen",
+    ran_status="alignment_ran",
+)
 DEFAULT_THRESHOLDS = {
     "min_motif_copies": 4,
     "terminal_window_bp": 10_000,
@@ -65,6 +72,16 @@ DEFAULT_THRESHOLDS = {
     "min_overlap_bp": 500,
     "min_supporting_reads": 1,
 }
+
+
+def build_t2t_alignment_graph():
+    """Build the shared minimap2 alignment lifecycle."""
+
+    return build_method_graph(
+        T2T_ALIGNMENT_LIFECYCLE,
+        freeze_t2t_alignment,
+        build_t2t_candidates,
+    )
 
 
 @dataclass(frozen=True)
@@ -338,44 +355,12 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
         env_spec=env_spec,
         metadata={"paf_path": str(paf_path), "assembly_ref": out["input_assembly_ref"], "reads_ref": str(alignment_reads_ref)},
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-    return _update(
+    return freeze_method_attempts(
         state,
-        {
-            "status": "alignment_frozen",
-            "alignment_attempt_ref": attempt_ref.model_dump(mode="json"),
-            "alignment_paf_ref": str(paf_path),
-        },
+        T2T_ALIGNMENT_LIFECYCLE,
+        [attempt],
+        stage_updates={"alignment_paf_ref": str(paf_path)},
     )
-
-
-def run_t2t_alignment(state: TopLevelState) -> dict:
-    """Run the frozen minimap2 evidence alignment."""
-    out = _output(state)
-    if out.get("status") != "alignment_frozen":
-        return {}
-    attempt = load_frozen_attempt(
-        state,
-        out["alignment_attempt_ref"],
-        expected_stage="t2t",
-        expected_method_name=T2T_ALIGNMENT_METHOD,
-    )
-    outcome = run_frozen_attempt(
-        attempt,
-        data_dir=absolute_data_dir(state),
-        input_manifest_ref=state.get("input_manifest_ref", ""),
-        fail_label="t2t minimap2",
-    )
-    result_ref = persist_execution_result(
-        state,
-        stage="t2t",
-        method_name=T2T_ALIGNMENT_METHOD,
-        result=outcome.result,
-        error=outcome.error,
-    ).model_dump(mode="json")
-    if not outcome.success:
-        return _update(state, {"status": "failed", "reason": outcome.error, "alignment_result": result_ref})
-    return _update(state, {"status": "alignment_ran", "alignment_result": result_ref})
 
 
 def build_t2t_candidates(state: TopLevelState) -> dict:
@@ -385,19 +370,12 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         return {}
     if out.get("status") == "candidates_built":
         return {}
-    attempt = load_frozen_attempt(
+    executions = load_method_executions(
         state,
-        out["alignment_attempt_ref"],
-        expected_stage="t2t",
-        expected_method_name=T2T_ALIGNMENT_METHOD,
+        T2T_ALIGNMENT_LIFECYCLE,
     )
-    load_execution_evidence(
-        state,
-        out["alignment_result"],
-        expected_stage="t2t",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=T2T_ALIGNMENT_METHOD,
-    )
+    if len(executions) != 1:
+        return _fail(state, "t2t minimap2 requires exactly one execution attempt")
     candidates_source = Path(out["work_dir"]) / "telomere_extension_candidates.tsv"
     try:
         assembly_ends = {row["sequence"]: row for row in _read_tsv(Path(out["assembly_telomere_scan_ref"]))}

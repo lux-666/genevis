@@ -4,8 +4,7 @@
 
 **Accepted:** 2026-07-15
 
-**Implementation:** Core stage implemented; cross-cutting Data v2 conformance is
-tracked by `data-v2.md`
+**Implementation:** Implemented
 
 **Scope:** Parent-graph ownership, the AutoHiC-only Hi-C stage, and its
 parameter-recommendation gate
@@ -132,7 +131,7 @@ assembly parameter gate.
 
 ### 4.2 Other AutoHiC configuration
 
-The first version exposes no other LLM-recommended parameters:
+The current implementation exposes no other LLM-recommended parameters:
 
 | Configuration | Source |
 |---|---|
@@ -159,7 +158,7 @@ chooses between:
 Rejecting an AutoHiC result is a reviewed adoption decision. It is not a skip
 mode and does not reintroduce method selection.
 
-## 6. Implementation Changes
+## 6. Implemented Cutover
 
 1. Remove `select_hic_mode`, `write_hic_skip`, the one-item candidate list, and
    the method-selection review path.

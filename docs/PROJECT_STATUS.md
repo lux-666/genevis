@@ -1,10 +1,10 @@
 # Project Status
 
 A living index of what the Gene Agent pipeline can execute today, how execution
-works, and what is still on the roadmap. This document links to the detailed
-phase docs rather than repeating them.
+works, and what is still on the roadmap. Normative details live in the accepted
+specifications under `docs/architecture/`.
 
-Last updated 2026-07-01.
+Last updated 2026-07-21.
 
 ## Execution model
 
@@ -20,10 +20,10 @@ stage. See `app/schemas/descriptors.py` and `docs/descriptor_spec.md`.
 Each stage runs its selected method through a uniform freeze → run → collect flow:
 
 1. A planning node resolves inputs and parameters for the chosen method.
-2. `build_frozen_attempt` (`app/execution/method_runner.py`) writes a shell
-   script and freezes it into a `FrozenAttemptSpec` (script path, working dir,
-   expected outputs, env / conda fields, metadata) — a deterministic, replayable
-   execution unit.
+2. The stage adapter writes its method-specific shell script, then
+   `build_frozen_attempt` (`app/execution/method_runner.py`) assembles the script
+   path, working dir, expected outputs, env / conda fields, and metadata into a
+   deterministic, replayable `FrozenAttemptSpec`.
 3. `run_frozen_attempt` executes the spec via `LocalRunner`
    (`app/execution/local_runner.py`, dispatching through `conda run` when the
    attempt declares an env), records `attempt_started` / `attempt_failed` ledger
@@ -31,12 +31,14 @@ Each stage runs its selected method through a uniform freeze → run → collect
 4. A collect node registers artifacts, materializes any candidate bundle, and
    advances stage status, recording `attempt_succeeded` / `artifact_registered`.
 
-Stages share this via the `MethodLifecycle` + `build_method_graph` convention
-(`app/stages/assembly/method_application/lifecycle.py`): a method module owns
-only how it freezes an attempt and collects its artifacts; the run step and
-ledger bookkeeping are common. `flye.py` and `hifiasm.py` are the reference
-adapters. The parent graph (`app/graph/builder.py`) is a thin router that
-composes the per-stage subgraphs and returns to a controller between stages.
+Stages share `MethodExecutionLifecycle` and `build_method_graph` from
+`app/execution/lifecycle.py`. A method adapter owns only preparation of the
+immutable runner input and biological artifact collection. The shared graph
+resumes a frozen attempt at `run`, resumes a completed run at `collect`, and
+owns runner invocation plus canonical execution evidence. The parent graph
+(`app/graph/builder.py`) is a thin router that composes the per-stage subgraphs
+and returns to a controller between stages. The complete contract is
+[`architecture/execution-lifecycle.md`](architecture/execution-lifecycle.md).
 
 ## Invariant: registered = executable
 
@@ -59,7 +61,7 @@ Stages in pipeline order, with the methods registered under each stage's
 | `inventory` | — | No registered methods; assembles the run manifest. |
 | `read_qc` | `read_qc.long_read_stats.seqkit_stats`, `read_qc.length_filter.seqkit_seq`, `read_qc.make_fofn.local` | Stats always run; length filter can be skipped (planner offers a skip role); FOFN handoff always runs. |
 | `genome_survey` | `genome_survey.kmer_count.jellyfish`, `genome_survey.model.genomescope2` | k-mer count feeds the GenomeScope2 model. |
-| `assembly` | `assembly.candidate.flye`, `assembly.candidate.hifiasm`, `assembly.candidate.nextdenovo` | Candidate assemblers; route/candidate selection may open a human gate. |
+| `assembly` | `assembly.candidate.flye`, `assembly.candidate.hifiasm`, `assembly.candidate.hifiasm_ont`, `assembly.candidate.nextdenovo` | Candidate assemblers; route/candidate selection may open a human gate. |
 | `assembly_dedup` | `assembly_dedup.purge_dups` | Haplotig / duplicate purging. |
 | `assembly_review` | `assembly_review.eval.quast`, `assembly_review.eval.busco` | Evaluation methods feeding a mandatory review gate. |
 | `hic_scaffolding` | `hic_scaffolding.candidate.autohic` | End-to-end AutoHiC candidate; emits chromosome FASTA, `.hic`, `.assembly`, and HTML report, then blocks at the GeneAgent adoption gate. |
@@ -109,10 +111,11 @@ executable:
    `descriptors/packages/`, and register all three in
    `descriptors/registry.yaml` (`packages`, `methods`, and the stage's
    `by_stage` list).
-2. Implement the runner: for a candidate stage, add a `method_application`
-   adapter following the `MethodLifecycle` + freeze/collect pattern (see
-   `app/stages/assembly/method_application/hifiasm.py`); otherwise add the
-   stage's own freeze/run/collect nodes.
+2. Implement a `method_application` adapter that prepares a complete
+   `FrozenAttemptSpec` and collects biological outputs. Configure it with the
+   shared `MethodExecutionLifecycle` and `build_method_graph`; do not add a
+   stage-local lifecycle or runner path. See
+   `app/stages/assembly/method_application/hifiasm.py`.
 3. Wire it into the stage: update the stage `routing.py`, `builder.py`, and any
    method constants so the graph can dispatch to the new method.
 4. Add a run-config parameter model and validation if the method is locally
@@ -124,26 +127,16 @@ executable:
 7. Satisfy the invariant: `tests/test_registry_executable_invariant.py` requires
    the newly registered method to have a wired runner.
 
-## Current phase / next
+## Current status
 
 The registry has been trimmed to executable-only methods; the candidate-only
-mechanism and its ~24 placeholder methods have been removed. hifiasm was just
-made executable and now runs through the shared assembly `MethodLifecycle`.
+mechanism and its ~24 placeholder methods have been removed. Executable
+methods now use the shared execution lifecycle under `app/execution/`.
 
-Next: TBD — see the linked phase docs for the active work stream.
+Remaining simplification work is tracked in `docs/handoff.md` and
+`docs/architecture/refactor/architecture-contracts.md`.
 
-## Known issues
-
-Pre-existing test failures unrelated to current feature work:
-
-- The 7 `AssemblyRerunTests` Flye failures are pre-existing and not caused by
-  recent changes.
-- `related_species_evidence` tests require the NCBI metazoa reference to be
-  installed locally (`scripts/install_ncbi_metazoa_reference.py`).
-- `test_durable_resume` can fail on macOS due to a `/private/var` vs `/var`
-  symlink path discrepancy.
-
-## Phase docs index
+## Current documentation
 
 Coordination and design references:
 
@@ -151,21 +144,9 @@ Coordination and design references:
 - [docs/handoff.md](handoff.md) — current status, next task, verification, risks.
 - [docs/governance.md](governance.md) — coordinator responsibilities, source-of-truth order.
 - [docs/architecture.md](architecture.md) — parent graph, modules, state categories.
+- [docs/architecture/execution-lifecycle.md](architecture/execution-lifecycle.md) — shared executable-method lifecycle and attempt ownership.
 - [docs/stage_contracts.md](stage_contracts.md) — per-stage inputs/outputs/review triggers.
 - [docs/descriptor_spec.md](descriptor_spec.md) — descriptor registry and descriptor contracts.
 - [docs/beginner_mainline_guide.md](beginner_mainline_guide.md) — mainline walkthrough.
 - [docs/deployment/migration.md](deployment/migration.md) — new-host setup checklist.
 - [docs/deployment/mac_dev_server_pull.md](deployment/mac_dev_server_pull.md) — mac-dev / server git-pull workflow.
-
-Phase roadmap and per-phase folders:
-
-- [docs/phases/phase_completion_plan.md](phases/phase_completion_plan.md) — long-range roadmap.
-- [docs/phases/phase1/phase1.md](phases/phase1/phase1.md)
-- [docs/phases/phase2/phase2.md](phases/phase2/phase2.md)
-- [docs/phases/phase3/README.md](phases/phase3/README.md)
-- [docs/phases/phase4/README.md](phases/phase4/README.md)
-- [docs/phases/phase5/README.md](phases/phase5/README.md)
-- [docs/phases/phase6/](phases/phase6/) — HPC acceptance, resume CLI, TUI ask/plan preview.
-- [docs/phases/phase7/README.md](phases/phase7/README.md) — review-gate generalization through function-annotation execution.
-- [docs/phases/phase8/README.md](phases/phase8/README.md) — resource-resolution architecture (Phase 8 & 8.5).
-- [docs/phases/phase9/README.md](phases/phase9/README.md) — end-to-end pipeline integration test.

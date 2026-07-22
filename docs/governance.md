@@ -9,11 +9,10 @@ handoff clarity.
 
 The coordinator owns these responsibilities:
 
-- Keep `deep-research-report.md` as the biological design source.
+- Keep `docs/archive/deep-research-report.md` as the biological design source.
 - Keep `CLAUDE.md` as the engineering behavior source.
 - Keep architecture documents current before large implementation work.
-- Split work into phases that produce testable software.
-- Make sure each phase has clear exit criteria.
+- Split large work into testable slices with explicit exit criteria.
 - Make sure state, ledger, artifact, runner, review, and descriptor boundaries
   remain separate.
 - Leave a current handoff note whenever the work pauses.
@@ -43,10 +42,11 @@ rationale, and coordination procedure into one linear ranking:
   silently amend an accepted design; a mismatch is recorded as conformance
   debt.
 - `CLAUDE.md` and this document govern engineering/coordination procedure.
-- `deep-research-report.md` supplies biological rationale, not runtime storage
-  or software-state facts.
-- `docs/handoff.md` is a current work snapshot. Phase documents and Git history
-  are implementation history, not normative contracts.
+- `docs/archive/deep-research-report.md` supplies biological rationale, not
+  runtime storage or software-state facts.
+- `docs/handoff.md` is a current work snapshot. Git history retains superseded
+  implementation and design records; the working tree keeps only current
+  contracts and operational documentation.
 
 Reference project files under `/Users/a1/Documents/BGIwork/rna_agent` are
 examples, not source of truth. Reuse patterns, not single-cell business names.
@@ -57,7 +57,7 @@ For each non-trivial change:
 
 1. State the assumption and success criteria.
 2. Add or update a focused test before behavior code when applicable.
-3. Keep edits scoped to the phase being worked.
+3. Keep edits scoped to the approved task.
 4. Update the relevant document in the same change.
 5. Run the verification commands listed in `docs/handoff.md`.
 6. Update `docs/handoff.md` if the next agent needs different instructions.

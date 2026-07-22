@@ -6,14 +6,12 @@ import json
 import shlex
 from pathlib import Path
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import publish_or_recover_work_artifact
 from app.execution.env_dispatch import resolve_method_env
-from app.execution.evidence import (
-    execution_log_paths,
-    load_execution_evidence,
-    load_frozen_attempt,
-    persist_frozen_attempt,
+from app.execution.lifecycle import (
+    MethodExecutionLifecycle,
+    build_method_graph,
+    freeze_method_attempts,
+    load_method_executions,
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import (
@@ -29,9 +27,7 @@ from app.stages.read_qc.constants import (
     LENGTH_FILTER_METHOD_NAME,
     METHOD_NAME,
 )
-from app.stages.read_qc.method_application.lifecycle import (
-    ReadQCMethodLifecycle,
-    build_method_graph,
+from app.stages.read_qc.method_application.support import (
     fail_update,
     filtered_long_reads_path,
     parse_seqkit_summary,
@@ -39,18 +35,24 @@ from app.stages.read_qc.method_application.lifecycle import (
     read_qc_output,
     update_read_qc_output,
 )
+from app.storage.artifacts import publish_or_recover_work_artifact
+from app.storage.ledger import Ledger
 
-LIFECYCLE = ReadQCMethodLifecycle(
+LIFECYCLE = MethodExecutionLifecycle(
+    stage="read_qc",
     name="seqkit seq",
+    method_name=LENGTH_FILTER_METHOD_NAME,
     frozen_status="length_filter_frozen",
     ran_status="length_filter_ran",
-    frozen_attempt_key="length_filter_frozen_attempt_ref",
-    execution_result_key="length_filter_execution_result",
 )
 
 
 def build_seqkit_length_filter_graph():
-    return build_method_graph(LIFECYCLE, freeze_length_filter_attempt, collect_length_filter_artifacts)
+    return build_method_graph(
+        LIFECYCLE,
+        freeze_length_filter_attempt,
+        collect_length_filter_artifacts,
+    )
 
 
 def freeze_length_filter_attempt(state: TopLevelState) -> dict:
@@ -83,33 +85,17 @@ def freeze_length_filter_attempt(state: TopLevelState) -> dict:
                   "filtered_long_reads_path": str(filtered_paths[0]), "filtered_long_reads_paths": [str(path) for path in filtered_paths],
                   "post_filter_stats_path": str(post_filter_stats_path), "thresholds": {"min_len": min_len}},
     )
-    attempt_ref = persist_frozen_attempt(state, attempt)
-    return update_read_qc_output(
-        state,
-        {
-            "status": LIFECYCLE.frozen_status,
-            LIFECYCLE.frozen_attempt_key: attempt_ref.model_dump(mode="json"),
-        },
-    )
+    return freeze_method_attempts(state, LIFECYCLE, [attempt])
 
 
 def collect_length_filter_artifacts(state: TopLevelState) -> dict:
     output = read_qc_output(state)
     if output.get("status") != LIFECYCLE.ran_status:
         return {}
-    attempt = load_frozen_attempt(
-        state,
-        output[LIFECYCLE.frozen_attempt_key],
-        expected_stage="read_qc",
-        expected_method_name=LENGTH_FILTER_METHOD_NAME,
-    )
-    result = load_execution_evidence(
-        state,
-        output[LIFECYCLE.execution_result_key],
-        expected_stage="read_qc",
-        expected_attempt_id=attempt.attempt_id,
-        expected_method_name=LENGTH_FILTER_METHOD_NAME,
-    )
+    executions = load_method_executions(state, LIFECYCLE)
+    if len(executions) != 1:
+        return fail_update(state, "SeqKit filter requires exactly one execution attempt")
+    attempt = executions[0].attempt
     paths = [Path(path) for path in attempt.metadata["filtered_long_reads_paths"]]
     stats_path = Path(attempt.metadata["post_filter_stats_path"])
     min_len = attempt.metadata["thresholds"]["min_len"]
@@ -120,28 +106,18 @@ def collect_length_filter_artifacts(state: TopLevelState) -> dict:
         "thresholds": {"min_len": min_len},
         "tool": "seqkit",
     }
-    try:
-        paths = [
-            publish_or_recover_work_artifact(
-                state.get("data_dir", "data"),
-                attempt.session_id,
-                path,
-                stage="read_qc",
-                method_name=LENGTH_FILTER_METHOD_NAME,
-                artifact_type=READ_QC_FILTERED_LONG_READS,
-                metadata=filtered_metadata,
-            ).path
-            for path in paths
-        ]
-    except FileNotFoundError as exc:
-        missing = [str(exc.filename or exc)]
-        stdout_path, stderr_path = execution_log_paths(state, result)
-        stdout = stdout_path.read_text(encoding="utf-8")
-        stderr = stderr_path.read_text(encoding="utf-8")
-        reason = f"seqkit seq expected outputs missing: {missing}"
-        detail = "\n".join(part for part in [reason, stdout.strip(), stderr.strip()] if part)
-        Ledger(state.get("data_dir", "data")).record_attempt_failed(attempt.session_id, attempt, return_code=0, error=detail)
-        return fail_update(state, detail)
+    paths = [
+        publish_or_recover_work_artifact(
+            state.get("data_dir", "data"),
+            attempt.session_id,
+            path,
+            stage="read_qc",
+            method_name=LENGTH_FILTER_METHOD_NAME,
+            artifact_type=READ_QC_FILTERED_LONG_READS,
+            metadata=filtered_metadata,
+        ).path
+        for path in paths
+    ]
     stats_metadata = {
         "attempt_id": attempt.attempt_id,
         "input_asset_ref": output.get("input_asset_ref"),

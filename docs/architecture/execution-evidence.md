@@ -70,12 +70,11 @@ authoritative process output.
 - For model-recommended parameterized execution after human approval, current
   and historical execution-record refs live only on the corresponding
   `ParameterAttempt`; the stage cursor selects an attempt by ID and does not
-  duplicate a method-specific execution cursor. Operator-directed Assembly
-  reruns remain bound through their review decision and candidate bundle. A
-  non-parameterized method may carry its execution-record `ArtifactRef` directly
-  (or a bounded list for a multi-command method). Small immutable projections
-  such as success, return code, or a bounded error may be used for routing and
-  display; the execution record remains authoritative.
+  duplicate a method-specific execution cursor. Ordinary methods, ordered
+  batches, and operator-directed Assembly reruns bind their frozen and execution
+  refs through the shared typed `execution_attempts` cursor. Small immutable
+  projections such as success, return code, or a bounded error may be used for
+  routing and display; the execution record remains authoritative.
 - Collect resolves refs only when it needs log bytes. It registers biological
   outputs, reports, and other stage-owned artifacts, but never registers the
   runner logs again.
@@ -95,7 +94,8 @@ For model-recommended Assembly and AutoHiC execution, the same
 `execution_ref`. Sealing an attempt binds both refs into its immutable manifest,
 so advancing the current attempt during a retry cannot erase which runner input
 produced an earlier result. This ownership rule does not include an
-operator-directed Assembly review rerun.
+operator-directed Assembly review rerun, which uses the direct-attempt owner
+defined by [`execution-lifecycle.md`](execution-lifecycle.md).
 
 ## Cutover
 

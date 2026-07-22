@@ -44,10 +44,8 @@ from app.stages.read_qc.routing import (
     route_after_resolve as route_after_qc_resolve,
 )
 from app.stages.t2t.routing import (
-    route_after_alignment_freeze,
-    route_after_alignment_run,
+    route_after_alignment,
     route_after_assembly_scan,
-    route_after_candidates,
     route_after_patches,
     route_after_read_prepare,
     route_after_read_scan,
@@ -111,9 +109,7 @@ class RoutingFailureContractTests(unittest.TestCase):
             route_after_assembly_scan,
             route_after_read_prepare,
             route_after_read_scan,
-            route_after_alignment_freeze,
-            route_after_alignment_run,
-            route_after_candidates,
+            route_after_alignment,
             route_after_patches,
             route_after_validation,
             route_after_report,

@@ -37,7 +37,6 @@ ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
 ASSEMBLY_PARAMETER_RESPONSE_PARSE = "assembly.parameter.response_parse"
 ASSEMBLY_PARAMETER_COMMAND = "assembly.parameter.command"
 ASSEMBLY_PARAMETER_FROZEN_PARAMETERS = "assembly.parameter.frozen_parameters"
-ASSEMBLY_PARAMETER_EXECUTION = "assembly.parameter.execution"
 ASSEMBLY_PARAMETER_REVIEW = "assembly.parameter.review"
 ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST = "assembly.parameter.attempt_manifest"
 ASSEMBLY_PARAMETER_REVIEW_FAILURE = "assembly.parameter.review_failure"
@@ -70,7 +69,6 @@ HIC_PARAMETER_RESPONSE_PARSE = "hic_scaffolding.parameter.response_parse"
 HIC_PARAMETER_RECOMMENDATION_MANIFEST = "hic_scaffolding.parameter.recommendation_manifest"
 HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
 HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
-HIC_PARAMETER_EXECUTION = "hic_scaffolding.parameter.execution"
 T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
 T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
 T2T_TELOMERIC_READS = "t2t.telomeric_reads"
@@ -577,7 +575,6 @@ class FunctionMethodResult(BaseModel):
     status: Literal["materialized", "skipped", "failed"] = "materialized"
     result_refs: dict[str, str] = Field(default_factory=dict)
     database_provenance: list[FunctionDatabaseProvenance] = Field(default_factory=list)
-    execution_result_ref: str | None = None
     warnings: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
