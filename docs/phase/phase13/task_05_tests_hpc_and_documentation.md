@@ -1,0 +1,132 @@
+# Task 05: Close Phase 13 with Lifecycle, Replay, and HPC Coverage
+
+**Phase**: 13
+**Status**: Planned
+**Depends on**: Tasks 01-04
+
+## Goal
+
+Prove the completed Hi-C and T2T behavior through focused unit tests,
+integration/replay tests, artifact and ledger assertions, and real-tool HPC
+smoke scripts. Update the stable architecture and operator documentation only
+after the implemented contracts pass.
+
+## Current State
+
+The focused suites for T2T, Hi-C scaffolding, and the shared execution
+lifecycle currently pass, but they do not cover the Phase 13 contracts. The
+T2T HPC smoke also reads `final_assembly_for_annotation` from the finishing
+bundle while the current `T2TFinishingBundle` exposes `output_assembly_ref`.
+The smoke checks the minimap2 PAF in work storage rather than requiring an
+immutable registered PAF.
+
+## Design
+
+### Test layers
+
+Use four complementary layers:
+
+1. pure tests for DTOs, response-shape parsing, catalog projection, sequence
+   junction calculations, and attempt-chain validation;
+2. stage tests with fake model and fake executables for complete graph routing,
+   approval resume, retry, collect, and commit;
+3. shared lifecycle tests for freeze/run/collect recovery and collect failure;
+4. skip-safe HPC smoke using real AutoHiC/minimap2 resources when configured.
+
+Tests must assert durable facts and refs, not only final status strings.
+
+### T2T coverage
+
+Add regression coverage for:
+
+- multiple ONT files and source attribution;
+- non-zero terminal distance and correct junction trimming;
+- no-read work-to-immutable publication;
+- PAF publication, artifact-index registration, and `attempt_succeeded`;
+- candidate-to-attempt/execution provenance;
+- mandatory parameter approval and unchanged execution handoff;
+- `ParameterAttemptOwner` freeze/run/collect replay;
+- collect failure after process success;
+- manual patch review after parameter approval;
+- downstream assembly resource handoff.
+
+### Hi-C coverage
+
+Add regression coverage for:
+
+- the expanded request/catalog surface;
+- response-shape-only parsing and mandatory approval;
+- initial attempt, execution-failure retry, and review-feedback retry;
+- immutable predecessor seals and retry evidence hydration;
+- replay after recommendation, approval, freeze, run, and collect;
+- retry exhaustion without fallback;
+- separation of the parameter approval gate and final adoption gate;
+- accepted candidate and retained-prior-assembly outcomes.
+
+### HPC smoke correction
+
+Update `tests/hpc/test_07_t2t.sh` to consume the canonical bundle field
+`output_assembly_ref`. Do not add a second compatibility field solely to make
+the smoke pass.
+
+When minimap2 executes, the smoke must assert:
+
+- canonical execution evidence exists;
+- the immutable PAF artifact exists and is indexed;
+- the T2T method has started and succeeded ledger facts;
+- the candidate table and bundle refer to the collected execution;
+- the final assembly ref exists and is valid FASTA;
+- the source assembly remains unchanged.
+
+Update the Hi-C smoke to cover parameter approval and, where practical, a
+bounded retry fixture without requiring an expensive second real AutoHiC run.
+Real retry execution may remain an opt-in extended smoke if runtime cost is too
+high, but the approval and artifact contracts must still be exercised.
+
+### Documentation update
+
+After implementation, update:
+
+- `docs/architecture/parameter-recommenders.md`;
+- `docs/architecture/execution-lifecycle.md` if T2T ownership changes its
+  conformance list;
+- `docs/stage_contracts.md`;
+- `docs/user_guide/parameter_recommendation.md`;
+- HPC quick-start documentation and current run-config examples.
+
+Documentation must repeat the Phase 13 parameter boundary precisely: species
+facts are supplied, response processing is shape-only, every valid
+recommendation is human-reviewed, and only the normal post-approval
+executability check may stop freeze.
+
+## Verification Commands
+
+At minimum, run the focused local suites:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 conda run -n gene_agent \
+  python -m unittest \
+  tests.test_t2t \
+  tests.test_hic_scaffolding \
+  tests.test_execution_lifecycle \
+  tests.test_parameter_attempt_schema \
+  tests.test_phase11_parameter_approval -v
+```
+
+Then run the broader affected suite selected by changed modules. The real HPC
+smokes remain environment-dependent and must report a clear skip/block reason
+when AutoHiC, minimap2, models, or real data are unavailable.
+
+## Acceptance Criteria
+
+- [ ] Focused unit and integration suites pass.
+- [ ] T2T lifecycle, provenance, multi-input, and junction regressions pass.
+- [ ] Hi-C initial and retry attempt regressions pass.
+- [ ] Parameter tests prove shape-only parsing and mandatory human approval.
+- [ ] Collect failures cannot produce successful durable output.
+- [ ] T2T HPC smoke uses `output_assembly_ref`.
+- [ ] HPC smoke requires an immutable registered PAF after real execution.
+- [ ] Stable architecture, stage-contract, user-guide, and HPC docs reflect the
+      implemented behavior.
+- [ ] Any unavailable real-tool smoke is reported explicitly rather than
+      represented as passing.
