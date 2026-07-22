@@ -1,15 +1,9 @@
 # AutoHiC Hi-C Stage Architecture
 
-**Status:** Accepted
-
-**Accepted:** 2026-07-15
-
-**Implementation:** Implemented
-
 **Scope:** Parent-graph ownership, the AutoHiC-only Hi-C stage, and its
 parameter-recommendation gate
 
-## 1. Decisions
+## 1. Current Contract
 
 1. AutoHiC is the only Hi-C scaffolding method. Gene Agent does not present a
    one-item method-selection gate.
@@ -19,10 +13,8 @@ parameter-recommendation gate
 3. When Hi-C was selected, the stage resolves its required inputs and proceeds
    with AutoHiC. Missing required inputs block the stage; an attempted AutoHiC
    run that does not complete is a stage failure.
-4. `select_hic_mode` and `write_hic_skip` are removed. The stage has no local
-   skip/no-op branch.
-5. AutoHiC gets a parameter recommender node following the existing assembly
-   parameter-recommendation pattern.
+4. The stage has no local method-selection or skip/no-op branch.
+5. AutoHiC uses the shared parameter-recommendation and approval contracts.
 6. The recommender uses the LLM to directly recommend the restriction enzyme.
    Every recommendation requires human approval before execution.
 7. Parameter approval and final chromosome-assembly adoption remain separate
@@ -47,7 +39,7 @@ The stage needs only these exceptional terminal conditions:
 
 Not selecting Hi-C is a parent route decision, not a Hi-C stage result.
 
-## 3. Target Graph
+## 3. Stage Graph
 
 The solid edges below are the nodes and routes compiled by
 `app/stages/hic_scaffolding/builder.py`. Dashed edges are review/resume actions
@@ -91,8 +83,7 @@ flowchart TD
     block -. "accept candidate / keep prior assembly" .-> next
 ```
 
-There is deliberately no `select_hic_mode`, `write_hic_skip`, method picker, or
-YaHS node in the compiled subgraph.
+The compiled subgraph has no method-selection or local skip branch.
 
 The stable method ID `hic_scaffolding.candidate.autohic` remains on descriptors,
 recommendations, attempts, artifacts, and ledger events. It is an execution
@@ -158,17 +149,14 @@ chooses between:
 Rejecting an AutoHiC result is a reviewed adoption decision. It is not a skip
 mode and does not reintroduce method selection.
 
-## 6. Implemented Cutover
+## 6. Current State Contract
 
-1. Remove `select_hic_mode`, `write_hic_skip`, the one-item candidate list, and
-   the method-selection review path.
-2. Route directly from resolved Hi-C inputs to
-   `recommend_autohic_parameters`.
-3. Reuse the shared recommendation persistence, response parsing, approval, resume, and frozen
-   attempt contracts for the AutoHiC restriction-enzyme proposal.
-4. Keep missing-requirement blocking separate from AutoHiC execution failure.
-5. Update tests to cover parent bypass, missing requirements, mandatory
-   parameter approval, execution failure, and final assembly adoption.
+Resolved Hi-C inputs route directly to `recommend_autohic_parameters`. The
+restriction-enzyme proposal uses the shared recommendation persistence,
+response parsing, approval, resume, and frozen-attempt contracts. Missing
+requirements produce a blocked-requirement outcome; an attempted AutoHiC run
+that fails produces an execution failure. These outcomes do not share a skip or
+method-selection branch.
 
 The AutoHiC stage cursor owns `current_parameter_attempt_id` and the compact
 `parameter_attempts` chain. Each `ParameterAttempt` owns its own

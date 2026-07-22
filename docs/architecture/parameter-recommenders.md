@@ -1,11 +1,5 @@
 # Stage Parameter Recommenders
 
-**Status:** Accepted
-
-**Accepted:** 2026-07-16
-
-**Implementation:** Assembly and AutoHiC implemented
-
 ## Definition
 
 A parameter recommender runs after method selection. It asks an LLM for the

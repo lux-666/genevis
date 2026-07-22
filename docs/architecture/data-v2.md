@@ -1,16 +1,6 @@
 # Data Architecture v2
 
-**Status:** Accepted
-
-**Accepted:** 2026-07-15
-
-**Implementation:** Implemented. The v2 run layout, immutable refs,
-ledger/report ownership, recommendation persistence, typed bounded stage
-cursors, universal frozen-attempt refs, process-result evidence, whole-state
-checkpoint budgets, verified single-terminal-checkpoint compaction, and the
-read-only `storage-audit` CLI are in use.
-
-**Scope:** New workflow sessions created after the v2 cutover
+**Scope:** Current workflow sessions
 
 **Compatibility:** No legacy-session read, resume, migration, or dual-write contract
 
@@ -29,7 +19,7 @@ contract rather than stage-specific audit envelopes.
 This specification supersedes earlier data-layout and persistence assumptions.
 Biological and stage contracts remain governed by their current specifications.
 
-## 2. Accepted Product Decisions
+## 2. Product Decisions
 
 1. The project is still in development. Data v2 does not preserve compatibility
    with old sessions.
@@ -561,47 +551,59 @@ Model and command records use an allowlisted configuration projection. When a
 secret influences execution, record its presence and source name, not its
 value.
 
-## 19. Cutover Policy
+## 19. Retention and Garbage Collection
 
-Data v2 uses a clean cutover:
+GC is reachability-based, never filename- or age-only deletion.
+
+Retention roots include:
+
+- control manifests and configuration refs;
+- the artifact refs reachable from the ledger, artifact index, and retained
+  checkpoint;
+- active review requests and decisions;
+- sealed attempt manifests and terminal timelines;
+- retained externally delivered evidence exports.
+
+Deletion policy:
+
+- `work/` is outside automatic cleanup and GC. An operator may remove it only
+  by explicitly accepting that affected attempts can no longer resume.
+- `reports/` may be removed and regenerated.
+- Intermediate checkpoints may be pruned according to section 14.
+- Immutable artifacts may be deleted only when the session is terminal and
+  they are unreachable from every retention root.
+- GC must first produce a dry-run manifest containing each candidate's
+  run-relative path, hash, size, and reason.
+- Immediately before deletion, an executor must revalidate terminal state and
+  every candidate path, hash, size, reachability result, and layer
+  classification; any mismatch fails closed.
+- Deletion requires explicit operator confirmation. The executor must reject
+  path traversal, absolute paths, symlink escapes, and every `work/` entry.
+- Artifact-index compaction happens only after all approved artifact deletions
+  succeed.
+
+Because runtime refs are session-local, deleting another run or a global cache
+cannot break the retained run.
+
+## 20. Compatibility Boundary
+
+Data v2 has one current representation:
 
 - no dual write;
 - no fallback lookup of legacy flat paths;
 - no hash-only payload/profile runtime branch;
 - no `locate_session_data_dir` compatibility behavior for v2 commands;
 - no automatic migration of old checkpoints, ledgers, indexes, or reports;
-- no compatibility aliases for old report filenames or artifact types.
-
-For this repository, the old local `data/` sessions and samples were determined
-to have no remaining development value and were deleted with explicit user
-authorization on 2026-07-15. The committed `data/` tree retains only the v2
-`layout.json` marker and reference data still used by the application. Runtime
-code must not recreate or silently mix legacy data into the v2 root.
-
-## 20. Implementation Status
-
-| Step | Status | Implementation state |
-|---|---|---|
-| 1. Add `layout.json`, run-root paths, ArtifactRef v2, and immutable writers | Complete | The repository and runtime use the strict v2 layout and run-relative, hash-verifiable immutable artifact references. |
-| 2. Add ledger v2 envelope, event IDs, sequences, idempotency, and route events | Complete | Ledger v2 owns bounded lifecycle events and request-ID-bound review decisions. |
-| 3. Introduce typed compact stage cursors and remove embedded attempt bodies from checkpoints | Complete | `stage_outputs` accepts only known stage keys and bounded recursive JSON cursors; the LangGraph channel rejects non-JSON values, oversized cursors, and embedded `FrozenAttemptSpec` bodies. Every resumable freeze/run lifecycle checkpoints the shared immutable attempt ref. Model-recommended Assembly/AutoHiC executions own it through `ParameterAttempt`; ordinary methods, ordered batches, and operator-directed Assembly reruns own it through the shared direct-attempt cursor. Same-node helper commands persist the same record before execution. |
-| 4. Extract the shared parameter-recommendation persistence contract | Complete | Assembly and AutoHiC use the shared persistence, approval, resume, and attempt contracts while retaining stage-specific model DTOs. |
-| 5. Persist exact model requests/responses and policy/knowledge references | Complete | The exact request sent to the model is persisted before invocation; durable records use refs instead of embedding repeated audit envelopes. |
-| 6. Move reports out of the artifact index and generate shared report views | Complete | `current_status.json`, `assembly_review.md`, and `session_summary.{json,md}` are derived projections rather than workflow truth. |
-| 7. Enforce whole-state budgets and compact verified terminal checkpoints | Complete | One saver decorator validates full checkpoints and pending writes for MemorySaver, SqliteSaver, and injected savers. Terminal compaction keeps one standalone top-level checkpoint only after ledger reconstruction and checkpoint-free artifact reachability succeed. |
-| 8. Expose read-only storage audit and complete the clean cutover | Complete | `gene-agent storage-audit` reports storage integrity and reachability as JSON and can include a dry-run manifest. Legacy fallback behavior and old local sessions/samples are removed; real SQLite resume and existing-assembly-to-annotation entrypoint E2E tests cover the v2 path. |
-
-The implementation uses one publication boundary, one resume transaction, one
-terminal finalizer, one checkpoint-budget decorator, and one read-only storage
-audit path. Entry points and stages do not retain parallel legacy branches.
+- no compatibility aliases for old report filenames or artifact types;
+- runtime code must not recreate or mix legacy data into a v2 run root.
 
 Reasonable dual representations remain allowed: raw output plus normalized
 summary, immutable artifact plus metadata-only index, compact ledger event plus
 artifact ref, and JSON report plus regenerable Markdown.
 
-## 21. Enforced Acceptance Criteria
+## 21. Current Conformance
 
-The current Data v2 implementation enforces the following:
+The current implementation enforces the following:
 
 - A new run contains no repeated session ID below its run root.
 - Every durable internal ref is session-relative and hash-verifiable.
@@ -622,3 +624,10 @@ The current Data v2 implementation enforces the following:
 - The storage-audit command reports bytes by layer, largest checkpoint fields,
   duplicate content, unreachable artifacts, retained work bytes, and
   reclaimable report data.
+
+The deletion portion of section 19 is not implemented. `storage-audit` is
+read-only and has no `--apply` option. Its optional cleanup manifest is a
+dry-run projection: regenerable reports are deletion candidates, while `work/`
+is reported but explicitly retained. There is no filesystem deletion executor
+for unreachable immutable artifacts and no post-GC artifact-index compaction.
+These gaps are conformance debt, not a reduction of the Data v2 contract.

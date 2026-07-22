@@ -98,8 +98,7 @@ cat <<EOF
   artifacts/assembly_review/${SESSION_ID}/quast/<safe_candidate_id>/quast_summary.json
   artifacts/assembly_review/${SESSION_ID}/assembly_review_request.json
 
-Record successful artifact refs in docs/handoff.md per
-docs/deployment/mac_dev_server_pull.md.
+Preserve successful artifact refs with the server run records.
 EOF
 
 exit "${status}"

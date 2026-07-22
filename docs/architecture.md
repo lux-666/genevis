@@ -1,17 +1,11 @@
 # Gene Agent Architecture
 
-Gene Agent follows the BioAgent V2 pattern from the reference `rna_agent`
-project, but the biological workflow is the ONT/CLR long-read genome pipeline
-described in `docs/archive/deep-research-report.md`.
+Gene Agent implements the ONT/CLR long-read genome workflow whose biological
+rationale is retained in `docs/archive/deep-research-report.md`.
 
-This document is the system-level architecture. For operational handoff, read
-`docs/handoff.md`. For coordinator rules, read `docs/governance.md`. For
-stage-by-stage inputs and outputs, read `docs/stage_contracts.md`. Accepted
-cross-cutting specifications live under `docs/architecture/`; the accepted Data
-Architecture v2 contract is `docs/architecture/data-v2.md`, and the runtime to
-durable process boundary is `docs/architecture/execution-evidence.md`. The
-shared executable-method graph and recovery contract are normative in
-`docs/architecture/execution-lifecycle.md`.
+This document is the system overview. Stage inputs and outputs live in
+`docs/stage_contracts.md`; cross-cutting contracts are registered in
+`docs/architecture/README.md`.
 
 ## Principles
 
@@ -41,6 +35,7 @@ START
     -> read_qc_stage
     -> genome_survey_stage
     -> assembly_stage
+    -> assembly_dedup_stage
     -> assembly_review_stage
     -> hic_scaffolding_stage
     -> t2t_stage
@@ -121,8 +116,7 @@ the frozen evidence without being embedded again in the checkpoint.
 
 Data-specific ownership, path, checkpoint-size, parameter-recommendation,
 attempt, review, report, audit, and terminal-compaction rules are normative in
-`docs/architecture/data-v2.md`. The v2 cutover is complete and has no legacy
-compatibility branch.
+`docs/architecture/data-v2.md`, which has no legacy compatibility branch.
 
 State categories:
 
@@ -140,8 +134,8 @@ hard to resume when these facts are mixed.
 
 ## Stage Shape
 
-Executable stages use the following shape; candidate-only methods may stop after
-their planning/review nodes:
+Executable stages use the following shape where their domain flow requires each
+boundary:
 
 ```text
 enter -> validate_inputs -> plan_methods -> method_family_subgraph
@@ -153,28 +147,26 @@ methods share this boundary without changing the parent graph. Executable
 method subgraphs conform to
 [`architecture/execution-lifecycle.md`](architecture/execution-lifecycle.md).
 
-## Current Implementation Status
+## Implemented Scope
 
-The top-level graph contains real inventory, read-QC, assembly, review, Hi-C,
-T2T, repeat, gene-annotation, and function-annotation stages. Methods remain
-individually scoped: unsupported methods are represented as planning contracts,
-while supported methods freeze an auditable command and run through the shared
-execution lifecycle.
+The top-level graph contains inventory, read-QC, genome-survey, assembly,
+assembly-dedup, assembly-review, Hi-C, T2T, repeat-annotation,
+gene-annotation, and function-annotation stages. Every method in the descriptor
+registry is executable; future tools remain outside the registry until their
+adapter, configuration, routing, and tests exist.
 
-## Executable Method Contract
+## Executable Method Boundary
 
-A supported executable method follows this single lifecycle:
+Every registered method enters one shared lifecycle after method selection and
+any required parameter approval:
 
-1. Add or update asset and method descriptors.
-2. Add a focused test for method-selection behavior and, when present,
-   parameter-recommender behavior as separate contracts.
-3. Add a `StagePlan` path before execution.
-4. If the method uses parameter recommendation, persist the exact profile,
-   model request/response, response-parse result, and approval through the shared Data v2
-   contract. The recommender does not select the method or workflow route.
-5. Generate or template a `FrozenAttemptSpec` only after successful response
-   parsing and approval, persist it before execution, and checkpoint its ref.
-6. Run through a runner boundary.
-7. Collect artifacts.
-8. Review outputs.
-9. Commit compact references to state and bounded causal events to the ledger.
+```text
+prepare and freeze -> run frozen attempt -> collect domain artifacts
+                   -> review -> commit compact refs
+```
+
+The stage adapter owns command preparation and biological collection. Shared
+execution owns Runner invocation, process logs, durable execution evidence,
+attempt recovery, and failure-policy enforcement. Checkpoints contain compact
+owner cursors, not command or result bodies. Cross-stage file publication uses
+the logical resources in `architecture/resource-handoff.md`.

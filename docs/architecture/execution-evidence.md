@@ -1,12 +1,6 @@
 # Execution Evidence
 
-**Status:** Accepted
-
-**Accepted:** 2026-07-16
-
-**Implementation:** Process-result boundary implemented
-
-## Decision
+## Contract
 
 Process execution has one durable representation. Runtime code may use local
 paths while a process is running, but no checkpoint or durable execution record
@@ -97,14 +91,14 @@ produced an earlier result. This ownership rule does not include an
 operator-directed Assembly review rerun, which uses the direct-attempt owner
 defined by [`execution-lifecycle.md`](execution-lifecycle.md).
 
-## Cutover
+## Compatibility Boundary
 
 Data v2 has no legacy-session read or migration contract. Loaders therefore
 fail closed on an old path-based result. They do not infer refs from paths, add
 dual reads, or write both formats. A workflow that must preserve an old run does
 so outside the v2 resume contract.
 
-## Acceptance criteria
+## Enforced Constraints
 
 1. Every durable execution result validates as `ExecutionEvidence`.
 2. No stage serializes `ExecutionResult.model_dump()` into checkpoint state.

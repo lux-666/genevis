@@ -55,20 +55,26 @@ artifact ref、route trace、interrupt 信息等控制字段；大文件、日�
 - **Human-in-the-loop review**：review registry 统一声明 gate、允许的决策、resume applier 和 prompt bundle，避免每个阶段各写一套暂停/恢复逻辑。
 - **Operator observability**：`inspect`、`review`、run trace、operator report 能从 durable records 里还原 session 状态、下一步动作和关键 artifact。
 
-已接入或规划的生信工具状态：
+当前 descriptor registry 中的全部方法都具有可执行路径：
 
-| Stage | Executable slices | Planning-only / pending slices |
-|---|---|---|
-| read_qc | SeqKit stats, optional length filter | broader QC reports |
-| genome_survey | Jellyfish, GenomeScope2 | additional survey methods |
-| assembly | Flye, NextDenovo | Canu, hifiasm |
-| assembly_review | QUAST, BUSCO evidence | Merqury, coverage/contamination checks |
-| assembly_dedup | purge_dups-style candidate handoff | broader purge/polish loops |
-| hic_scaffolding | AutoHiC (internally Juicer + 3D-DNA + DL correction) | GPU/HPC real-data validation |
-| t2t | minimap2 evidence, conservative telomere patch handoff | broader gap-closing strategies |
-| repeat_annotation | RepeatMasker with provided libraries | EDTA, RepeatModeler, TRF |
-| gene_annotation | Miniprot, AUGUSTUS, EVM merge, BUSCO signal | BRAKER3, MAKER, HISAT2/StringTie/IsoQuant, GeMoMa |
-| function_annotation | DIAMOND blastp with database provenance gate | InterProScan, eggNOG-mapper, KofamScan |
+| Stage | Registered executable methods |
+|---|---|
+| inventory | —（注册 manifest assets，不选择工具） |
+| read_qc | SeqKit stats、显式 skip、SeqKit length filter |
+| genome_survey | Jellyfish、GenomeScope2 |
+| assembly | Flye、Hifiasm、Hifiasm-ONT、NextDenovo |
+| assembly_dedup | purge_dups |
+| assembly_review | QUAST、BUSCO |
+| hic_scaffolding | AutoHiC（内部使用 Juicer、3D-DNA 和模型校正） |
+| t2t | minimap2 |
+| repeat_annotation | RepeatMasker |
+| gene_annotation | AUGUSTUS、Miniprot |
+| function_annotation | DIAMOND blastp |
+
+Gene Annotation 还会运行不可由操作员选择的内部 helper：gffread、EVM 和
+BUSCO；它们不属于 stage 的 `by_stage` 方法列表。
+
+未实现的方法不进入 registry，也不出现在当前能力表中。
 
 ## Architecture
 
@@ -88,12 +94,12 @@ app/
 
 docs/
   architecture.md          system architecture and ownership boundaries
-  architecture/            accepted cross-cutting architecture specifications
+  architecture/            current cross-cutting architecture specifications
+    resource-handoff.md     cross-stage logical resource contract
     data-v2.md              run data and parameter-recommendation persistence contract
-  stage_contracts.md      stage-by-stage input/output contracts
-  beginner_mainline_guide.md
-                           beginner-friendly source reading map
-  handoff.md              current status, validation evidence, known gaps
+  stage_contracts.md        current stage inputs, outputs, methods, and review triggers
+  deployment/               installation and server-execution guidance
+  user_guide/               current operator guides
 ```
 
 The parent graph intentionally stays thin:
@@ -357,6 +363,23 @@ gene-agent resume \
   --checkpointer sqlite
 ```
 
+## Adding an Executable Method
+
+The invariant is **registered = executable**. A new method is added as one
+complete slice:
+
+1. add or reuse its package descriptor and add its method descriptor;
+2. register the package, method, and stage entry in
+   `descriptors/registry.yaml`;
+3. implement a stage adapter that prepares `FrozenAttemptSpec` values and
+   collects biological outputs through the shared execution lifecycle;
+4. add stage routing and run-config validation for its actual parameters;
+5. expose the canonical method ID to the planner where user selection applies;
+6. add selection, execution, failure, and artifact tests.
+
+`tests/test_registry_executable_invariant.py` rejects a registered method that
+does not have a wired execution path.
+
 ## Verification
 
 Primary regression suite:
@@ -386,19 +409,17 @@ Intentional boundaries:
 
 - No in-agent remote execution. Real heavy bioinformatics runs happen by running the same CLI inside the server/HPC checkout.
 - Real execution is opt-in per stage. The agent should not silently launch expensive tools.
-- Unsupported methods are represented as planning contracts instead of fake success.
+- Unimplemented methods remain outside the descriptor registry.
 - Function annotation requires explicit database provenance before terminal completion.
 - Large biological files stay outside graph state.
-
-Known remaining work is tracked in `docs/handoff.md` and the accepted
-specifications under `docs/architecture/`.
 
 ## Read More
 
 - `docs/architecture.md`：系统架构和模块边界
+- `docs/architecture/README.md`：当前规范注册表与职责边界
+- `docs/architecture/resource-handoff.md`：跨阶段逻辑资源交接
 - `docs/architecture/execution-lifecycle.md`：可执行方法的统一 freeze/run/collect 生命周期
 - `docs/architecture/data-v2.md`：新 session 的数据、参数推荐、审计、恢复与保留规范
 - `docs/stage_contracts.md`：各阶段输入/输出合同
-- `docs/beginner_mainline_guide.md`：从业务到源码的阅读地图
-- `docs/handoff.md`：当前状态、验证记录和已知风险
+- `docs/deployment/migration.md`：新机器安装与验证
 - `docs/deployment/mac_dev_server_pull.md`：Mac 开发与服务器/HPC 执行边界

@@ -1,4 +1,4 @@
-session_id: phase5-provided-ann-YYYYMMDD-a
+session_id: existing-annotation-YYYYMMDD-a
 sample_id: sample-existing-assembly
 target_assembly_level: contig
 assets:

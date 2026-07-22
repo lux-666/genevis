@@ -15,7 +15,6 @@ The coordinator owns these responsibilities:
 - Split large work into testable slices with explicit exit criteria.
 - Make sure state, ledger, artifact, runner, review, and descriptor boundaries
   remain separate.
-- Leave a current handoff note whenever the work pauses.
 
 The coordinator should avoid these behaviors:
 
@@ -44,12 +43,8 @@ rationale, and coordination procedure into one linear ranking:
 - `CLAUDE.md` and this document govern engineering/coordination procedure.
 - `docs/archive/deep-research-report.md` supplies biological rationale, not
   runtime storage or software-state facts.
-- `docs/handoff.md` is a current work snapshot. Git history retains superseded
-  implementation and design records; the working tree keeps only current
-  contracts and operational documentation.
-
-Reference project files under `/Users/a1/Documents/BGIwork/rna_agent` are
-examples, not source of truth. Reuse patterns, not single-cell business names.
+- Git history retains superseded implementation and design records; the working
+  tree keeps only current contracts and operational documentation.
 
 ## Change Control
 
@@ -59,8 +54,8 @@ For each non-trivial change:
 2. Add or update a focused test before behavior code when applicable.
 3. Keep edits scoped to the approved task.
 4. Update the relevant document in the same change.
-5. Run the verification commands listed in `docs/handoff.md`.
-6. Update `docs/handoff.md` if the next agent needs different instructions.
+5. Run focused verification for the affected boundary and the full regression
+   suite when behavior changes.
 
 Documentation-only changes do not need full runner tests, but they should keep
 the scaffold structure test passing when they add required documents or paths.
@@ -162,14 +157,8 @@ Do not interrupt for ordinary local validation or deterministic file collection.
 
 ## Documentation Standard
 
-Every phase should have:
-
-- goal
-- files touched
-- test plan
-- exit criteria
-- known risks
-- handoff note if incomplete
-
-Use concise documents, but make them operational. A future agent should be able
-to open a document and know the next exact file and command.
+Each current architecture or domain contract has one owning document. Update
+that owner in place; do not add phase plans, implementation summaries, handoff
+snapshots, acceptance logs, or duplicate design explanations to the working
+tree. Keep operational guides executable and current, and retain superseded
+material only in Git history.

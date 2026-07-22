@@ -1,4 +1,4 @@
-session_id: phase5-existing-asm-YYYYMMDD-a
+session_id: existing-assembly-repeatmasker-YYYYMMDD-a
 sample_id: sample-existing-assembly
 target_assembly_level: contig
 assets:

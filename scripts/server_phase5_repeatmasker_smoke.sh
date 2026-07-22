@@ -188,5 +188,5 @@ softmasked_genome: ${softmasked}
 repeat_annotation_gff3: ${repeat_gff}
 gene_bundle: ${gene_bundle}
 
-Record these refs in docs/handoff.md and check the task 03 server boxes.
+Preserve these refs with the server run records.
 EOF

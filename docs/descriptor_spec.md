@@ -1,24 +1,31 @@
 # Descriptor Spec
 
-Descriptors keep biological method compatibility out of graph routing code.
+Descriptors declare executable method capability and keep package compatibility
+out of graph-routing code.
 
 ## Registry
 
-`descriptors/registry.yaml` maps package and method names to descriptor files and groups methods by stage.
+`descriptors/registry.yaml` maps package names and canonical method IDs to their
+descriptor files and defines the ordered methods available in each stage:
 
 ```yaml
 packages:
   flye: flye.yaml
 methods:
-  flye_ont_raw: flye_ont_raw.yaml
+  assembly.candidate.flye: assembly/flye_candidate.yaml
 by_stage:
   assembly:
-    - flye_ont_raw
+    - assembly.candidate.flye
 ```
+
+Every method in `by_stage` is executable. Future or unavailable tools remain
+outside the registry until their adapter, routing, configuration, and tests are
+implemented. Registry loading goes through `app.configuration` so packaged and
+source-checkout execution are independent of the current working directory.
 
 ## Package Descriptor
 
-Package descriptors describe tool-level capability:
+A package descriptor defines tool-level capability:
 
 ```yaml
 package_name: flye
@@ -26,39 +33,51 @@ version_constraint: ">=2.9"
 language: cli
 install_channel: conda
 entry_patterns:
-  - "flye --nano-raw {reads} --out-dir {out_dir}"
-help_summary: "Repeat-graph assembler for raw single-molecule reads."
-known_pitfalls:
-  - "Memory scales with genome size and coverage."
+  - "flye --nano-raw {reads} --out-dir {output_dir} --threads {threads}"
 resource_defaults:
-  cpu_cores: 64
-  memory_gb: 256
-  walltime_hours: 72
+  cpu_cores: 32
+  memory_gb: 128
+  walltime_hours: 48
 ```
+
+Package descriptors may describe installation channels, entry patterns,
+resource defaults, and known pitfalls. Machine-specific environment and package
+roots live in `config/envs.yaml`, not in descriptor capability records.
 
 ## Method Descriptor
 
-Method descriptors describe stage-specific use:
+A method descriptor binds one package capability to a stage:
 
 ```yaml
-method_name: flye_ont_raw
+method_name: assembly.candidate.flye
 stage: assembly
 package_ref: flye
-goal: "Assemble ONT raw reads into draft contigs."
+parameter_catalog: flye
 required_inputs:
-  - name: clean_long_reads
-    type: clean_long_reads
-    description: "Registered long-read FASTQ input."
+  - name: long_reads
+    type: clean_long_reads_or_fofn
 expected_outputs:
   - name: draft_assembly
     type: draft_assembly
-    description: "Draft assembly FASTA."
 review_rules:
-  - assembly_fasta_exists
-human_review_triggers:
-  - memory_fallback_required
+  - candidate_bundle_exists
+planner:
+  required_parameters: [threads]
+  parameter_defaults:
+    threads: 4
 ```
+
+Method IDs are canonical across registry, planner, run config, stage routing,
+execution evidence, and artifacts. An explicit canonical method selection has
+priority; runtime still validates that its stage, inputs, read type, and
+parameters match the descriptor and run configuration.
+
+Descriptors do not authorize process execution. Execution requires the stage to
+be enabled for local execution and a complete frozen attempt.
 
 ## Asset Rules
 
-`descriptors/assets/ont_clr_long_reads.yaml` defines asset-stage compatibility. These rules are planner inputs, not execution code.
+Asset descriptors define which manifest asset types may satisfy a stage input.
+They are inputs to inventory and resource resolution, not a second execution or
+cross-stage handoff system. Current logical resource transport is defined in
+[`architecture/resource-handoff.md`](architecture/resource-handoff.md).

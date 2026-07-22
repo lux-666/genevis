@@ -1,24 +1,15 @@
 # Project Bootstrap Architecture
 
-**Status:** Accepted
-
-**Accepted:** 2026-07-15
-
-**Implementation:** Implemented
-
 **Scope:** Minimal initialization of project-owned configuration consumed by
-Gene Agent
+Gene Agent, followed by configured external-package conformance and preflight
 
 ## 1. Goal
 
-`gene-agent bootstrap` should help a user create the project configuration that
-Gene Agent actually consumes. It should generate as few files as possible and
-should not create runtime, audit, or placeholder files without a current
+`gene-agent bootstrap` creates or updates only configuration consumed by the
+current application, validates it through the runtime loaders, applies approved
+conformance actions for configured packages, and verifies package canary paths.
+It does not create runtime, audit, or placeholder files without a current
 consumer.
-
-This specification defines only project configuration initialization. External
-software conformance remains outside this design and can be handled separately
-when needed.
 
 ## 2. Managed Files
 
@@ -49,11 +40,14 @@ inspect existing .env and config/envs.yaml
   -> show the files and fields that will change
   -> create or update the approved fields
   -> load the result through the existing runtime consumers
+  -> apply configured package conformance with --apply
+  -> verify package canary paths
 ```
 
-The implementation keeps the current `gene-agent bootstrap` entrypoint.
-It adds initialization before the current validation behavior rather than
-introducing a family of new commands.
+Without `--apply`, bootstrap shows configuration and conformance changes without
+writing them. With `--apply`, it writes approved project configuration, conforms
+packages that opt in, and then performs the same package preflight used by
+execution.
 
 ## 4. Write Rules
 
@@ -82,15 +76,3 @@ current AutoHiC execution code consumes:
 These are machine/project setup values and are loaded through `EnvResolver` by
 the AutoHiC adapter. The Hi-C reads, adopted assembly, and restriction enzyme
 remain run-level inputs handled by the Hi-C stage.
-
-## 6. Implemented Behavior
-
-1. Define the minimal fields currently consumed from `.env` and
-   `config/envs.yaml`.
-2. Let bootstrap create a missing `config/envs.yaml` instead of failing with a
-   manual copy instruction.
-3. Create `.env` only when required and preserve existing user values.
-4. Validate the generated files with `_load_dotenv_without_override()` and
-   `EnvResolver`.
-5. Add tests for a new project, an existing configuration, idempotent rerun,
-   secret redaction, and AutoHiC path collection.

@@ -165,6 +165,6 @@ final_report:    ${final_report}
 function_bundle: ${function_bundle}
 proteins_ref:    ${PROTEINS_REF}
 
-Record session_id, exit_code (0), final_report path, function_bundle path, and
-proteins_ref in docs/handoff.md.
+Preserve the session ID, exit code, final-report path, function bundle, and
+proteins ref with the server run records.
 EOF

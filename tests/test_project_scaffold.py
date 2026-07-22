@@ -65,6 +65,7 @@ class ProjectScaffoldTests(unittest.TestCase):
         expected_paths = [
             root / "docs" / "architecture.md",
             root / "docs" / "architecture" / "README.md",
+            root / "docs" / "architecture" / "resource-handoff.md",
             root / "docs" / "architecture" / "data-v2.md",
             root / "docs" / "architecture" / "execution-evidence.md",
             root / "docs" / "architecture" / "execution-lifecycle.md",
@@ -74,7 +75,6 @@ class ProjectScaffoldTests(unittest.TestCase):
             root / "docs" / "descriptor_spec.md",
             root / "docs" / "stage_contracts.md",
             root / "docs" / "governance.md",
-            root / "docs" / "handoff.md",
             root / "descriptors" / "registry.yaml",
             root / "descriptors" / "assets" / "ont_clr_long_reads.yaml",
             root / "config" / "defaults.yaml",

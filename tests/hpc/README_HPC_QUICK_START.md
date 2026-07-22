@@ -1,7 +1,6 @@
 # HPC 快速启动指南 / HPC Quick Start Guide
 
 > 当前 smoke 合同以本目录脚本和 `hpc_env.sh.example` 为准。
-> `HPC_TEST_PROGRESS.md` 是历史运行记录，不代表当前 Phase 11/TUI 行为。
 
 ## 快速开始 / Quick Start
 
@@ -146,13 +145,13 @@ python3 -m app.entrypoints.run inspect \
 
 ### Q4: 流程在哪里会阻塞等待人工干预？
 **A:** 阻塞点包括：
-- Phase 11 parameter approval（每个 initial/retry attempt 都必须独立批准）
+- Parameter approval（每个 initial/retry attempt 都必须独立批准）
 - Assembly route selection（如果自动选择置信度低）
 - Assembly review（除非设置 `review_policy: {mode: "auto"}`）
 - Hi-C scaffolding（如果 execution_mode != local）
 - T2T finishing/review（当 stage 提出需要人工确认的变更）
 
-`test_09` 的 review policy 为 auto，但不会绕过独立的 Phase 11
+`test_09` 的 review policy 为 auto，但不会绕过独立的
 `parameter_approval`。除非 HPC 配置显式选择测试专用的
 `HPC_PARAMETER_APPROVAL_MODE=approve`，参数推荐仍需要人工批准。
 
@@ -205,12 +204,12 @@ data_hpc_test/runs/hpc-test09-e2e-YYYYMMDD-HHMMSS/
 
 - `test_06_hic.sh` - 单独的 Hi-C 挂载测试
 - `test_07_t2t.sh` - 单独的 T2T 测试
-- `test_04_assembly_dedup.sh` - 组装、Phase 11 参数批准与去冗余测试
+- `test_04_assembly_dedup.sh` - 组装、参数批准与去冗余测试
 - `common.sh` - 共享的测试工具函数
 
 ## 联系 / Contact
 
 遇到问题请查看：
-- 主项目 `AGENTS.md` / 会话内项目说明 - 编码原则
-- 当前架构规范 `docs/architecture/` 与交接说明 `docs/handoff.md`
+- 主项目 `CLAUDE.md` - 编码原则
+- 当前架构规范 `docs/architecture/`
 - 执行日志 `ledger/events.jsonl`

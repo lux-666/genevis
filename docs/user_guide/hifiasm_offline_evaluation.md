@@ -20,11 +20,9 @@ Offline evaluation is not an activation or forward-progress gate. A report canno
 enable or disable `initial_cutover_enabled`, reject a shortlist, stop a
 recommendation, or authorize execution. Corpus size, query count, scores,
 coverage, scientific assessment, recorded recommendations, and other reported
-metrics have no controlling threshold. Phase 11's reduced MVP delivery target
-is 10 approved hifiasm-family initial cases (synthetic fixtures excluded), but
-it is not a runtime minimum or activation requirement; production ranks the
-eligible cases actually present, whether their count is below, equal to, or
-above 10. Neither is the 10-query evaluation target a runtime threshold.
+metrics have no controlling threshold. Production ranks the eligible cases
+actually present; corpus size and query count do not become activation or
+runtime requirements.
 
 ## Run the fixture
 
@@ -100,9 +98,7 @@ decisions_allowed: [approve_parameters, reject_parameters]
 
 `approve_parameters` freezes the exact parsed candidate and routes it to
 execution. `reject_parameters` terminates without execution; for a retry it
-also appends no attempt and consumes no execution or review retry budget. TUI
-presentation is not part of Phase 11; future UI code may consume this generic
-human-review contract.
+also appends no attempt and consumes no execution or review retry budget.
 
 ## Focused verification
 

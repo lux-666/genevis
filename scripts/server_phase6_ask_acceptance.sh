@@ -361,6 +361,6 @@ Key validation: LLM successfully parsed natural-language request,
 materialized manifest from source_paths, and the graph completed
 end-to-end with durable resume.
 
-Record these in docs/handoff.md under Phase 6 Ask Acceptance.
+Preserve this summary with the server run records.
 ========================================
 EOF

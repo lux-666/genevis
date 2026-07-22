@@ -157,5 +157,5 @@ cat <<EOF
 run_log: ${run_log}
 gene_bundle: ${gene_bundle}
 
-Record these refs in docs/handoff.md and check the task 06 server boxes.
+Preserve these refs with the server run records.
 EOF

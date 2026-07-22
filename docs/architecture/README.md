@@ -1,65 +1,54 @@
 # Architecture Specifications
 
-This directory contains the accepted cross-cutting contracts for Gene Agent.
-It is deliberately small: a topic belongs to one normative specification, and
-other documents link to that owner instead of restating its schema or flow.
+This directory contains the current cross-cutting contracts. Each topic has one
+owner; other documents link to it instead of restating its schema or flow.
+[`../architecture.md`](../architecture.md) is the system overview. Code and
+tests provide implementation evidence, while Git history retains superseded
+design and implementation records.
 
-[`docs/architecture.md`](../architecture.md) is the system overview, not a
-second source of detailed contracts. Code and tests show present conformance;
-[`docs/handoff.md`](../handoff.md) is only a current work snapshot. Superseded
-design and implementation records remain available through Git history rather
-than as parallel working-tree documentation.
+## Specification registry
 
-## Specification Registry
+| Specification | Owns |
+|---|---|
+| [`resource-handoff.md`](resource-handoff.md) | Cross-stage logical resources, resolver priority, central `resource_refs`, and FOFN boundary |
+| [`data-v2.md`](data-v2.md) | Run ownership, durable fact placement, artifact refs, checkpoint bounds and compaction, ledger/report authority, storage audit, and retention/GC |
+| [`execution-evidence.md`](execution-evidence.md) | Runtime `ExecutionResult`, durable `ExecutionEvidence`, process logs, and result cursors |
+| [`execution-lifecycle.md`](execution-lifecycle.md) | Shared freeze/run/collect graph, attempt owners, recovery routing, failure policies, and stage-adapter boundary |
+| [`parameter-recommenders.md`](parameter-recommenders.md) | Model-boundary DTOs, exact request/response flow, approval, persistence, and recommender responsibilities |
+| [`autohic-stage.md`](autohic-stage.md) | Parent/Hi-C boundary, AutoHiC-only execution, restriction-enzyme recommendation, and result adoption |
+| [`bootstrap.md`](bootstrap.md) | Minimal initialization of `.env`, `config/envs.yaml`, and configured external-package conformance |
 
-Design acceptance and implementation conformance are separate facts.
+## Ownership boundaries
 
-| Specification | Design | Current conformance | Owns |
-|---|---|---|---|
-| [`data-v2.md`](data-v2.md) | Accepted | Implemented | Run ownership, durable fact placement, artifact refs, checkpoint bounds and compaction, ledger/report authority, audit, and cutover |
-| [`execution-evidence.md`](execution-evidence.md) | Accepted | Implemented for process results | Runtime `ExecutionResult`, durable `ExecutionEvidence`, log ownership, and result cursors |
-| [`execution-lifecycle.md`](execution-lifecycle.md) | Accepted | Implemented | Shared freeze/run/collect graph, attempt owners, recovery routing, failure policies, and stage-adapter boundary |
-| [`parameter-recommenders.md`](parameter-recommenders.md) | Accepted | Assembly and AutoHiC implemented | Model-boundary DTOs, exact request/response flow, parsing, approval, and recommender responsibilities |
-| [`autohic-stage.md`](autohic-stage.md) | Accepted | Implemented | Parent/Hi-C boundary, AutoHiC-only execution, and restriction-enzyme recommendation |
-| [`bootstrap.md`](bootstrap.md) | Accepted | Implemented | Minimal initialization of `.env` and `config/envs.yaml` |
-| [`refactor/architecture-contracts.md`](refactor/architecture-contracts.md) | Accepted | Core refactor implemented; remaining simplification tracked | Resource handoff, execution authorization, method selection, CWD independence, implementation evidence, and single-track simplification rules |
+- Resource Handoff decides how materialized inputs move between stages.
+- Data v2 decides where durable facts live and what checkpoints may reference.
+- Execution Evidence defines the durable process-result body.
+- Execution Lifecycle defines how frozen attempts run, resume, and reach
+  stage-owned collection.
+- Parameter Recommenders defines how a selected method receives a reviewed
+  parameter recommendation.
+- Stage Contracts defines biological inputs, outputs, planning behavior, and
+  review triggers.
+- Descriptor Spec defines registered package and method capability metadata.
 
-## Ownership Boundaries
+No stage specification may create a second storage, execution, resource, or
+parameter-recommendation ownership model.
 
-- Data v2 decides **where durable facts live** and what checkpoints may point to.
-- Execution Evidence decides **what a durable process result contains**.
-- Execution Lifecycle decides **how frozen attempts run, resume, and reach
-  stage-owned collection**.
-- Parameter Recommenders decides **how an already selected method receives an
-  approved parameter recommendation**.
-- Stage specifications decide **domain flow and biological behavior**.
+## Vocabulary
 
-A frozen attempt is created and made durable before execution. A checkpoint
-does not recreate it from current configuration; it carries the immutable ref
-needed to load the same runner input.
+- **method selection** chooses a registered executable method;
+- **parameter recommendation** proposes values for an already selected method;
+- **parameter approval** is the human decision on that exact proposal;
+- **planning** creates bounded workflow or stage intent and does not authorize a
+  process;
+- **execution** consumes a persisted frozen attempt;
+- **report** is a regenerable operator projection and never controls workflow.
 
-## Vocabulary Rule
+## Change rule
 
-In this repository, informal references to a stage “planner” may mean a
-**parameter recommender**. Architecture documents must use the explicit term
-`parameter recommender` when that is the intended meaning. It is distinct from:
-
-- `StagePlan`, which records requested stages and method-selection intent;
-- method selection, which chooses a method before parameter recommendation;
-- parent-graph routing, which chooses the next biological stage.
-
-A parameter recommender receives an already selected method and recommends only
-that method's adjustable execution parameters. It must not choose the method,
-the stage route, or the requested stage set.
-
-## Change Protocol
-
-1. Update the relevant specification before or with behavior code.
-2. Record the specification status and date when a decision changes.
-3. Do not add a stage-local storage convention when the shared contract can
-   express the requirement.
-4. Any exception to a normative invariant must be approved explicitly and
-   documented here; a non-normative document or test fixture cannot create an
-   implicit exception.
-5. Keep the implementation status honest. “Accepted” means the design is
-   approved, not that current code already conforms.
+1. Update the owning specification and implementation in the same change.
+2. Verify current code and tests against the changed invariant.
+3. Do not add compatibility branches for deleted development-only contracts.
+4. Register any new cross-cutting specification here.
+5. A test fixture or non-normative guide cannot create an architecture
+   exception.

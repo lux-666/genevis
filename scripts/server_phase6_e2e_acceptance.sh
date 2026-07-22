@@ -350,6 +350,6 @@ resume_log:    ${resume_log}
 inspect_final: ${final_inspect}
 decision_file: ${decision_file}
 
-Record these in docs/handoff.md under Phase 6 End-to-End Acceptance.
+Preserve this summary with the server run records.
 ========================================
 EOF

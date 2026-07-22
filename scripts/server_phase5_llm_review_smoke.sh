@@ -167,6 +167,6 @@ run_log:                 ${run_log}
 recommendation_artifact: ${recommendation_artifact}
 ledger:                  ${events_path}
 
-Record session_id, result, recommendation artifact ref, and the
-auto_decision_committed event timestamp in docs/handoff.md.
+Preserve the session ID, result, recommendation artifact ref, and
+auto_decision_committed event timestamp with the server run records.
 EOF

@@ -154,6 +154,6 @@ run_log:        ${run_log}
 final_report:   ${final_report}
 function_bundle: ${function_bundle}
 
-Record session_id, exit_code (0), final_report path, and the auto_rule
-decision count in docs/handoff.md.
+Preserve the session ID, exit code, final-report path, and auto-rule decision
+count with the server run records.
 EOF

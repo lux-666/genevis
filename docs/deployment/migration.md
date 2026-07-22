@@ -1,152 +1,95 @@
-# Migration Checklist (New Machine)
+# New Host Setup
 
-First-time setup checklist for moving Gene Agent to a new host. This file
-does not change behavior; it consolidates the install surface already
-implied by `pyproject.toml`, `config/envs.yaml`, and the package
-descriptors, so you can stand the project up without reading them all.
+This guide provisions the current Gene Agent checkout on a new machine. For the
+ongoing Mac-development/server-execution workflow after provisioning, use
+[`mac_dev_server_pull.md`](mac_dev_server_pull.md).
 
-For the ongoing Mac-dev / server `git pull` workflow once both hosts are
-already provisioned, see [`mac_dev_server_pull.md`](mac_dev_server_pull.md).
+## Prerequisites
 
-## Scope
+- Conda or Mamba on `PATH`.
+- Python 3.11 or newer for the orchestrator.
+- A `gene_agent` orchestrator environment.
+- A bioinformatics environment matching `config/envs.yaml` (default:
+  `env_geno_exec`).
+- Server-local databases, model files, and external package installations for
+  the stages that will run.
 
-After `git clone` on a new host you need:
+## What Git Carries
 
-- `conda` on PATH (Miniconda / Mambaforge), Python 3.11+ available through
-  the orchestrator env.
-- Two conda envs: `gene_agent` (orchestrator) and `env_geno_exec` (tools).
-- Optional `.env` for `gene-agent ask` (natural-language entry).
+Git contains application code, descriptors, configuration defaults, tests,
+current documentation, examples, and server helper scripts.
 
-## What Git Carries vs Does Not Carry
+The following remain machine-local:
 
-Tracked: application code, descriptors, configs, tests, docs, manifest /
-run-config templates, server helper scripts.
+- `.env` and credentials;
+- runtime `data/`, checkpoints, ledger, reports, and artifacts;
+- Conda environments;
+- bioinformatics databases and BUSCO lineages;
+- real input files and run configs containing private paths;
+- AutoHiC, Juicer, 3D-DNA, Juicer Tools, and model installations.
 
-Not tracked (must be (re)created or supplied locally; see `.gitignore`):
-
-- `.env` (LLM credentials)
-- `data/` (manifests, ledgers, artifacts, checkpoints, smoke configs)
-- conda envs themselves
-- bioinformatics databases (RepeatMasker libraries, InterProScan, ...)
-- `app/entrypoints/workflow.ipynb` and `docs/beginner_mainline_guide.md`
-
-## Two Conda Envs
-
-`config/envs.yaml` decides which env each method runs in. Defaults:
-
-| Env name | Role | When required |
-|---|---|---|
-| `gene_agent` | Python orchestrator (LangGraph, CLI) | always |
-| `env_geno_exec` | All bioinformatics tools (default + every stage / method) | when running real local execution |
-
-Both names are config knobs. If you need different names on the new host,
-edit `config/envs.yaml` (named env) or switch its `conda_env:` entries to
-`conda_prefix:` absolute paths. `scripts/server_*.sh` also hardcode these
-two names — search and replace if you change them.
-
-### `gene_agent` env (orchestrator)
+## Orchestrator Environment
 
 ```bash
 conda create -n gene_agent python=3.11 -y
 conda run -n gene_agent pip install -e .[dev]
 ```
 
-`pyproject.toml` declares the runtime deps (`langgraph`,
-`langgraph-checkpoint`, `langgraph-checkpoint-sqlite`, `langchain-core`,
-`langchain-openai`, `pydantic`, `pyyaml`) and the dev extras (`pytest`,
-`ruff`, `mypy`). The optional `proxy` extra (`fastapi`, `httpx`,
-`uvicorn`) is unused by the current mainline; install only if you need it.
+The runtime dependencies and development tools are declared in
+`pyproject.toml`. Durable CLI runs require the SQLite checkpoint package that is
+installed with the project dependencies.
 
-Phase 5/02 onward, `langgraph-checkpoint-sqlite` is required even for a
-local-only run because `gene-agent run` defaults to the durable sqlite
-checkpoint backend. `scripts/server_check.sh` verifies the import is
-available and fails fast with an actionable message if `pip install -e .`
-was skipped.
+## Bioinformatics Environment
 
-### `env_geno_exec` env (tools)
+`config/envs.yaml` maps stages and methods to named Conda environments or
+absolute prefixes. The default shared environment must provide the tools used
+by the methods you intend to execute.
 
-This env hosts every binary the workflow can actually invoke today, plus
-the descriptors for tools whose stages are still candidate-only. Channels:
-`bioconda` + `conda-forge`.
+| Stage | Current command requirements |
+|---|---|
+| Read QC | `seqkit` |
+| Genome Survey | `jellyfish`, `genomescope2` |
+| Assembly | `flye`, `hifiasm`, `nextDenovo` |
+| Assembly Dedup | `minimap2`, `samtools`, `pbcstat`, `calcuts`, `split_fa`, `gzip`, `purge_dups`, `get_seqs` |
+| Assembly Review | `quast.py`, `busco` |
+| T2T | `minimap2` |
+| Repeat Annotation | `RepeatMasker` |
+| Gene Annotation | `augustus`, `miniprot`, `gffread`, `EVidenceModeler`, `busco` |
+| Function Annotation | `diamond` |
 
-#### Wired into the executable mainline — install these for Phase 4 / 5 acceptance
+Install the required subset with Bioconda/Conda Forge or the deployment method
+appropriate to the server. Missing commands produce structured preflight
+failures; the workflow does not fabricate success.
 
-| Tool | Binary used by attempt scripts | Stages |
-|---|---|---|
-| seqkit ≥ 2.0 | `seqkit` | `read_qc` |
-| jellyfish ≥ 2.3 | `jellyfish` | `genome_survey` |
-| genomescope2 ≥ 2.0 | `genomescope2` | `genome_survey` |
-| flye ≥ 2.9 | `flye` | `assembly` |
-| quast ≥ 5.2 | `quast.py` | `assembly_review` |
-| AutoHiC ≥ 1.3.3 | dedicated `autohic` conda env plus AutoHiC/Juicer/3D-DNA install roots | `hic_scaffolding` |
-| repeatmasker ≥ 4.1 | `RepeatMasker` | `repeat_annotation` |
+## AutoHiC Packages
+
+AutoHiC uses its configured environment plus external package roots. Update the
+`packages` entries in `config/envs.yaml` for:
+
+- AutoHiC;
+- Juicer;
+- 3D-DNA;
+- the directory containing `juicer_tools.jar`;
+- AutoHiC error and chromosome model paths.
+
+Inspect the plan first, then apply approved configuration/conformance changes:
 
 ```bash
-conda create -n env_geno_exec -y
-conda install -n env_geno_exec -c bioconda -c conda-forge -y \
-  seqkit jellyfish genomescope2 flye quast repeatmasker
+conda run -n gene_agent gene-agent bootstrap
+conda run -n gene_agent gene-agent bootstrap --apply
 ```
 
-Notes:
+Bootstrap validates current configuration, conforms packages that opt in, and
+checks their declared canary paths. It performs no downloads.
 
-- The Bioconda `genomescope2` package exposes the command-line entrypoint as
-  `genomescope2`. `config/envs.yaml` lists `genomescope2` as the required
-  tool to match the generated attempt script.
-- `RepeatMasker` ships without a default repeat library on conda.
-  Configure its library separately if you opt into the local
-  `repeat_annotation` route; the workflow already requires explicitly
-  registered libraries.
-- Missing tools surface structured `blocked_env` / `missing_tool` states
-  via `EnvResolver` preflight; they do not silently fail.
+## Optional LLM Configuration
 
-#### Descriptor-only — install when their stage gets a real execution path
+`gene-agent ask`, TUI parameter recommendation, and model-assisted review read
+credentials from exported `GENE_AGENT_LLM_*` variables or the project-root
+`.env` file. Structured `run`, `inspect`, and storage audit do not require an LLM
+unless the selected workflow reaches a model-backed gate.
 
-These have package descriptors but no execution code yet:
-
-- assembly: `nextdenovo`, `canu`, `hifiasm`
-- assembly_review: `busco`, `merqury`, `meryl`, `minimap2`, `purge_dups`
-- read_qc length filters: `chopper`, `fastplong`, `filtlong`
-- genome_survey: `smudgeplot`
-- repeat_annotation: `edta`, `repeatmodeler`, `trf`
-- gene_annotation: `braker3`, `maker`, `augustus`, `miniprot`, `hisat2`,
-  `stringtie`, `isoquant`, `gemoma`
-- function_annotation: `interproscan`, `eggnog_mapper`, `diamond`,
-  `kofamscan`
-
-`docs/handoff.md` "Not implemented" tracks this catalogue authoritatively.
-
-#### Not on conda
-
-Marked `install_channel: container` in their descriptors and need
-container / upstream installs (not a Phase 4 / 5 mainline concern):
-
-- `juicer`, `juicebox`, `3ddna`
-
-## Absolute Paths That Reference The Original Mac
-
-Search-and-replace targets when standing the new host up:
-
-- `README.md`, `docs/handoff.md`, `docs/governance.md`,
-  and `docs/architecture.md` may reference
-  `/Users/a1/Documents/BGIwork/rna_agent` (a sibling reference project, not a
-  runtime dependency). Update or drop these mentions on the new host as needed.
-- `data/phase4_real_smoke/manifest.yaml` carries an absolute path to the
-  Phase 4 smoke FASTA. `data/` is gitignored, so this file does not
-  migrate with git; recreate it from
-  `docs/examples/phase4_real_manifest.template.yaml`.
-- `.claude/settings.local.json` carries Mac-specific permission entries;
-  it is local to the original Claude Code session and does not need to
-  migrate.
-
-The `/opt/conda/envs/...` strings inside `config/envs.yaml` are inline
-comments showing the alternative `conda_prefix:` form, not active paths.
-
-## Optional: `.env` for `gene-agent ask`
-
-`gene-agent ask` reads LLM credentials from `GENE_AGENT_LLM_*` env vars
-and from a project-root `.env` (gitignored). `gene-agent run` and
-`gene-agent inspect` do not need these. Create `.env` only when you
-intend to use `ask`:
+Example `.env`:
 
 ```dotenv
 GENE_AGENT_LLM_PROVIDER=openai_compatible
@@ -158,7 +101,25 @@ GENE_AGENT_LLM_MAX_TOKENS=16000
 GENE_AGENT_LLM_TIMEOUT_SECONDS=180
 ```
 
-## Verification After Setup
+Do not commit this file.
+
+## Current Templates
+
+Schema-valid templates live in `docs/examples/`:
+
+- `real_data_manifest.template.yaml`;
+- `read_qc_assembly_review_run_config.template.json`;
+- `busco_run_config.template.json`;
+- `existing_assembly_repeatmasker_manifest.template.yaml`;
+- `existing_assembly_provided_annotation_manifest.template.yaml`;
+- `repeatmasker_run_config.template.json`;
+- `e2e_manifest.template.yaml`;
+- `e2e_run_config.template.json`.
+
+Copy a template to a server-local directory and replace placeholder paths. Do
+not commit private paths or real sample metadata.
+
+## Verification
 
 ```bash
 bash scripts/server_check.sh
@@ -168,7 +129,5 @@ PYTHONPYCACHEPREFIX=/tmp/gene_agent_pycache conda run -n gene_agent \
   python -m compileall app tests
 ```
 
-A passing `server_check.sh` confirms both envs exist and seqkit / flye /
-quast.py are present; a passing test suite confirms Python-side wiring.
-The Phase 4 real-data smoke (`scripts/server_phase4_smoke.sh`) is the
-final acceptance step; see `mac_dev_server_pull.md` for inputs.
+Run real-data smoke scripts only from the provisioned server checkout and with
+explicit server-local inputs.

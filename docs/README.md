@@ -1,43 +1,40 @@
 # Documentation Map
 
-Coordination layer for Gene Agent. Treat as part of the system, not a
-side note.
+The working tree keeps current contracts and operational guidance. Superseded
+designs, implementation summaries, and run histories remain available through
+Git history.
 
-## Start Here
+## Start here
 
-If you are taking over:
+1. [`architecture.md`](architecture.md) — system flow and module ownership.
+2. [`architecture/README.md`](architecture/README.md) — normative specification
+   registry.
+3. [`stage_contracts.md`](stage_contracts.md) — current biological stage
+   inputs, outputs, methods, and review triggers.
+4. [`descriptor_spec.md`](descriptor_spec.md) — package, method, and asset
+   descriptor contracts.
+5. [`../README.md`](../README.md) — current executable scope and usage.
 
-1. `architecture/README.md` — specification registry, authority, and current
-   conformance status.
-2. `architecture.md` — parent graph, modules, and system boundaries.
-3. `handoff.md` — current work snapshot, open conformance gaps, and verification.
-4. `governance.md` — coordinator responsibilities and change rules.
-5. `stage_contracts.md` — stable inputs / outputs / planning rules per
-   biological stage.
-6. `descriptor_spec.md` — descriptor registry, package and method
-   descriptors.
+For installation and server execution, read
+[`deployment/migration.md`](deployment/migration.md) and
+[`deployment/mac_dev_server_pull.md`](deployment/mac_dev_server_pull.md).
 
-If you are setting this project up on a new host, read
-`deployment/migration.md` for the conda env / install checklist.
+## Current document roles
 
-## Document Roles
-
-| File / Folder | Purpose |
+| File or folder | Purpose |
 |---|---|
-| `handoff.md` | Short-lived current work snapshot; never a normative architecture source |
-| `governance.md` | Coordinator responsibilities, source-of-truth order, boundary rules |
-| `architecture.md` | Parent graph, modules, state categories, extension rule |
-| `architecture/` | Accepted cross-cutting specifications and their implementation-conformance status |
-| `stage_contracts.md` | Stable inputs, outputs, planning rules, and review triggers per stage |
-| `descriptor_spec.md` | Descriptor registry, package descriptor, method descriptor, asset rules |
-| `deployment/mac_dev_server_pull.md` | Mac-dev / server `git pull` workflow contract |
-| `deployment/migration.md` | New-host setup checklist (conda envs, installs, paths) |
-| `examples/` | Manifest and run-config templates |
-| `archive/` | Original biology source documents (kept for reference) |
+| `architecture.md` | Parent graph, modules, state categories, and execution boundary |
+| `architecture/` | One current owner for each cross-cutting contract |
+| `stage_contracts.md` | Biological stage contracts; no cross-stage storage convention |
+| `descriptor_spec.md` | Descriptor registry and capability metadata |
+| `governance.md` | Current engineering and documentation boundary rules |
+| `deployment/` | Current host setup and Mac/server workflow |
+| `user_guide/` | Current operator-facing feature guides |
+| `examples/` | Schema-valid manifest and run-config templates |
+| `archive/` | Original biological source material retained for reference |
 
-## Update Rule
+## Update rule
 
-When code behavior changes, update the owning specification in the same work
-session. Keep `handoff.md` short and current; it should point to specifications,
-tests, or current implementation evidence rather than copying them. Design
-status and current implementation conformance must be recorded separately.
+When behavior changes, update the single owning contract in the same change.
+Do not add a status snapshot, implementation summary, phase document, or second
+description of an existing architecture boundary.

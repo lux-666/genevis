@@ -1,11 +1,5 @@
 # Execution Lifecycle
 
-**Status:** Accepted
-
-**Implementation:** Implemented
-
-**Accepted:** 2026-07-21
-
 ## Scope
 
 This specification owns the shared execution lifecycle for every executable
@@ -170,13 +164,12 @@ execution refs. The review decision owns the operator parameters; the candidate
 bundle is the collected domain result and may project those refs for audit. No
 parameter-recommendation record is synthesized for this path.
 
-## Cutover and Conformance
+## Conformance
 
 There is no legacy cursor reader, dual write, checkpoint migration, or
-stage-local lifecycle compatibility layer. Migrated stage-local lifecycle
-modules and manual Runner/evidence paths are deleted.
+stage-local lifecycle compatibility layer.
 
-Current conformance requires:
+The current implementation requires:
 
 1. every executable production method reaches `build_method_graph` and the
    shared run kernel;
@@ -185,5 +178,5 @@ Current conformance requires:
 4. process success and failure persist canonical execution evidence;
 5. resume after freeze does not rebuild a command, and resume after run does
    not execute again;
-6. no removed method-specific cursor key, wrapper artifact, or stage-local
-   lifecycle implementation remains in production code.
+6. production code has no method-specific duplicate cursor key, wrapper
+   artifact, or stage-local lifecycle implementation.

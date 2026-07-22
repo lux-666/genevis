@@ -150,5 +150,5 @@ cat <<EOF
 run_log: ${run_log}
 review_request: ${review_request}
 
-Record these refs in docs/handoff.md and check the task 07 server box after server validation.
+Preserve these refs with the server run records.
 EOF

@@ -20,12 +20,12 @@
   "function_annotation": {
     "database_provenance": [
       {
-        "method_name": "function_annotation.candidate.interproscan",
-        "database_name": "InterPro",
+        "method_name": "function_annotation.candidate.diamond",
+        "database_name": "UniProt",
         "database_version": "operator_supplied",
         "snapshot_date": "2026-05-26",
-        "database_source_ref": "/abs/path/to/interpro_db",
-        "descriptor_version": "interproscan.yaml",
+        "database_source_ref": "/abs/path/to/uniprot.dmnd",
+        "descriptor_version": "diamond.yaml",
         "input_proteins_ref": "__PROTEINS_REF_PLACEHOLDER__",
         "command": "operator provenance note"
       }

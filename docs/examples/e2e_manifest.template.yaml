@@ -1,4 +1,4 @@
-# Phase 6 End-to-End Acceptance Manifest Template
+# End-to-End Manifest Template
 #
 # Copy this file to a server-local path and replace placeholder paths with
 # real files on the HPC. Do NOT commit the filled-in version with private paths.
@@ -6,7 +6,7 @@
 # This manifest starts from raw long reads and includes a provided repeat
 # library so the full mainline can reach terminal completion in one session.
 
-session_id: phase6-e2e-YYYYMMDD-a
+session_id: e2e-YYYYMMDD-a
 
 assets:
   - asset_type: raw_long_reads
