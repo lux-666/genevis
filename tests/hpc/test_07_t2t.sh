@@ -173,8 +173,8 @@ elif (( RUN_EXITCODE != 0 )); then
 fi
 
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-OUT_DIR="${RUN_DIR}/artifacts/t2t/${SID}/t2t_finishing"
-WORK_DIR="${RUN_DIR}/work/t2t/${SID}/t2t_finishing"
+OUT_DIR="${RUN_DIR}/artifacts/t2t/outputs/t2t_finishing"
+WORK_DIR="${RUN_DIR}/work/t2t/t2t_finishing"
 BUNDLE="${OUT_DIR}/t2t_finishing_bundle.json"
 ASSEMBLY_SCAN="${OUT_DIR}/assembly_telomere_scan.tsv"
 READS_SCAN="${OUT_DIR}/reads_telomere_scan.tsv"
@@ -268,9 +268,9 @@ else
     info "No terminal-telomeric reads detected; minimap2 branch correctly skipped after real read scan."
 fi
 
-ARTIFACTS_INDEX="${RUN_DIR}/artifacts/artifacts.jsonl"
+ARTIFACTS_INDEX="${RUN_DIR}/artifacts/index.jsonl"
 assert_file_nonempty "$ARTIFACTS_INDEX" "T2T artifact index"
-assert_file_contains "$ARTIFACTS_INDEX" '"stage": "t2t"' "T2T artifacts registered"
+assert_file_contains "$ARTIFACTS_INDEX" '"stage":"t2t"' "T2T artifacts registered"
 
 GA inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --trace 2>&1 && \
     pass "inspect real T2T session" || fail "inspect real T2T session"

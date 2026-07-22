@@ -70,10 +70,8 @@ BUSCO_LINEAGE_NAME="actinopterygii_odb10"
 
 # ---- Hi-C scaffolding ----
 HIC_RESTRICTION_ENZYME="DpnII"
-# AutoHiC requires both pretrained models. They are passed through to
-# ERROR_PRETRAINED_MODEL and CHR_PRETRAINED_MODEL in cfg-autohic.txt.
-HIC_AUTOHIC_ERROR_MODEL="/path/to/error_detection_model.pth"
-HIC_AUTOHIC_CHROMOSOME_MODEL="/path/to/chromosome_assignment_model.pth"
+# AutoHiC model paths belong to packages.autohic.models in
+# config/envs.local.yaml, alongside the package installation root.
 
 # ---- Test output root ----
 # All test sessions will be created under this directory.
@@ -85,7 +83,7 @@ CHECKPOINTER="sqlite"
 # ---- Run unit tests first? (true/false) ----
 RUN_UNIT_TESTS=true
 
-# ---- Phase 11 parameter approval ----
+# ---- Assembly parameter approval ----
 # "manual" preserves every production human gate. run_all reports a blocked
 # smoke as SKIP (77), prints its session ID, and continues independent tests.
 # "approve" only auto-approves hash-bound assembly parameter recommendations;
@@ -97,7 +95,7 @@ HPC_MAX_PARAMETER_APPROVALS=3
 # test_02 uses this executable subgraph instead of only the default skip path.
 READ_QC_MIN_LEN=1000
 
-# ---- Test 09 assembly-focused smoke (skip expensive upstream stages) ----
+# ---- E2E assembly-focused smoke (skip expensive upstream stages) ----
 # true: skip read_qc + genome_survey; assembly uses raw long reads and
 # GENOME_SIZE_ESTIMATE from shared_parameters. Full e2e should leave this false.
 TEST09_SKIP_UPSTREAM=false

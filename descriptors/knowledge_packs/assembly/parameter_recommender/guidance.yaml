@@ -88,7 +88,7 @@ guidance:
     guidance: >-
       When review indicates retained haplotig duplication, reconsider the
       previous purging settings as a connected group and use the observed
-      quality signals to justify a focused retry patch.
+      quality signals to justify the retry attempt's explicit mapping.
     caveats:
       - Biological duplication and polyploidy can resemble under-purging.
       - Increased assembly size or duplicated BUSCO alone is not a sufficient diagnosis.

@@ -49,16 +49,7 @@ elif [[ ! -s "$HIC_R1" || ! -s "$HIC_R2" ]]; then
 else
     assert_file_nonempty "$HIC_R1" "Hi-C R1"
     assert_file_nonempty "$HIC_R2" "Hi-C R2"
-    if [[ -z "${HIC_AUTOHIC_ERROR_MODEL:-}" || -z "${HIC_AUTOHIC_CHROMOSOME_MODEL:-}" ]]; then
-        warn "AutoHiC pretrained models are not configured; schema/unit tests only"
-        HIC_AVAILABLE=false
-    elif [[ ! -s "$HIC_AUTOHIC_ERROR_MODEL" || ! -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]]; then
-        [[ -s "$HIC_AUTOHIC_ERROR_MODEL" ]] || fail "AutoHiC error model missing: ${HIC_AUTOHIC_ERROR_MODEL}"
-        [[ -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]] || fail "AutoHiC chromosome model missing: ${HIC_AUTOHIC_CHROMOSOME_MODEL}"
-        exit 1
-    else
-        HIC_AVAILABLE=true
-    fi
+    HIC_AVAILABLE=true
 fi
 
 # ---- Unit tests ----

@@ -1,17 +1,17 @@
 """Strict Assembly parameter-recommendation response contract.
 
-The model returns one complete set of explicit parameter recommendations for
-the current attempt.  Application code does not merge catalog defaults,
-previous attempts, or policy-derived values into that set.  After syntactic
-parsing the recommendation is shown to a human, and an approved recommendation
-is the exact mapping consumed by command construction.
+The model returns the explicit L2 parameter mapping it recommends for the
+current attempt. Application code does not merge catalog defaults, previous
+attempts, or policy-derived values into that mapping. Omitted L2 parameters are
+not emitted by Gene Agent and remain tool defaults. After syntactic parsing the
+recommendation is shown to a human, and an approved recommendation is the exact
+mapping consumed by command construction.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
-
 
 PARAMETER_RECOMMENDATION_CONTRACT = "parameter_recommendation_v1"
 _RETRY_DISPOSITIONS = {"retry", "stop", "expert_review"}
@@ -61,7 +61,8 @@ def normalize_parameter_recommendation(
         retry_disposition = response.get("retry_disposition")
         if retry_disposition not in _RETRY_DISPOSITIONS:
             raise ValueError(
-                "retry recommendation requires retry_disposition=retry, stop, or expert_review"
+                "retry recommendation requires retry_disposition=retry, stop, "
+                "or expert_review"
             )
 
     return {

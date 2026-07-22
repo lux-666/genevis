@@ -163,9 +163,9 @@ fi
 
 # ---- Verify assembly outputs ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-ASM_ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly/${SID}"
-DEDUP_ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly_dedup/${SID}"
-DEDUP_WORK_DIR="${RUN_DIR}/work/assembly_dedup/${SID}"
+ASM_ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly"
+DEDUP_ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly_dedup"
+DEDUP_WORK_DIR="${RUN_DIR}/work/assembly_dedup"
 
 # ---- Assembly stage outputs ----
 info "Checking assembly outputs"
@@ -191,7 +191,7 @@ else
 fi
 
 # The storage refactor changed method scripts from cp to replay-safe publish.
-ASM_SCRIPT=$(find "${RUN_DIR}/work/assembly/${SID}" -name "*.sh" -type f 2>/dev/null | head -1 || true)
+ASM_SCRIPT=$(find "${RUN_DIR}/work/assembly" -name "*.sh" -type f 2>/dev/null | head -1 || true)
 if [[ -n "$ASM_SCRIPT" ]]; then
     pass "assembly method script generated: $(basename "$ASM_SCRIPT")"
     case "${ASSEMBLY_METHOD}" in
@@ -229,46 +229,92 @@ else
     warn "assembly candidate bundle not found (may be at different path)"
 fi
 
-# ---- Parameter recommendation closed-loop artifacts ----
-info "Checking assembly parameter recommendation artifacts"
+# ---- Parameter recommendation and execution evidence ----
+info "Checking assembly parameter recommendation and execution evidence"
 cd "${PROJECT_ROOT}"
 python3 - "${RUN_DIR}" "${SID}" "${ASSEMBLY_METHOD}" <<'PY' 2>&1 && \
-    pass "assembly parameter closed-loop artifacts valid" || fail "assembly parameter closed-loop artifacts invalid"
+    pass "assembly parameter and execution evidence valid" || fail "assembly parameter or execution evidence invalid"
 import json
 import sys
 from pathlib import Path
+
+from app.execution.evidence import load_execution_evidence, load_frozen_attempt
+from app.graph.builder import build_graph
+from app.schemas.artifacts import ParameterAttempt
+from app.stages.assembly.parameters.storage import load_recommendation_bundle, read_json_artifact
+from app.storage.artifacts import resolve_artifact_ref
 
 run_dir = Path(sys.argv[1])
 session_id = sys.argv[2]
 method_slug = sys.argv[3]
 method_id = f"assembly.candidate.{method_slug}"
-assembly_dir = run_dir / "artifacts" / "assembly" / session_id
 
-matching_commands = []
-for command_path in sorted(assembly_dir.glob("parameter_attempt_*/command.json")):
-    command = json.loads(command_path.read_text(encoding="utf-8"))
-    if command.get("method_id") == method_id:
-        matching_commands.append((command_path, command))
-assert matching_commands, f"no command.json for {method_id} under {assembly_dir}/parameter_attempt_*"
-command_path, command = matching_commands[-1]
-attempt_dir = command_path.parent
-method_artifact_dir = attempt_dir / method_slug
-assert method_artifact_dir.is_dir(), f"missing method artifact directory: {method_artifact_dir}"
+checkpoint_path = run_dir / "checkpoints" / "checkpoints.sqlite"
+assert checkpoint_path.is_file(), f"missing sqlite checkpoint: {checkpoint_path}"
+graph = build_graph(backend="sqlite", data_dir=str(run_dir))
+try:
+    snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
+    state = dict(snapshot.values or {})
+finally:
+    connection = getattr(getattr(graph, "checkpointer", None), "conn", None)
+    if connection is not None:
+        connection.close()
+
+assert state.get("session_id") == session_id, state.get("session_id")
+assembly_out = dict((state.get("stage_outputs") or {}).get("assembly") or {})
+current_id = assembly_out.get("current_parameter_attempt_id")
+assert type(current_id) is int and current_id >= 0, current_id
+matching_attempts = [
+    ParameterAttempt.model_validate(item)
+    for item in assembly_out.get("parameter_attempts") or []
+    if isinstance(item, dict)
+    and item.get("method_id") == method_id
+    and item.get("attempt_id") == current_id
+]
+assert len(matching_attempts) == 1, f"expected one current attempt for {method_id}, got {len(matching_attempts)}"
+attempt = matching_attempts[0]
+assert attempt.status == "executed", attempt
+for field in (
+    "recommendation_manifest_ref",
+    "approval_decision_ref",
+    "frozen_parameters_ref",
+    "command_ref",
+    "frozen_attempt_ref",
+    "execution_ref",
+):
+    assert getattr(attempt, field) is not None, f"current ParameterAttempt missing {field}"
+
+attempt_scope = f"{attempt.attempt_id:03d}"
+assert attempt.recommendation_manifest_ref.path_ref == (
+    f"artifacts/assembly/parameter_recommendations/{attempt_scope}/recommendation_manifest.json"
+)
+assert attempt.command_ref.path_ref == f"artifacts/assembly/attempts/{attempt_scope}/command.json"
+assert attempt.frozen_parameters_ref.path_ref == f"artifacts/assembly/attempts/{attempt_scope}/frozen_parameters.json"
+
+# Canonical loaders verify artifact-index identity, hashes, types, and all
+# recommendation-manifest refs before returning the payloads.
+bundle = load_recommendation_bundle(state, attempt.recommendation_manifest_ref)
+manifest = bundle["manifest"]
+recommendation_record = bundle["recommendation"]
+assert manifest.get("method_id") == method_id, manifest
+assert manifest.get("recommendation_id") == attempt.attempt_id, manifest
+assert recommendation_record.get("method_id") == method_slug, recommendation_record
+recommendation = recommendation_record.get("recommendation") or {}
+recommended_parameters = recommendation.get("parameters")
+assert isinstance(recommended_parameters, dict), recommendation
+
+command = read_json_artifact(state, attempt.command_ref)
+frozen_parameters = read_json_artifact(state, attempt.frozen_parameters_ref)
 sources = command.get("parameter_sources")
 assert isinstance(sources, dict), "command.json missing parameter_sources"
 for group in ("l0_fixed", "l1_readonly", "l2_recommended"):
-    assert group in sources and isinstance(sources[group], dict), f"missing parameter source group: {group}"
+    assert isinstance(sources.get(group), dict), f"missing parameter source group: {group}"
+assert sources["l2_recommended"] == recommended_parameters
+assert frozen_parameters.get("parameter_sources") == sources
 
 argv = command.get("argv")
 assert isinstance(argv, list) and argv, "command.json missing argv"
 assert command.get("command"), "command.json missing rendered command string"
-
-validated_path = attempt_dir / "validated_recommendation.json"
-assert validated_path.is_file(), f"missing validated recommendation: {validated_path}"
-validated = json.loads(validated_path.read_text(encoding="utf-8"))
-validated_attempt = validated.get("attempt") or {}
-assert validated_attempt.get("validation", {}).get("valid") is True, validated_attempt.get("validation")
-
 if method_slug in {"hifiasm", "hifiasm_ont"}:
     assert argv[0] == "hifiasm", argv
     assert "-t" in argv, f"hifiasm argv missing -t threads flag: {argv}"
@@ -277,37 +323,8 @@ if method_slug in {"hifiasm", "hifiasm_ont"}:
         assert "--ont" in argv, f"hifiasm_ont argv missing --ont: {argv}"
     else:
         assert "--ont" not in argv, f"hifiasm HiFi argv should not contain --ont: {argv}"
-
-    prompt_path = attempt_dir / "prompt_payload.json"
-    evidence_path = attempt_dir / "evidence_payload.json"
-    approval_path = attempt_dir / "parameter_approval_decision.json"
-    for required_path in (prompt_path, evidence_path, approval_path):
-        assert required_path.is_file(), f"missing Phase 11 artifact: {required_path}"
-    prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
-    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    retrieval = prompt.get("case_retrieval") or {}
-    prompt_cases = prompt.get("evidence_cases") or []
-    prompt_ids = [case.get("case_id") for case in prompt_cases]
-    assert retrieval.get("retrieval_backend") == "hifiasm_numeric", retrieval
-    assert len(prompt_ids) == 5, f"production top-five expected, got {prompt_ids}"
-    assert prompt.get("selected_cases") == [], "legacy selected_cases must stay empty for hifiasm"
-    for field in ("candidate_case_ids", "selected_case_ids", "evidence_case_ids"):
-        assert retrieval.get(field) == prompt_ids, f"{field} does not match prompt evidence"
-    for case in prompt_cases:
-        source = case.get("source") or {}
-        excerpts = case.get("source_excerpts") or []
-        assert source.get("kind") == "paper", source
-        assert source.get("doi"), source
-        assert excerpts, case.get("case_id")
-        assert all(item.get("span_id") and item.get("quote") for item in excerpts), excerpts
-    assert evidence.get("cases") == prompt_cases, "evidence payload differs from canonical prompt cases"
-    recommendation_case_ids = validated_attempt.get("selected_case_ids") or []
-    assert recommendation_case_ids, "validated hifiasm recommendation cited no paper case"
-    assert set(recommendation_case_ids) <= set(prompt_ids), recommendation_case_ids
-    assert validated_attempt.get("retrieval_backend") == "hifiasm_numeric"
-    approval = json.loads(approval_path.read_text(encoding="utf-8"))
-    assert approval.get("decision") == "approve_parameters", approval
 elif method_slug == "nextdenovo":
+    assert argv[0] == "nextDenovo", argv
     rendered = command.get("rendered_parameters")
     assert isinstance(rendered, dict) and rendered, "NextDenovo command.json missing rendered_parameters"
     run_cfg = command.get("run_cfg")
@@ -315,66 +332,54 @@ elif method_slug == "nextdenovo":
 else:
     assert argv[0] == "flye", argv
 
-candidate_paths = sorted(assembly_dir.glob(f"**/*candidate*.json"))
+approval_path = resolve_artifact_ref(run_dir, session_id, attempt.approval_decision_ref)
+approval = json.loads(approval_path.read_text(encoding="utf-8"))
+assert approval.get("stage") == "assembly", approval
+assert approval.get("gate_id") == "parameter_approval", approval
+assert (approval.get("decision") or {}).get("decision") == "approve_parameters", approval
+
+frozen_attempt = load_frozen_attempt(
+    state,
+    attempt.frozen_attempt_ref,
+    expected_stage="assembly",
+    expected_method_name=method_id,
+)
+assert (frozen_attempt.metadata or {}).get("parameter_attempt_id") == attempt.attempt_id
+execution = load_execution_evidence(
+    state,
+    attempt.execution_ref,
+    expected_stage="assembly",
+    expected_attempt_id=frozen_attempt.attempt_id,
+    expected_method_name=method_id,
+)
+assert execution.success is True, execution
+assert execution.return_code == 0, execution
+
+assembly_dir = run_dir / "artifacts" / "assembly"
+
+candidate_paths = sorted((assembly_dir / "candidates").glob("*.json"))
 matching_candidates = []
 for path in candidate_paths:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    if data.get("method_name") == method_id:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("method_name") == method_id and data.get("status") == "executed":
         matching_candidates.append((path, data))
-assert matching_candidates, f"no candidate bundle for {method_id}"
-candidate_path, candidate = matching_candidates[-1]
-assert candidate.get("status") == "executed", f"{candidate_path} status is {candidate.get('status')!r}"
+assert matching_candidates, f"no executed candidate bundle for {method_id}"
+candidate_path, _candidate = matching_candidates[-1]
 
 events_path = run_dir / "ledger" / "events.jsonl"
 assert events_path.is_file(), f"missing ledger events: {events_path}"
 events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-succeeded = [
-    event for event in events
-    if event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
-]
-assert succeeded, f"ledger has no attempt_succeeded for {method_id}"
+assert any(
+    event.get("event_type") == "attempt_succeeded" and event.get("method_name") == method_id
+    for event in events
+), f"ledger has no attempt_succeeded for {method_id}"
 
-checkpoint_path = run_dir / "checkpoints" / "checkpoints.sqlite"
-if checkpoint_path.exists():
-    from app.graph.builder import build_graph
-
-    graph = build_graph(backend="sqlite", data_dir=str(run_dir))
-    try:
-        snapshot = graph.get_state({"configurable": {"thread_id": session_id}})
-        state = dict(snapshot.values or {})
-    finally:
-        checkpointer = getattr(graph, "checkpointer", None)
-        conn = getattr(checkpointer, "conn", None)
-        if conn is not None:
-            conn.close()
-
-    assembly_out = dict((state.get("stage_outputs") or {}).get("assembly") or {})
-    current_id = int(assembly_out.get("current_parameter_attempt_id") or command.get("attempt_id") or 0)
-    attempts = [
-        item for item in assembly_out.get("parameter_attempts") or []
-        if isinstance(item, dict)
-        and item.get("method_id") == method_id
-        and int(item.get("attempt_id", -1)) == current_id
-    ]
-    assert attempts, f"checkpoint state has no current parameter_attempt for {method_id}"
-    assert attempts[-1].get("status") == "executed", attempts[-1]
-    if method_slug in {"hifiasm", "hifiasm_ont"}:
-        assert attempts[-1].get("parameter_approval_decision_ref"), attempts[-1]
-        assert attempts[-1].get("parameter_approval_recommendation_hash") == attempts[-1].get("parameter_recommendation_hash")
-    compact_attempt_status = attempts[-1].get("status")
-else:
-    compact_attempt_status = "skipped_no_sqlite_checkpoint"
-
-print(f"  command_json: {command_path}")
-print(f"  method_id: {method_id}")
-print(f"  compact_parameter_attempt_status: {compact_attempt_status}")
-print(f"  parameter_source_groups: {', '.join(sorted(sources))}")
+print(f"  recommendation_manifest: {attempt.recommendation_manifest_ref.path_ref}")
+print(f"  command_json: {attempt.command_ref.path_ref}")
+print(f"  approval_decision: {attempt.approval_decision_ref.path_ref}")
+print(f"  execution_evidence: {attempt.execution_ref.path_ref}")
+print(f"  explicit_l2_parameters: {sorted(recommended_parameters)}")
 print(f"  argv_preview: {' '.join(argv[:12])}")
-if method_slug == "nextdenovo":
-    print(f"  rendered_parameters: {sorted(command['rendered_parameters'])}")
 print(f"  candidate_bundle: {candidate_path}")
 PY
 cd "${SCRIPT_DIR}"

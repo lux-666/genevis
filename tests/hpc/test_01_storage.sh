@@ -5,7 +5,7 @@
 #  What it tests:
 #    1. New runs/<session-id>/ directory layout is created correctly
 #    2. Session ID auto-generation works
-#    3. locate_session_data_dir() backward compat (legacy flat layout)
+#    3. locate_session_data_dir() resolves the current v2 session layout
 #    4. publish_file() atomic move / cross-device fallback
 #    5. inspect subcommand reads the new layout
 #    6. Unit tests for storage paths pass
@@ -228,13 +228,13 @@ assert str(sp.checkpoints_dir).endswith('checkpoints'), f'bad checkpoints_dir: {
 print('SessionPaths: all paths correct')
 " 2>&1 && pass "SessionPaths layout validation" || fail "SessionPaths layout validation"
 
-# ---- Test 8: locate_session_data_dir backward compat ----
+# ---- Test 8: locate_session_data_dir current v2 lookup ----
 cd "${PROJECT_ROOT}"
 python3 -c "
 from pathlib import Path
 from app.storage.paths import locate_session_data_dir
 
-# New layout should be found
+# The only supported v2 layout should be found.
 result = locate_session_data_dir('${TEST_DATA_ROOT}', '${SID}')
 assert result is not None, 'new layout session not found'
 assert 'runs/${SID}' in str(result), f'unexpected path: {result}'
@@ -243,8 +243,8 @@ assert 'runs/${SID}' in str(result), f'unexpected path: {result}'
 result2 = locate_session_data_dir('${TEST_DATA_ROOT}', 'nonexistent-session-xyz')
 assert result2 is None, f'should be None for missing session, got {result2}'
 
-print('locate_session_data_dir: backward compat OK')
-" 2>&1 && pass "locate_session_data_dir backward compat" || fail "locate_session_data_dir backward compat"
+print('locate_session_data_dir: current v2 lookup OK')
+" 2>&1 && pass "locate_session_data_dir current v2 lookup" || fail "locate_session_data_dir current v2 lookup"
 
 # ---- Cleanup test-specific temp files ----
 rm -rf "${PUBLISH_TEST_DIR}"

@@ -6,22 +6,28 @@
 
 ### 1. 首次配置 / First Time Setup
 
-在 HPC 上配置好 `work/genevis/tests/hpc/hpc_env.sh` 后，可以这样运行：
+在 HPC 上复制并填写 `tests/hpc/hpc_env.sh` 后，先检查配置，再选择 Assembly-first
+或完整流水线：
 
 ```bash
 cd /path/to/gene_agent/tests/hpc
 
-# 方式1：使用快速启动脚本（推荐）
+# 首次配置与静态检查
 ./quick_run.sh --setup    # 交互式配置向导
 ./quick_run.sh --check    # 检查配置
-./quick_run.sh            # 运行完整流程
 
-# 方式2：直接运行测试脚本
-./test_09_e2e_pipeline.sh
+# Assembly-first：先验证入口，再实跑组装、参数批准与去冗余
+./test_00_entrypoints.sh
+./test_04_assembly_dedup.sh
 
-# 全套分阶段检查（00→09；assembly/Hi-C 会实际运行）
+# 完整流程（两种入口等价；00→09，assembly/Hi-C 会实际运行）
+./quick_run.sh
 ./run_all.sh
 ```
+
+`test_04` 是上 HPC 后最值得先跑的真实主链：它覆盖参数推荐、逐 attempt 批准、
+冻结命令、执行证据、Assembly 产物和 purge_dups。需要全链路 Hi-C/T2T 时，再运行
+`test_09_e2e_pipeline.sh` 或整套 `run_all.sh`。
 
 ### 2. 配置文件 / Configuration
 
@@ -69,9 +75,10 @@ ${TEST_DATA_ROOT}/test_logs/run-all-YYYYMMDD-HHMMSS/
 HIC_R1="/path/to/hic_R1.fq.gz"                  # Hi-C 双端测序 R1
 HIC_R2="/path/to/hic_R2.fq.gz"                  # Hi-C 双端测序 R2
 HIC_RESTRICTION_ENZYME="DpnII"                   # 限制性内切酶
-HIC_AUTOHIC_ERROR_MODEL="/path/to/error_model.pth"
-HIC_AUTOHIC_CHROMOSOME_MODEL="/path/to/chromosome_model.pth"
 ```
+
+AutoHiC 的安装目录和两个模型路径统一配置在 `config/envs.local.yaml` 的
+`packages.autohic` 下，不再通过 `hpc_env.sh` 或 run-config 重复传递。
 
 ## 流程说明 / Pipeline Overview
 
@@ -131,8 +138,8 @@ HIC_AUTOHIC_CHROMOSOME_MODEL="/path/to/chromosome_model.pth"
 ### Q2: Hi-C 执行失败怎么办？
 **A:** 检查以下配置：
 - `HIC_RESTRICTION_ENZYME`: 必须与 Hi-C 建库酶一致
-- `HIC_AUTOHIC_ERROR_MODEL` 与 `HIC_AUTOHIC_CHROMOSOME_MODEL`: 两个预训练模型都必须存在
-- `config/envs.yaml`: AutoHiC、Juicer、3D-DNA 的安装根目录和 AutoHiC 专用 conda 环境必须可用
+- `config/envs.local.yaml`: `packages.autohic.models.error` 与 `models.chromosome` 指向存在的模型
+- `config/envs.local.yaml`: AutoHiC、Juicer、3D-DNA 的安装根目录和 AutoHiC 专用 conda 环境必须可用
 
 ### Q3: 如何查看会话状态？
 **A:** 使用 inspect 命令：
@@ -165,6 +172,17 @@ Hi-C/T2T 的 stage-specific gate。每次恢复都继续原 session，已完成 
 
 **推荐在 HPC 上创建 `config/envs.local.yaml`：**
 ```yaml
+packages:
+  autohic:
+    install_root: /path/to/AutoHiC
+    models:
+      error: /path/to/error_model.pth
+      chromosome: /path/to/chromosome_model.pth
+  juicer:
+    install_root: /path/to/juicer
+  three_d_dna:
+    install_root: /path/to/3d-dna
+
 methods:
   hic_scaffolding.candidate.autohic:
     conda_env: autohic

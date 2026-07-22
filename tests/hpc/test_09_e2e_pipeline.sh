@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Test 09 — Phase 9: End-to-End Pipeline Test
+#  Test 09 — End-to-End Pipeline Test
 # ============================================================
 #  What it tests:
 #    1. Full pipeline flow: read_qc → genome_survey → assembly → assembly_review → hic → t2t
@@ -61,16 +61,8 @@ if [[ -n "${HIC_R1:-}" || -n "${HIC_R2:-}" ]]; then
         info "Hi-C data detected:"
         info "  R1: ${HIC_R1}"
         info "  R2: ${HIC_R2}"
-        if [[ -z "${HIC_AUTOHIC_ERROR_MODEL:-}" || -z "${HIC_AUTOHIC_CHROMOSOME_MODEL:-}" ]]; then
-            fail "AutoHiC requires HIC_AUTOHIC_ERROR_MODEL and HIC_AUTOHIC_CHROMOSOME_MODEL"
-            exit 1
-        elif [[ ! -s "$HIC_AUTOHIC_ERROR_MODEL" || ! -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]]; then
-            [[ -s "$HIC_AUTOHIC_ERROR_MODEL" ]] || fail "AutoHiC error model missing: ${HIC_AUTOHIC_ERROR_MODEL}"
-            [[ -s "$HIC_AUTOHIC_CHROMOSOME_MODEL" ]] || fail "AutoHiC chromosome model missing: ${HIC_AUTOHIC_CHROMOSOME_MODEL}"
-            exit 1
-        fi
         HIC_AVAILABLE=true
-        pass "Hi-C data and AutoHiC models available for scaffolding"
+        pass "Hi-C data available for scaffolding"
     else
         [[ -s "$HIC_R1" ]] || fail "HIC_R1 is missing or empty: ${HIC_R1}"
         [[ -s "$HIC_R2" ]] || fail "HIC_R2 is missing or empty: ${HIC_R2}"
@@ -227,12 +219,12 @@ print("run-config schema validation OK")
 PY
 
 # ============================================================
-# Phase 1: Run through read_qc and genome_survey (no blocking)
+# Run the configured pipeline until completion or a durable human gate.
 # ============================================================
 if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
-    info "Phase 1: Existing assembly shortcut + downstream stages"
+    info "Run: Existing assembly shortcut + downstream stages"
 else
-    info "Phase 1: Read QC + Genome Survey (non-blocking stages)"
+    info "Run: Read QC + Genome Survey + downstream stages"
 fi
 
 RUN_EXITCODE=0
@@ -267,7 +259,7 @@ INSPECT_JSON="${TEST_DATA_ROOT}/_test09_inspect.json"
 assert_dir_exists "$RUN_DIR" "run directory exists"
 assert_dir_exists "$ARTIFACT_DIR" "artifacts directory exists"
 
-READQC_SUMMARY="${ARTIFACT_DIR}/read_qc/${SID}/read_qc_summary.json"
+READQC_SUMMARY="${ARTIFACT_DIR}/read_qc/outputs/seqkit_stats/read_qc_summary.json"
 if [[ -f "$READQC_SUMMARY" ]]; then
     pass "read_qc_summary.json produced"
     assert_file_contains "$READQC_SUMMARY" "method_name" "summary has method_name"
@@ -280,7 +272,7 @@ else
 fi
 
 # ---- Verify genome_survey artifacts ----
-SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/${SID}/genome_survey_result.json"
+SURVEY_RESULT="${ARTIFACT_DIR}/genome_survey/genome_survey_result.json"
 if [[ -f "$SURVEY_RESULT" ]]; then
     pass "genome_survey_result.json produced"
 elif [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
@@ -313,7 +305,7 @@ fi
 
 # ---- Check current stage and supervision state ----
 cd "${PROJECT_ROOT}"
-info "Inspecting session state after Phase 1"
+info "Inspecting durable session state after pipeline invocation"
 if python3 -m app.entrypoints.run inspect --session-id "$SID" --data-dir "$TEST_DATA_ROOT" --json > "$INSPECT_JSON" 2>/dev/null; then
     CURRENT_STAGE=$(python3 - "$INSPECT_JSON" <<'PY'
 import json, sys
@@ -394,9 +386,9 @@ if (( RUN_EXITCODE != 0 )) && [[ "$SUPERVISION_STATE" != "blocked_human" ]]; the
 fi
 
 # ============================================================
-# Phase 2: Check blocking behavior
+# Check blocking behavior
 # ============================================================
-section "Phase 2: Blocking Behavior Analysis"
+section "Blocking Behavior Analysis"
 
 if [[ "$SUPERVISION_STATE" == "blocked_human" ]]; then
     pass "Pipeline correctly blocked at human gate"
@@ -481,9 +473,9 @@ else
 fi
 
 # ============================================================
-# Phase 3: Stage Transition Validation
+# Stage Transition Validation
 # ============================================================
-section "Phase 3: Stage Transition Validation"
+section "Stage Transition Validation"
 
 if [[ -f "$INSPECT_JSON" ]]; then
     info "Analyzing route trace"
@@ -521,11 +513,11 @@ else
 fi
 
 # ============================================================
-# Phase 4: Asset Registry Propagation
+# Asset Registry Propagation
 # ============================================================
-section "Phase 4: Asset Registry Propagation"
+section "Asset Registry Propagation"
 
-REGISTRY="${ASSET_REGISTRY_REF:-${ARTIFACT_DIR}/asset_registry/${SID}/registry.json}"
+REGISTRY="${ASSET_REGISTRY_REF:-${ARTIFACT_DIR}/asset_registry/registry.json}"
 if [[ -f "$REGISTRY" ]]; then
     cd "${PROJECT_ROOT}"
     python3 <<EOPYTHON
@@ -572,9 +564,9 @@ else
 fi
 
 # ============================================================
-# Phase 5: TUI Interaction Points Summary
+# TUI Interaction Points Summary
 # ============================================================
-section "Phase 5: TUI Interaction Points Summary"
+section "TUI Interaction Points Summary"
 
 info "TUI blocking points in the pipeline:"
 info "  1. Assembly route selection (when platform/coverage evidence is insufficient)"
@@ -591,9 +583,9 @@ info "  - TUI can inspect decision requirements and present choices"
 info "  - Resume via review_interactive endpoint with decision"
 
 # ============================================================
-# Phase 6: Tool Execution Verification
+# Tool Execution Verification
 # ============================================================
-section "Phase 6: Tool Execution Verification"
+section "Tool Execution Verification"
 
 info "Checking tool execution artifacts"
 
@@ -601,7 +593,7 @@ if [[ "$USE_EXISTING_ASSEMBLY" == true ]]; then
     info "Read QC, genome survey, and assembly execution skipped by existing assembly shortcut"
 else
     # Check seqkit execution
-    SEQKIT_WORK="${RUN_DIR}/work/read_qc/${SID}/seqkit_stats"
+    SEQKIT_WORK="${RUN_DIR}/work/read_qc/seqkit_stats"
     if [[ -d "$SEQKIT_WORK" ]]; then
         assert_file_exists "${SEQKIT_WORK}/run_seqkit_stats.sh" "seqkit script generated"
         if [[ -f "${SEQKIT_WORK}/seqkit_stats.tsv" ]]; then
@@ -610,7 +602,7 @@ else
     fi
 
     # Check jellyfish execution (if genome_survey ran)
-    JELLYFISH_WORK="${RUN_DIR}/work/genome_survey/${SID}/jellyfish"
+    JELLYFISH_WORK="${RUN_DIR}/work/genome_survey/jellyfish"
     if [[ -d "$JELLYFISH_WORK" ]]; then
         if [[ -f "${JELLYFISH_WORK}/run_jellyfish.sh" ]]; then
             pass "jellyfish script generated"
@@ -633,9 +625,9 @@ else
 fi
 
 # ============================================================
-# Phase 7: Checkpoint Persistence
+# Checkpoint Persistence
 # ============================================================
-section "Phase 7: Checkpoint Persistence"
+section "Checkpoint Persistence"
 
 CHECKPOINT_DIR="${RUN_DIR}/checkpoints"
 if [[ -d "$CHECKPOINT_DIR" ]]; then
@@ -650,11 +642,11 @@ else
 fi
 
 # ============================================================
-# Phase 8: Hi-C Scaffolding Verification
+# Hi-C Scaffolding Verification
 # ============================================================
 HIC_RAN=false
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    section "Phase 8: Hi-C Scaffolding Verification"
+    section "Hi-C Scaffolding Verification"
 
     info "Verifying Hi-C scaffolding execution"
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
@@ -716,15 +708,15 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         info "Derived Hi-C outputs are tracked in artifact records, not the input asset registry"
     fi
 else
-    info "Hi-C data not available, Phase 8 skipped"
+    info "Hi-C data not available; scaffolding verification skipped"
 fi
 
 # ============================================================
-# Phase 9: T2T Polishing Verification
+# T2T Polishing Verification
 # ============================================================
 T2T_RAN=false
 if [[ "$HIC_AVAILABLE" == true ]]; then
-    section "Phase 9: T2T Polishing Verification"
+    section "T2T Polishing Verification"
 
     info "Verifying T2T polishing execution"
     if [[ "$WAITING_AT_ASSEMBLY_REVIEW" == true ]]; then
@@ -781,7 +773,7 @@ if [[ "$HIC_AVAILABLE" == true ]]; then
         info "Derived T2T outputs are tracked in artifact records, not the input asset registry"
     fi
 else
-    info "Hi-C data not available, Phase 9 (T2T) skipped"
+    info "Hi-C data not available; T2T verification skipped"
 fi
 
 # ============================================================

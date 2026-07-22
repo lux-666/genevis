@@ -17,7 +17,7 @@ Paper cards are analogs, not recipes. Method, read type, route, assembly goal, a
 
 - Selection ranks paper cards by missing-aware numeric similarity across genome size, coverage, read N50, heterozygosity, and ploidy. Actionability only breaks ties. Missing dimensions are excluded and weights are renormalized.
 - Augmentation presents each selected card exactly once and adds applicable method-guidance cards. It never synthesizes a second copy of parameters, quotes, rationale, or citation.
-- Generation is one LLM call. The model judges the evidence and returns the entire set of parameters it recommends passing explicitly for this attempt.
+- Generation is one LLM call. The model judges the evidence and returns the explicit L2 parameter mapping it recommends passing for this attempt. It may omit an L2 parameter when the tool default should apply.
 - Application parsing checks only the declared JSON response shape. Parameter values are shown to the human reviewer without catalog-range or biological hard-rule rejection.
 
 ## Biological Reasoning
@@ -32,7 +32,7 @@ Repeat fraction and genome size affect graph complexity and resource pressure. T
 
 Retry context is same-run evidence, never a literature case. The previous recommendation is context only. It is not a baseline and is not merged into the new recommendation.
 
-For missing input, binary, permission, environment, or invalid-wrapper failures, prefer `expert_review` or `stop` instead of inventing a biological parameter change. For memory, timeout, parsing, or review-quality failures, return the complete explicit parameter set recommended for the next attempt.
+For missing input, binary, permission, environment, or invalid-wrapper failures, prefer `expert_review` or `stop` instead of inventing a biological parameter change. For memory, timeout, parsing, or review-quality failures, return the new attempt's explicit parameter mapping independently; the application does not inherit omitted parameters from the previous attempt.
 
 ## Response
 

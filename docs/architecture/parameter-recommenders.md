@@ -117,6 +117,12 @@ wrapper objects are rejected. A parser checks only response structure and the
 few fields required to continue the workflow; it does not check biological
 correctness or catalog ranges.
 
+For Assembly, `parameters` is the explicit L2 mapping for the current attempt,
+not a patch and not a requirement to enumerate every L2 parameter. An omitted
+L2 parameter is not emitted by Gene Agent and remains a tool default. Retry
+recommendations independently declare the next attempt's mapping; the
+application does not inherit omitted parameters from the prior attempt.
+
 ## Durable records and checkpoints
 
 `model_request.json` owns the exact compact-JSON messages and prompt identity.

@@ -113,14 +113,14 @@ fi
 
 # ---- Verify outputs ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-ARTIFACT_DIR="${RUN_DIR}/artifacts/genome_survey/${SID}"
-WORK_DIR="${RUN_DIR}/work/genome_survey/${SID}"
+ARTIFACT_DIR="${RUN_DIR}/artifacts/genome_survey"
+WORK_DIR="${RUN_DIR}/work/genome_survey"
 
 assert_dir_exists "$ARTIFACT_DIR" "genome_survey artifact dir"
 
 # ---- Jellyfish outputs ----
-JF_DB="${ARTIFACT_DIR}/jellyfish_kmers.jf"
-KMER_HIST="${ARTIFACT_DIR}/kmer_hist.tsv"
+JF_DB="${ARTIFACT_DIR}/outputs/jellyfish/jellyfish_kmers.jf"
+KMER_HIST="${ARTIFACT_DIR}/outputs/jellyfish/kmer_hist.tsv"
 assert_file_nonempty "$JF_DB"    "jellyfish k-mer database (.jf)"
 assert_file_nonempty "$KMER_HIST" "k-mer histogram (.tsv)"
 
@@ -133,7 +133,7 @@ if [[ -f "$JF_SCRIPT" ]]; then
 fi
 
 # ---- GenomeScope2 outputs ----
-GS_DIR="${ARTIFACT_DIR}/genomescope2"
+GS_DIR="${ARTIFACT_DIR}/outputs/genomescope2/output"
 GS_SUMMARY="${GS_DIR}/summary.txt"
 assert_dir_exists  "$GS_DIR"     "genomescope2 output dir"
 assert_file_nonempty "$GS_SUMMARY" "genomescope2 summary.txt"

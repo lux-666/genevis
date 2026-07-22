@@ -5,7 +5,7 @@
 #  What it tests:
 #    1. seqkit_stats subgraph (freeze -> run -> collect) with real seqkit
 #    2. seqkit_length_filter subgraph with real seqkit
-#    3. make_fofn creates correct file-of-filenames
+#    3. Every filtered long-read output is durably published and indexed
 #    4. Artifacts are published to new runs/<sid>/artifacts/ layout
 #    5. read_qc_summary.json has correct structure (new fields)
 #    6. Ledger records attempt_succeeded
@@ -68,14 +68,14 @@ fi
 
 # ---- Verify directory structure ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-ARTIFACT_DIR="${RUN_DIR}/artifacts/read_qc/${SID}"
-WORK_DIR="${RUN_DIR}/work/read_qc/${SID}"
+ARTIFACT_DIR="${RUN_DIR}/artifacts/read_qc"
+WORK_DIR="${RUN_DIR}/work/read_qc"
 
 assert_dir_exists "$RUN_DIR"              "run_dir exists"
 assert_dir_exists "$ARTIFACT_DIR"         "read_qc artifact dir"
 
 # ---- Verify seqkit_stats output ----
-STATS_TSV="${ARTIFACT_DIR}/seqkit_stats.tsv"
+STATS_TSV="${ARTIFACT_DIR}/outputs/seqkit_stats/seqkit_stats.tsv"
 assert_file_nonempty "$STATS_TSV" "seqkit_stats.tsv produced"
 if [[ -f "$STATS_TSV" ]]; then
     # Should have header + at least one data row
@@ -91,7 +91,7 @@ if [[ -f "$STATS_TSV" ]]; then
 fi
 
 # ---- Verify read_qc_summary.json ----
-SUMMARY="${ARTIFACT_DIR}/read_qc_summary.json"
+SUMMARY="${ARTIFACT_DIR}/outputs/seqkit_stats/read_qc_summary.json"
 assert_file_nonempty "$SUMMARY" "read_qc_summary.json produced"
 if [[ -f "$SUMMARY" ]]; then
     cd "${PROJECT_ROOT}"
@@ -124,18 +124,15 @@ if [[ -f "$FILTER_SCRIPT" ]]; then
     assert_file_contains "$FILTER_SCRIPT" "post_filter_seqkit_stats.tsv" "script collects post-filter statistics"
 fi
 
-FILTERED_FOFN="${ARTIFACT_DIR}/filtered_long_reads.fofn"
-FILTERED_SUMMARY="${ARTIFACT_DIR}/post_filter_read_qc_summary.json"
-assert_file_nonempty "$FILTERED_FOFN" "filtered long-read FOFN produced"
+FILTER_OUTPUT_DIR="${ARTIFACT_DIR}/outputs/length_filter"
+FILTERED_SUMMARY="${FILTER_OUTPUT_DIR}/post_filter_read_qc_summary.json"
 assert_file_nonempty "$FILTERED_SUMMARY" "post-filter summary produced"
-if [[ -f "$FILTERED_FOFN" ]]; then
-    FOFN_LINES=$(wc -l < "$FILTERED_FOFN")
-    EXPECTED_FOFN_LINES=$(wc -w <<< "$LONG_READS")
-    if (( FOFN_LINES == EXPECTED_FOFN_LINES )); then
-        pass "filtered FOFN contains every configured long-read input"
-    else
-        fail "filtered FOFN has ${FOFN_LINES} paths; expected ${EXPECTED_FOFN_LINES}"
-    fi
+FILTERED_COUNT=$(find "$FILTER_OUTPUT_DIR" -maxdepth 1 -type f \( -name 'filtered_long_reads*.fastq' -o -name 'filtered_long_reads*.fq' -o -name 'filtered_long_reads*.fasta' -o -name 'filtered_long_reads*.fa' \) 2>/dev/null | wc -l)
+EXPECTED_FILTERED_COUNT=$(wc -w <<< "$LONG_READS")
+if (( FILTERED_COUNT == EXPECTED_FILTERED_COUNT )); then
+    pass "published every filtered long-read output (${FILTERED_COUNT})"
+else
+    fail "published ${FILTERED_COUNT} filtered outputs; expected ${EXPECTED_FILTERED_COUNT}"
 fi
 
 # ---- Verify execution logs were published ----
@@ -154,12 +151,12 @@ else
 fi
 
 # ---- Verify artifact index ----
-ARTIFACTS_INDEX="${RUN_DIR}/artifacts/artifacts.jsonl"
+ARTIFACTS_INDEX="${RUN_DIR}/artifacts/index.jsonl"
 if [[ -f "$ARTIFACTS_INDEX" ]]; then
     RC_COUNT=$(grep -c "read_qc" "$ARTIFACTS_INDEX" 2>/dev/null || echo 0)
-    pass "artifacts.jsonl has ${RC_COUNT} read_qc entries"
+    pass "artifact index has ${RC_COUNT} read_qc entries"
 else
-    warn "artifacts.jsonl not found"
+    warn "artifact index not found"
 fi
 
 # ---- Verify ledger ----

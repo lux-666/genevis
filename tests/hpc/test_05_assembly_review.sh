@@ -137,8 +137,8 @@ GA run \
 
 # ---- Verify outputs ----
 RUN_DIR="${TEST_DATA_ROOT}/runs/${SID}"
-ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly_review/${SID}"
-WORK_DIR="${RUN_DIR}/work/assembly_review/${SID}"
+ARTIFACT_DIR="${RUN_DIR}/artifacts/assembly_review"
+WORK_DIR="${RUN_DIR}/work/assembly_review"
 
 assert_dir_exists "$ARTIFACT_DIR" "assembly_review artifact dir"
 

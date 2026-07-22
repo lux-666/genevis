@@ -24,6 +24,11 @@ unknown name or an unusual value merely because it is absent from a catalog or
 outside a suggested range. The reviewer sees the exact parsed mapping and
 chooses whether to approve it.
 
+For Assembly, this is the explicit L2 mapping for one attempt. It is not merged
+with catalog defaults or a previous attempt, and it does not have to enumerate
+every L2 parameter. Omitted parameters are not added to the command by Gene
+Agent and therefore remain tool defaults. A retry supplies its own mapping.
+
 There is no automatic fallback to catalog defaults when the model is
 unavailable or its response is malformed. That condition is recorded as
 `parameter_response_invalid` and execution does not start.
@@ -59,5 +64,6 @@ binds all files by immutable refs and hashes; the approval decision is bound to
 that manifest.
 
 After approval, the exact parameter mapping is handed to command construction.
-If a name cannot be rendered safely for the selected tool, command freeze fails
-explicitly; the system does not silently substitute a different value.
+If a name is unknown, belongs to another parameter level, or cannot be rendered
+safely for the selected tool, command freeze fails explicitly; the system does
+not silently substitute a different value.

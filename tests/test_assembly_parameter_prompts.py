@@ -4,10 +4,10 @@ import json
 
 import pytest
 
+from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.llm.parameters.assembly.prompt import render_assembly_parameter_messages
 
 
 def _request_dto(method_id: str = "hifiasm") -> dict:
@@ -78,7 +78,9 @@ def test_renderer_serializes_the_direct_dto_without_a_second_projection() -> Non
 
 
 @pytest.mark.parametrize("method_id", ["flye", "nextdenovo", "hifiasm", "hifiasm_ont"])
-def test_prompt_is_one_system_user_pair_without_response_example(method_id: str) -> None:
+def test_prompt_is_one_system_user_pair_without_response_example(
+    method_id: str,
+) -> None:
     messages = render_assembly_parameter_messages(_request_dto(method_id))
 
     assert [message["role"] for message in messages] == ["system", "user"]
@@ -88,7 +90,11 @@ def test_prompt_is_one_system_user_pair_without_response_example(method_id: str)
     assert "rules" not in model_payload
     assert messages[1]["content"].count("Reported parameter rationale.") == 1
     assert "Representative" not in json.dumps(messages)
-    assert "entire set of parameters" in messages[0]["content"]
+    assert "explicit L2 parameters" in messages[0]["content"]
+    assert (
+        "Omit an L2 parameter when the tool default should apply"
+        in messages[0]["content"]
+    )
     assert "Do not return observation IDs" in messages[0]["content"]
 
 

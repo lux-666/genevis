@@ -409,11 +409,8 @@ if 'assembly_review' in stages:
 # Hi-C config
 if 'hic_scaffolding' in stages:
     rc['hic_scaffolding'] = {
-        'methods': ['autohic'],
         'autohic_parameters': {
             'restriction_enzyme': '${HIC_RESTRICTION_ENZYME}',
-            'error_model_ref': '${HIC_AUTOHIC_ERROR_MODEL:-}',
-            'chromosome_model_ref': '${HIC_AUTOHIC_CHROMOSOME_MODEL:-}',
             'threads': ${ASSEMBLY_THREADS},
         },
     }
@@ -457,7 +454,7 @@ GA() {
 }
 
 resume_configured_parameter_gates() {
-    # Resume Phase 11's parameter gate only when hpc_env.sh explicitly opts
+    # Resume Assembly's parameter gate only when hpc_env.sh explicitly opts
     # into unattended approval. Production defaults remain human-reviewed.
     # Return 3 when a manual approval is required.
     local session_id="$1"
@@ -502,7 +499,7 @@ PY
         fi
 
         if [[ "$mode" == "manual" ]]; then
-            warn "session ${session_id} is waiting at Phase 11 parameter_approval"
+            warn "session ${session_id} is waiting at Assembly parameter_approval"
             info "Review it in the TUI, or generate a bound decision template:"
             info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${decision_json}"
             info "  python3 -m app.entrypoints.run resume --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --decision-file ${decision_json} --checkpointer ${CHECKPOINTER}"
