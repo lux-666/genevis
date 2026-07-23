@@ -223,15 +223,19 @@ previously hidden behind `cli` and `cli: null`:
 |---|---|---|
 | `cli_option` | `flag`, `order`, optional `join` | emits `flag value`; `join` controls scalar, comma-joined, or repeated values |
 | `cli_switch` | `flag`, `order` | emits the flag only for boolean `true` |
-| `choice_flag` | `flags`, `order` | maps an allowed scalar value to one CLI flag |
+| `selector` | none | non-emitting execution selector referenced by one `choice_option` |
+| `choice_option` | `selector`, `flags`, `order`, optional `join` | maps the selector value to a flag and emits that flag immediately followed by this parameter's own value(s) |
 | `positional` | `position` | emits one scalar or expands a path list at the declared position |
 | `config_key` | `key` | writes one key in a stage-owned typed config |
 | `stage_value` | `key` | supplies a typed internal execution value such as a T2T threshold |
 
-CLI option/switch/choice applications are emitted in ascending `order`,
-followed by positionals in ascending `position`. Order/position collisions fail
-catalog validation. A stage renderer accepts only the application kinds it
-supports and fails closed on any other kind.
+CLI option/switch/choice-option applications are emitted in ascending `order`,
+followed by positionals in ascending `position`. A `selector` is not emitted
+independently; catalog validation requires exactly one `choice_option` to
+reference it, and that choice option emits its flag and values as one adjacent
+render unit. Order/position collisions and dangling or multiply referenced
+selectors fail catalog validation. A stage renderer accepts only the
+application kinds it supports and fails closed on any other kind.
 
 Catalog entries must describe execution destinations. Old `cli: null` entries
 that only exposed recommendation context, such as Flye/NextDenovo `read_n50`
@@ -284,9 +288,9 @@ ResolvedParameterSources
 Command/configuration rendering joins each effective value to its validated
 `application` and visits every parameter once. It does not concatenate three
 source groups, so a dual-source parameter cannot be emitted twice. Assembly
-CLI rendering consumes the four CLI application variants; NextDenovo and
-AutoHiC configuration writers consume `config_key`; T2T execution consumes
-`stage_value`.
+CLI rendering consumes CLI options, switches, selectors/choice options, and
+positionals; NextDenovo and AutoHiC configuration writers consume
+`config_key`; T2T execution consumes `stage_value`.
 
 The frozen-attempt artifact persists all six views. The approved sparse L2
 mapping remains byte-for-byte distinguishable from facts and defaults.
@@ -302,14 +306,7 @@ tool: flye
 parameters:
   read_type:
     value_type: string
-    application:
-      kind: choice_flag
-      order: 10
-      flags:
-        nano-raw: --nano-raw
-        nano-hq: --nano-hq
-        pacbio-raw: --pacbio-raw
-        pacbio-hifi: --pacbio-hifi
+    application: {kind: selector}
     required_for_execution: true
     layers:
       l0:
@@ -318,7 +315,16 @@ parameters:
         required: true
   input_reads:
     value_type: path_list
-    application: {kind: positional, position: 0}
+    application:
+      kind: choice_option
+      selector: read_type
+      order: 10
+      join: expand
+      flags:
+        nano-raw: --nano-raw
+        nano-hq: --nano-hq
+        pacbio-raw: --pacbio-raw
+        pacbio-hifi: --pacbio-hifi
     required_for_execution: true
     layers:
       l0:
@@ -357,7 +363,7 @@ parameters:
     application: {kind: config_key, key: number_of_edit_rounds}
     required_for_execution: true
     layers:
-      l0: {kind: materialized_default, value: 3}
+      l0: {kind: materialized_default, value: 2}
       l2: {adjustable: true}
 ```
 
@@ -551,7 +557,7 @@ the typed stage review evidence for a review retry.
 
 ### Snapshot
 
-Every recommendation point builds and persists:
+Every parameter-recommendation point builds and persists:
 
 ```text
 RecommendationInputSnapshotV3
@@ -606,6 +612,33 @@ and copy the initial canonical facts, but AutoHiC has no literature selection
 or literature basis to reselect. Only typed retry context and its dependency
 refs change. A retry does not reread mutable upstream dictionaries or
 recalculate sample facts.
+
+### Separate T2T motif snapshot
+
+Motif resolution is not a parameter recommendation and has no method catalog.
+It therefore uses a separate strict contract rather than pretending to be a
+member of the parameter stage-context union:
+
+```text
+T2TMotifInputSnapshotV3
+├── schema_version: 3
+├── snapshot_kind: t2t_motif_resolution
+├── resolver_id: t2t.telomere_motif_resolver
+├── facts:
+│   └── species: CanonicalSpeciesFacts
+└── dependency_refs: RecommendationDependencyRefs
+```
+
+For this snapshot, retry refs and `motif_resolution_ref` must be absent;
+available canonical upstream fact refs may remain in `fact_source_refs`.
+There is no `method_id`, `task`, parameter catalog, or parameter stage context.
+Identity validation compares `resolver_id` to the fixed resolver constant.
+
+`T2TMotifRequestV3` projects only `schema_version: 3`, the unchanged
+motif-resolution contract, `resolver_id`, and canonical species facts. If a
+supplied canonical motif makes resolution deterministic, the input snapshot
+and resolution manifest are still persisted but no model
+request/response/parse records are fabricated.
 
 ## Facts Adapter and Data Flow
 
@@ -744,6 +777,13 @@ facts to the model, persisting the exact request, response, parse result, and
 source `llm_species_resolution`. Every later T2T consumer reads only the typed
 resolved motif.
 
+The schema-2 motif-resolution manifest has
+`resolution_mode: provided_species_fact | llm_species_resolution`.
+`input_snapshot_ref` and `resolution_ref` are always required. The three model
+refs are forbidden in provided mode and required in LLM mode. Resume validates
+the v3 motif snapshot and fixed `resolver_id` before applying those conditional
+manifest rules.
+
 The old `t2t.telomere_motif` run-config field,
 `configured_telomere_motif`, `legacy_motif_hint`, raw `telomere_motif`
 checkpoint fallback, and sources `legacy_t2t_config` /
@@ -814,7 +854,7 @@ The implementation deletes, rather than deprecates:
   `estimated_coverage`;
 - `descriptors/knowledge_packs/assembly/parameter_recommender/rules/profile_boundaries.yaml`
   and its registry entry;
-- `T2TRunParameters.telomere_motif`, `configured_telomere_motif`,
+- `T2TRunConfig.telomere_motif`, `configured_telomere_motif`,
   `legacy_motif_hint`, raw checkpoint `telomere_motif` fallback, and their
   compatibility-source labels;
 - fixtures and documentation containing old profile field names;
@@ -884,10 +924,10 @@ own v3 chain; retaining an unchanged leaf schema does not make a pre-v3 chain
 resumable.
 
 T2T motif persistence uses `motif_input_snapshot.json` with a new
-`.input_snapshot` artifact type and schema 3, model-request record schema 3,
-and motif-resolution manifest schema 2 with required
-`input_snapshot_ref`. Its response, parse, and resolution leaf records retain
-their current bodies.
+`.input_snapshot` artifact type and schema 3. In LLM mode it also uses a
+model-request record schema 3. The motif-resolution manifest is schema 2 with
+the conditional refs defined above; its response, parse, and resolution leaf
+records retain their current bodies.
 
 Resume/hydration performs this ordered gate before reading a recommendation or
 calling a model:
@@ -923,13 +963,16 @@ cursor/manifest with v3 artifacts.
 - AutoHiC `restriction_enzyme` resolves from L1 when L2 omits it and from L2
   when approved L2 supplies it;
 - one dual-source parameter is rendered exactly once;
-- choice flags, positional inputs, CLI options/switches, config keys, and T2T
-  stage values each reach only their declared renderer;
+- selector/choice options preserve flag-value adjacency, and positional
+  inputs, CLI options/switches, config keys, and T2T stage values each reach
+  only their declared renderer;
 - Flye/hifiasm genome-size bindings resolve from the same canonical fact;
 - request DTOs reject dependency refs, sessions, locators, hashes, and unknown
   fields;
 - pre-v3 cursors, attempts, manifests, input profiles, and old catalog schemas
   fail closed;
+- motif snapshots validate the fixed resolver identity without a parameter
+  catalog, and provided-motif manifests contain no fabricated model refs;
 - old T2T motif run-config and checkpoint fields are rejected rather than
   recovered.
 
