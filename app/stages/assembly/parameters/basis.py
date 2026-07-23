@@ -9,13 +9,18 @@ from app.domains.assembly.case_selector import select_evidence_cases
 from app.domains.assembly.method_guidance import load_method_guidance
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+)
 
 
 def build_parameter_basis_snapshot(
     *,
     method_id: str,
     catalog: MethodParameterCatalog,
-    prompt_profile: dict[str, Any],
+    facts: CanonicalRecommendationFacts,
+    context: AssemblyRecommendationContext,
     knowledge_pack_id: str = "parameter_recommender",
     knowledge_root: Path | None = None,
 ) -> dict[str, Any]:
@@ -30,7 +35,8 @@ def build_parameter_basis_snapshot(
         knowledge_pack["cases"],
         method_id=method_id,
         task="recommend_initial",
-        prompt_profile=prompt_profile,
+        facts=facts,
+        context=context,
         strategy=knowledge_pack.get("strategies"),
         source_root=knowledge_pack.get("pack_root"),
     )

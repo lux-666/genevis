@@ -1,41 +1,65 @@
+catalog_id: t2t.alignment.minimap2
 method_id: t2t.alignment.minimap2
 tool: Gene Agent T2T finishing
-read_type: ont
 description: "Sparse adjustable evidence thresholds for T2T finishing."
+
 parameters:
   min_motif_copies:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: min_motif_copies
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum consecutive telomere motif copies in a terminal window or read tail."
+
   terminal_window_bp:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: terminal_window_bp
+    layers:
+      l2:
+        adjustable: true
     description: "Number of terminal bases inspected for telomere signal."
+
   min_mapq:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: min_mapq
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum mapping quality for a patch candidate."
+
   max_target_terminal_distance_bp:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: max_target_terminal_distance_bp
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum target bases replaced between the alignment junction and terminus."
+
   min_overlap_bp:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: min_overlap_bp
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum aligned query overlap supporting a patch candidate."
+
   min_supporting_reads:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: stage_value
+      key: min_supporting_reads
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum compatible reads supporting the selected tail."

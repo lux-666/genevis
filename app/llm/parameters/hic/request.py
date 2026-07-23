@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AutoHiCRecommendationContext,
+    CanonicalRecommendationFacts,
+    QuantityFact,
+)
 from app.schemas.shared_parameters import SpeciesFacts
 
 
@@ -30,7 +35,7 @@ class AutoHiCInputFacts(_StrictRequestModel):
 class AutoHiCParameterRequest(_StrictRequestModel):
     """Exact allowlisted request DTO rendered for the AutoHiC model."""
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     recommendation_contract: Literal["parameter_recommendation_v1"] = (
         PARAMETER_RECOMMENDATION_CONTRACT
     )
@@ -41,19 +46,43 @@ class AutoHiCParameterRequest(_StrictRequestModel):
     attempt_history: list[dict[str, Any]] | None = None
 
 
+def _project_canonical_species(species: Any) -> SpeciesFacts | None:
+    """Project CanonicalSpeciesFacts to SpeciesFacts, or None if no scientific name."""
+    if species is None or not species.scientific_name:
+        return None
+    taxon_id: int | None = None
+    if species.taxon_id is not None:
+        try:
+            taxon_id = int(species.taxon_id)
+        except (ValueError, TypeError):
+            taxon_id = None
+    ploidy_fact = species.ploidy
+    ploidy_int: int | None = int(ploidy_fact.value) if ploidy_fact is not None else None
+    chrom_fact = species.expected_chromosome_count
+    chrom_int: int | None = int(chrom_fact.value) if chrom_fact is not None else None
+    return SpeciesFacts(
+        scientific_name=species.scientific_name,
+        taxon_id=taxon_id,
+        clade=species.clade,
+        ploidy=ploidy_int,
+        expected_chromosome_count=chrom_int,
+        telomere_motif=species.supplied_telomere_motif,
+    )
+
+
 def build_autohic_parameter_request(
     *,
-    input_profile: Mapping[str, Any],
+    facts: CanonicalRecommendationFacts,
+    context: AutoHiCRecommendationContext,
     catalog: MethodParameterCatalog,
     task: ParameterAttemptTask = "recommend_initial",
     attempt_history: list[dict[str, Any]] | None = None,
 ) -> AutoHiCParameterRequest:
-    """Project audit-rich stage input into the strict model-facing DTO.
+    """Project typed recommendation inputs into the strict model-facing DTO.
 
-    The full input profile remains persisted evidence.  Only currently accepted
-    biological/library facts cross the model boundary; run identity, paths,
-    artifact references, asset IDs, and unrecognized metadata are deliberately
-    absent from this DTO.
+    Only currently accepted biological/library facts cross the model boundary;
+    run identity, paths, artifact references, asset IDs, and unrecognized
+    metadata are deliberately absent from this DTO.
     """
 
     if catalog.method_id != "autohic":
@@ -74,39 +103,20 @@ def build_autohic_parameter_request(
             and value is not None
         }
         for name, specification in catalog.parameters.items()
-        if specification.level == 2
+        if specification.layers.l2 is not None
     }
     if not adjustable:
         raise ValueError("AutoHiC model request requires at least one L2 parameter")
 
-    raw_metadata = input_profile.get("hic_library_metadata") or []
-    if not isinstance(raw_metadata, list):
-        raise ValueError("hic_library_metadata must be a list")
-    protocols: list[str] = []
-    for metadata in raw_metadata:
-        if not isinstance(metadata, Mapping):
-            raise ValueError("each Hi-C library metadata entry must be an object")
-        protocol = metadata.get("library_protocol")
-        if protocol is None:
-            continue
-        if not isinstance(protocol, str) or not protocol.strip():
-            raise ValueError("library_protocol must be a non-empty string")
-        protocols.append(protocol.strip())
-
-    provided_enzyme = input_profile.get("provided_restriction_enzyme")
-    if provided_enzyme is not None:
-        if not isinstance(provided_enzyme, str) or not provided_enzyme.strip():
-            raise ValueError(
-                "provided_restriction_enzyme must be a non-empty string"
-            )
-        provided_enzyme = provided_enzyme.strip()
+    library_protocols = list(context.library_protocols)
+    provided_restriction_enzyme = context.provided_restriction_enzyme
 
     return AutoHiCParameterRequest(
         task=task,
         input_facts=AutoHiCInputFacts(
-            library_protocols=protocols,
-            provided_restriction_enzyme=provided_enzyme,
-            species_facts=input_profile.get("species_facts"),
+            library_protocols=library_protocols,
+            provided_restriction_enzyme=provided_restriction_enzyme,
+            species_facts=_project_canonical_species(facts.species),
         ),
         adjustable_params=adjustable,
         attempt_history=attempt_history or None,

@@ -39,7 +39,7 @@ def load_autohic_parameter_catalog() -> MethodParameterCatalog:
         )
     adjustable = {
         name for name, specification in catalog.parameters.items()
-        if specification.level == 2
+        if specification.layers.l2 is not None
     }
     expected = {
         "restriction_enzyme",

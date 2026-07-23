@@ -1,67 +1,106 @@
+catalog_id: autohic
 method_id: autohic
 tool: AutoHiC
-read_type: hic
 description: "Sparse AutoHiC biological/configuration recommendation surface. Runtime and model paths are resolved outside the LLM recommendation."
 
 parameters:
   restriction_enzyme:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: string
+    application:
+      kind: config_key
+      key: restriction_enzyme
+    layers:
+      l2:
+        adjustable: true
     description: "Restriction enzyme used to prepare the selected Hi-C library."
     notes: "The LLM proposes this value and every proposal requires human approval."
+
   number_of_edit_rounds:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: number_of_edit_rounds
+    layers:
+      l2:
+        adjustable: true
     description: "Number of AutoHiC edit rounds."
+
   translocation_adjust:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: boolean
+    application:
+      kind: config_key
+      key: translocation_adjust
+    layers:
+      l2:
+        adjustable: true
     description: "Whether AutoHiC applies translocation adjustment."
+
   inversion_adjust:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: boolean
+    application:
+      kind: config_key
+      key: inversion_adjust
+    layers:
+      l2:
+        adjustable: true
     description: "Whether AutoHiC applies inversion adjustment."
+
   debris_adjust:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: boolean
+    application:
+      kind: config_key
+      key: debris_adjust
+    layers:
+      l2:
+        adjustable: true
     description: "Whether AutoHiC applies debris adjustment."
+
   error_max_epoch:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: error_max_epoch
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum error-detection training epochs."
+
   error_min_len:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: error_min_len
+    layers:
+      l2:
+        adjustable: true
     description: "Minimum sequence length considered by error detection."
+
   error_max_len:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: int
+    application:
+      kind: config_key
+      key: error_max_len
+    layers:
+      l2:
+        adjustable: true
     description: "Maximum sequence length considered by error detection."
+
   error_filter_score:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: config_key
+      key: error_filter_score
+    layers:
+      l2:
+        adjustable: true
     description: "AutoHiC error confidence filter score."
+
   error_filter_iou_score:
-    cli: null
-    level: 2
-    source: parameter_recommender
     value_type: float
+    application:
+      kind: config_key
+      key: error_filter_iou_score
+    layers:
+      l2:
+        adjustable: true
     description: "AutoHiC error intersection-over-union filter score."

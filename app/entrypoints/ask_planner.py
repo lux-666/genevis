@@ -665,7 +665,7 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
             catalog = load_parameter_catalog(method)
         except (FileNotFoundError, ValueError):
             continue
-        dynamic_names = [name for name, spec in catalog.parameters.items() if spec.level == 2]
+        dynamic_names = [name for name, spec in catalog.parameters.items() if spec.layers.l2 is not None]
         if not dynamic_names:
             continue
         supplied = dict((plan.method_parameters or {}).get(method) or {})
@@ -691,7 +691,7 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
             dynamic_names = [
                 name
                 for name, spec in catalog.parameters.items()
-                if spec.level == 2
+                if spec.layers.l2 is not None
             ]
             supplied = dict(
                 (plan.method_parameters or {}).get(

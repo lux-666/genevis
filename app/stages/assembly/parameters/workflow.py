@@ -63,10 +63,9 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.state import TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.assembly.parameters.profile import (
-    build_full_parameter_profile,
-    build_prompt_profile,
-)
+from app.domains.parameter_recommendation.facts import build_canonical_facts
+from app.schemas.parameter_recommendation import AssemblyRecommendationContext
+from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
     load_recommendation_bundle,
@@ -133,7 +132,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             else _retry_transition_failure(state, reason)
         )
 
-    l2_keys = [key for key, spec in catalog.parameters.items() if spec.level == 2]
+    l2_keys = [key for key, spec in catalog.parameters.items() if spec.layers.l2 is not None]
     if not l2_keys:
         return _fail_update(
             state,
@@ -183,28 +182,53 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         except ParameterPersistenceError as exc:
             return _retry_transition_failure(state, str(exc))
 
-    full_profile = build_full_parameter_profile(
+    stage_outputs = state.get("stage_outputs") or {}
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(mode="json", exclude_none=True)
+    input_profile = dict(assembly_out.get("input_profile") or {})
+    facts = build_canonical_facts(
+        shared_parameters=shared if isinstance(shared, dict) else {},
+        read_qc_output=stage_outputs.get("read_qc") or {},
+        genome_survey_result=stage_outputs.get("genome_survey") or {},
+        asset_flags={
+            "has_hifi": input_profile.get("has_hifi") or bool(assembly_out.get("hifi_reads_ref")),
+            "has_ont": input_profile.get("has_ont") or bool(assembly_out.get("ont_reads_ref")),
+            "has_hic": input_profile.get("has_hic") or bool(assembly_out.get("hic_reads_ref")),
+            "has_rnaseq": bool(input_profile.get("has_rnaseq")),
+        },
+    )
+    context: AssemblyRecommendationContext = build_assembly_recommendation_context(
         state,
         assembly_out=assembly_out,
-        previous_attempt=hydrated_previous,
-        attempt_history=hydrated_history,
-        assembly_review=hydrated_previous.get("review_failure"),
+        task=task,
     )
-    prompt_profile = build_prompt_profile(full_profile, task)
+    retry_context: dict | None = None
+    if task != "recommend_initial":
+        retry_context = {
+            "task": task,
+            "previous_attempt": hydrated_previous,
+            "attempt_history": hydrated_history,
+        }
+        if task == "retry_after_review_failure":
+            retry_context["assembly_review"] = hydrated_previous.get("review_failure")
     try:
         if task == "recommend_initial":
             basis_snapshot = build_parameter_basis_snapshot(
                 method_id=catalog.method_id,
                 catalog=catalog,
-                prompt_profile=prompt_profile,
+                facts=facts,
+                context=context,
             )
         assert basis_snapshot is not None
         request_dto = build_parameter_request_dto(
             method_id=catalog.method_id,
             catalog=catalog,
-            prompt_profile=prompt_profile,
+            facts=facts,
+            context=context,
             task=task,
             basis_snapshot=basis_snapshot,
+            retry_context=retry_context,
         )
     except Exception as exc:
         return _fail_update(state, f"Assembly parameter request failed: {exc}")
