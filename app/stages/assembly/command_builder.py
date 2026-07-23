@@ -17,7 +17,11 @@ from app.schemas.parameter_catalog import (
     SelectorApplication,
     StageValueApplication,
 )
-from app.schemas.parameter_recommendation import RecommendationInputSnapshotV3
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    RecommendationInputSnapshotV3,
+)
+
 
 SOURCE_GROUP_LEVELS = {
     "l0_fixed": 0,
@@ -184,46 +188,83 @@ def build_parameter_sources_v3(
     }
 
 
-def _build_parameter_sources_legacy(
+def build_parameter_sources_from_state(
     *,
     method_id: str,
-    catalog: MethodParameterCatalog,
-    state: Any,
-    assembly_out: dict[str, Any],
+    catalog: "MethodParameterCatalog",
+    state: "TopLevelState",
+    assembly_out: dict,
     attempt_id: int,
-    recommended_params: dict[str, Any],
-    execution_context: dict[str, Any] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Deprecated: uses old spec.level / _first_available_value patterns.
+    recommended_params: dict,
+    execution_context: dict | None = None,
+) -> "dict[str, dict]":
+    """Build parameter_sources for method_application callers using the v3 resolver.
 
-    Callers should migrate to build_parameter_sources_v3.
+    Maps execution_context keys to ExecutorBindingKey values, builds a minimal
+    RecommendationInputSnapshotV3 from state, and delegates to resolve_parameters.
     """
-    # Kept for backward compatibility only — do not add new callers.
-    execution_context = execution_context or {}
-    l0_fixed: dict[str, Any] = {}
-    l1_readonly: dict[str, Any] = {}
+    from app.domains.parameter_recommendation.facts import build_canonical_facts
+    from app.domains.parameter_recommendation.resolution import resolve_parameters
+    from app.schemas.parameter_recommendation import (
+        AssemblyRecommendationContext,
+        RecommendationDependencyRefs,
+        RecommendationInputSnapshotV3,
+    )
+    from app.stages.assembly.parameters.context import build_assembly_recommendation_context
+    from app.schemas.artifacts import ParameterAttemptTask
 
-    for key, spec in catalog.parameters.items():
-        if spec.layers.l0 is not None:
-            # L0 layer: use executor values or materialized default
-            from app.schemas.parameter_catalog import FixedExecutorSource, MaterializedDefaultExecutorSource, RuntimeExecutorSource
-            if isinstance(spec.layers.l0, FixedExecutorSource):
-                l0_fixed[key] = spec.layers.l0.value
-            elif isinstance(spec.layers.l0, MaterializedDefaultExecutorSource):
-                l0_fixed[key] = spec.layers.l0.value
-        elif spec.layers.l1 is not None:
-            # L1 layer: caller must supply values; skip here
-            pass
+    ctx = execution_context or {}
+    # Map execution_context keys to ExecutorBindingKey values
+    l0_executor_values: dict = {}
+    if "output_prefix" in ctx:
+        l0_executor_values["assembly_output_prefix"] = ctx["output_prefix"]
+    if "input_reads" in ctx:
+        l0_executor_values["assembly_input_reads"] = ctx["input_reads"]
+    # Threads: from run_config or state shared_parameters
+    shared = state.get("shared_parameters") or {}
+    threads = (
+        (shared.get("assembly") or {}).get("threads")
+        or (state.get("run_config") or {}).get("threads")
+        or 32
+    )
+    l0_executor_values["assembly_threads"] = int(threads)
 
+    stage_ctx: AssemblyRecommendationContext = build_assembly_recommendation_context(
+        state, assembly_out=assembly_out
+    )
+    facts = build_canonical_facts(
+        shared_parameters=dict(shared),
+        read_qc_output=dict((state.get("stage_outputs") or {}).get("read_qc") or {}),
+        genome_survey_result=dict((state.get("stage_outputs") or {}).get("genome_survey") or {}),
+        asset_flags={
+            "has_hifi": assembly_out.get("input_profile", {}).get("has_hifi"),
+            "has_ont": assembly_out.get("input_profile", {}).get("has_ont"),
+            "has_hic": assembly_out.get("input_profile", {}).get("has_hic"),
+        },
+    )
+    snapshot = RecommendationInputSnapshotV3(
+        method_id=catalog.method_id,
+        task="recommend_initial",
+        facts=facts,
+        stage_context=stage_ctx,
+        dependency_refs=RecommendationDependencyRefs(),
+    )
+    resolved = resolve_parameters(
+        catalog,
+        l0_executor_values=l0_executor_values,
+        snapshot=snapshot,
+        approved_l2=dict(recommended_params),
+    )
     return {
-        "l0_fixed": l0_fixed,
-        "l1_readonly": l1_readonly,
-        "l2_recommended": dict(recommended_params),
+        "l0_fixed": resolved.l0_executor,
+        "l1_readonly": resolved.l1_facts,
+        "l2_recommended": resolved.l2_approved,
     }
 
 
-# Keep old name as alias for callers not yet migrated.
-build_parameter_sources = _build_parameter_sources_legacy
+# Backward-compat alias — prefer build_parameter_sources_from_state for new code.
+build_parameter_sources = build_parameter_sources_from_state
+
 
 
 def _validate_groups(catalog: MethodParameterCatalog, parameter_sources: dict[str, dict[str, Any]]) -> None:
@@ -341,39 +382,3 @@ def _emit_parameter(spec: ParameterSpec, value: Any) -> tuple[list[str], list[st
     # SelectorApplication, ConfigKeyApplication, StageValueApplication,
     # ChoiceOptionApplication — not emitted in basic argv builder.
     return [], []
-
-
-def _first_available_value(
-    paths: list[str],
-    state: Any,
-    assembly_out: dict[str, Any],
-    execution_context: dict[str, Any],
-) -> Any:
-    roots: dict[str, Any] = {
-        "state": state,
-        "assembly": assembly_out,
-        "execution": execution_context,
-        "shared_parameters": state.get("shared_parameters") or {},
-    }
-    stage_outputs = state.get("stage_outputs") or {}
-    roots.update(stage_outputs)
-    for path in paths:
-        value = _lookup_path(path, roots)
-        if value is not None:
-            return value
-    return None
-
-
-def _lookup_path(path: str, roots: dict[str, Any]) -> Any:
-    parts = path.split(".")
-    if not parts:
-        return None
-    current: Any = roots.get(parts[0])
-    for part in parts[1:]:
-        if current is None:
-            return None
-        if isinstance(current, dict):
-            current = current.get(part)
-        else:
-            current = getattr(current, part, None)
-    return current
