@@ -19,6 +19,13 @@ genome size and coverage at the retrieval boundary. The wider design problem is
 that dictionary paths, model DTOs, retrieval, and command construction each
 define their own version of the same facts.
 
+This does not invalidate data v2's artifact/ref ownership model. The incorrect
+architecture is the parameter-specific profile and catalog layer built on top
+of it: parallel dictionary contracts and a singular `ParameterSpec.level`
+cannot express the actual source semantics. Data v2 remains the persistence
+envelope; the v3 recommendation artifacts defined here are new payload
+contracts inside that envelope.
+
 ## Decisions
 
 1. `CanonicalRecommendationFacts` is the sole common biological and
@@ -94,27 +101,37 @@ sparse L2 mapping may override it. The catalog labels it only as L2, while
 runtime code contains a separate L1 fallback. That splits the contract across
 two places.
 
-The replacement declaration is source-oriented:
+The replacement declaration separates the parameter's execution destination
+from its permitted value sources:
 
 ```yaml
-restriction_enzyme:
-  cli: null
-  value_type: string
-  layers:
-    l1:
-      fact: hic_provided_restriction_enzyme
-      required_for_execution: true
-    l2:
-      adjustable: true
-  description: Restriction enzyme used to prepare the selected Hi-C library.
+catalog_id: autohic
+method_id: hic_scaffolding.candidate.autohic
+
+parameters:
+  restriction_enzyme:
+    value_type: string
+    application:
+      kind: config_key
+      key: restriction_enzyme
+    required_for_execution: true
+    layers:
+      l1:
+        fact: hic_provided_restriction_enzyme
+      l2:
+        adjustable: true
+    description: Restriction enzyme used to prepare the selected Hi-C library.
 ```
 
 An ordinary hifiasm L1 binding is:
 
 ```yaml
 hg_size:
-  cli: --hg-size
   value_type: string
+  application:
+    kind: cli_option
+    flag: --hg-size
+    order: 40
   layers:
     l1:
       fact: effective_genome_size_bp
@@ -126,25 +143,37 @@ An L0 runtime input uses a registered binding rather than a state path:
 
 ```yaml
 input_reads:
-  cli: null
   value_type: path_list
+  application:
+    kind: positional
+    position: 0
   layers:
     l0:
+      kind: runtime
       binding: assembly_input_reads
+      required: true
 ```
 
 `level`, `source`, `source_priority`, top-level `default`, and top-level
-`fixed_value` are removed. Source-specific fixed or materialized default values
-live inside `layers.l0`. L2 has no default field.
+`fixed_value` are removed. The ambiguous `cli: null` convention is also
+removed. Source-specific fixed or materialized default values live inside
+`layers.l0`. L2 has no default field.
 
 ### Catalog schema
 
 The catalog schema contains these concepts:
 
 ```text
+MethodParameterCatalog
+├── catalog_id
+├── method_id
+├── tool
+└── parameters
+
 ParameterSpec
-├── cli
 ├── value_type and descriptive constraints
+├── application: ParameterApplication
+├── required_for_execution: bool
 ├── layers
 │   ├── l0: ExecutorSource | null
 │   ├── l1: FactSource | null
@@ -152,17 +181,62 @@ ParameterSpec
 └── description / notes
 ```
 
-- `ExecutorSource.binding` is a registered, catalog-load-validated resolver ID,
-  never a dotted state path.
-- `ExecutorSource.fixed_value` and
-  `ExecutorSource.materialized_default` are mutually exclusive.
+`catalog_id` is the short descriptor-directory identity such as `hifiasm` or
+`autohic`. `method_id` is always the stable execution identity used by
+selection, snapshots, requests, attempts, and ledger records, such as
+`assembly.candidate.hifiasm` or `hic_scaffolding.candidate.autohic`. Catalog
+loaders resolve a descriptor's `parameter_catalog` to `catalog_id` and then
+require the loaded stable `method_id` to equal the selected method. No request
+or persisted attempt uses a short catalog ID as its method identity.
+
+`ExecutorSource` is a discriminated union:
+
+| `kind` | Required fields | Meaning |
+|---|---|---|
+| `fixed` | `value` | Route-owned value that cannot coexist with L1 or L2 |
+| `runtime` | `binding`, `required`, optional `materialized_default` | Value supplied through a registered typed execution binding; the default is used only when the binding is absent |
+| `materialized_default` | `value` | Wrapper-owned concrete default with no runtime binding |
+
+- A runtime `binding` is an `ExecutorBindingKey` enum member registered by the
+  owning stage, never a dotted state path.
+- `runtime.required=true` and `materialized_default` are mutually exclusive.
+  A required runtime binding must be present.
+- `fixed` cannot coexist with L1 or L2 because a value that may be overridden
+  is not fixed.
 - `FactSource.fact` is a `CanonicalFactKey` enum.
 - `FactSource.transform` is a small validated transform enum such as
   `identity` or `hifiasm_hg_size`, not an import path or free-form expression.
 - `ModelSource.adjustable` must be `true` when L2 exists.
 - A parameter must declare at least one layer.
-- A parameter may declare multiple layers when the effective-value precedence
-  is intentional.
+- L0 `runtime` or `materialized_default`, L1, and L2 may coexist. Their
+  precedence is the single global rule below; catalogs do not declare a second
+  `source_priority`.
+- `required_for_execution` belongs to `ParameterSpec`, not to an individual
+  source. It means that some effective value must exist after all declared
+  layers have been considered. Thus AutoHiC enzyme may be satisfied by either
+  L1 or L2.
+
+`ParameterApplication` is a discriminated union that replaces every meaning
+previously hidden behind `cli` and `cli: null`:
+
+| `kind` | Required fields | Consumer |
+|---|---|---|
+| `cli_option` | `flag`, `order`, optional `join` | emits `flag value`; `join` controls scalar, comma-joined, or repeated values |
+| `cli_switch` | `flag`, `order` | emits the flag only for boolean `true` |
+| `choice_flag` | `flags`, `order` | maps an allowed scalar value to one CLI flag |
+| `positional` | `position` | emits one scalar or expands a path list at the declared position |
+| `config_key` | `key` | writes one key in a stage-owned typed config |
+| `stage_value` | `key` | supplies a typed internal execution value such as a T2T threshold |
+
+CLI option/switch/choice applications are emitted in ascending `order`,
+followed by positionals in ascending `position`. Order/position collisions fail
+catalog validation. A stage renderer accepts only the application kinds it
+supports and fails closed on any other kind.
+
+Catalog entries must describe execution destinations. Old `cli: null` entries
+that only exposed recommendation context, such as Flye/NextDenovo `read_n50`
+and `estimated_coverage`, are deleted from catalogs; those values already live
+in canonical facts. They are not migrated to a `context_only` application.
 
 Catalog migration also corrects semantic inconsistencies. Biological values
 such as Flye genome size are L1 facts even when they are required to construct
@@ -189,10 +263,11 @@ approved L2 value
   > implicit tool default (parameter remains absent)
 ```
 
-This precedence is applied only when a parameter declares the corresponding
-layers. An L2 key that is unknown or not L2-adjustable fails at the
-post-approval executability boundary; the persisted recommendation is not
-rewritten.
+This fixed precedence is applied only when a parameter declares the
+corresponding layers; there is no per-parameter precedence field. After source
+selection, every `required_for_execution` parameter must have an effective
+value. An L2 key that is unknown or not L2-adjustable fails at the post-approval
+executability boundary; the persisted recommendation is not rewritten.
 
 The result is a typed, provenance-aware structure:
 
@@ -202,15 +277,105 @@ ResolvedParameterSources
 ├── l1_facts
 ├── l2_approved
 ├── effective_parameters
-└── effective_source_by_parameter
+├── effective_source_by_parameter
+└── applications
 ```
 
-Command/configuration rendering iterates `effective_parameters` once. It does
-not concatenate three source groups, so a dual-source parameter cannot be
-emitted twice.
+Command/configuration rendering joins each effective value to its validated
+`application` and visits every parameter once. It does not concatenate three
+source groups, so a dual-source parameter cannot be emitted twice. Assembly
+CLI rendering consumes the four CLI application variants; NextDenovo and
+AutoHiC configuration writers consume `config_key`; T2T execution consumes
+`stage_value`.
 
-The frozen-attempt artifact persists all five views. The approved sparse L2
+The frozen-attempt artifact persists all six views. The approved sparse L2
 mapping remains byte-for-byte distinguishable from facts and defaults.
+
+### Complete migrated examples
+
+An Assembly CLI catalog declares both rendering and sourcing explicitly:
+
+```yaml
+catalog_id: flye
+method_id: assembly.candidate.flye
+tool: flye
+parameters:
+  read_type:
+    value_type: string
+    application:
+      kind: choice_flag
+      order: 10
+      flags:
+        nano-raw: --nano-raw
+        nano-hq: --nano-hq
+        pacbio-raw: --pacbio-raw
+        pacbio-hifi: --pacbio-hifi
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_method_read_type
+        required: true
+  input_reads:
+    value_type: path_list
+    application: {kind: positional, position: 0}
+    required_for_execution: true
+    layers:
+      l0:
+        kind: runtime
+        binding: assembly_input_reads
+        required: true
+  genome_size:
+    value_type: int
+    application: {kind: cli_option, flag: --genome-size, order: 30}
+    required_for_execution: true
+    layers:
+      l1: {fact: effective_genome_size_bp, transform: identity}
+  min_overlap:
+    value_type: int
+    application: {kind: cli_option, flag: --min-overlap, order: 80}
+    layers:
+      l2: {adjustable: true}
+```
+
+AutoHiC's dual-source config value and an executor-default/L2 value are:
+
+```yaml
+catalog_id: autohic
+method_id: hic_scaffolding.candidate.autohic
+tool: AutoHiC
+parameters:
+  restriction_enzyme:
+    value_type: string
+    application: {kind: config_key, key: restriction_enzyme}
+    required_for_execution: true
+    layers:
+      l1: {fact: hic_provided_restriction_enzyme, transform: identity}
+      l2: {adjustable: true}
+  number_of_edit_rounds:
+    value_type: int
+    application: {kind: config_key, key: number_of_edit_rounds}
+    required_for_execution: true
+    layers:
+      l0: {kind: materialized_default, value: 3}
+      l2: {adjustable: true}
+```
+
+A T2T internal threshold has no fake CLI:
+
+```yaml
+catalog_id: minimap2
+method_id: t2t.alignment.minimap2
+tool: minimap2
+parameters:
+  min_mapq:
+    value_type: int
+    application: {kind: stage_value, key: min_mapq}
+    required_for_execution: true
+    layers:
+      l0: {kind: materialized_default, value: 20}
+      l2: {adjustable: true}
+```
 
 ## Canonical Facts Model
 
@@ -225,7 +390,8 @@ QuantityFact[T]
 ├── unit: closed enum
 └── origin
     ├── kind: provided | measured | derived | resolved
-    └── producer: run_config | read_qc | genome_survey | assembly | hic | t2t
+    └── producer: run_config | read_qc | genome_survey | assembly | hic | t2t |
+                  parameter_recommendation
 ```
 
 Examples include:
@@ -235,11 +401,14 @@ Examples include:
 - total bases in `bp`;
 - sequencing coverage in `x`;
 - heterozygosity and repeat fraction in `fraction`;
+- provided-versus-measured genome-size delta in `relative_change`;
 - expected chromosome count and ploidy in `count`.
 
-Fractions are stored as `[0, 1]`, never sometimes percentages and sometimes
-fractions. Counts are positive integers where biologically required. Numeric
-values reject booleans, NaN, and infinity.
+`fraction` values are stored as `[0, 1]`, never sometimes percentages and
+sometimes fractions. `relative_change` is a separate unit with a finite value
+greater than `-1` and no upper bound; it represents
+`(provided - measured) / measured`. Counts are positive integers where
+biologically required. Numeric values reject booleans, NaN, and infinity.
 
 Artifact refs and source paths are not embedded in a `QuantityFact`. They live
 in the audit-only dependency-ref section of the snapshot.
@@ -271,7 +440,7 @@ CanonicalRecommendationFacts
 │   ├── effective_genome_size
 │   ├── measured_genome_size
 │   ├── provided_genome_size
-│   ├── provided_vs_measured_delta_fraction
+│   ├── provided_vs_measured_relative_change
 │   ├── heterozygosity
 │   ├── repeat_fraction
 │   └── estimate_confidence
@@ -313,43 +482,72 @@ typed producer and resolver case.
 ## Stage Contexts and Input Snapshot
 
 The shared facts model intentionally does not absorb every stage detail.
-Each stage owns one strict context model:
+Each stage owns one strict context model. `stage_context` is a Pydantic
+discriminated union on the field `stage`.
 
-### Assembly context
+| Context | Exact fields |
+|---|---|
+| `AssemblyRecommendationContext` | `stage: Literal["assembly"]`; `assembly_route: Literal["hifi", "ont", "cyclone"]`; `read_type: NormalizedReadType`; `target_level: Literal["draft", "near_t2t", "strict_t2t"]`; `retry: RecommendationRetryContext \| None` |
+| `AutoHiCRecommendationContext` | `stage: Literal["hic_scaffolding"]`; `library_protocols: tuple[NonEmptyStr, ...]`; `provided_restriction_enzyme: NonEmptyStr \| None`; `retry: RecommendationRetryContext \| None` |
+| `T2TRecommendationContext` | `stage: Literal["t2t"]`; `resolved_telomere_motif: DnaMotif`; `motif_source: Literal["provided_species_fact", "llm_species_resolution"]`; `ont_asset_count: PositiveInt` |
 
-`AssemblyRecommendationContext` contains:
+`library_protocols` is deterministically deduplicated, sorted, and limited to
+64 values of at most 120 characters. The T2T threshold workflow has no retry in
+this scope and therefore has no retry field.
 
-- selected assembly route and normalized read type;
-- target assembly level;
-- method-relevant asset availability not already represented in common facts;
-- task-specific retry/review context;
-- bounded chronological attempt history.
-
-Execution paths, run IDs, and artifact refs are excluded.
-
-### AutoHiC context
-
-`AutoHiCRecommendationContext` contains:
-
-- normalized Hi-C library protocols;
-- explicitly provided restriction enzyme;
-- task-specific bounded chronological attempt history.
-
-The enzyme is also available through the
+The AutoHiC enzyme is available through the
 `hic_provided_restriction_enzyme` L1 fact key. The typed context remains its
 stage-owned source; the common facts model does not gain a Hi-C-only field.
 
-### T2T context
+Execution paths, run IDs, artifact refs, and retry-policy values are excluded
+from all three contexts.
 
-`T2TRecommendationContext` contains:
+### Retry evidence
 
-- resolved telomere motif and its semantic source;
-- positive ONT asset count;
-- bounded assembly/read facts required only by T2T threshold selection.
+`RecommendationRetryContext` is present only for
+`retry_after_execution_failure` or `retry_after_review_failure` and contains:
 
-The T2T motif request has its own strict context containing canonical species
-facts and the optional configured hint. The threshold context consumes only the
-persisted resolved motif.
+```text
+RecommendationRetryContext
+├── trigger: ExecutionFailureTrigger | ReviewFailureTrigger
+└── attempt_history: tuple[ParameterAttemptEvidenceV3, ...]
+```
+
+The history contains exactly every sealed predecessor in ascending
+`attempt_id`; its length must equal the current recommendation ID. It is
+bounded by the operator-authorized attempt chain rather than silently
+truncated. Each item has this strict surface:
+
+| Field | Type and bound |
+|---|---|
+| `attempt_id` | non-negative integer |
+| `task` | `ParameterAttemptTask` |
+| `status` | `ParameterAttemptStatus` |
+| `recommended_parameters` | exact prior sparse JSON mapping |
+| `approved_parameters` | exact approved sparse JSON mapping |
+| `effective_parameters` | effective non-locator values from the frozen record |
+| `effective_sources` | parameter name to `Literal["l0", "l1", "l2"]` |
+| `execution` | optional `ParameterExecutionEvidence` |
+| `review` | optional stage-specific review evidence |
+
+`ParameterExecutionEvidence` contains `status`, optional `return_code`,
+`failure_class` (120 characters), `status_detail` (500 characters), up to 16
+finite numeric resource metrics, and an optional 4,000-character `stderr_tail`.
+Only the latest failed execution may include the tail. It never contains
+stdout/stderr refs, commands, paths, environment variables, or credentials.
+
+Assembly review evidence contains the existing typed failure mode and these
+optional finite metrics only: assembly size, assembly-size ratio, contig count,
+N50, N90, largest contig, BUSCO complete/single/duplicate/fragmented/missing,
+and the bounded scalar QUAST metrics selected by the review adapter. AutoHiC
+review evidence contains the decision
+`accept_candidate | keep_prior_assembly | request_parameter_retry` and at most
+20 reviewer notes of 500 characters each. Unknown review fields do not cross
+the model boundary.
+
+The trigger duplicates only the current reason for requesting the retry:
+execution status/return code/failure class/detail for an execution retry, or
+the typed stage review evidence for a review retry.
 
 ### Snapshot
 
@@ -358,12 +556,41 @@ Every recommendation point builds and persists:
 ```text
 RecommendationInputSnapshotV3
 ├── schema_version: 3
+├── snapshot_kind: parameter_recommendation
 ├── method_id
 ├── task
 ├── facts: CanonicalRecommendationFacts
 ├── stage_context: discriminated stage-context union
 └── dependency_refs: RecommendationDependencyRefs
 ```
+
+`method_id` is the stable execution ID and must equal both the selected method
+and `catalog.method_id`. Short catalog IDs are rejected.
+
+`RecommendationDependencyRefs` has this exact audit-only surface:
+
+```text
+RecommendationDependencyRefs
+├── fact_source_refs:
+│   └── dict[read_qc_summary | genome_survey_result, ArtifactRef]
+├── stage_input_refs: tuple[ArtifactRef, ...]
+├── initial_input_snapshot_ref: ArtifactRef | null
+├── prior_attempt_manifest_refs: tuple[ArtifactRef, ...]
+└── motif_resolution_ref: ArtifactRef | null
+```
+
+- `initial_input_snapshot_ref` and `prior_attempt_manifest_refs` are empty on an
+  initial attempt and required on a retry.
+- `prior_attempt_manifest_refs` has one entry per history item in identical
+  order.
+- `motif_resolution_ref` is required only for the T2T threshold snapshot.
+- `stage_input_refs` is deterministically role-sorted and limited to 1,024
+  canonical refs; a larger input set must be represented by its indexed
+  manifest ref rather than expanded into the snapshot.
+- Missing optional upstream artifact roles are omitted rather than represented
+  by path strings.
+- All refs are canonical `ArtifactRef` records; bare paths and logical asset
+  IDs are not accepted.
 
 `dependency_refs` binds the snapshot to source artifacts for replay and audit.
 It is never projected into a model DTO or prompt.
@@ -372,21 +599,36 @@ The snapshot is stage- and attempt-local. There is no long-lived global facts
 snapshot reused after upstream state changes. “One facts model” means one
 schema and adapter, not one stale object for the entire run.
 
-Retries reuse the initial attempt's canonical facts and selected literature
-basis. Only attempt history and review/execution context change. A retry does
-not reread mutable upstream dictionaries, recalculate the sample facts, or
-reselect papers.
+Assembly retries load the initial v3 snapshot through
+`initial_input_snapshot_ref`, copy its canonical facts byte-for-byte, and reuse
+the same immutable Assembly literature-basis ref. AutoHiC retries likewise load
+and copy the initial canonical facts, but AutoHiC has no literature selection
+or literature basis to reselect. Only typed retry context and its dependency
+refs change. A retry does not reread mutable upstream dictionaries or
+recalculate sample facts.
 
 ## Facts Adapter and Data Flow
 
 `app/domains/parameter_recommendation/facts.py` owns:
 
 - reading the authoritative species facts from shared parameters;
-- reading current Read-QC and genome-survey typed producer contracts;
+- projecting the current Read-QC summary mapping and `GenomeSurveyResult`
+  estimate mappings into strict adapter-local source models;
 - unit normalization;
 - effective genome-size selection;
 - raw-coverage derivation;
 - conflict detection and canonical fact construction.
+
+Read-QC and genome survey do not currently publish fully typed nested
+quantitative contracts: Read-QC publishes a summary mapping, and
+`GenomeSurveyResult.estimates`, `measured_estimates`, and
+`provided_overrides` are `dict[str, Any]`. Changing those stage output schemas
+is outside this refactor. The facts adapter is an anti-corruption boundary: it
+allowlists the currently authoritative producer keys, validates them
+immediately into private strict `ReadQCRecommendationSource` and
+`GenomeSurveyRecommendationSource` models, and only then constructs canonical
+facts. Malformed present values fail; absent optional values remain absent.
+No downstream recommendation code receives the source mappings.
 
 Stage `context.py` modules read only their stage-owned typed output and build
 their strict stage context. They do not reimplement common fact extraction.
@@ -394,8 +636,9 @@ their strict stage context. They do not reimplement common fact extraction.
 The required initial-attempt flow is:
 
 ```text
-state and typed upstream outputs
+state and current upstream outputs
   -> canonical facts adapter
+  -> strict adapter-local source models
   -> stage context builder
   -> RecommendationInputSnapshotV3
   -> persist input snapshot
@@ -452,9 +695,25 @@ All parameter recommendation DTOs use:
 - `adjustable_parameters`, selected from catalog entries declaring L2;
 - stage-specific evidence and retry context where applicable.
 
-Assembly retains literature selection, cases, and method guidance. AutoHiC
-retains only its bounded stage facts and attempt history. T2T retains its
-resolved motif and threshold-relevant context.
+The fact projection is normative:
+
+| Request | `facts` projection | Additional fields |
+|---|---|---|
+| Assembly | species, reads, genome, sequencing, and asset presence, excluding `None` | `AssemblyRecommendationContext`, method guidance, literature selection, and literature cases |
+| AutoHiC | canonical species facts only | `AutoHiCRecommendationContext` |
+| T2T threshold | canonical species facts only | `T2TRecommendationContext` |
+| T2T motif | canonical species facts only | no parameter catalog; this uses the separate motif-resolution contract |
+
+Every projection reuses the canonical nested models; no request declares a
+second species or quantity schema. Assembly retry evidence is carried only by
+its context and reuses the initial literature basis. AutoHiC retains only its
+bounded stage facts and attempt history and has no literature fields. T2T
+retains its resolved motif and ONT asset count in its context.
+
+`adjustable_parameters` is keyed only by catalog entries with `layers.l2`.
+Each value contains `value_type`, allowed values, min/max, description, and
+notes; it excludes all L0/L1 declarations, application bindings, defaults, and
+stable execution metadata.
 
 No DTO contains session identity, locators, artifact IDs, hashes, source paths,
 dependency refs, credentials, or unrestricted registry metadata. DTOs are
@@ -477,14 +736,20 @@ not filled, and retry responses are not merged with their predecessor.
 The motif resolver uses the same canonical species facts projection as the
 three parameter recommenders. It does not reread `shared_parameters` directly.
 
-The optional configured motif hint is isolated in the T2T motif context. The
-resolver persists the exact request, response, parse result, and resolved
-source. Every later T2T consumer reads only the typed resolved motif.
+If canonical `species.supplied_telomere_motif` is present, the resolver
+normalizes it and persists a deterministic resolution with source
+`provided_species_fact` without invoking the model. Otherwise,
+`species.scientific_name` is required and the resolver sends canonical species
+facts to the model, persisting the exact request, response, parse result, and
+source `llm_species_resolution`. Every later T2T consumer reads only the typed
+resolved motif.
 
-The hard cutover removes direct reads of the old configured motif from
-threshold selection and scanning consumers. The explicit configured-hint path
-at the resolver boundary remains supported only if it is part of the new typed
-T2T context; it is not treated as an old input-profile compatibility alias.
+The old `t2t.telomere_motif` run-config field,
+`configured_telomere_motif`, `legacy_motif_hint`, raw `telomere_motif`
+checkpoint fallback, and sources `legacy_t2t_config` /
+`legacy_t2t_checkpoint` are deleted. They are not accepted at the resolver
+boundary under a new name. A run must supply `species_facts` and either its
+optional canonical motif or enough species identity for model resolution.
 
 ## File Ownership
 
@@ -544,9 +809,14 @@ The implementation deletes, rather than deprecates:
 - `_first_available_value`, `_lookup_path`, and arbitrary dotted
   `source_priority` handling in Assembly command construction;
 - singular catalog `level`, `source`, `source_priority`, top-level `default`,
-  and top-level `fixed_value`;
+  top-level `fixed_value`, `cli`, and every overloaded `cli: null`;
+- catalog-only context placeholders such as Flye/NextDenovo `read_n50` and
+  `estimated_coverage`;
 - `descriptors/knowledge_packs/assembly/parameter_recommender/rules/profile_boundaries.yaml`
   and its registry entry;
+- `T2TRunParameters.telomere_motif`, `configured_telomere_motif`,
+  `legacy_motif_hint`, raw checkpoint `telomere_motif` fallback, and their
+  compatibility-source labels;
 - fixtures and documentation containing old profile field names;
 - stale retrieval-activation placeholder documentation;
 - schema aliases, dual writes, and compatibility readers for pre-v3
@@ -565,7 +835,8 @@ Construction fails before retrieval or model invocation when:
   producer contract does not resolve;
 - a stage context discriminator does not match the selected method/stage;
 - a catalog references an unknown L0 binding, fact key, or transform;
-- a dual-layer declaration lacks an explicit valid precedence;
+- a catalog has an unsupported application, duplicate render order/position,
+  `fixed` plus another source layer, or an invalid runtime/default combination;
 - an old input snapshot or catalog schema is supplied.
 
 Missing optional facts remain `None`. The adapter does not guess a value, scan
@@ -579,16 +850,61 @@ recommendation.
 
 ## Persistence and Replay
 
-The persisted input artifact contains the complete
-`RecommendationInputSnapshotV3`, including audit-only dependency refs.
-`model_request.json` continues to own the exact rendered messages sent to the
-provider. Basis, response, parse, recommendation, approval, and frozen-attempt
-records retain their existing ownership boundaries.
+The hard cutover changes these persisted contracts:
 
-Old recommendation artifacts and checkpoints are unsupported by design. A
-resume that points at a pre-v3 input snapshot reports a schema mismatch and
-stops. The implementation does not silently rebuild it from current state,
-because that would break replay identity.
+| Record | New file/key/type rule | Schema |
+|---|---|---|
+| recommendation input | `input_snapshot.json`; manifest key `input_snapshot_ref`; exact constants/types listed below | 3 |
+| basis snapshot | existing basis filename/type; contains the new catalog snapshot | 3 |
+| model request record | existing filename/type; owns exact rendered messages | 3 |
+| recommendation manifest | requires `input_snapshot_ref`, `basis_snapshot_ref`, `model_request_ref`, `model_response_ref`, `response_parse_ref`, and `recommendation_ref` | 3 |
+| recommendation cursor | same ownership, but validates only a v3 manifest chain | 3 |
+| `ParameterAttempt` checkpoint cursor | same refs/ownership | 3 |
+| attempt manifest | same filename/type and seal semantics | 3 |
+| frozen parameter-source record | persists the six `ResolvedParameterSources` views | 3 |
+
+The exact new input constants and artifact types are:
+
+| Constant | Artifact type |
+|---|---|
+| `ASSEMBLY_PARAMETER_INPUT_SNAPSHOT` | `assembly.parameter_recommendation.input_snapshot` |
+| `HIC_PARAMETER_INPUT_SNAPSHOT` | `hic_scaffolding.parameter_recommendation.input_snapshot` |
+| `T2T_PARAMETER_INPUT_SNAPSHOT` | `t2t.parameter_recommendation.input_snapshot` |
+| `T2T_MOTIF_INPUT_SNAPSHOT` | `t2t.telomere_motif.input_snapshot` |
+
+The old `*_PARAMETER_INPUT_PROFILE` / `T2T_MOTIF_INPUT_PROFILE` constants and
+artifact types, `input_profile.json` / `motif_input_profile.json`, and
+`input_profile_ref` manifest keys are deleted and replaced by the table above,
+`input_snapshot.json` / `motif_input_snapshot.json`, and
+`input_snapshot_ref`. The recommendation record,
+raw model-response record, response-parse record, review request/decision, and
+execution records retain their current schemas because their bodies do not
+change. A v3 manifest may reference only records produced and hash-bound by its
+own v3 chain; retaining an unchanged leaf schema does not make a pre-v3 chain
+resumable.
+
+T2T motif persistence uses `motif_input_snapshot.json` with a new
+`.input_snapshot` artifact type and schema 3, model-request record schema 3,
+and motif-resolution manifest schema 2 with required
+`input_snapshot_ref`. Its response, parse, and resolution leaf records retain
+their current bodies.
+
+Resume/hydration performs this ordered gate before reading a recommendation or
+calling a model:
+
+1. validate `ParameterRecommendationCursor` / `ParameterAttempt` as schema 3;
+2. load a schema-3 recommendation manifest of the expected stage artifact type;
+3. require and hash-validate its schema-3 input snapshot, basis, and
+   model-request refs;
+4. validate `snapshot.method_id == catalog.method_id == attempt.method_id` and
+   the stage-context discriminator;
+5. validate every remaining manifest ref and hash using the existing immutable
+   artifact rules.
+
+Any failure reports `unsupported_parameter_recommendation_schema` or the
+specific integrity mismatch and stops. The implementation never falls back to
+an old key, reconstructs a missing snapshot from current state, or mixes a v2
+cursor/manifest with v3 artifacts.
 
 ## Verification
 
@@ -602,13 +918,20 @@ because that would break replay identity.
 - every `CanonicalFactKey` has an explicit typed resolver;
 - catalog loading rejects old fields, dotted paths, unknown bindings, and
   invalid multi-layer declarations;
+- catalogs reject ambiguous applications, duplicate CLI order/positions, and
+  short method IDs in persisted contracts;
 - AutoHiC `restriction_enzyme` resolves from L1 when L2 omits it and from L2
   when approved L2 supplies it;
 - one dual-source parameter is rendered exactly once;
+- choice flags, positional inputs, CLI options/switches, config keys, and T2T
+  stage values each reach only their declared renderer;
 - Flye/hifiasm genome-size bindings resolve from the same canonical fact;
 - request DTOs reject dependency refs, sessions, locators, hashes, and unknown
   fields;
-- pre-v3 snapshots and old catalog schemas fail closed.
+- pre-v3 cursors, attempts, manifests, input profiles, and old catalog schemas
+  fail closed;
+- old T2T motif run-config and checkpoint fields are rejected rather than
+  recovered.
 
 ### Cross-stage contract tests
 
@@ -629,8 +952,10 @@ because that would break replay identity.
 - persisted input snapshot precedes retrieval and survives retrieval failure;
 - initial recommendation persists the v3 snapshot, basis, exact request,
   response, parse, sparse recommendation, and approval request;
-- Assembly and AutoHiC retries reuse the original canonical facts and selected
-  literature basis, change only retry context, and do not reselect papers;
+- Assembly retries reuse the original canonical facts and Assembly literature
+  basis without reselecting papers;
+- AutoHiC retries reuse the original canonical facts, change only typed retry
+  context, and never create or load a literature basis;
 - T2T motif resolution feeds the typed resolved motif into threshold
   recommendation and all scan/patch consumers;
 - empty sparse mappings still reach approval and use only L0/L1/default
