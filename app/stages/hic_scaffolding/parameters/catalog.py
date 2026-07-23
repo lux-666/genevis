@@ -33,9 +33,9 @@ def load_autohic_parameter_catalog() -> MethodParameterCatalog:
         AUTOHIC_PARAMETER_CATALOG.read_text(encoding="utf-8")
     ) or {}
     catalog = MethodParameterCatalog.model_validate(raw)
-    if catalog.method_id != "autohic":
+    if catalog.method_id != "hic_scaffolding.candidate.autohic":
         raise ValueError(
-            "AutoHiC parameter catalog method_id must be 'autohic'"
+            "AutoHiC parameter catalog method_id must be 'hic_scaffolding.candidate.autohic'"
         )
     adjustable = {
         name for name, specification in catalog.parameters.items()

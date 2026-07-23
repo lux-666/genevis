@@ -173,7 +173,11 @@ def build_parameter_sources_v3(
     snapshot: RecommendationInputSnapshotV3,
     approved_l2: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Build legacy-shaped parameter_sources dict from ResolvedParameterSources."""
+    """Build parameter_sources dict from ResolvedParameterSources.
+
+    Each parameter appears in exactly one group — its effective source level.
+    This prevents dual-layer params from being emitted twice by build_command.
+    """
     from app.domains.parameter_recommendation.resolution import resolve_parameters
     resolved = resolve_parameters(
         catalog,
@@ -181,10 +185,11 @@ def build_parameter_sources_v3(
         snapshot=snapshot,
         approved_l2=approved_l2,
     )
+    src = resolved.effective_source_by_parameter
     return {
-        "l0_fixed": resolved.l0_executor,
-        "l1_readonly": resolved.l1_facts,
-        "l2_recommended": resolved.l2_approved,
+        "l0_fixed": {k: v for k, v in resolved.l0_executor.items() if src.get(k) == "l0"},
+        "l1_readonly": {k: v for k, v in resolved.l1_facts.items() if src.get(k) == "l1"},
+        "l2_recommended": {k: v for k, v in resolved.l2_approved.items() if src.get(k) == "l2"},
     }
 
 
@@ -218,8 +223,16 @@ def build_parameter_sources_from_state(
     l0_executor_values: dict = {}
     if "output_prefix" in ctx:
         l0_executor_values["assembly_output_prefix"] = ctx["output_prefix"]
+    if "output_dir" in ctx:
+        l0_executor_values["assembly_output_dir"] = ctx["output_dir"]
     if "input_reads" in ctx:
         l0_executor_values["assembly_input_reads"] = ctx["input_reads"]
+    elif "input_fofn" in ctx:
+        l0_executor_values["assembly_input_reads"] = ctx["input_fofn"]
+    if "read_type" in ctx:
+        l0_executor_values["assembly_method_read_type"] = ctx["read_type"]
+    elif "method_read_type" in ctx:
+        l0_executor_values["assembly_method_read_type"] = ctx["method_read_type"]
     # Threads: from run_config or state shared_parameters
     shared = state.get("shared_parameters") or {}
     threads = (
@@ -255,10 +268,11 @@ def build_parameter_sources_from_state(
         snapshot=snapshot,
         approved_l2=dict(recommended_params),
     )
+    src = resolved.effective_source_by_parameter
     return {
-        "l0_fixed": resolved.l0_executor,
-        "l1_readonly": resolved.l1_facts,
-        "l2_recommended": resolved.l2_approved,
+        "l0_fixed": {k: v for k, v in resolved.l0_executor.items() if src.get(k) == "l0"},
+        "l1_readonly": {k: v for k, v in resolved.l1_facts.items() if src.get(k) == "l1"},
+        "l2_recommended": {k: v for k, v in resolved.l2_approved.items() if src.get(k) == "l2"},
     }
 
 

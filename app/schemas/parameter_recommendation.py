@@ -24,6 +24,7 @@ QuantityUnit = Literal[
     "fraction",
     "relative_change",
     "count",
+    "phred",
 ]
 
 QuantityOriginKind = Literal["provided", "measured", "derived", "resolved"]

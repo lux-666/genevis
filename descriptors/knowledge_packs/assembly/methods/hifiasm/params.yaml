@@ -1,5 +1,5 @@
-catalog_id: hifiasm
-method_id: hifiasm
+catalog_id: assembly.hifiasm
+method_id: assembly.hifiasm
 tool: hifiasm
 description: "HiFi assembly mode using hifiasm >=0.21.0; CLI surface derived from upstream help/CommandLines.cpp."
 
@@ -337,10 +337,9 @@ parameters:
       order: 101
     min: 1
     layers:
-      l1:
-        fact: raw_coverage_x
-        transform: identity
-    description: "Homozygous read coverage; omitted until a producer publishes this measurement."
+      l2:
+        adjustable: true
+    description: "Homozygous read coverage; no producer measures this — must come from model recommendation."
 
   n_hap:
     value_type: int

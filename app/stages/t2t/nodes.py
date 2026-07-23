@@ -118,36 +118,6 @@ def _fail(state: TopLevelState, reason: str) -> dict:
 
 def enter_t2t(state: TopLevelState) -> dict:
     """Mark T2T finishing as the active stage."""
-
-    output = _output(state)
-    if (
-        output.get("status") not in {None, "resolved"}
-        and output.get("resolved_telomere_motif") is None
-    ):
-        legacy_motif = output.get("configured_telomere_motif")
-        if legacy_motif is None:
-            legacy_motif = output.get("telomere_motif")
-        if legacy_motif is not None:
-            try:
-                motif = normalize_dna_motif(
-                    str(legacy_motif), field_name="legacy t2t.telomere_motif"
-                )
-            except ValueError as exc:
-                return _fail(state, f"invalid legacy T2T telomere motif: {exc}")
-            return {
-                **_update(
-                    state,
-                    {
-                        "resolved_telomere_motif": motif,
-                        "resolved_telomere_motif_source": "legacy_t2t_checkpoint",
-                        "resolved_telomere_motif_summary": (
-                            "Recovered from a checkpoint created before motif "
-                            "resolution."
-                        ),
-                    },
-                ),
-                "supervision_state": "running_stage",
-            }
     return {"supervision_state": "running_stage"}
 
 

@@ -1,5 +1,5 @@
-catalog_id: nextdenovo
-method_id: nextdenovo
+catalog_id: assembly.nextdenovo
+method_id: assembly.nextdenovo
 tool: nextDenovo
 description: "NextDenovo long-read assembly catalog for Phase11 typed parameter attempts."
 

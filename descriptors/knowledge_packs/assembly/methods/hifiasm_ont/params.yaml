@@ -1,5 +1,5 @@
-catalog_id: hifiasm_ont
-method_id: hifiasm_ont
+catalog_id: assembly.hifiasm_ont
+method_id: assembly.hifiasm_ont
 tool: hifiasm
 description: "ONT simplex assembly mode using hifiasm >=0.21.0; --ont is fixed by the route."
 
@@ -337,10 +337,9 @@ parameters:
       order: 101
     min: 1
     layers:
-      l1:
-        fact: raw_coverage_x
-        transform: identity
-    description: "Homozygous read coverage; omitted until a producer publishes this measurement."
+      l2:
+        adjustable: true
+    description: "Homozygous read coverage; no producer measures this — must come from model recommendation."
 
   n_hap:
     value_type: int

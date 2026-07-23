@@ -53,7 +53,12 @@ from app.schemas.artifacts import (
     ParameterRecommendationCursor,
 )
 from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir
+from app.domains.parameter_recommendation.facts import build_canonical_facts
+from app.schemas.parameter_recommendation import (
+    RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
+)
+from app.stages.hic_scaffolding.parameters.context import build_autohic_recommendation_context
 from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
@@ -146,12 +151,21 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             f"AutoHiC retry history is invalid: {exc}",
             failure_kind="parameter_recommendation",
         )
-    input_profile = _input_profile(state, hic_out, attempt_history=attempt_history)
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(mode="json", exclude_none=True)
+    facts = build_canonical_facts(
+        shared_parameters=shared if isinstance(shared, dict) else {},
+        read_qc_output=(state.get("stage_outputs") or {}).get("read_qc") or {},
+        genome_survey_result=(state.get("stage_outputs") or {}).get("genome_survey") or {},
+    )
+    context = build_autohic_recommendation_context(state, hic_out=hic_out)
     catalog_snapshot = catalog.model_dump(mode="json")
 
     try:
         model_request = build_autohic_parameter_request(
-            input_profile=input_profile,
+            facts=facts,
+            context=context,
             catalog=catalog,
             task=task,
             attempt_history=attempt_history,
@@ -160,7 +174,13 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             state,
             recommendation_id,
             "input_profile.json",
-            input_profile,
+            RecommendationInputSnapshotV3(
+                method_id=catalog.method_id,
+                task=task,
+                facts=facts,
+                stage_context=context,
+                dependency_refs=RecommendationDependencyRefs(),
+            ).model_dump(mode="json"),
             artifact_type=HIC_PARAMETER_INPUT_SNAPSHOT,
             method_name=_RECOMMENDER_METHOD,
         )
@@ -169,7 +189,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             recommendation_id,
             "basis_snapshot.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "catalog_snapshot": catalog_snapshot,
                 "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
             },
@@ -182,7 +202,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             recommendation_id,
             "model_request.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "prompt_bundle_id": PROMPT_BUNDLE,
                 "prompt_template_sha256": autohic_parameter_prompt_hash(),
                 "messages": messages,

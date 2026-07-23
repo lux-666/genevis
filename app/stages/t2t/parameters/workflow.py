@@ -64,11 +64,13 @@ from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.schemas.parameter_recommendation import (
     CanonicalSpeciesFacts,
     RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
     T2TMotifInputSnapshotV3,
 )
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
+from app.stages.t2t.parameters.context import build_t2t_recommendation_context
 from app.stages.t2t.parameters.storage import (
     T2TParameterPersistenceError,
     read_t2t_parameter_artifact,
@@ -98,6 +100,45 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
     )
     species_facts: CanonicalSpeciesFacts = canonical_facts.species
 
+    # Deterministic short-circuit: motif supplied in species facts — skip model call
+    if species_facts.supplied_telomere_motif:
+        from app.schemas.shared_parameters import normalize_dna_motif
+        try:
+            motif = normalize_dna_motif(
+                species_facts.supplied_telomere_motif,
+                field_name="species_facts.supplied_telomere_motif",
+            )
+        except ValueError as exc:
+            return _fail(state, f"supplied telomere motif is invalid: {exc}")
+        snapshot = T2TMotifInputSnapshotV3(
+            facts=species_facts,
+            dependency_refs=RecommendationDependencyRefs(),
+        )
+        try:
+            input_profile_ref = write_t2t_parameter_artifact(
+                state,
+                0,
+                "motif_input_profile.json",
+                snapshot.model_dump(mode="json"),
+                artifact_type=T2T_MOTIF_INPUT_SNAPSHOT,
+                method_name=_MOTIF_RESOLVER_METHOD,
+            )
+        except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+            return _fail(state, f"T2T motif snapshot persistence failed: {exc}")
+        return update_stage_output(
+            state,
+            "t2t",
+            {
+                "status": "motif_resolved",
+                "resolved_telomere_motif": motif,
+                "resolved_telomere_motif_source": "supplied_species_fact",
+                "resolved_telomere_motif_summary": (
+                    "Motif supplied directly in species facts; no LLM call required."
+                ),
+                "telomere_motif_resolution_ref": input_profile_ref.model_dump(mode="json"),
+            },
+        )
+
     snapshot = T2TMotifInputSnapshotV3(
         facts=species_facts,
         dependency_refs=RecommendationDependencyRefs(),
@@ -118,7 +159,7 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
             0,
             "motif_model_request.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "prompt_bundle_id": MOTIF_PROMPT_BUNDLE,
                 "prompt_template_sha256": t2t_motif_prompt_hash(),
                 "messages": messages,
@@ -308,25 +349,28 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
     shared = state.get("shared_parameters") or {}
     if hasattr(shared, "model_dump"):
         shared = shared.model_dump(mode="json", exclude_none=True)
-    species_facts = shared.get("species_facts") if isinstance(shared, dict) else None
-    input_profile = {
-        "schema_version": 2,
-        "species_facts": species_facts,
-        "resolved_telomere_motif": output["resolved_telomere_motif"],
-        "ont_asset_count": len(read_refs),
-        "ont_read_refs": read_refs,
-        "input_assembly_ref": output["input_assembly_ref"],
-    }
+    facts = build_canonical_facts(
+        shared_parameters=shared if isinstance(shared, dict) else {},
+        read_qc_output=None,
+        genome_survey_result=None,
+    )
+    context = build_t2t_recommendation_context(state, t2t_out=output)
     try:
         catalog = load_t2t_parameter_catalog()
         request = build_t2t_parameter_request(
-            input_profile=input_profile, catalog=catalog
+            facts=facts, context=context, catalog=catalog
         ).model_dump(mode="json", exclude_none=True)
         input_profile_ref = write_t2t_parameter_artifact(
             state,
             0,
             "input_profile.json",
-            input_profile,
+            RecommendationInputSnapshotV3(
+                method_id=catalog.method_id,
+                task="recommend_initial",
+                facts=facts,
+                stage_context=context,
+                dependency_refs=RecommendationDependencyRefs(),
+            ).model_dump(mode="json"),
             artifact_type=T2T_PARAMETER_INPUT_SNAPSHOT,
             method_name=_RECOMMENDER_METHOD,
         )
@@ -335,7 +379,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
             0,
             "basis_snapshot.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "catalog_snapshot": catalog.model_dump(mode="json"),
                 "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
                 "executor_defaults": dict(output.get("threshold_defaults") or {}),
@@ -349,7 +393,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
             0,
             "model_request.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "prompt_bundle_id": PROMPT_BUNDLE,
                 "prompt_template_sha256": t2t_parameter_prompt_hash(),
                 "messages": messages,
@@ -679,7 +723,7 @@ def prepare_t2t_parameter_profile(state: TopLevelState) -> dict:
             attempt.attempt_id,
             "frozen_parameters.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "stage": "t2t",
                 "method_id": T2T_METHOD,
                 "approved_sparse_parameters": approved,

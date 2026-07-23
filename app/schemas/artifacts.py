@@ -27,7 +27,6 @@ GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
 ASSEMBLY_PARAMETER_INPUT_SNAPSHOT = "assembly.parameter.input_snapshot"
-ASSEMBLY_PARAMETER_INPUT_PROFILE = ASSEMBLY_PARAMETER_INPUT_SNAPSHOT  # compat alias
 ASSEMBLY_PARAMETER_MODEL_REQUEST = "assembly.parameter.model_request"
 ASSEMBLY_PARAMETER_MODEL_RESPONSE = "assembly.parameter.model_response"
 ASSEMBLY_PARAMETER_BASIS = "assembly.parameter.basis_snapshot"
@@ -62,7 +61,6 @@ HIC_CONTACT_MAP = "hic_scaffolding.contact_map"
 HIC_ASSEMBLY_FILE = "hic_scaffolding.assembly"
 HIC_HTML_REPORT = "hic_scaffolding.html_report"
 HIC_PARAMETER_INPUT_SNAPSHOT = "hic_scaffolding.parameter.input_snapshot"
-HIC_PARAMETER_INPUT_PROFILE = HIC_PARAMETER_INPUT_SNAPSHOT  # compat alias
 HIC_PARAMETER_BASIS = "hic_scaffolding.parameter.basis_snapshot"
 HIC_PARAMETER_MODEL_REQUEST = "hic_scaffolding.parameter.model_request"
 HIC_PARAMETER_MODEL_RESPONSE = "hic_scaffolding.parameter.model_response"
@@ -74,7 +72,6 @@ HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
 HIC_PARAMETER_ATTEMPT_MANIFEST = "hic_scaffolding.parameter.attempt_manifest"
 HIC_PARAMETER_REVIEW = "hic_scaffolding.parameter.review"
 T2T_PARAMETER_INPUT_SNAPSHOT = "t2t.parameter.input_snapshot"
-T2T_PARAMETER_INPUT_PROFILE = T2T_PARAMETER_INPUT_SNAPSHOT  # compat alias
 T2T_PARAMETER_BASIS = "t2t.parameter.basis_snapshot"
 T2T_PARAMETER_MODEL_REQUEST = "t2t.parameter.model_request"
 T2T_PARAMETER_MODEL_RESPONSE = "t2t.parameter.model_response"
@@ -204,7 +201,7 @@ class ParameterRecommendationCursor(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     recommendation_id: int = Field(ge=0)
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
@@ -233,7 +230,7 @@ class ParameterAttempt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     attempt_id: int = Field(ge=0)
     method_id: str = Field(min_length=1)
     status: ParameterAttemptStatus

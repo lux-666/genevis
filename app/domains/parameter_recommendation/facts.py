@@ -230,7 +230,7 @@ def _build_read_facts(src: _ReadQCRecommendationSource) -> CanonicalReadFacts:
     quality_fact = (
         QuantityFact(
             value=src.mean_quality,
-            unit="fraction",
+            unit="phred",
             origin=QuantityOrigin(kind="measured", producer="read_qc"),
         )
         if src.mean_quality is not None

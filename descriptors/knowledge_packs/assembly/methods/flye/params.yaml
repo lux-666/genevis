@@ -1,5 +1,5 @@
-catalog_id: flye
-method_id: flye
+catalog_id: assembly.flye
+method_id: assembly.flye
 tool: flye
 description: "Flye long-read assembly catalog for Phase11 typed parameter attempts."
 

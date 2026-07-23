@@ -64,7 +64,11 @@ from app.schemas.state import TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.domains.parameter_recommendation.facts import build_canonical_facts
-from app.schemas.parameter_recommendation import AssemblyRecommendationContext
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
+)
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
@@ -238,7 +242,13 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             state,
             recommendation_id,
             "input_profile.json",
-            full_profile,
+            RecommendationInputSnapshotV3(
+                method_id=catalog.method_id,
+                task=task,
+                facts=facts,
+                stage_context=context,
+                dependency_refs=RecommendationDependencyRefs(),
+            ).model_dump(mode="json"),
             artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
             method_name="assembly.parameter_recommender",
         )
@@ -259,7 +269,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             recommendation_id,
             "model_request.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "prompt_bundle_id": parameter_prompt_bundle_name(catalog.method_id),
                 "prompt_template_sha256": parameter_prompt_bundle_hash(
                     catalog.method_id

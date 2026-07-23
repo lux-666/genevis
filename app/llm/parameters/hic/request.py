@@ -85,7 +85,7 @@ def build_autohic_parameter_request(
     metadata are deliberately absent from this DTO.
     """
 
-    if catalog.method_id != "autohic":
+    if catalog.method_id != AUTOHIC_METHOD:
         raise ValueError("AutoHiC model request requires the autohic catalog")
     adjustable = {
         name: {

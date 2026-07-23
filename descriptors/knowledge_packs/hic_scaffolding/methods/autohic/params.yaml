@@ -1,5 +1,5 @@
-catalog_id: autohic
-method_id: autohic
+catalog_id: hic_scaffolding.candidate.autohic
+method_id: hic_scaffolding.candidate.autohic
 tool: AutoHiC
 description: "Sparse AutoHiC biological/configuration recommendation surface. Runtime and model paths are resolved outside the LLM recommendation."
 

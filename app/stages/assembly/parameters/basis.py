@@ -41,7 +41,7 @@ def build_parameter_basis_snapshot(
         source_root=knowledge_pack.get("pack_root"),
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "method_id": catalog.method_id,
         "catalog_snapshot": catalog.model_dump(mode="json"),
         "literature_selection": dict(literature_selection),
@@ -51,6 +51,6 @@ def build_parameter_basis_snapshot(
 
 
 def _method_guidance(method_id: str) -> list[dict[str, Any]]:
-    if method_id not in {"hifiasm", "hifiasm_ont"}:
+    if method_id not in {"assembly.hifiasm", "assembly.hifiasm_ont"}:
         return []
     return load_method_guidance().model_cards_for_method(method_id)
