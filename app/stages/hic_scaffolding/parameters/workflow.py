@@ -42,7 +42,7 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_APPROVAL_DECISION,
     HIC_PARAMETER_ATTEMPT_MANIFEST,
     HIC_PARAMETER_BASIS,
-    HIC_PARAMETER_INPUT_PROFILE,
+    HIC_PARAMETER_INPUT_SNAPSHOT,
     HIC_PARAMETER_MODEL_REQUEST,
     HIC_PARAMETER_MODEL_RESPONSE,
     HIC_PARAMETER_RECOMMENDATION,
@@ -161,7 +161,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             recommendation_id,
             "input_profile.json",
             input_profile,
-            artifact_type=HIC_PARAMETER_INPUT_PROFILE,
+            artifact_type=HIC_PARAMETER_INPUT_SNAPSHOT,
             method_name=_RECOMMENDER_METHOD,
         )
         basis_ref = write_autohic_parameter_artifact(

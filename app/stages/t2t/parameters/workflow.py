@@ -42,13 +42,13 @@ from app.schemas.artifacts import (
     T2T_PARAMETER_APPROVAL_DECISION,
     T2T_PARAMETER_BASIS,
     T2T_PARAMETER_FROZEN_PARAMETERS,
-    T2T_PARAMETER_INPUT_PROFILE,
+    T2T_PARAMETER_INPUT_SNAPSHOT,
     T2T_PARAMETER_MODEL_REQUEST,
     T2T_PARAMETER_MODEL_RESPONSE,
     T2T_PARAMETER_RECOMMENDATION,
     T2T_PARAMETER_RECOMMENDATION_MANIFEST,
     T2T_PARAMETER_RESPONSE_PARSE,
-    T2T_MOTIF_INPUT_PROFILE,
+    T2T_MOTIF_INPUT_SNAPSHOT,
     T2T_MOTIF_MODEL_REQUEST,
     T2T_MOTIF_MODEL_RESPONSE,
     T2T_MOTIF_RESOLUTION,
@@ -60,6 +60,12 @@ from app.schemas.artifacts import (
 )
 from app.schemas.run_config import T2TThresholdProfile
 from app.schemas.shared_parameters import normalize_dna_motif
+from app.domains.parameter_recommendation.facts import build_canonical_facts
+from app.schemas.parameter_recommendation import (
+    CanonicalSpeciesFacts,
+    RecommendationDependencyRefs,
+    T2TMotifInputSnapshotV3,
+)
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
@@ -85,45 +91,25 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
     shared = state.get("shared_parameters") or {}
     if hasattr(shared, "model_dump"):
         shared = shared.model_dump(mode="json", exclude_none=True)
-    species_facts = shared.get("species_facts") if isinstance(shared, dict) else None
-    legacy_hint = output.get("configured_telomere_motif")
+    canonical_facts = build_canonical_facts(
+        shared_parameters=shared if isinstance(shared, dict) else {},
+        read_qc_output=None,
+        genome_survey_result=None,
+    )
+    species_facts: CanonicalSpeciesFacts = canonical_facts.species
 
-    if species_facts is None:
-        if legacy_hint is not None:
-            try:
-                motif = normalize_dna_motif(
-                    str(legacy_hint), field_name="configured_telomere_motif"
-                )
-            except ValueError as exc:
-                return _fail(state, f"T2T motif resolution failed: {exc}")
-            return _persist_t2t_motif_resolution(
-                state,
-                motif=motif,
-                source="legacy_t2t_config",
-                summary="Used the configured compatibility motif because no species facts were supplied.",
-                refs={},
-            )
-        return _fail(
-            state,
-            "T2T telomere motif resolution requires species facts or a configured compatibility motif",
-        )
-
-    input_profile = {
-        "schema_version": 1,
-        "species_facts": species_facts,
-        "legacy_motif_hint": legacy_hint,
-    }
+    snapshot = T2TMotifInputSnapshotV3(
+        facts=species_facts,
+        dependency_refs=RecommendationDependencyRefs(),
+    )
     try:
-        request = build_t2t_motif_request(
-            species_facts=species_facts,
-            legacy_motif_hint=str(legacy_hint) if legacy_hint is not None else None,
-        )
+        request = build_t2t_motif_request(facts=species_facts)
         input_profile_ref = write_t2t_parameter_artifact(
             state,
             0,
             "motif_input_profile.json",
-            input_profile,
-            artifact_type=T2T_MOTIF_INPUT_PROFILE,
+            snapshot.model_dump(mode="json"),
+            artifact_type=T2T_MOTIF_INPUT_SNAPSHOT,
             method_name=_MOTIF_RESOLVER_METHOD,
         )
         messages = render_t2t_motif_messages(request)
@@ -341,7 +327,7 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
             0,
             "input_profile.json",
             input_profile,
-            artifact_type=T2T_PARAMETER_INPUT_PROFILE,
+            artifact_type=T2T_PARAMETER_INPUT_SNAPSHOT,
             method_name=_RECOMMENDER_METHOD,
         )
         basis_ref = write_t2t_parameter_artifact(

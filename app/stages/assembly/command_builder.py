@@ -5,31 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.schemas.parameter_catalog import (
-    CliOptionApplication,
-    CliSwitchApplication,
-    ChoiceOptionApplication,
-    ConfigKeyApplication,
-    FixedExecutorSource,
-    MethodParameterCatalog,
-    ParameterSpec,
-    PositionalApplication,
-    SelectorApplication,
-    StageValueApplication,
-)
-from app.schemas.parameter_recommendation import RecommendationInputSnapshotV3
+from app.schemas.parameter_catalog import MethodParameterCatalog, ParameterSpec
+from app.schemas.state import TopLevelState
 
 SOURCE_GROUP_LEVELS = {
     "l0_fixed": 0,
     "l1_readonly": 1,
     "l2_recommended": 2,
-}
-
-# Map from group name to the layer attribute to check on spec.layers.
-_GROUP_LAYER_ATTR = {
-    "l0_fixed": "l0",
-    "l1_readonly": "l1",
-    "l2_recommended": "l2",
 }
 
 # hifiasm --hg-size accepts INT with a required k/m/g unit suffix.
@@ -157,63 +139,42 @@ def validate_parameter_sources(
     catalog: MethodParameterCatalog,
     parameter_sources: dict[str, dict[str, Any]],
 ) -> None:
-    """Validate that parameter source groups match catalog layers."""
+    """Validate that parameter source groups match catalog levels."""
 
     _validate_groups(catalog, parameter_sources)
 
 
-def build_parameter_sources_v3(
-    *,
-    catalog: MethodParameterCatalog,
-    l0_executor_values: dict[str, Any],
-    snapshot: RecommendationInputSnapshotV3,
-    approved_l2: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    """Build legacy-shaped parameter_sources dict from ResolvedParameterSources."""
-    from app.domains.parameter_recommendation.resolution import resolve_parameters
-    resolved = resolve_parameters(
-        catalog,
-        l0_executor_values=l0_executor_values,
-        snapshot=snapshot,
-        approved_l2=approved_l2,
-    )
-    return {
-        "l0_fixed": resolved.l0_executor,
-        "l1_readonly": resolved.l1_facts,
-        "l2_recommended": resolved.l2_approved,
-    }
-
-
-def _build_parameter_sources_legacy(
+def build_parameter_sources(
     *,
     method_id: str,
     catalog: MethodParameterCatalog,
-    state: Any,
+    state: TopLevelState,
     assembly_out: dict[str, Any],
     attempt_id: int,
     recommended_params: dict[str, Any],
     execution_context: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Deprecated: uses old spec.level / _first_available_value patterns.
+    """Build replayable parameter source groups for hifiasm methods."""
 
-    Callers should migrate to build_parameter_sources_v3.
-    """
-    # Kept for backward compatibility only — do not add new callers.
     execution_context = execution_context or {}
     l0_fixed: dict[str, Any] = {}
     l1_readonly: dict[str, Any] = {}
 
     for key, spec in catalog.parameters.items():
-        if spec.layers.l0 is not None:
-            # L0 layer: use executor values or materialized default
-            from app.schemas.parameter_catalog import FixedExecutorSource, MaterializedDefaultExecutorSource, RuntimeExecutorSource
-            if isinstance(spec.layers.l0, FixedExecutorSource):
-                l0_fixed[key] = spec.layers.l0.value
-            elif isinstance(spec.layers.l0, MaterializedDefaultExecutorSource):
-                l0_fixed[key] = spec.layers.l0.value
-        elif spec.layers.l1 is not None:
-            # L1 layer: caller must supply values; skip here
-            pass
+        if spec.level == 0 and spec.fixed_value is not None:
+            l0_fixed[key] = spec.fixed_value
+        elif spec.level == 0:
+            value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
+            if value is not None:
+                l0_fixed[key] = value
+            elif spec.default is not None:
+                l0_fixed[key] = spec.default
+        elif spec.level == 1:
+            value = _first_available_value(spec.source_priority or [], state, assembly_out, execution_context)
+            if value is not None:
+                if key == "hg_size" or spec.cli == "--hg-size":
+                    value = format_hifiasm_hg_size(value)
+                l1_readonly[key] = value
 
     return {
         "l0_fixed": l0_fixed,
@@ -222,27 +183,20 @@ def _build_parameter_sources_legacy(
     }
 
 
-# Keep old name as alias for callers not yet migrated.
-build_parameter_sources = _build_parameter_sources_legacy
-
-
 def _validate_groups(catalog: MethodParameterCatalog, parameter_sources: dict[str, dict[str, Any]]) -> None:
     unknown_groups = sorted(set(parameter_sources) - set(SOURCE_GROUP_LEVELS))
     if unknown_groups:
         raise ParameterCommandError(f"Unknown parameter source group(s): {unknown_groups}")
-    for group_name in SOURCE_GROUP_LEVELS:
+    for group_name, expected_level in SOURCE_GROUP_LEVELS.items():
         group = parameter_sources.get(group_name) or {}
         if not isinstance(group, dict):
             raise ParameterCommandError(f"{group_name} must be a mapping")
-        layer_attr = _GROUP_LAYER_ATTR[group_name]
         for key in group:
             spec = catalog.parameters.get(key)
             if spec is None:
                 raise ParameterCommandError(f"Unknown parameter for {group_name}: {key}")
-            if getattr(spec.layers, layer_attr) is None:
-                raise ParameterCommandError(
-                    f"{key} has no {layer_attr.upper()} layer, cannot appear in {group_name}"
-                )
+            if spec.level != expected_level:
+                raise ParameterCommandError(f"{key} belongs to L{spec.level}, not {group_name}")
             if group_name == "l2_recommended":
                 _validate_renderable_l2_value(key, spec, group[key])
 
@@ -298,54 +252,30 @@ def _ordered_keys(
 
 
 def _is_fixed_truthy_boolean(spec: ParameterSpec, value: Any) -> bool:
-    return (
-        spec.value_type == "boolean"
-        and bool(value)
-        and isinstance(spec.layers.l0, FixedExecutorSource)
-    )
+    return spec.value_type == "boolean" and bool(value) and spec.fixed_value is not None
 
 
 def _emit_parameter(spec: ParameterSpec, value: Any) -> tuple[list[str], list[str]]:
     if value is None or value == "":
         return [], []
-
-    app = spec.application
-
-    if isinstance(app, CliSwitchApplication):
+    if spec.value_type == "boolean":
         if not value:
             return [], []
-        return [app.flag], []
-
-    if isinstance(app, CliOptionApplication):
-        # Detect whether the hifiasm_hg_size transform already formatted the value.
-        already_formatted = (
-            spec.layers.l1 is not None
-            and spec.layers.l1.transform == "hifiasm_hg_size"
-        )
-        if app.flag == "--hg-size" and not already_formatted:
-            value = format_hifiasm_hg_size(value)
-        if app.join == "comma" and isinstance(value, list):
-            return [app.flag, ",".join(str(item) for item in value)], []
-        if app.join == "expand" and isinstance(value, list):
-            result: list[str] = []
-            for item in value:
-                result.extend([app.flag, str(item)])
-            return result, []
-        return [app.flag, str(value)], []
-
-    if isinstance(app, PositionalApplication):
+        return ([spec.cli] if spec.cli else []), []
+    if spec.cli is None:
         if isinstance(value, list):
             return [], [str(item) for item in value]
         return [], [str(value)]
-
-    # SelectorApplication, ConfigKeyApplication, StageValueApplication,
-    # ChoiceOptionApplication — not emitted in basic argv builder.
-    return [], []
+    if spec.value_type == "path_list" and isinstance(value, list):
+        return [spec.cli, ",".join(str(item) for item in value)], []
+    if spec.cli == "--hg-size":
+        value = format_hifiasm_hg_size(value)
+    return [spec.cli, str(value)], []
 
 
 def _first_available_value(
     paths: list[str],
-    state: Any,
+    state: TopLevelState,
     assembly_out: dict[str, Any],
     execution_context: dict[str, Any],
 ) -> Any:

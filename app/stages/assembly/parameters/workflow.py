@@ -48,7 +48,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
     ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
@@ -215,7 +215,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             recommendation_id,
             "input_profile.json",
             full_profile,
-            artifact_type=ASSEMBLY_PARAMETER_INPUT_PROFILE,
+            artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
             method_name="assembly.parameter_recommender",
         )
         if task == "recommend_initial":

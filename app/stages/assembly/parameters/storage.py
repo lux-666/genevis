@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
     ASSEMBLY_PARAMETER_RECOMMENDATION,
@@ -34,7 +34,7 @@ class ParameterPersistenceError(ValueError):
 
 
 _RECOMMENDATION_REF_TYPES = {
-    "input_profile_ref": ASSEMBLY_PARAMETER_INPUT_PROFILE,
+    "input_profile_ref": ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     "basis_snapshot_ref": ASSEMBLY_PARAMETER_BASIS,
     "model_request_ref": ASSEMBLY_PARAMETER_MODEL_REQUEST,
     "model_response_ref": ASSEMBLY_PARAMETER_MODEL_RESPONSE,
@@ -140,7 +140,7 @@ def load_recommendation_bundle(
         manifest_ref,
         expected_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
     )
-    if manifest.get("schema_version") != 2:
+    if manifest.get("schema_version") not in {2, 3}:
         raise ParameterPersistenceError("unsupported recommendation manifest schema")
     refs = manifest.get("refs")
     if not isinstance(refs, dict):
