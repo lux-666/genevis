@@ -17,9 +17,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
 )
-from app.domains.assembly.profile_evidence import build_profile_evidence
 from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalRecommendationFacts,
+    QuantityFact,
+)
 from app.schemas.shared_parameters import SpeciesFacts
 
 
@@ -111,9 +115,11 @@ def build_parameter_request_dto(
     *,
     method_id: str,
     catalog: MethodParameterCatalog,
-    prompt_profile: dict[str, Any],
+    facts: CanonicalRecommendationFacts,
+    context: AssemblyRecommendationContext,
     task: ParameterAttemptTask,
     basis_snapshot: Mapping[str, Any],
+    retry_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build only the model-visible parameter recommendation DTO."""
 
@@ -124,14 +130,14 @@ def build_parameter_request_dto(
     if basis_snapshot.get("method_id") != catalog.method_id:
         raise ValueError("parameter request basis method does not match the catalog")
 
-    observations, _ = build_profile_evidence(prompt_profile)
+    observations = _facts_to_observations(facts)
     adjustable_parameters = _model_adjustable_parameters(catalog)
 
     request: dict[str, Any] = {
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": task,
-        "species_facts": prompt_profile.get("species_facts"),
+        "species_facts": _project_canonical_species(facts.species),
         "observations": _model_observations(observations),
         "adjustable_parameters": adjustable_parameters,
     }
@@ -155,11 +161,11 @@ def build_parameter_request_dto(
         _model_literature_cases(basis_snapshot.get("literature_cases")),
         already_projected=True,
     )
-    if task != "recommend_initial":
+    if task != "recommend_initial" and retry_context is not None:
         _add_visible(
             request,
             "retry_context",
-            _model_retry_context(_build_retry_context(prompt_profile, task=task)),
+            _model_retry_context(retry_context),
             already_projected=True,
         )
     return AssemblyParameterRequestDTO.model_validate(request).model_dump(
@@ -168,12 +174,84 @@ def build_parameter_request_dto(
     )
 
 
+def _facts_to_observations(facts: CanonicalRecommendationFacts) -> list[dict[str, Any]]:
+    """Project CanonicalRecommendationFacts into a flat observation list."""
+    observations: list[dict[str, Any]] = []
+
+    def _add(section: str, name: str, value: Any) -> None:
+        if value is None:
+            return
+        # Unwrap QuantityFact to its scalar value
+        if isinstance(value, QuantityFact):
+            value = value.value
+        observations.append({"id": f"cf_{section}_{name}", "section": section, "name": name, "value": value})
+
+    s = facts.species
+    _add("species", "scientific_name", s.scientific_name)
+    _add("species", "taxon_id", s.taxon_id)
+    _add("species", "clade", s.clade)
+    _add("species", "ploidy", s.ploidy)
+    _add("species", "expected_chromosome_count", s.expected_chromosome_count)
+    _add("species", "supplied_telomere_motif", s.supplied_telomere_motif)
+
+    r = facts.reads
+    _add("reads", "read_type", r.read_type)
+    _add("reads", "read_n50", r.read_n50)
+    _add("reads", "read_count", r.read_count)
+    _add("reads", "total_bases", r.total_bases)
+    _add("reads", "mean_read_length", r.mean_read_length)
+    _add("reads", "q20_fraction", r.q20_fraction)
+    _add("reads", "mean_quality", r.mean_quality)
+
+    g = facts.genome
+    _add("genome", "effective_genome_size", g.effective_genome_size)
+    _add("genome", "measured_genome_size", g.measured_genome_size)
+    _add("genome", "provided_genome_size", g.provided_genome_size)
+    _add("genome", "heterozygosity", g.heterozygosity)
+    _add("genome", "repeat_fraction", g.repeat_fraction)
+    _add("genome", "estimate_confidence", g.estimate_confidence)
+
+    _add("sequencing", "raw_coverage", facts.sequencing.raw_coverage)
+
+    a = facts.asset_presence
+    _add("assets", "has_hifi", a.has_hifi)
+    _add("assets", "has_ont", a.has_ont)
+    _add("assets", "has_hic", a.has_hic)
+    _add("assets", "has_rnaseq", a.has_rnaseq)
+
+    return observations
+
+
+def _project_canonical_species(species: Any) -> SpeciesFacts | None:
+    """Project CanonicalSpeciesFacts to SpeciesFacts, or None if no scientific name."""
+    if species is None or not species.scientific_name:
+        return None
+    taxon_id: int | None = None
+    if species.taxon_id is not None:
+        try:
+            taxon_id = int(species.taxon_id)
+        except (ValueError, TypeError):
+            taxon_id = None
+    ploidy_fact = species.ploidy
+    ploidy_int: int | None = int(ploidy_fact.value) if ploidy_fact is not None else None
+    chrom_fact = species.expected_chromosome_count
+    chrom_int: int | None = int(chrom_fact.value) if chrom_fact is not None else None
+    return SpeciesFacts(
+        scientific_name=species.scientific_name,
+        taxon_id=taxon_id,
+        clade=species.clade,
+        ploidy=ploidy_int,
+        expected_chromosome_count=chrom_int,
+        telomere_motif=species.supplied_telomere_motif,
+    )
+
+
 def _model_adjustable_parameters(
     catalog: MethodParameterCatalog,
 ) -> dict[str, Any]:
     adjustable_parameters: dict[str, Any] = {}
     for key, spec in catalog.parameters.items():
-        if spec.level == 2:
+        if spec.layers.l2 is not None:
             adjustable_parameters[key] = _model_parameter_spec(
                 spec.model_dump(mode="json")
             )
@@ -189,65 +267,6 @@ def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         if child is not _OMIT:
             projected[field] = child
     return projected
-
-
-def _build_retry_context(profile: dict[str, Any], *, task: str) -> dict[str, Any]:
-    previous = dict(profile.get("previous_attempt") or {})
-    review = dict(profile.get("assembly_review") or {})
-    history = list(profile.get("attempt_history") or [])
-    signals: list[dict[str, Any]] = []
-    for signal_id, path, value in (
-        (
-            "execution.status",
-            "previous_attempt.execution_status",
-            previous.get("execution_status"),
-        ),
-        (
-            "execution.status_detail",
-            "previous_attempt.execution_status_detail",
-            previous.get("execution_status_detail"),
-        ),
-        (
-            "execution.exit_code",
-            "previous_attempt.exit_code",
-            previous.get("exit_code"),
-        ),
-        (
-            "execution.stderr_ref",
-            "previous_attempt.stderr_ref",
-            previous.get("stderr_ref"),
-        ),
-        (
-            "execution.stdout_ref",
-            "previous_attempt.stdout_ref",
-            previous.get("stdout_ref"),
-        ),
-        (
-            "review.failure_mode",
-            "assembly_review.failure_mode",
-            review.get("failure_mode"),
-        ),
-    ):
-        if value is not None:
-            signals.append({"signal_id": signal_id, "path": path, "value": value})
-    for metric, value in review.items():
-        if metric == "failure_mode" or value is None or isinstance(value, (dict, list)):
-            continue
-        signals.append(
-            {
-                "signal_id": f"review.{metric}",
-                "path": f"assembly_review.{metric}",
-                "value": value,
-            }
-        )
-    return {
-        "task": task,
-        "previous_attempt": previous,
-        "attempt_history": history,
-        "assembly_review": review,
-        "signal_ids": [signal["signal_id"] for signal in signals],
-        "signals": signals,
-    }
 
 
 def _model_observations(value: Any) -> list[dict[str, Any]]:
