@@ -1112,6 +1112,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 model_request["attempt_history"][0]["status"],
                 "execution_failed",
             )
+            stderr_tail = model_request["attempt_history"][0]["execution"][
+                "stderr_tail"
+            ]
+            self.assertIn("fake AutoHiC failed", stderr_tail)
+            self.assertLessEqual(len(stderr_tail.encode("utf-8")), 16 * 1024)
+            self.assertLessEqual(len(stderr_tail.splitlines()), 200)
+            self.assertNotIn("stderr_ref", json.dumps(model_request))
+            self.assertNotIn("path_ref", json.dumps(model_request))
 
             retry_approved = self._approve_parameters(retry_blocked)
             self._fake_autohic_environment(
@@ -1268,6 +1276,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(
                 history[1]["review"]["decision"], "request_parameter_retry"
             )
+            self.assertNotIn("stderr_tail", json.dumps(history))
             retry_request = load_review_request(
                 attempt_two_blocked["data_dir"],
                 attempt_two_blocked["active_interrupt"]["request_ref"],

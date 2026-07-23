@@ -208,7 +208,7 @@ _PARAM_HINTS: dict[str, str] = {
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
     "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
-    "t2t.alignment.minimap2.telomere_motif": "terminal repeat motif, e.g. TTAGGG",
+    "t2t.alignment.minimap2.telomere_motif": "optional terminal-repeat compatibility hint, e.g. TTAGGG",
     "t2t.alignment.minimap2.threshold_min_motif_copies": "minimum motif copies at a read/contig end",
     "t2t.alignment.minimap2.threshold_terminal_window_bp": "terminal window scanned for telomere signal",
     "t2t.alignment.minimap2.threshold_min_mapq": "minimum minimap2 mapping quality for candidate reads",

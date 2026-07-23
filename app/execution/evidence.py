@@ -113,6 +113,50 @@ def execution_log_paths(
     return stdout_path, stderr_path
 
 
+DEFAULT_EXECUTION_LOG_TAIL_BYTES = 16 * 1024
+DEFAULT_EXECUTION_LOG_TAIL_LINES = 200
+
+
+def read_execution_stderr_tail(
+    state: Mapping[str, Any],
+    evidence: ExecutionEvidence,
+    *,
+    max_bytes: int = DEFAULT_EXECUTION_LOG_TAIL_BYTES,
+    max_lines: int = DEFAULT_EXECUTION_LOG_TAIL_LINES,
+) -> str | None:
+    """Read a verified, bounded stderr excerpt without exposing its location."""
+
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    if max_lines <= 0:
+        raise ValueError("max_lines must be positive")
+
+    try:
+        _, stderr_path = execution_log_paths(state, evidence)
+        with stderr_path.open("rb") as handle:
+            handle.seek(0, 2)
+            file_size = handle.tell()
+            start = max(0, file_size - max_bytes)
+            handle.seek(start)
+            raw = handle.read(max_bytes)
+    except OSError:
+        return None
+
+    if not raw:
+        return ""
+
+    text = raw.decode("utf-8", errors="replace")
+    if start > 0:
+        # Avoid presenting a line fragment when the byte window starts mid-line.
+        first_newline = text.find("\n")
+        if first_newline >= 0:
+            text = text[first_newline + 1 :]
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return "\n".join(lines)
+
+
 def persist_frozen_attempt(
     state: Mapping[str, Any],
     attempt: FrozenAttemptSpec,

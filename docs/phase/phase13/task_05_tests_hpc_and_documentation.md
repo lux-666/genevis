@@ -134,15 +134,19 @@ At minimum, run the focused local suites:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 conda run -n gene_agent \
-  python -m unittest \
-  tests.test_t2t \
-  tests.test_hic_scaffolding \
-  tests.test_execution_lifecycle \
-  tests.test_parameter_recommendation \
-  tests.test_assembly_parameter_request \
-  tests.test_parameter_attempt_schema \
-  tests.test_phase11_parameter_approval -v
+  python -m pytest -v \
+  tests/test_t2t.py \
+  tests/test_t2t_motif.py \
+  tests/test_hic_scaffolding.py \
+  tests/test_execution_lifecycle.py \
+  tests/test_parameter_recommendation.py \
+  tests/test_assembly_parameter_request.py \
+  tests/test_parameter_attempt_schema.py \
+  tests/test_phase11_parameter_approval.py
 ```
+
+Use pytest for this mixed suite: several focused modules contain top-level
+pytest tests and parametrized cases that `unittest` does not collect.
 
 Then run the broader affected suite selected by changed modules. The real HPC
 smokes remain environment-dependent and must report a clear skip/block reason

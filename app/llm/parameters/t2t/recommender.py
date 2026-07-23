@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any, Mapping
 
 from app.llm.factory import build_chat_model
+from app.llm.json_response import parse_json_object, response_text
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
 PROMPT_BUNDLE = "t2t.parameter_thresholds"
@@ -56,9 +57,9 @@ def recommend_t2t_parameters(
         response = model.invoke(invocation_messages)
     except Exception as exc:
         return T2TParameterDecision("", None, False, f"{type(exc).__name__}: {exc}")
-    raw = _response_text(response)
+    raw = response_text(response)
     try:
-        parsed = normalize_t2t_recommendation(_parse_json_object(raw))
+        parsed = normalize_t2t_recommendation(parse_json_object(raw))
     except Exception as exc:
         return T2TParameterDecision(
             raw, None, False, f"{type(exc).__name__}: {exc}", type(model).__name__
@@ -79,7 +80,7 @@ def restore_t2t_parameter_decision(record: Mapping[str, Any]) -> T2TParameterDec
         )
     return T2TParameterDecision(
         raw,
-        normalize_t2t_recommendation(_parse_json_object(raw)),
+        normalize_t2t_recommendation(parse_json_object(raw)),
         True,
         record.get("error"),
         record.get("model_id"),
@@ -105,26 +106,3 @@ def normalize_t2t_recommendation(response: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("summary must be a non-empty string when provided")
         summary = summary.strip()
     return {"parameters": deepcopy(parameters), "summary": summary}
-
-
-def _response_text(response: Any) -> str:
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content).strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    value = json.loads(cleaned)
-    if not isinstance(value, dict):
-        raise ValueError("LLM response JSON must be an object")
-    return value

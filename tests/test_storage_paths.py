@@ -23,6 +23,7 @@ from app.execution.evidence import (
     load_frozen_attempt,
     persist_execution_result,
     persist_frozen_attempt,
+    read_execution_stderr_tail,
     validate_execution_evidence,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
@@ -411,7 +412,11 @@ class ImmutablePublishTests(unittest.TestCase):
             stdout = work / "log"
             stderr = work / "err"
             stdout.write_text("first stdout\n", encoding="utf-8")
-            stderr.write_text("first stderr\n", encoding="utf-8")
+            stderr_text = (
+                "discarded diagnostic\n" * 1_000
+                + "penultimate diagnostic\nfinal diagnostic\n"
+            )
+            stderr.write_text(stderr_text, encoding="utf-8")
             attempt = build_frozen_attempt(
                 attempt_id="s1:read_qc:seqkit_stats",
                 session_id="s1",
@@ -493,7 +498,11 @@ class ImmutablePublishTests(unittest.TestCase):
                 expected_method_name=attempt.method_name,
             )
             _, loaded_stderr = execution_log_paths(state, loaded)
-            self.assertEqual(loaded_stderr.read_text(encoding="utf-8"), "first stderr\n")
+            self.assertEqual(loaded_stderr.read_text(encoding="utf-8"), stderr_text)
+            self.assertEqual(
+                read_execution_stderr_tail(state, loaded, max_bytes=128, max_lines=2),
+                "penultimate diagnostic\nfinal diagnostic",
+            )
             types = [
                 record["artifact_type"]
                 for record in read_artifact_records(paths.run_dir, "s1")

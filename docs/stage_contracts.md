@@ -197,13 +197,19 @@ Registered method:
 
 - `t2t.alignment.minimap2`.
 
-The stage obtains a sparse, human-approved threshold recommendation before
-scanning or minimap2 execution. It records source-attributed telomere scans, an
-immutable registered PAF, attempt/execution-bound candidate evidence,
-junction-aware patch records, and a finishing report. Reverse-strand tails are
-oriented target-forward; non-zero junction distances trim the target before
-extension. Ambiguous, chimeric, overlapping, or conflicting evidence is never
-silently materialized, and the source FASTA is never overwritten.
+Before threshold recommendation or scanning, T2T resolves one telomere motif
+from supplied species facts through a persisted LLM response boundary. The
+resolved value and source are the only motif inputs to later scans and patch
+checks; a legacy config value is only a compatibility hint. If neither species
+facts nor a compatibility hint is available, motif resolution fails closed
+instead of assuming a common repeat. The stage then obtains a sparse,
+human-approved threshold recommendation before scanning or minimap2 execution.
+It records source-attributed telomere scans, an immutable registered PAF,
+attempt/execution-bound candidate evidence, junction-aware patch records, and a
+finishing report. Reverse-strand tails are oriented target-forward; non-zero
+junction distances trim the target before extension. Ambiguous, chimeric,
+overlapping, or conflicting evidence is never silently materialized, and the
+source FASTA is never overwritten.
 
 ## 9. Repeat Annotation
 

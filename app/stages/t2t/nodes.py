@@ -39,6 +39,7 @@ from app.schemas.artifacts import (
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
+from app.schemas.shared_parameters import normalize_dna_motif
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -117,6 +118,36 @@ def _fail(state: TopLevelState, reason: str) -> dict:
 
 def enter_t2t(state: TopLevelState) -> dict:
     """Mark T2T finishing as the active stage."""
+
+    output = _output(state)
+    if (
+        output.get("status") not in {None, "resolved"}
+        and output.get("resolved_telomere_motif") is None
+    ):
+        legacy_motif = output.get("configured_telomere_motif")
+        if legacy_motif is None:
+            legacy_motif = output.get("telomere_motif")
+        if legacy_motif is not None:
+            try:
+                motif = normalize_dna_motif(
+                    str(legacy_motif), field_name="legacy t2t.telomere_motif"
+                )
+            except ValueError as exc:
+                return _fail(state, f"invalid legacy T2T telomere motif: {exc}")
+            return {
+                **_update(
+                    state,
+                    {
+                        "resolved_telomere_motif": motif,
+                        "resolved_telomere_motif_source": "legacy_t2t_checkpoint",
+                        "resolved_telomere_motif_summary": (
+                            "Recovered from a checkpoint created before motif "
+                            "resolution."
+                        ),
+                    },
+                ),
+                "supervision_state": "running_stage",
+            }
     return {"supervision_state": "running_stage"}
 
 
@@ -170,7 +201,7 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
         {
             "status": "resolved",
             "mode": config["mode"],
-            "telomere_motif": config["telomere_motif"],
+            "configured_telomere_motif": config["telomere_motif"],
             "threshold_defaults": config["thresholds"],
             "chromosome_list_ref": config.get("chromosome_list_ref"),
             "input_assembly_ref": str(assembly_path),
@@ -193,7 +224,13 @@ def scan_assembly_telomeres(state: TopLevelState) -> dict:
     if out.get("status") != "parameters_ready":
         return {}
     try:
-        rows = list(_scan_fasta_ends(Path(out["input_assembly_ref"]), out["telomere_motif"], out["thresholds"]))
+        rows = list(
+            _scan_fasta_ends(
+                Path(out["input_assembly_ref"]),
+                out["resolved_telomere_motif"],
+                out["thresholds"],
+            )
+        )
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t assembly telomere scan failed: {exc}")
     scan_source = Path(out["work_dir"]) / "assembly_telomere_scan.tsv"
@@ -280,7 +317,9 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
                         )
                     seen_read_ids.add(read_id)
                     left, right = _terminal_signal(
-                        sequence, out["telomere_motif"], out["thresholds"]
+                        sequence,
+                        out["resolved_telomere_motif"],
+                        out["thresholds"],
                     )
                     row = {
                         "read_id": read_id,
@@ -467,7 +506,7 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
             read_signals,
             read_sequences,
             out["thresholds"],
-            out["telomere_motif"],
+            out["resolved_telomere_motif"],
             allowed,
             out["mode"],
         )
@@ -560,7 +599,13 @@ def validate_patched_assembly(state: TopLevelState) -> dict:
     if out.get("status") != "patched":
         return {}
     try:
-        rows = list(_scan_fasta_ends(Path(out["patched_assembly_ref"]), out["telomere_motif"], out["thresholds"]))
+        rows = list(
+            _scan_fasta_ends(
+                Path(out["patched_assembly_ref"]),
+                out["resolved_telomere_motif"],
+                out["thresholds"],
+            )
+        )
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t patched assembly validation failed: {exc}")
     source = Path(out["work_dir"]) / "patched_telomere_scan.tsv"
@@ -622,6 +667,8 @@ def write_t2t_report(state: TopLevelState) -> dict:
         output_assembly_ref=out.get("output_assembly_ref") or out["input_assembly_ref"],
         ont_read_refs=list(out.get("ont_read_refs") or []),
         mode=out.get("mode", "auto_patch"),
+        resolved_telomere_motif=out.get("resolved_telomere_motif"),
+        resolved_telomere_motif_source=out.get("resolved_telomere_motif_source"),
         patched_assembly_ref=out.get("patched_assembly_ref"),
         artifact_refs={path.name: str(path) for path in artifacts},
         notes=list(out.get("notes") or []),
@@ -811,7 +858,17 @@ def _config(out: dict[str, Any]) -> dict[str, Any]:
     thresholds = {**DEFAULT_THRESHOLDS, **dict(out.get("thresholds") or {})}
     return {
         "mode": out.get("mode", "auto_patch"),
-        "telomere_motif": str(out.get("telomere_motif", "TTAGGG")).upper(),
+        "telomere_motif": (
+            str(
+                out.get(
+                    "configured_telomere_motif",
+                    out.get("telomere_motif"),
+                )
+            ).upper()
+            if out.get("configured_telomere_motif", out.get("telomere_motif"))
+            is not None
+            else None
+        ),
         "thresholds": thresholds,
         "chromosome_list_ref": out.get("chromosome_list_ref"),
         "assembly_fasta_ref": out.get("assembly_fasta_ref"),
@@ -1420,7 +1477,8 @@ def _report_markdown(out: dict[str, Any], summary: list[dict[str, str]]) -> str:
         f"- source stage: `{out.get('source_stage', '')}`",
         f"- ONT reads: `{', '.join(out.get('ont_read_refs') or []) or 'not available'}`",
         f"- execution enabled: `{out.get('execution_enabled')}`",
-        f"- telomere motif: `{out.get('telomere_motif')}`",
+        f"- resolved telomere motif: `{out.get('resolved_telomere_motif')}`",
+        f"- motif source: `{out.get('resolved_telomere_motif_source')}`",
         f"- sequences with a missing terminal signal: `{missing}`",
         f"- telomeric reads: `{out.get('telomeric_read_count', 0)}`",
         f"- extension candidates: `{out.get('candidate_count', 0)}`",

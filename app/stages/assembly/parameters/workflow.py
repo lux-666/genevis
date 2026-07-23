@@ -14,7 +14,10 @@ from typing import Any
 
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
-from app.execution.evidence import load_execution_evidence
+from app.execution.evidence import (
+    load_execution_evidence,
+    read_execution_stderr_tail,
+)
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
@@ -166,8 +169,15 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             )
         try:
             hydrated_history = [
-                hydrate_parameter_attempt(state, attempt)
-                for attempt in attempts_before
+                hydrate_parameter_attempt(
+                    state,
+                    attempt,
+                    include_execution_log=(
+                        task == "retry_after_execution_failure"
+                        and index == len(attempts_before) - 1
+                    ),
+                )
+                for index, attempt in enumerate(attempts_before)
             ]
             hydrated_previous = hydrated_history[-1]
         except ParameterPersistenceError as exc:
@@ -846,6 +856,8 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
 def hydrate_parameter_attempt(
     state: TopLevelState,
     attempt_value: ParameterAttempt | dict[str, Any],
+    *,
+    include_execution_log: bool = False,
 ) -> dict[str, Any]:
     """Rehydrate domain inputs transiently without placing them in checkpoint state."""
 
@@ -874,12 +886,17 @@ def hydrate_parameter_attempt(
             }
         )
     if attempt.execution_ref is not None:
-        hydrated["execution_result"] = load_execution_evidence(
+        execution = load_execution_evidence(
             state,
             attempt.execution_ref,
             expected_stage="assembly",
             expected_method_name=attempt.method_id,
-        ).model_dump(mode="json")
+        )
+        hydrated["execution_result"] = execution.model_dump(mode="json")
+        if include_execution_log and not execution.success:
+            stderr_tail = read_execution_stderr_tail(state, execution)
+            if stderr_tail:
+                hydrated["stderr_tail"] = stderr_tail
     if attempt.review_ref is not None:
         review = read_json_artifact(state, attempt.review_ref)
         hydrated["review_failure"] = dict(review.get("diagnosis") or {})

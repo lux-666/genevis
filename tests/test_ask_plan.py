@@ -337,7 +337,7 @@ class BuildInitialPlanDraftTests(unittest.TestCase):
             self.assertEqual(draft.selected_methods["t2t"], "t2t.alignment.minimap2")
             params = draft.method_parameters["t2t.alignment.minimap2"]
             self.assertEqual(params["mode"], "auto_patch")
-            self.assertEqual(params["telomere_motif"], "TTAGGG")
+            self.assertNotIn("telomere_motif", params)
             self.assertEqual(params["threshold_min_supporting_reads"], 1)
 
 

@@ -22,6 +22,7 @@ app/llm/parameters/
 │   ├── request.py       # AutoHiC-specific model-input DTO
 │   └── recommender.py   # prompt rendering, model call, response parsing
 └── t2t/
+    ├── motif.py         # species-motif request, model call, response parser
     ├── request.py       # T2T threshold model-input DTO
     └── recommender.py   # prompt rendering, model call, response parsing
 
@@ -101,8 +102,14 @@ AutoHiC `AutoHiCParameterRequest` contains:
 T2T `T2TParameterRequest` contains:
 
 - current task and fixed minimap2 method id;
-- supplied species facts plus bounded assembly/read facts;
+- supplied species facts, the resolved telomere motif, and bounded assembly/read
+  facts;
 - the adjustable telomere and alignment threshold catalog.
+
+Before this threshold request, T2T performs a separate motif-resolution call
+using caller-supplied species identity and any legacy motif hint. It persists
+the exact messages, raw response, parse result, and resolved source. The
+threshold request and all scan/patch consumers use only that resolved value.
 
 All DTOs forbid unknown top-level fields and exclude session identity, paths,
 artifact IDs/hashes, storage metadata, credentials, and unrestricted registry

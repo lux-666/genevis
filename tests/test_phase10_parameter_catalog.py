@@ -808,7 +808,9 @@ class ParameterProfileTests(unittest.TestCase):
         self.assertNotIn("has_trio", initial["assets"])
 
         execution_repair = build_prompt_profile(full_profile, "retry_after_execution_failure")
-        self.assertNotIn("stderr_tail", execution_repair["previous_attempt"])
+        self.assertEqual(
+            execution_repair["previous_attempt"]["stderr_tail"], "invalid value"
+        )
         self.assertNotIn("stdout_tail", execution_repair["previous_attempt"])
         self.assertNotIn("read_qc", execution_repair)
         self.assertNotIn("assembly_review", execution_repair)
@@ -1241,6 +1243,97 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
             )
             self.assertIn("line 149", stderr_path.read_text(encoding="utf-8"))
             self.assertNotIn("failure_class", assembly["parameter_attempts"][0])
+
+    def test_execution_retry_prompt_includes_bounded_stderr_tail_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            stderr_text = "discarded diagnostic\n" * 2_000 + "tail diagnostic marker\n"
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                recommended_params={"purge_level": 1},
+                status="execution_failed",
+                execution_result={"return_code": 17, "status": "failed"},
+                execution_stderr=stderr_text,
+            )
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "status": "failed",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
+                }
+            )
+            retry_gate = execution_retry_gate(state)
+            state["stage_outputs"] = retry_gate["stage_outputs"]
+            retry_model = _FakeModel(
+                _complete_hifiasm_ont_response(purge_level=2)
+            )
+
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=retry_model,
+            ):
+                recommendation = recommend_assembly_parameters(state)
+
+            prompt_request = json.loads(retry_model.messages[1]["content"])
+            serialized = json.dumps(prompt_request, ensure_ascii=False)
+
+        stderr_tail = prompt_request["retry_context"]["previous_attempt"][
+            "stderr_tail"
+        ]
+        self.assertTrue(stderr_tail.endswith("tail diagnostic marker"))
+        self.assertLessEqual(len(stderr_tail.encode("utf-8")), 16 * 1024)
+        self.assertLessEqual(len(stderr_tail.splitlines()), 200)
+        self.assertEqual(recommendation["stage_outputs"]["assembly"]["status"], "blocked_human")
+        self.assertNotIn("stderr_ref", serialized)
+        self.assertNotIn("path_ref", serialized)
+        self.assertNotIn("parameter_attempt_0.stderr.log", serialized)
+
+    def test_review_retry_prompt_excludes_execution_stderr_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self._state(tmpdir)
+            attempt = _persist_parameter_attempt(
+                state,
+                method_id="assembly.candidate.hifiasm_ont",
+                recommended_params={"purge_level": 1},
+                status="executed",
+                execution_result={
+                    "success": True,
+                    "return_code": 0,
+                    "status": "ok",
+                },
+                execution_stderr="review retry must not receive this log",
+            )
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "status": "draft_ready",
+                    "current_parameter_attempt_id": 0,
+                    "parameter_attempts": [attempt],
+                }
+            )
+            state["stage_outputs"]["assembly_review"] = {
+                "metrics": {
+                    "assembly_size_ratio": 1.35,
+                    "busco_complete": 0.94,
+                    "busco_duplicate": 0.21,
+                }
+            }
+            retry_gate = parameter_quality_gate(state)
+            state["stage_outputs"] = retry_gate["stage_outputs"]
+            retry_model = _FakeModel(
+                _complete_hifiasm_ont_response(purge_level=2)
+            )
+
+            with patch(
+                "app.llm.parameters.assembly.recommender.build_chat_model",
+                return_value=retry_model,
+            ):
+                recommend_assembly_parameters(state)
+
+            serialized = retry_model.messages[1]["content"]
+
+        self.assertNotIn("review retry must not receive this log", serialized)
+        self.assertNotIn("stderr_tail", serialized)
 
     def test_execution_retry_gate_does_not_apply_hifiasm_classifier_to_other_methods(self):
         for method_id in (

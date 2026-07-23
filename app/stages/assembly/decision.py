@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.llm.factory import build_chat_model
+from app.llm.json_response import parse_json_object, response_text
 
 AssemblyDecisionKind = Literal["route_selection"]
 
@@ -78,9 +79,9 @@ def make_assembly_decision(
             error=f"{type(exc).__name__}: {exc}",
         )
 
-    raw_content = _response_text(response)
+    raw_content = response_text(response)
     try:
-        parsed = _parse_json_object(raw_content)
+        parsed = parse_json_object(raw_content)
         _validate_route_selection(parsed, request.allowed_actions)
         return AssemblyDecisionResult(
             kind=request.kind,
@@ -95,31 +96,6 @@ def make_assembly_decision(
             raw_response=raw_content,
             error=f"{type(exc).__name__}: {exc}",
         )
-
-
-def _response_text(response: Any) -> str:
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content).strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    parsed = json.loads(cleaned)
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM response JSON must be an object")
-    return parsed
 
 
 def _validate_route_selection(parsed: dict[str, Any], allowed_actions: list[str]) -> None:

@@ -45,6 +45,7 @@ class T2TDescriptorTests(unittest.TestCase):
         config = RunConfig.model_validate({"local_exec": ["t2t"], "t2t": {}})
         self.assertEqual(config.t2t.mode, "auto_patch")
         self.assertEqual(config.t2t.thresholds.min_supporting_reads, 1)
+        self.assertIsNone(config.t2t.telomere_motif)
 
 
 class T2TStageTests(unittest.TestCase):
@@ -54,9 +55,23 @@ class T2TStageTests(unittest.TestCase):
         graph = build_stage()
         current = state
         for _ in range(3):
-            with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model"
-            ) as build_model:
+            with (
+                patch(
+                    "app.llm.parameters.t2t.motif.build_chat_model"
+                ) as motif_model,
+                patch(
+                    "app.llm.parameters.t2t.recommender.build_chat_model"
+                ) as build_model,
+            ):
+                motif_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "status": "resolved",
+                            "telomere_motif": "TTAGGG",
+                            "summary": "Test species uses the canonical repeat.",
+                        }
+                    )
+                )
                 build_model.return_value.invoke.return_value = SimpleNamespace(
                     content=json.dumps(
                         {
@@ -108,6 +123,9 @@ class T2TStageTests(unittest.TestCase):
             paths=[str(assembly)],
             source_stage="assembly_review",
         ).to_dict()
+        state["shared_parameters"] = {
+            "species_facts": {"scientific_name": "Homo sapiens", "taxon_id": 9606}
+        }
         return state
 
     def _fake_minimap2(
@@ -615,7 +633,8 @@ class T2TStageTests(unittest.TestCase):
                 ],
                 "out_dir": str(out_dir),
                 "work_dir": str(work_dir),
-                "telomere_motif": "TTAGGG",
+                "configured_telomere_motif": "TTAGGG",
+                "resolved_telomere_motif": "TTAGGG",
                 "thresholds": {
                     "min_motif_copies": 4,
                     "terminal_window_bp": 10_000,
@@ -745,9 +764,19 @@ class T2TStageTests(unittest.TestCase):
             assembly, reads = self._write_inputs(tmpdir)
             state = self._state(tmpdir, assembly, reads)
             state["stage_outputs"]["t2t"] = {"execution_mode": "local"}
-            with patch(
-                "app.llm.parameters.t2t.recommender.build_chat_model"
-            ) as build_model:
+            with (
+                patch(
+                    "app.llm.parameters.t2t.motif.build_chat_model"
+                ) as motif_model,
+                patch(
+                    "app.llm.parameters.t2t.recommender.build_chat_model"
+                ) as build_model,
+            ):
+                motif_model.return_value.invoke.return_value = SimpleNamespace(
+                    content=json.dumps(
+                        {"status": "resolved", "telomere_motif": "TTAGGG"}
+                    )
+                )
                 build_model.return_value.invoke.return_value = SimpleNamespace(
                     content=json.dumps(
                         {

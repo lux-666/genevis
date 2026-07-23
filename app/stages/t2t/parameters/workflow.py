@@ -17,6 +17,15 @@ from app.llm.parameters.t2t.recommender import (
     restore_t2t_parameter_decision,
     t2t_parameter_prompt_hash,
 )
+from app.llm.parameters.t2t.motif import (
+    MOTIF_RESOLUTION_CONTRACT,
+    PROMPT_BUNDLE as MOTIF_PROMPT_BUNDLE,
+    build_t2t_motif_request,
+    render_t2t_motif_messages,
+    resolve_t2t_motif as invoke_t2t_motif_model,
+    restore_t2t_motif_decision,
+    t2t_motif_prompt_hash,
+)
 from app.llm.parameters.t2t.request import (
     PARAMETER_RECOMMENDATION_CONTRACT,
     T2T_METHOD,
@@ -39,11 +48,18 @@ from app.schemas.artifacts import (
     T2T_PARAMETER_RECOMMENDATION,
     T2T_PARAMETER_RECOMMENDATION_MANIFEST,
     T2T_PARAMETER_RESPONSE_PARSE,
+    T2T_MOTIF_INPUT_PROFILE,
+    T2T_MOTIF_MODEL_REQUEST,
+    T2T_MOTIF_MODEL_RESPONSE,
+    T2T_MOTIF_RESOLUTION,
+    T2T_MOTIF_RESOLUTION_MANIFEST,
+    T2T_MOTIF_RESPONSE_PARSE,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
 from app.schemas.run_config import T2TThresholdProfile
+from app.schemas.shared_parameters import normalize_dna_motif
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
@@ -57,23 +73,260 @@ from app.storage.ledger import Ledger
 
 _RECOMMENDER_METHOD = "t2t.parameter_recommender"
 _APPROVAL_METHOD = "t2t.parameter_approval"
+_MOTIF_RESOLVER_METHOD = "t2t.telomere_motif_resolver"
+
+
+def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
+    """Resolve one motif before any T2T recommendation or sequence scan."""
+
+    output = stage_output(state, "t2t")
+    if output.get("status") != "resolved":
+        return {}
+    shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(mode="json", exclude_none=True)
+    species_facts = shared.get("species_facts") if isinstance(shared, dict) else None
+    legacy_hint = output.get("configured_telomere_motif")
+
+    if species_facts is None:
+        if legacy_hint is not None:
+            try:
+                motif = normalize_dna_motif(
+                    str(legacy_hint), field_name="configured_telomere_motif"
+                )
+            except ValueError as exc:
+                return _fail(state, f"T2T motif resolution failed: {exc}")
+            return _persist_t2t_motif_resolution(
+                state,
+                motif=motif,
+                source="legacy_t2t_config",
+                summary="Used the configured compatibility motif because no species facts were supplied.",
+                refs={},
+            )
+        return _fail(
+            state,
+            "T2T telomere motif resolution requires species facts or a configured compatibility motif",
+        )
+
+    input_profile = {
+        "schema_version": 1,
+        "species_facts": species_facts,
+        "legacy_motif_hint": legacy_hint,
+    }
+    try:
+        request = build_t2t_motif_request(
+            species_facts=species_facts,
+            legacy_motif_hint=str(legacy_hint) if legacy_hint is not None else None,
+        )
+        input_profile_ref = write_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_input_profile.json",
+            input_profile,
+            artifact_type=T2T_MOTIF_INPUT_PROFILE,
+            method_name=_MOTIF_RESOLVER_METHOD,
+        )
+        messages = render_t2t_motif_messages(request)
+        request_ref = write_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_model_request.json",
+            {
+                "schema_version": 2,
+                "prompt_bundle_id": MOTIF_PROMPT_BUNDLE,
+                "prompt_template_sha256": t2t_motif_prompt_hash(),
+                "messages": messages,
+            },
+            artifact_type=T2T_MOTIF_MODEL_REQUEST,
+            method_name=_MOTIF_RESOLVER_METHOD,
+        )
+    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+        return _fail(state, f"T2T motif request failed: {exc}")
+
+    response_ref: ArtifactRef | None = None
+    try:
+        recovered = recover_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_model_response.json",
+            expected_type=T2T_MOTIF_MODEL_RESPONSE,
+            method_name=_MOTIF_RESOLVER_METHOD,
+        )
+        if recovered is None:
+            decision = invoke_t2t_motif_model(request, messages=messages)
+        else:
+            response_ref, record = recovered
+            decision = restore_t2t_motif_decision(record)
+        if response_ref is None:
+            response_ref = write_t2t_parameter_artifact(
+                state,
+                0,
+                "motif_model_response.json",
+                {
+                    "schema_version": 2,
+                    "raw_response": decision.raw_response,
+                    "validity": "parsed" if decision.valid else "invalid",
+                    "error": decision.error,
+                    "model_id": decision.model_id,
+                },
+                artifact_type=T2T_MOTIF_MODEL_RESPONSE,
+                method_name=_MOTIF_RESOLVER_METHOD,
+            )
+        parse_ref = write_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_response_parse.json",
+            {
+                "schema_version": 1,
+                "parsed": decision.valid,
+                "error": decision.error,
+            },
+            artifact_type=T2T_MOTIF_RESPONSE_PARSE,
+            method_name="t2t.telomere_motif_response_parser",
+        )
+        resolution_ref = write_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_resolution.json",
+            {
+                "schema_version": 1,
+                "resolution_contract": MOTIF_RESOLUTION_CONTRACT,
+                "status": decision.status if decision.valid else "invalid",
+                "resolved_telomere_motif": decision.resolved_telomere_motif,
+                "source": "llm_species_resolution",
+                "summary": decision.summary,
+            },
+            artifact_type=T2T_MOTIF_RESOLUTION,
+            method_name=_MOTIF_RESOLVER_METHOD,
+        )
+        manifest_ref = write_t2t_parameter_artifact(
+            state,
+            0,
+            "motif_resolution_manifest.json",
+            {
+                "schema_version": 1,
+                "resolution_contract": MOTIF_RESOLUTION_CONTRACT,
+                "status": decision.status if decision.valid else "invalid",
+                "refs": {
+                    "input_profile_ref": input_profile_ref.model_dump(mode="json"),
+                    "model_request_ref": request_ref.model_dump(mode="json"),
+                    "model_response_ref": response_ref.model_dump(mode="json"),
+                    "response_parse_ref": parse_ref.model_dump(mode="json"),
+                    "resolution_ref": resolution_ref.model_dump(mode="json"),
+                },
+            },
+            artifact_type=T2T_MOTIF_RESOLUTION_MANIFEST,
+            method_name=_MOTIF_RESOLVER_METHOD,
+        )
+    except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+        return _fail(state, f"T2T motif response persistence failed: {exc}")
+
+    refs = {
+        "telomere_motif_input_profile_ref": input_profile_ref.model_dump(mode="json"),
+        "telomere_motif_model_request_ref": request_ref.model_dump(mode="json"),
+        "telomere_motif_model_response_ref": response_ref.model_dump(mode="json"),
+        "telomere_motif_response_parse_ref": parse_ref.model_dump(mode="json"),
+        "telomere_motif_resolution_manifest_ref": manifest_ref.model_dump(mode="json"),
+    }
+    failure_refs = {
+        **refs,
+        "telomere_motif_resolution_ref": resolution_ref.model_dump(mode="json"),
+    }
+    if not decision.valid:
+        return _fail_with_motif_refs(
+            state,
+            "T2T telomere motif response could not be parsed",
+            failure_refs,
+        )
+    if decision.status != "resolved" or not decision.resolved_telomere_motif:
+        return _fail_with_motif_refs(
+            state,
+            "T2T telomere motif is unresolved for the supplied species facts",
+            failure_refs,
+        )
+    return _persist_t2t_motif_resolution(
+        state,
+        motif=decision.resolved_telomere_motif,
+        source="llm_species_resolution",
+        summary=decision.summary,
+        resolution_ref=resolution_ref,
+        refs=refs,
+    )
+
+
+def _persist_t2t_motif_resolution(
+    state: TopLevelState,
+    *,
+    motif: str,
+    source: str,
+    summary: str | None,
+    refs: dict[str, Any],
+    resolution_ref: ArtifactRef | None = None,
+) -> dict:
+    """Persist the compact result used by every downstream T2T operation."""
+
+    if resolution_ref is None:
+        try:
+            resolution_ref = write_t2t_parameter_artifact(
+                state,
+                0,
+                "motif_resolution.json",
+                {
+                    "schema_version": 1,
+                    "resolution_contract": MOTIF_RESOLUTION_CONTRACT,
+                    "status": "resolved",
+                    "resolved_telomere_motif": motif,
+                    "source": source,
+                    "summary": summary,
+                },
+                artifact_type=T2T_MOTIF_RESOLUTION,
+                method_name=_MOTIF_RESOLVER_METHOD,
+            )
+        except (OSError, ValueError, T2TParameterPersistenceError) as exc:
+            return _fail(state, f"T2T motif resolution persistence failed: {exc}")
+    return update_stage_output(
+        state,
+        "t2t",
+        {
+            "status": "motif_resolved",
+            "resolved_telomere_motif": motif,
+            "resolved_telomere_motif_source": source,
+            "resolved_telomere_motif_summary": summary,
+            "telomere_motif_resolution_ref": resolution_ref.model_dump(mode="json"),
+            **refs,
+        },
+    )
+
+
+def _fail_with_motif_refs(
+    state: TopLevelState,
+    reason: str,
+    refs: dict[str, Any],
+) -> dict:
+    return update_stage_output(
+        state,
+        "t2t",
+        {"status": "failed", "reason": reason, **refs},
+    )
 
 
 def recommend_t2t_parameters(state: TopLevelState) -> dict:
     """Persist one sparse recommendation and block at mandatory approval."""
 
     output = stage_output(state, "t2t")
-    if output.get("status") != "resolved":
+    if output.get("status") != "motif_resolved":
         return {}
     read_refs = list(output.get("ont_read_refs") or [])
     if not read_refs:
         return {}
     shared = state.get("shared_parameters") or {}
+    if hasattr(shared, "model_dump"):
+        shared = shared.model_dump(mode="json", exclude_none=True)
     species_facts = shared.get("species_facts") if isinstance(shared, dict) else None
     input_profile = {
         "schema_version": 2,
         "species_facts": species_facts,
-        "telomere_motif": output["telomere_motif"],
+        "resolved_telomere_motif": output["resolved_telomere_motif"],
         "ont_asset_count": len(read_refs),
         "ont_read_refs": read_refs,
         "input_assembly_ref": output["input_assembly_ref"],
@@ -240,6 +493,10 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
                 "recommendation_manifest_hash": manifest_ref.sha256,
                 "method_id": T2T_METHOD,
                 "task": "recommend_initial",
+                "resolved_telomere_motif": output["resolved_telomere_motif"],
+                "resolved_telomere_motif_source": output.get(
+                    "resolved_telomere_motif_source"
+                ),
                 "parameters": dict(recommendation.get("parameters") or {}),
                 "rationale": recommendation.get("summary"),
                 "response_parse_ref": parse_ref.model_dump(mode="json"),

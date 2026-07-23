@@ -23,6 +23,7 @@ from app.stages.t2t.nodes import (
 from app.stages.t2t.parameters.workflow import (
     prepare_t2t_parameter_profile,
     recommend_t2t_parameters,
+    resolve_t2t_telomere_motif,
 )
 from app.stages.t2t.routing import (
     route_after_alignment,
@@ -31,6 +32,7 @@ from app.stages.t2t.routing import (
     route_after_gate,
     route_after_parameter_profile,
     route_after_parameter_recommendation,
+    route_after_motif_resolution,
     route_after_patches,
     route_after_read_prepare,
     route_after_read_scan,
@@ -45,6 +47,7 @@ def build_stage():
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_t2t)
     graph.add_node("resolve_inputs", resolve_t2t_inputs)
+    graph.add_node("resolve_telomere_motif", resolve_t2t_telomere_motif)
     graph.add_node("recommend_parameters", recommend_t2t_parameters)
     graph.add_node("prepare_parameters", prepare_t2t_parameter_profile)
     graph.add_node("scan_assembly", scan_assembly_telomeres)
@@ -60,8 +63,9 @@ def build_stage():
     graph.add_node("fail", fail_t2t)
 
     graph.add_edge(START, "enter")
-    graph.add_conditional_edges("enter", route_after_enter, {"resolve": "resolve_inputs", "prepare_parameters": "prepare_parameters", "scan_assembly": "scan_assembly", "prepare_reads": "prepare_reads", "scan_reads": "scan_reads", "alignment": "alignment"})
-    graph.add_conditional_edges("resolve_inputs", route_after_resolve, {"recommend": "recommend_parameters", "prepare_reads": "prepare_reads", "report": "report", "fail": "fail"})
+    graph.add_conditional_edges("enter", route_after_enter, {"resolve": "resolve_inputs", "recommend": "recommend_parameters", "prepare_parameters": "prepare_parameters", "scan_assembly": "scan_assembly", "prepare_reads": "prepare_reads", "scan_reads": "scan_reads", "alignment": "alignment", "fail": "fail"})
+    graph.add_conditional_edges("resolve_inputs", route_after_resolve, {"resolve_motif": "resolve_telomere_motif", "recommend": "recommend_parameters", "prepare_reads": "prepare_reads", "report": "report", "fail": "fail"})
+    graph.add_conditional_edges("resolve_telomere_motif", route_after_motif_resolution, {"recommend": "recommend_parameters", "fail": "fail"})
     graph.add_conditional_edges("recommend_parameters", route_after_parameter_recommendation, {"block": "block", "fail": "fail"})
     graph.add_conditional_edges("prepare_parameters", route_after_parameter_profile, {"scan_assembly": "scan_assembly", "fail": "fail"})
     graph.add_conditional_edges("scan_assembly", route_after_assembly_scan, {"prepare_reads": "prepare_reads", "fail": "fail"})

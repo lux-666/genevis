@@ -35,6 +35,7 @@ EXECUTION_REPAIR_FIELDS = (
     "execution_status",
     "execution_status_detail",
     "resource_facts",
+    "stderr_tail",
 )
 QUALITY_REPLAN_PREVIOUS_FIELDS = (
     "tool_version",

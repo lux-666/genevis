@@ -12,10 +12,17 @@ def _output(state: TopLevelState) -> dict:
 
 def route_after_enter(state: TopLevelState) -> str:
     status = _output(state).get("status")
+    if is_terminal_failure(status):
+        return "fail"
     if status == "parameters_approved":
         return "prepare_parameters"
     if status == "parameters_ready":
         return "scan_assembly"
+    if status == "motif_resolved":
+        output = _output(state)
+        if not output.get("ont_read_refs"):
+            return "prepare_reads"
+        return "recommend"
     if status == "assembly_scanned":
         return "prepare_reads"
     if status == "reads_prepared":
@@ -33,7 +40,12 @@ def route_after_resolve(state: TopLevelState) -> str:
         return "report"
     if not output.get("ont_read_refs"):
         return "prepare_reads"
-    return "recommend"
+    return "resolve_motif"
+
+
+def route_after_motif_resolution(state: TopLevelState) -> str:
+    output = _output(state)
+    return "recommend" if output.get("status") == "motif_resolved" else "fail"
 
 
 def route_after_parameter_recommendation(state: TopLevelState) -> str:

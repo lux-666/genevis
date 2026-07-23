@@ -26,7 +26,7 @@ class T2TParameterRequest(BaseModel):
     task: ParameterAttemptTask = "recommend_initial"
     method_id: Literal["t2t.alignment.minimap2"] = T2T_METHOD
     species_facts: SpeciesFacts | None = None
-    telomere_motif: str = Field(min_length=2)
+    resolved_telomere_motif: str = Field(min_length=2)
     ont_asset_count: int = Field(ge=1)
     adjustable_parameters: dict[str, dict[str, Any]]
 
@@ -50,7 +50,7 @@ def build_t2t_parameter_request(
     }
     return T2TParameterRequest(
         species_facts=input_profile.get("species_facts"),
-        telomere_motif=str(input_profile["telomere_motif"]),
+        resolved_telomere_motif=str(input_profile["resolved_telomere_motif"]),
         ont_asset_count=int(input_profile["ont_asset_count"]),
         adjustable_parameters=adjustable,
     )

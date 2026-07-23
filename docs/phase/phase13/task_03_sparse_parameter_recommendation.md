@@ -142,10 +142,12 @@ Add a strict `SpeciesFacts` model under `app/schemas/shared_parameters.py` at
 - optional `expected_chromosome_count: int`;
 - optional `telomere_motif: str`.
 
-`RunConfig.shared_parameters.species_facts` is the authoritative producer.
-Recommendation workflows must not infer species facts from filenames, free-form
-manifest metadata, related-species retrieval, or an LLM. The full profile
-snapshots the provided facts into immutable recommendation evidence.
+`RunConfig.shared_parameters.species_facts` is the authoritative producer for
+species identity. Recommendation workflows must not infer species facts from
+filenames, free-form manifest metadata, related-species retrieval, or an LLM.
+The full profile snapshots the provided facts into immutable evidence. T2T may
+derive a separate motif result from those caller-owned facts, but it must not
+rewrite the species profile.
 
 `shared_parameters.species_facts` is optional for backward-compatible run
 configs. When present, it must validate as the strict model above and therefore
@@ -282,8 +284,22 @@ Keep these values model-hidden:
 - minimap2 executable, preset, threads, paths, and output locations;
 - attempt identity and review policy.
 
-The species telomere motif is an L1 provided fact. The adjustable sparse surface
-is:
+The species telomere motif is resolved at a single T2T boundary before any
+threshold recommendation or sequence scan. The resolver sends the supplied
+species facts, an optional legacy `t2t.telomere_motif` hint, and a prompt with
+discriminating examples to the LLM. It persists the exact request, response,
+shape parse, and resolution manifest. A resolved result is stored as
+`resolved_telomere_motif` with source `llm_species_resolution`; an invalid or
+`unresolved` response fails the stage before scanning. When no species facts
+are supplied, an explicit legacy hint may be used through the same boundary
+and is recorded with its compatibility source. Without either input, motif
+resolution fails closed rather than assuming a common repeat.
+
+Every later T2T consumer (parameter request, assembly/read scan, candidate
+evaluation, and patched-assembly recheck) reads only `resolved_telomere_motif`.
+The old config field is never read directly by those consumers.
+
+The adjustable sparse surface is:
 
 - `min_motif_copies`;
 - `terminal_window_bp`;
@@ -292,11 +308,11 @@ is:
 - `min_overlap_bp`;
 - `min_supporting_reads`.
 
-T2T recommendation runs after input/species-fact resolution and before scans
-that consume the threshold profile. Any subset of the six thresholds may be
-recommended. The executor overlays the approved sparse mapping on its declared
-T2T defaults to create the effective threshold profile, while preserving the
-source split in frozen evidence.
+T2T motif resolution and recommendation run after input resolution and before
+scans that consume the threshold profile. Any subset of the six thresholds may
+be recommended. The executor overlays the approved sparse mapping on its
+declared T2T defaults to create the effective threshold profile, while
+preserving the source split in frozen evidence.
 
 If input resolution finds no usable ONT assets, T2T takes the ordinary no-read
 publication path before invoking the recommender. A non-empty but malformed ONT
@@ -341,6 +357,8 @@ the approved recommendation unchanged.
 - `app/schemas/run_config.py`
 - `app/llm/parameters/hic/`
 - `app/llm/parameters/t2t/`
+- `app/llm/json_response.py`
+- `app/llm/prompt_bundles/prompts/t2t/telomere_motif_*`
 - `app/stages/hic_scaffolding/parameters/`
 - `app/stages/t2t/parameters/`
 - `app/stages/t2t/builder.py`
@@ -368,6 +386,8 @@ the approved recommendation unchanged.
 - Unknown and unusual shape-valid values reach human review.
 - Assembly retry no longer requires or routes on `retry_disposition`.
 - Every shape-valid Assembly, Hi-C, and T2T recommendation enters approval.
+- T2T motif resolution persists its model evidence, normalizes a resolved DNA
+  motif, and blocks malformed or unresolved responses before threshold approval.
 - The T2T `parameter_approval` gate is registered and dispatches its resume
   decision to the T2T parameter workflow.
 - Rejected and structurally invalid responses never freeze or run.

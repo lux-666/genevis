@@ -8,6 +8,17 @@ from app.domains.assembly.selection import NormalizedReadType
 from app.schemas.manifest import Platform
 
 
+def normalize_dna_motif(value: str, *, field_name: str = "telomere_motif") -> str:
+    """Normalize one simple DNA repeat motif used by sequence scanners."""
+
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a DNA motif")
+    motif = value.strip().upper()
+    if len(motif) < 2 or any(base not in "ACGT" for base in motif):
+        raise ValueError(f"{field_name} must be a DNA motif of at least two bases")
+    return motif
+
+
 class SpeciesFacts(BaseModel):
     """Caller-supplied biological identity used by parameter recommenders."""
 
@@ -35,10 +46,7 @@ class SpeciesFacts(BaseModel):
     def _dna_motif(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        motif = value.strip().upper()
-        if len(motif) < 2 or any(base not in "ACGT" for base in motif):
-            raise ValueError("telomere_motif must be a DNA motif of at least two bases")
-        return motif
+        return normalize_dna_motif(value)
 
 
 class SharedParameters(BaseModel):

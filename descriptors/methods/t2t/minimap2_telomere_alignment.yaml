@@ -26,7 +26,6 @@ resource_hints:
 planner:
   required_parameters:
     - mode
-    - telomere_motif
     - threshold_min_motif_copies
     - threshold_terminal_window_bp
     - threshold_min_mapq
@@ -35,7 +34,6 @@ planner:
     - threshold_min_supporting_reads
   parameter_defaults:
     mode: auto_patch
-    telomere_motif: TTAGGG
     threshold_min_motif_copies: 4
     threshold_terminal_window_bp: 10000
     threshold_min_mapq: 20

@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from app.domains.assembly.selection import is_method_read_type_compatible, normalize_read_type
 from app.schemas.artifacts import FunctionDatabaseProvenance
 from app.schemas.manifest import InputManifest
-from app.schemas.shared_parameters import SharedParameters
+from app.schemas.shared_parameters import SharedParameters, normalize_dna_motif
 
 RequestableStage = Literal[
     "read_qc",
@@ -80,7 +80,9 @@ class T2TRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
-    telomere_motif: str = "TTAGGG"
+    # Compatibility hint only. T2T resolves the effective motif from species
+    # facts before any scan; leaving this unset avoids planner-injected values.
+    telomere_motif: str | None = None
     chromosome_list_ref: str | None = None
     assembly_fasta_ref: str | None = None
     ont_read_refs: list[str] = Field(default_factory=list)
@@ -96,10 +98,11 @@ class T2TRunConfig(BaseModel):
 
     @model_validator(mode="after")
     def _motif_is_dna(self) -> "T2TRunConfig":
-        motif = self.telomere_motif.upper()
-        if len(motif) < 2 or any(base not in "ACGT" for base in motif):
-            raise ValueError("t2t.telomere_motif must be a DNA motif of at least two bases")
-        self.telomere_motif = motif
+        if self.telomere_motif is not None:
+            self.telomere_motif = normalize_dna_motif(
+                self.telomere_motif,
+                field_name="t2t.telomere_motif",
+            )
         return self
 
 

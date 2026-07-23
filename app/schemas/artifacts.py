@@ -80,6 +80,12 @@ T2T_PARAMETER_RESPONSE_PARSE = "t2t.parameter.response_parse"
 T2T_PARAMETER_RECOMMENDATION_MANIFEST = "t2t.parameter.recommendation_manifest"
 T2T_PARAMETER_APPROVAL_DECISION = "t2t.parameter_approval.decision"
 T2T_PARAMETER_FROZEN_PARAMETERS = "t2t.parameter.frozen_parameters"
+T2T_MOTIF_INPUT_PROFILE = "t2t.telomere_motif.input_profile"
+T2T_MOTIF_MODEL_REQUEST = "t2t.telomere_motif.model_request"
+T2T_MOTIF_MODEL_RESPONSE = "t2t.telomere_motif.model_response"
+T2T_MOTIF_RESOLUTION = "t2t.telomere_motif.resolution"
+T2T_MOTIF_RESPONSE_PARSE = "t2t.telomere_motif.response_parse"
+T2T_MOTIF_RESOLUTION_MANIFEST = "t2t.telomere_motif.resolution_manifest"
 T2T_READ_ALIGNMENT_PAF = "t2t.read_alignment_paf"
 T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
 T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
@@ -430,6 +436,8 @@ class T2TFinishingBundle(BaseModel):
     output_assembly_ref: str
     ont_read_refs: list[str] = Field(default_factory=list)
     mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
+    resolved_telomere_motif: str | None = None
+    resolved_telomere_motif_source: str | None = None
     patched_assembly_ref: str | None = None
     artifact_refs: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)

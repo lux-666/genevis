@@ -201,6 +201,7 @@ def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
             "stdout_ref": "artifacts/assembly/attempts/009/stdout.log",
             "execution_status": "failed",
             "failure_class": "memory_exhausted",
+            "stderr_tail": "unknown option --purge-level",
         }
     )
 
@@ -221,6 +222,7 @@ def test_retry_dto_never_receives_attempt_or_command_audit_fields() -> None:
     assert "stderr_ref" not in serialized
     assert "stdout_ref" not in serialized
     assert '"attempt_id"' not in serialized
+    assert "unknown option --purge-level" in serialized
 
 
 def test_basis_and_request_omit_redundant_selection_identity_and_audit_locators() -> None:

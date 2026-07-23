@@ -44,9 +44,14 @@ supplied enzyme if present, the complete adjustable L2 catalog, and bounded
 ordered attempt history. T2T receives bounded assembly/read facts and its
 adjustable threshold catalog.
 
-Species facts are used only when supplied explicitly through
-`shared_parameters.species_facts`; they are not inferred from filenames,
-free-form metadata, retrieval results, or another model.
+Species identity is used only when supplied explicitly through
+`shared_parameters.species_facts`; it is not inferred from filenames,
+free-form metadata, retrieval results, or another model. Before T2T scans, a
+small resolver prompt uses those facts (and any legacy motif hint) to produce
+`resolved_telomere_motif`. The resolver stores its prompt/response evidence and
+source. T2T scans and patch checks never read the legacy motif field directly.
+If neither species facts nor a compatibility hint is supplied, T2T fails before
+scanning rather than assuming `TTAGGG`.
 
 Session IDs, run paths, artifact refs, hashes, credentials, and arbitrary asset
 metadata are kept out of model input.
@@ -114,6 +119,11 @@ inputs. A current run-config can express them as follows:
   }
 }
 ```
+
+The `species_facts.telomere_motif` value is optional compatibility evidence,
+not a direct scan override. When species facts are present, T2T asks the motif
+resolver to reconcile the identity and hint; the resulting resolved value is
+the only motif consumed by execution.
 
 Relative paths in `ont_read_refs` are resolved independently against the
 run-config file's directory while preserving list order. The singular

@@ -40,8 +40,8 @@ must collect every usable ONT asset in stable registry order:
 
 1. prefer all `clean_long_reads` assets when at least one is present;
 2. otherwise use all `raw_long_reads` assets;
-3. reject missing, non-file, empty, or non-FASTA/FASTQ members as a bounded
-   input failure instead of silently dropping them;
+3. reject missing, non-file, empty, or unsupported FASTA/FASTQ-envelope members
+   as a bounded input failure instead of silently dropping them;
 4. do not select only the first asset.
 
 The run-config, planner, materialized run config, stage state, and finishing
@@ -58,8 +58,10 @@ never let the last duplicate silently overwrite the first in a dictionary.
 
 An empty resolved list is not a malformed-input failure. It takes the no-read
 path before parameter recommendation or sequence scanning. A non-empty list is
-validated member by member, and any malformed member fails the stage instead of
-being converted into the no-read outcome.
+validated member by member for this stage's path and format envelope. Full FASTA
+or FASTQ record validation, including empty sequences and FASTQ sequence/quality
+length consistency, belongs to the upstream input/QC owner and is intentionally
+not repeated by T2T.
 
 ### Junction-aware patch model
 
@@ -131,8 +133,8 @@ materialization for an already selected candidate.
 
 ## Failure Behavior
 
-- A malformed member of the canonical ONT list blocks the stage as an input
-  problem; it is not silently skipped.
+- A member that fails the T2T path or format-envelope checks blocks the stage as
+  an input problem; it is not silently skipped.
 - Duplicate read identity across assets must either be namespaced
   deterministically or fail before alignment.
 - Invalid junction coordinates, an empty replacement tail, or overlapping

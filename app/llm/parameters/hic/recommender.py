@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any, Mapping
 
 from app.llm.factory import build_chat_model
+from app.llm.json_response import parse_json_object, response_text
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
 PROMPT_BUNDLE = "hic.parameter_autohic"
@@ -77,9 +78,9 @@ def recommend_autohic_parameters(
             error=f"{type(exc).__name__}: {exc}",
         )
 
-    raw_response = _response_text(response)
+    raw_response = response_text(response)
     try:
-        parsed = _parse_json_object(raw_response)
+        parsed = parse_json_object(raw_response)
         recommendation = _normalize_direct_recommendation(parsed)
     except Exception as exc:
         return AutoHiCParameterDecision(
@@ -125,7 +126,7 @@ def restore_autohic_parameter_decision(
     return AutoHiCParameterDecision(
         raw_response=raw_response,
         recommendation=_normalize_direct_recommendation(
-            _parse_json_object(raw_response)
+            parse_json_object(raw_response)
         ),
         valid=True,
         error=error,
@@ -157,28 +158,3 @@ def _normalize_direct_recommendation(response: dict[str, Any]) -> dict[str, Any]
         "parameters": dict(parameters),
         "summary": summary,
     }
-
-
-def _response_text(response: Any) -> str:
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        content = "".join(
-            str(part.get("text", part)) if isinstance(part, dict) else str(part)
-            for part in content
-        )
-    return str(content).strip()
-
-
-def _parse_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-    value = json.loads(cleaned)
-    if not isinstance(value, dict):
-        raise ValueError("LLM response JSON must be an object")
-    return value
