@@ -14,7 +14,6 @@ from copy import deepcopy
 from typing import Any
 
 PARAMETER_RECOMMENDATION_CONTRACT = "parameter_recommendation_v1"
-_RETRY_DISPOSITIONS = {"retry", "stop", "expert_review"}
 
 
 def normalize_parameter_recommendation(
@@ -28,10 +27,7 @@ def normalize_parameter_recommendation(
     if request_dto.get("recommendation_contract") != PARAMETER_RECOMMENDATION_CONTRACT:
         raise ValueError("request does not use the Assembly parameter contract")
 
-    task = request_dto.get("task")
     allowed_fields = {"parameters", "summary"}
-    if task != "recommend_initial":
-        allowed_fields.add("retry_disposition")
     unexpected = sorted(set(response) - allowed_fields)
     if unexpected:
         raise ValueError(
@@ -56,17 +52,7 @@ def normalize_parameter_recommendation(
             raise ValueError("summary must be a non-empty string when provided")
         summary = summary.strip()
 
-    retry_disposition: str | None = None
-    if task != "recommend_initial":
-        retry_disposition = response.get("retry_disposition")
-        if retry_disposition not in _RETRY_DISPOSITIONS:
-            raise ValueError(
-                "retry recommendation requires retry_disposition=retry, stop, "
-                "or expert_review"
-            )
-
     return {
         "parameters": deepcopy(parameters),
         "summary": summary,
-        "retry_disposition": retry_disposition,
     }

@@ -27,6 +27,9 @@ from app.stages.hic_scaffolding.method_application.support import (
 from app.stages.hic_scaffolding.method_application.support import (
     update_hic_output as _update_hic_output,
 )
+from app.stages.hic_scaffolding.parameters.workflow import (
+    prepare_autohic_review_retry,
+)
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
@@ -146,6 +149,7 @@ def prepare_autohic_adoption_review(state: TopLevelState) -> dict:
         decisions_allowed=[
             "accept_candidate",
             "keep_prior_assembly",
+            "request_parameter_retry",
             "stop_human_review",
         ],
         notes=list(hic_out.get("notes") or []),
@@ -241,7 +245,12 @@ def apply_hic_scaffolding_resume_decision(
             "AutoHiC adoption review requires hic_scaffolding/hic_scaffolding"
         )
     hic_out = _hic_output(state)
-    allowed = {"accept_candidate", "keep_prior_assembly", "stop_human_review"}
+    allowed = {
+        "accept_candidate",
+        "keep_prior_assembly",
+        "request_parameter_retry",
+        "stop_human_review",
+    }
     if request.decision not in allowed:
         raise ResumeValidationError(
             f"unsupported AutoHiC adoption decision: {request.decision}"
@@ -296,6 +305,21 @@ def apply_hic_scaffolding_resume_decision(
     ):
         raise ResumeValidationError("AutoHiC adoption review request binding mismatch")
 
+    decision_metadata = {
+        **dict(request.metadata),
+        "review_evidence": {
+            key: candidate.get(key)
+            for key in (
+                "scaffold_fasta",
+                "contact_map",
+                "assembly_file",
+                "html_report",
+                "review_bundle_ref",
+                "qc_report_ref",
+            )
+            if candidate.get(key)
+        },
+    }
     artifact_payload = HiCScaffoldDecisionArtifact(
         session_id=state["session_id"],
         decision=request.decision,
@@ -304,7 +328,7 @@ def apply_hic_scaffolding_resume_decision(
         output_assembly_ref=final_assembly,
         hic_read_refs=list(hic_out.get("hic_read_refs") or []),
         notes=list(request.notes),
-        metadata=request.metadata,
+        metadata=decision_metadata,
     )
     try:
         decision_ref = persist_review_decision(
@@ -331,11 +355,38 @@ def apply_hic_scaffolding_resume_decision(
         notes=list(request.notes),
         method_name=AUTOHIC_METHOD,
         artifact_ref=decision_ref.path_ref,
-        metadata=request.metadata,
+        metadata=decision_metadata,
         decided_by=request.decided_by,
         rationale_artifact_ref=request.rationale_artifact_ref,
         review_request_id=str(review_request_id),
     )
+
+    if request.decision == "request_parameter_retry":
+        retry_update = prepare_autohic_review_retry(state, decision_ref)
+        outputs = dict(retry_update.get("stage_outputs") or {})
+        retry_out = dict(outputs.get("hic_scaffolding") or {})
+        retry_out.update(
+            {
+                "active_interrupt": None,
+                "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+            }
+        )
+        outputs["hic_scaffolding"] = retry_out
+        return {
+            "current_stage": "hic_scaffolding",
+            "supervision_state": (
+                "failed_terminal"
+                if retry_out.get("status") == "review_parameter_retries_exhausted"
+                else "running_stage"
+            ),
+            "active_interrupt": None,
+            "stage_outputs": outputs,
+            **(
+                {"last_error": retry_out.get("reason")}
+                if retry_out.get("status") == "review_parameter_retries_exhausted"
+                else {}
+            ),
+        }
 
     outputs = dict(state.get("stage_outputs") or {})
     outputs["hic_scaffolding"] = {

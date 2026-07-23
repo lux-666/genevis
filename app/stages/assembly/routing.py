@@ -82,8 +82,6 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
     status = stage_output(state, "assembly").get("status")
     if status == "blocked_human":
         return "block"
-    if status in {"parameter_retry_stopped", "parameter_retry_expert_review"}:
-        return "fail"
     if is_terminal_failure(status, extra_statuses=EXTRA_FAIL_STATUSES) or status in {
         "parameter_response_invalid",
         "parameter_recommendation_failed",

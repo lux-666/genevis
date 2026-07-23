@@ -59,7 +59,7 @@ def recommend_autohic_parameters(
     *,
     messages: list[dict[str, str]] | None = None,
 ) -> AutoHiCParameterDecision:
-    """Ask the LLM directly for the restriction enzyme; never auto-default."""
+    """Ask the LLM for one attempt-local sparse AutoHiC mapping."""
 
     invocation_messages = (
         messages
@@ -142,19 +142,19 @@ def _normalize_direct_recommendation(response: dict[str, Any]) -> dict[str, Any]
     parameters = response.get("parameters")
     if not isinstance(parameters, dict):
         raise ValueError("AutoHiC response requires a parameters object")
-    if set(parameters) != {"restriction_enzyme"}:
-        raise ValueError("AutoHiC parameters must contain only restriction_enzyme")
-    enzyme = parameters["restriction_enzyme"]
-    if not isinstance(enzyme, str) or not enzyme.strip():
-        raise ValueError("restriction_enzyme must be a non-empty string")
-    enzyme = enzyme.strip()
+    wrapped = sorted(name for name, value in parameters.items() if isinstance(value, dict))
+    if wrapped:
+        raise ValueError(
+            "parameter values must be direct JSON values, not wrapper objects: "
+            + ", ".join(wrapped)
+        )
     summary = response.get("summary")
     if summary is not None:
         if not isinstance(summary, str) or not summary.strip():
             raise ValueError("summary must be a non-empty string when provided")
         summary = summary.strip()
     return {
-        "parameters": {"restriction_enzyme": enzyme},
+        "parameters": dict(parameters),
         "summary": summary,
     }
 

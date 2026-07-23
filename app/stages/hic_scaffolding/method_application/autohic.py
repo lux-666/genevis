@@ -45,6 +45,18 @@ from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
 
 METHOD = "hic_scaffolding.candidate.autohic"
+_ADJUSTABLE_PARAMETERS = {
+    "restriction_enzyme",
+    "number_of_edit_rounds",
+    "translocation_adjust",
+    "inversion_adjust",
+    "debris_adjust",
+    "error_max_epoch",
+    "error_min_len",
+    "error_max_len",
+    "error_filter_score",
+    "error_filter_iou_score",
+}
 LIFECYCLE = MethodExecutionLifecycle(
     stage="hic_scaffolding",
     name="autohic",
@@ -148,6 +160,11 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
                 "approval_decision_ref": (
                     parameter_attempt.approval_decision_ref.model_dump(mode="json")
                 ),
+                "approved_sparse_parameters": parameters.pop(
+                    "_approved_sparse_parameters"
+                ),
+                "provided_facts": parameters.pop("_provided_facts"),
+                "executor_defaults": parameters.pop("_executor_defaults"),
                 "parameters": parameters,
             },
             artifact_type=HIC_PARAMETER_FROZEN_PARAMETERS,
@@ -164,7 +181,12 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
             },
         )
 
-    working_dir = stage_work_dir(state, "hic_scaffolding", "autohic")
+    base_working_dir = stage_work_dir(state, "hic_scaffolding", "autohic")
+    working_dir = (
+        base_working_dir
+        if parameter_attempt.attempt_id == 0
+        else base_working_dir / f"attempt_{parameter_attempt.attempt_id:03d}"
+    )
     output_dir = working_dir / "published_outputs"
     reference_dir = working_dir / "input" / "references"
     fastq_root = working_dir / "input" / "rawdata"
@@ -268,7 +290,10 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         )
 
     attempt = build_frozen_attempt(
-        attempt_id=f"{session_id}:hic_scaffolding:autohic",
+        attempt_id=(
+            f"{session_id}:hic_scaffolding:autohic:"
+            f"parameter_attempt_{parameter_attempt.attempt_id}"
+        ),
         session_id=session_id,
         stage="hic_scaffolding",
         method_name=METHOD,
@@ -399,9 +424,17 @@ def _parameters(
         approved = load_approved_autohic_parameters(state)
     except (ValueError, AutoHiCParameterPersistenceError) as exc:
         return {}, _missing_block(f"approved AutoHiC parameter attempt: {exc}")
-    enzyme = str(approved.get("restriction_enzyme") or "").strip()
+    unknown = sorted(set(approved) - _ADJUSTABLE_PARAMETERS)
+    if unknown:
+        return {}, _parameter_block(
+            "approved_parameters",
+            unknown,
+            "contains AutoHiC parameters that cannot be rendered",
+        )
+    enzyme_source = approved.get("restriction_enzyme", raw.get("restriction_enzyme"))
+    enzyme = str(enzyme_source or "").strip()
     if not enzyme:
-        return {}, _missing_block("approved restriction_enzyme")
+        return {}, _missing_block("restriction_enzyme from L1 fact or approved L2 mapping")
     if any(character in enzyme for character in ("\n", "\r", "=")):
         return {}, _parameter_block(
             "restriction_enzyme",
@@ -419,23 +452,37 @@ def _parameters(
     threads = _positive_int(raw.get("threads", 10))
     if threads is None:
         return {}, _parameter_block("autohic_parameters.threads", raw.get("threads"), "must be a positive integer")
-    number_of_edit_rounds = _nonnegative_int(raw.get("number_of_edit_rounds", 2))
+    number_of_edit_rounds = _nonnegative_int(
+        approved.get("number_of_edit_rounds", raw.get("number_of_edit_rounds", 2))
+    )
     if number_of_edit_rounds is None:
         return {}, _parameter_block(
             "autohic_parameters.number_of_edit_rounds",
-            raw.get("number_of_edit_rounds"),
+            approved.get("number_of_edit_rounds", raw.get("number_of_edit_rounds")),
             "must be a non-negative integer",
         )
-    error_max_epoch = _positive_int(raw.get("error_max_epoch", 5))
-    error_min_len = _positive_int(raw.get("error_min_len", 15_000))
-    error_max_len = _positive_int(raw.get("error_max_len", 20_000_000))
+    error_max_epoch = _positive_int(
+        approved.get("error_max_epoch", raw.get("error_max_epoch", 5))
+    )
+    error_min_len = _positive_int(
+        approved.get("error_min_len", raw.get("error_min_len", 15_000))
+    )
+    error_max_len = _positive_int(
+        approved.get("error_max_len", raw.get("error_max_len", 20_000_000))
+    )
     if error_max_epoch is None or error_min_len is None or error_max_len is None:
         return {}, _parameter_block("autohic_parameters.error_limits", raw, "epoch and length limits must be positive integers")
     if error_max_len < error_min_len:
         return {}, _parameter_block("autohic_parameters.error_max_len", error_max_len, "must be >= error_min_len")
 
-    error_filter_score = _probability(raw.get("error_filter_score", 0.9))
-    error_filter_iou_score = _probability(raw.get("error_filter_iou_score", 0.8))
+    error_filter_score = _probability(
+        approved.get("error_filter_score", raw.get("error_filter_score", 0.9))
+    )
+    error_filter_iou_score = _probability(
+        approved.get(
+            "error_filter_iou_score", raw.get("error_filter_iou_score", 0.8)
+        )
+    )
     if error_filter_score is None:
         return {}, _parameter_block(
             "autohic_parameters.error_filter_score",
@@ -453,21 +500,49 @@ def _parameters(
     if not python_command:
         return {}, _parameter_block("autohic_parameters.python_command", python_command, "must be non-empty")
 
+    boolean_values: dict[str, bool] = {}
+    for name, default in (
+        ("translocation_adjust", True),
+        ("inversion_adjust", True),
+        ("debris_adjust", False),
+    ):
+        value = approved.get(name, raw.get(name, default))
+        if not isinstance(value, bool):
+            return {}, _parameter_block(name, value, "must be a boolean")
+        boolean_values[name] = value
+
+    executor_defaults = {
+        "number_of_edit_rounds": raw.get("number_of_edit_rounds", 2),
+        "translocation_adjust": raw.get("translocation_adjust", True),
+        "inversion_adjust": raw.get("inversion_adjust", True),
+        "debris_adjust": raw.get("debris_adjust", False),
+        "error_max_epoch": raw.get("error_max_epoch", 5),
+        "error_min_len": raw.get("error_min_len", 15_000),
+        "error_max_len": raw.get("error_max_len", 20_000_000),
+        "error_filter_score": raw.get("error_filter_score", 0.9),
+        "error_filter_iou_score": raw.get("error_filter_iou_score", 0.8),
+    }
+
     return {
         "species_name": _safe_name(str(output.get("species_name") or assembly.stem)),
         "hic_read_paths": [str(path.resolve()) for path in reads],
         "restriction_enzyme": enzyme,
         "threads": threads,
         "number_of_edit_rounds": number_of_edit_rounds,
-        "translocation_adjust": bool(raw.get("translocation_adjust", True)),
-        "inversion_adjust": bool(raw.get("inversion_adjust", True)),
-        "debris_adjust": bool(raw.get("debris_adjust", False)),
+        "translocation_adjust": boolean_values["translocation_adjust"],
+        "inversion_adjust": boolean_values["inversion_adjust"],
+        "debris_adjust": boolean_values["debris_adjust"],
         "error_max_epoch": error_max_epoch,
         "error_min_len": error_min_len,
         "error_max_len": error_max_len,
         "error_filter_score": error_filter_score,
         "error_filter_iou_score": error_filter_iou_score,
         "python_command": python_command,
+        "_approved_sparse_parameters": dict(approved),
+        "_provided_facts": {
+            "restriction_enzyme": raw.get("restriction_enzyme")
+        },
+        "_executor_defaults": executor_defaults,
     }, None
 
 

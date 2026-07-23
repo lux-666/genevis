@@ -61,8 +61,9 @@ python3 -m app.entrypoints.run tui \
 也可以直接运行 `gene-agent review --session-id ...`，或执行脚本打印的
 `inspect --write-decision-template` / `resume --decision-file` 命令。
 只有明确的无人值守 smoke test 才应设置 `approve`；该路径仍持久化并校验
-attempt/task/recommendation hash 绑定。`approve` 只处理 assembly 参数推荐，
-不会自动替人接受 assembly review、Hi-C 或 T2T 的生物学决策。
+attempt/task/recommendation hash 绑定。`approve` 会处理当前 session 中
+Assembly、Hi-C、T2T 的 `parameter_approval`，但不会自动替人接受 assembly
+review、Hi-C adoption review 或 T2T patch review 等生物学决策。
 
 每次 `run_all.sh` 的日志都有独立目录，避免覆盖前一次实机结果：
 
@@ -118,6 +119,8 @@ AutoHiC 的安装目录和两个模型路径统一配置在 `config/envs.local.y
 顺序执行 `run_all.sh` 时，它也会复用 Test 06 的最新 Hi-C scaffold（否则复用
 最新 assembly），并在 ONT/CycloneSeq 且只有一个长读文件时复用该 reads。
 仍无法组成完整输入时返回明确的 SKIP；只配置一项或真实运行缺产物时返回 FAIL。
+run-config 使用规范字段 `ont_read_refs`（列表）；stage bundle 使用
+`output_assembly_ref`，并把 minimap2 PAF 作为注册过的不可变 artifact 校验。
 
 - **Telomere detection**: 端粒序列检测
 - **Gap analysis**: 缺口分析
@@ -126,7 +129,9 @@ AutoHiC 的安装目录和两个模型路径统一配置在 `config/envs.local.y
 
 输出文件 / Outputs:
 - `*patched*.fasta` - 修补后的组装序列
-- `*report*.json` - T2T 分析报告
+- `t2t_finishing_report.md` - T2T 分析报告
+- `telomere_extension_candidates.tsv` - 绑定 frozen attempt、execution 与 PAF 的候选证据
+- `ont_to_assembly.paf` - artifact index 中类型为 `t2t.read_alignment_paf` 的不可变 PAF
 
 ## 常见问题 / FAQ
 
@@ -155,7 +160,7 @@ python3 -m app.entrypoints.run inspect \
 - Parameter approval（每个 initial/retry attempt 都必须独立批准）
 - Assembly route selection（如果自动选择置信度低）
 - Assembly review（除非设置 `review_policy: {mode: "auto"}`）
-- Hi-C scaffolding（如果 execution_mode != local）
+- Hi-C parameter approval、最终 adoption review，以及显式请求的参数重试
 - T2T finishing/review（当 stage 提出需要人工确认的变更）
 
 `test_09` 的 review policy 为 auto，但不会绕过独立的

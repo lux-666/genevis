@@ -1,7 +1,7 @@
 # Task 03: Unify Sparse Parameter Recommendation for Assembly, Hi-C, and T2T
 
 **Phase**: 13
-**Status**: Planned
+**Status**: Completed
 **Depends on**: Tasks 01-02
 
 ## Goal
@@ -147,6 +147,11 @@ Recommendation workflows must not infer species facts from filenames, free-form
 manifest metadata, related-species retrieval, or an LLM. The full profile
 snapshots the provided facts into immutable recommendation evidence.
 
+`shared_parameters.species_facts` is optional for backward-compatible run
+configs. When present, it must validate as the strict model above and therefore
+must contain `scientific_name`. A recommender snapshots exactly the supplied
+object or an explicit `null`; it must not synthesize a partial species profile.
+
 ### Response parsing
 
 Response parsing checks only the declared JSON structure:
@@ -186,7 +191,7 @@ it must not generate one approval question per absent key.
 
 ## Durable Records
 
-Persist these records for every attempt:
+Persist these records for every model invocation:
 
 - full input profile;
 - immutable catalog/basis snapshot;
@@ -195,7 +200,11 @@ Persist these records for every attempt:
 - parsed sparse recommendation or parse failure;
 - response-parse result;
 - recommendation manifest;
-- hash-bound human approval decision.
+- a hash-bound human approval decision when and only when response parsing
+  succeeds and an approval gate is opened.
+
+An invalid response persists its request, raw response, parse failure, and
+manifest but does not create a `ParameterAttempt` or an approval decision.
 
 `recommendation.json` and the approval request contain the exact sparse mapping.
 They do not contain an application-completed mapping or an absent-key list.
@@ -289,6 +298,10 @@ recommended. The executor overlays the approved sparse mapping on its declared
 T2T defaults to create the effective threshold profile, while preserving the
 source split in frozen evidence.
 
+If input resolution finds no usable ONT assets, T2T takes the ordinary no-read
+publication path before invoking the recommender. A non-empty but malformed ONT
+list is an input failure and likewise never opens parameter approval.
+
 Those defaults are ordinary stage behavior, not recommendation validation. Do
 not add a second minimum, clamp, hard boundary, or automatic-patch safety floor
 around the approved sparse mapping.
@@ -361,16 +374,16 @@ the approved recommendation unchanged.
 
 ## Acceptance Criteria
 
-- [ ] Sparse `parameters` mappings, including `{}`, are accepted.
-- [ ] No recommendation or attempt stores an absent-key/catalog-difference list.
-- [ ] Retry mappings are attempt-local and never merge with a predecessor.
-- [ ] Retry prompts contain bounded, ordered recommendation and execution
+- [x] Sparse `parameters` mappings, including `{}`, are accepted.
+- [x] No recommendation or attempt stores an absent-key/catalog-difference list.
+- [x] Retry mappings are attempt-local and never merge with a predecessor.
+- [x] Retry prompts contain bounded, ordered recommendation and execution
       evidence for all earlier attempts.
-- [ ] Retry-history code supplies evidence without making parameter decisions.
-- [ ] Defaults and facts remain separate from LLM-recommended values.
-- [ ] Absent CLI parameters are not emitted.
-- [ ] Required wrapper defaults are recorded as executor-owned when used.
-- [ ] Assembly retry cannot bypass human approval through model output.
-- [ ] Hi-C and T2T use the same sparse contract with stage-specific DTOs.
-- [ ] Only the post-approval executability boundary may reject an approved
+- [x] Retry-history code supplies evidence without making parameter decisions.
+- [x] Defaults and facts remain separate from LLM-recommended values.
+- [x] Absent CLI parameters are not emitted.
+- [x] Required wrapper defaults are recorded as executor-owned when used.
+- [x] Assembly retry cannot bypass human approval through model output.
+- [x] Hi-C and T2T use the same sparse contract with stage-specific DTOs.
+- [x] Only the post-approval executability boundary may reject an approved
       mapping as unrenderable.

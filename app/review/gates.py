@@ -245,6 +245,7 @@ register_review_gate(
         decisions_allowed=(
             "accept_candidate",
             "keep_prior_assembly",
+            "request_parameter_retry",
             "stop_human_review",
         ),
         decision_applier="app.stages.hic_scaffolding.nodes:apply_hic_scaffolding_resume_decision",
@@ -261,6 +262,23 @@ register_review_gate(
 register_review_gate(
     ReviewGateDeclaration(
         stage="t2t",
+        gate_id="parameter_approval",
+        decisions_allowed=("approve_parameters", "reject_parameters"),
+        decision_applier=(
+            "app.stages.t2t.parameters.workflow:"
+            "apply_t2t_parameter_approval_decision"
+        ),
+        prompt_adapter="generic",
+        proposal_kind="parameter_recommendation",
+        proposal_label="T2T threshold proposal",
+        parameter_recommendation_status="implemented",
+        plan_order=20,
+    )
+)
+
+register_review_gate(
+    ReviewGateDeclaration(
+        stage="t2t",
         gate_id="t2t_review",
         decisions_allowed=("accept_selected_candidates", "continue_without_patch", "stop_pipeline"),
         decision_applier="app.stages.t2t.nodes:apply_t2t_review_decision",
@@ -269,7 +287,9 @@ register_review_gate(
         required_resume_fields=("candidate_ids",),
         proposal_kind="finishing_candidate_review",
         proposal_label="T2T finishing candidate review",
-        parameter_recommendation_status="not_implemented",
+        parameter_recommendation_status="implemented",
+        related_parameter_gate=("t2t", "parameter_approval"),
+        plan_order=30,
     )
 )
 

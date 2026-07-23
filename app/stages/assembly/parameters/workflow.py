@@ -144,6 +144,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     )
     previous_attempt = _previous_parameter_attempt(assembly_out, recommendation_id)
     hydrated_previous: dict[str, Any] = {}
+    hydrated_history: list[dict[str, Any]] = []
     if task != "recommend_initial":
         if (
             not previous_attempt
@@ -164,7 +165,11 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 state, "previous_attempt_seal_hash_mismatch"
             )
         try:
-            hydrated_previous = hydrate_parameter_attempt(state, previous_attempt)
+            hydrated_history = [
+                hydrate_parameter_attempt(state, attempt)
+                for attempt in attempts_before
+            ]
+            hydrated_previous = hydrated_history[-1]
         except ParameterPersistenceError as exc:
             return _retry_transition_failure(state, str(exc))
 
@@ -172,6 +177,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         state,
         assembly_out=assembly_out,
         previous_attempt=hydrated_previous,
+        attempt_history=hydrated_history,
         assembly_review=hydrated_previous.get("review_failure"),
     )
     prompt_profile = build_prompt_profile(full_profile, task)
@@ -318,16 +324,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             state, f"Assembly parameter parse persistence failed: {exc}"
         )
 
-    retry_disposition = parsed.get("retry_disposition")
     if not decision.valid:
         cursor_status = "response_invalid"
         stage_status = "parameter_response_invalid"
-    elif retry_disposition == "stop":
-        cursor_status = "retry_stopped"
-        stage_status = "parameter_retry_stopped"
-    elif retry_disposition == "expert_review":
-        cursor_status = "expert_review"
-        stage_status = "parameter_retry_expert_review"
     else:
         cursor_status = "pending_approval"
         stage_status = "blocked_human"
@@ -360,7 +359,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         },
         "summary": {
             "response_parsed": bool(decision.valid),
-            "retry_disposition": retry_disposition,
         },
     }
     try:
@@ -399,14 +397,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             "Assembly parameter recommendation response could not be parsed"
         )
         return update_stage_output(state, "assembly", update)
-    if retry_disposition in {"stop", "expert_review"}:
-        update["reason"] = parsed.get("summary") or (
-            "Parameter retry stopped by evidence assessment"
-            if retry_disposition == "stop"
-            else "Parameter retry requires expert review"
-        )
-        return update_stage_output(state, "assembly", update)
-
     bindings = {
         "attempt_id": recommendation_id,
         "task": task,

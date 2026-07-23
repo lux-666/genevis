@@ -1,7 +1,7 @@
 # Task 04: Complete the Hi-C Parameter Attempt and Retry Loop
 
 **Phase**: 13
-**Status**: Planned
+**Status**: Completed
 **Depends on**: Task 03
 
 ## Goal
@@ -101,6 +101,12 @@ before freeze.
 Retry budgets are operator configuration. Exhaustion stops with an explicit
 reason and does not copy a prior mapping or synthesize defaults.
 
+Execution-failure retry creation is authorized only by the operator-owned
+`retry_on_execution_failure` setting and the configured execution retry budget.
+When disabled, or when the budget is zero/exhausted, the failed attempt is
+sealed and the stage stops. This policy chooses whether a new recommendation
+task may be created; it never chooses parameter keys or values.
+
 ## Review-Failure Retry
 
 Keep the final decisions:
@@ -171,7 +177,8 @@ decision artifact.
 - Invalid response structure persists invalid-response evidence and does not
   open approval.
 - Every structurally valid sparse mapping opens approval.
-- Rejected parameters do not execute.
+- Rejected parameters do not execute and are terminal in Phase 13; retry after
+  parameter rejection is outside this phase's task vocabulary.
 - Retry exhaustion does not reuse a prior mapping.
 - Post-approval executability failure leaves the recommendation unchanged.
 - `keep_prior_assembly` remains a valid non-retry outcome.
@@ -195,11 +202,11 @@ decision artifact.
 
 ## Acceptance Criteria
 
-- [ ] AutoHiC supports a validated multi-attempt chain.
-- [ ] Every attempt owns only its own sparse mapping.
-- [ ] Previous mappings are retry evidence and are never merge inputs.
-- [ ] Execution and review failures can request a new recommendation.
-- [ ] Every shape-valid initial or retry mapping enters human approval.
-- [ ] No model-controlled retry disposition or automatic fallback exists.
-- [ ] Retry evidence is artifact-backed and ref-only in checkpoint state.
-- [ ] Lifecycle and review-resume tests cover attempts beyond `0`.
+- [x] AutoHiC supports a validated multi-attempt chain.
+- [x] Every attempt owns only its own sparse mapping.
+- [x] Previous mappings are retry evidence and are never merge inputs.
+- [x] Execution and review failures can request a new recommendation.
+- [x] Every shape-valid initial or retry mapping enters human approval.
+- [x] No model-controlled retry disposition or automatic fallback exists.
+- [x] Retry evidence is artifact-backed and ref-only in checkpoint state.
+- [x] Lifecycle and review-resume tests cover attempts beyond `0`.

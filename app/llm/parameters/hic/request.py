@@ -6,7 +6,9 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.shared_parameters import SpeciesFacts
 
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
@@ -22,21 +24,7 @@ class AutoHiCInputFacts(_StrictRequestModel):
 
     library_protocols: list[str]
     provided_restriction_enzyme: str | None = None
-
-
-class AutoHiCRestrictionEnzymeCatalog(_StrictRequestModel):
-    """The L2 catalog projection for the only model-adjustable parameter."""
-
-    level: Literal[2]
-    source: Literal["parameter_recommender"]
-    value_type: Literal["string"]
-    allowed_values: list[str] | None = None
-    description: str | None = None
-    notes: str | None = None
-
-
-class AutoHiCAdjustableParameters(_StrictRequestModel):
-    restriction_enzyme: AutoHiCRestrictionEnzymeCatalog
+    species_facts: SpeciesFacts | None = None
 
 
 class AutoHiCParameterRequest(_StrictRequestModel):
@@ -46,16 +34,19 @@ class AutoHiCParameterRequest(_StrictRequestModel):
     recommendation_contract: Literal["parameter_recommendation_v1"] = (
         PARAMETER_RECOMMENDATION_CONTRACT
     )
-    task: Literal["recommend_initial"] = "recommend_initial"
+    task: ParameterAttemptTask = "recommend_initial"
     method_id: Literal["hic_scaffolding.candidate.autohic"] = AUTOHIC_METHOD
     input_facts: AutoHiCInputFacts
-    adjustable_params: AutoHiCAdjustableParameters
+    adjustable_params: dict[str, dict[str, Any]]
+    attempt_history: list[dict[str, Any]] | None = None
 
 
 def build_autohic_parameter_request(
     *,
     input_profile: Mapping[str, Any],
     catalog: MethodParameterCatalog,
+    task: ParameterAttemptTask = "recommend_initial",
+    attempt_history: list[dict[str, Any]] | None = None,
 ) -> AutoHiCParameterRequest:
     """Project audit-rich stage input into the strict model-facing DTO.
 
@@ -68,14 +59,25 @@ def build_autohic_parameter_request(
     if catalog.method_id != "autohic":
         raise ValueError("AutoHiC model request requires the autohic catalog")
     adjustable = {
-        name
+        name: {
+            key: value
+            for key, value in specification.model_dump(mode="json").items()
+            if key
+            in {
+                "value_type",
+                "allowed_values",
+                "min",
+                "max",
+                "description",
+                "notes",
+            }
+            and value is not None
+        }
         for name, specification in catalog.parameters.items()
         if specification.level == 2
     }
-    if adjustable != {"restriction_enzyme"}:
-        raise ValueError(
-            "AutoHiC model request allows only restriction_enzyme at L2"
-        )
+    if not adjustable:
+        raise ValueError("AutoHiC model request requires at least one L2 parameter")
 
     raw_metadata = input_profile.get("hic_library_metadata") or []
     if not isinstance(raw_metadata, list):
@@ -99,20 +101,13 @@ def build_autohic_parameter_request(
             )
         provided_enzyme = provided_enzyme.strip()
 
-    specification = catalog.parameters["restriction_enzyme"]
     return AutoHiCParameterRequest(
+        task=task,
         input_facts=AutoHiCInputFacts(
             library_protocols=protocols,
             provided_restriction_enzyme=provided_enzyme,
+            species_facts=input_profile.get("species_facts"),
         ),
-        adjustable_params=AutoHiCAdjustableParameters(
-            restriction_enzyme=AutoHiCRestrictionEnzymeCatalog(
-                level=specification.level,
-                source=specification.source,
-                value_type=specification.value_type,
-                allowed_values=specification.allowed_values,
-                description=specification.description,
-                notes=specification.notes,
-            )
-        ),
+        adjustable_params=adjustable,
+        attempt_history=attempt_history or None,
     )

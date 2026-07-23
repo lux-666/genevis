@@ -173,10 +173,15 @@ The current implementation requires:
 
 1. every executable production method reaches `build_method_graph` and the
    shared run kernel;
-2. Assembly and AutoHiC parameterized methods use `ParameterAttemptOwner`;
+2. Assembly, AutoHiC, and T2T parameterized methods use
+   `ParameterAttemptOwner`;
 3. ordinary, batch, and operator-rerun methods use `DirectAttemptOwner`;
 4. process success and failure persist canonical execution evidence;
 5. resume after freeze does not rebuild a command, and resume after run does
    not execute again;
 6. production code has no method-specific duplicate cursor key, wrapper
    artifact, or stage-local lifecycle implementation.
+
+Parameterized retries use a new attempt ID and an attempt-specific work/output
+directory. A completed predecessor remains immutable; a later attempt cannot
+reuse its mutable result directory or overwrite its published outputs.

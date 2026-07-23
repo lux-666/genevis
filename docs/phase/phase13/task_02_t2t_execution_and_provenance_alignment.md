@@ -1,7 +1,7 @@
 # Task 02: Align T2T Execution and Provenance with the Shared Lifecycle
 
 **Phase**: 13
-**Status**: Planned
+**Status**: Completed
 **Depends on**: Task 01
 
 ## Goal
@@ -55,13 +55,16 @@ path.
 2. require a successful process outcome before reading biological output;
 3. resolve the expected PAF from the verified frozen attempt, not from a raw
    stage field;
-4. validate that the PAF exists and is readable;
+4. validate that the PAF exists and is readable; every non-empty PAF row must
+   contain the required fields and valid core coordinates, otherwise collect
+   fails closed;
 5. publish the PAF from work storage as immutable artifact type
    `t2t.read_alignment_paf`;
-6. register the PAF and candidate table in the artifact index;
-7. construct candidates from the immutable PAF ref;
-8. bind candidate evidence to the frozen-attempt ref and execution-evidence
-   ref selected by the lifecycle owner;
+6. register the immutable PAF in the artifact index;
+7. construct candidates from the immutable PAF ref and bind every candidate
+   record to the frozen-attempt ref and execution-evidence ref selected by the
+   lifecycle owner before writing the candidate table in work storage;
+8. publish and register the already-bound immutable candidate table;
 9. record `attempt_succeeded` only after required output publication and
    candidate construction succeed.
 
@@ -117,16 +120,17 @@ not sufficient provenance.
 - Candidate construction reads the immutable PAF ref.
 - Successful collect records `attempt_succeeded`.
 - Missing PAF, malformed PAF, publication failure, and ledger failure cannot
-  produce a successful collect state.
+  produce a successful collect state. A replay after publication must recover
+  the deterministic immutable PAF when the work file has already moved.
 - Candidate evidence is bound to the exact frozen and execution refs.
 - Collect re-entry is idempotent.
 
 ## Acceptance Criteria
 
-- [ ] T2T minimap2 uses only the shared execution lifecycle.
-- [ ] No durable stage field treats a work PAF path as an artifact ref.
-- [ ] PAF publication and registration are complete.
-- [ ] Candidate evidence is attempt- and execution-bound.
-- [ ] `attempt_succeeded` is written after successful collect.
-- [ ] Freeze/run/collect replay tests pass.
-- [ ] Collect failure tests prove fail-closed provenance behavior.
+- [x] T2T minimap2 uses only the shared execution lifecycle.
+- [x] No durable stage field treats a work PAF path as an artifact ref.
+- [x] PAF publication and registration are complete.
+- [x] Candidate evidence is attempt- and execution-bound.
+- [x] `attempt_succeeded` is written after successful collect.
+- [x] Freeze/run/collect replay tests pass.
+- [x] Collect failure tests prove fail-closed provenance behavior.

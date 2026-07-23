@@ -69,6 +69,18 @@ HIC_PARAMETER_RESPONSE_PARSE = "hic_scaffolding.parameter.response_parse"
 HIC_PARAMETER_RECOMMENDATION_MANIFEST = "hic_scaffolding.parameter.recommendation_manifest"
 HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
 HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
+HIC_PARAMETER_ATTEMPT_MANIFEST = "hic_scaffolding.parameter.attempt_manifest"
+HIC_PARAMETER_REVIEW = "hic_scaffolding.parameter.review"
+T2T_PARAMETER_INPUT_PROFILE = "t2t.parameter.input_profile"
+T2T_PARAMETER_BASIS = "t2t.parameter.basis_snapshot"
+T2T_PARAMETER_MODEL_REQUEST = "t2t.parameter.model_request"
+T2T_PARAMETER_MODEL_RESPONSE = "t2t.parameter.model_response"
+T2T_PARAMETER_RECOMMENDATION = "t2t.parameter.recommendation"
+T2T_PARAMETER_RESPONSE_PARSE = "t2t.parameter.response_parse"
+T2T_PARAMETER_RECOMMENDATION_MANIFEST = "t2t.parameter.recommendation_manifest"
+T2T_PARAMETER_APPROVAL_DECISION = "t2t.parameter_approval.decision"
+T2T_PARAMETER_FROZEN_PARAMETERS = "t2t.parameter.frozen_parameters"
+T2T_READ_ALIGNMENT_PAF = "t2t.read_alignment_paf"
 T2T_ASSEMBLY_TELOMERE_SCAN = "t2t.assembly_telomere_scan"
 T2T_READS_TELOMERE_SCAN = "t2t.reads_telomere_scan"
 T2T_TELOMERIC_READS = "t2t.telomeric_reads"
@@ -174,8 +186,6 @@ ParameterRecommendationStatus = Literal[
     "pending_approval",
     "approved",
     "rejected",
-    "retry_stopped",
-    "expert_review",
 ]
 
 
@@ -383,7 +393,12 @@ class HiCScaffoldDecisionArtifact(BaseModel):
 
     session_id: str
     stage: Literal["hic_scaffolding"] = "hic_scaffolding"
-    decision: Literal["accept_candidate", "keep_prior_assembly", "stop_human_review"]
+    decision: Literal[
+        "accept_candidate",
+        "keep_prior_assembly",
+        "request_parameter_retry",
+        "stop_human_review",
+    ]
     method_name: str | None = None
     pre_hic_assembly_ref: str
     output_assembly_ref: str
@@ -413,7 +428,7 @@ class T2TFinishingBundle(BaseModel):
     status: str
     input_assembly_ref: str
     output_assembly_ref: str
-    ont_reads_ref: str | None = None
+    ont_read_refs: list[str] = Field(default_factory=list)
     mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
     patched_assembly_ref: str | None = None
     artifact_refs: dict[str, str] = Field(default_factory=dict)

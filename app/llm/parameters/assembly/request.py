@@ -20,6 +20,7 @@ from app.llm.parameters.assembly.response import (
 from app.domains.assembly.profile_evidence import build_profile_evidence
 from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.shared_parameters import SpeciesFacts
 
 
 _PARAMETER_SPEC_FIELDS = (
@@ -97,6 +98,7 @@ class AssemblyParameterRequestDTO(BaseModel):
     recommendation_contract: Literal["parameter_recommendation_v1"]
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
+    species_facts: SpeciesFacts | None = None
     observations: list[dict[str, Any]]
     adjustable_parameters: dict[str, dict[str, Any]]
     method_guidance: list[dict[str, Any]] | None = None
@@ -129,6 +131,7 @@ def build_parameter_request_dto(
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": task,
+        "species_facts": prompt_profile.get("species_facts"),
         "observations": _model_observations(observations),
         "adjustable_parameters": adjustable_parameters,
     }
@@ -191,6 +194,7 @@ def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
 def _build_retry_context(profile: dict[str, Any], *, task: str) -> dict[str, Any]:
     previous = dict(profile.get("previous_attempt") or {})
     review = dict(profile.get("assembly_review") or {})
+    history = list(profile.get("attempt_history") or [])
     signals: list[dict[str, Any]] = []
     for signal_id, path, value in (
         (
@@ -239,6 +243,7 @@ def _build_retry_context(profile: dict[str, Any], *, task: str) -> dict[str, Any
     return {
         "task": task,
         "previous_attempt": previous,
+        "attempt_history": history,
         "assembly_review": review,
         "signal_ids": [signal["signal_id"] for signal in signals],
         "signals": signals,
@@ -313,7 +318,7 @@ def _model_retry_context(value: Any) -> Any:
     task = _model_safe_value(value.get("task"))
     if task is not _OMIT:
         projected["task"] = task
-    for field in ("previous_attempt", "assembly_review"):
+    for field in ("previous_attempt", "attempt_history", "assembly_review"):
         child = _model_safe_value(value.get(field))
         if child is not _OMIT:
             projected[field] = child

@@ -1021,7 +1021,7 @@ class DecisionBriefTests(unittest.TestCase):
         }
         render_decision_brief(brief)
 
-    def test_t2t_runtime_proposal_does_not_claim_parameter_recommender(self):
+    def test_t2t_runtime_proposal_reports_parameter_recommender(self):
         summary = {
             "session_id": "s1",
             "supervision_state": "blocked_human",
@@ -1032,7 +1032,7 @@ class DecisionBriefTests(unittest.TestCase):
                 "runtime_proposal": {
                     "kind": "finishing_candidate_review",
                     "label": "T2T finishing candidate review",
-                    "parameter_recommendation_status": "not_implemented",
+                    "parameter_recommendation_status": "implemented",
                     "human_confirmation_required": True,
                 },
             },
@@ -1045,8 +1045,8 @@ class DecisionBriefTests(unittest.TestCase):
         with patch("sys.stdout", out):
             render_decision_brief(brief)
 
-        self.assertEqual(brief["runtime_proposal"]["parameter_recommendation_status"], "not_implemented")
-        self.assertIn("parameter recommendation: not_implemented", out.getvalue())
+        self.assertEqual(brief["runtime_proposal"]["parameter_recommendation_status"], "implemented")
+        self.assertIn("parameter recommendation: implemented", out.getvalue())
 
     def test_empty_brief_renders_without_error(self):
         brief = {

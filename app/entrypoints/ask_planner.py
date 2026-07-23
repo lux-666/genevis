@@ -1056,10 +1056,13 @@ def _build_t2t_config(plan: AskPlanState) -> dict[str, Any]:
         "threshold_min_supporting_reads": "min_supporting_reads",
     }
     payload: dict[str, Any] = {}
-    for key in ("mode", "telomere_motif", "chromosome_list_ref", "assembly_fasta_ref", "ont_reads_ref"):
+    for key in ("mode", "telomere_motif", "chromosome_list_ref", "assembly_fasta_ref"):
         value = params.get(key)
         if value not in (None, ""):
             payload[key] = value
+    read_refs = params.get("ont_read_refs")
+    if isinstance(read_refs, list):
+        payload["ont_read_refs"] = list(read_refs)
     thresholds = {
         out_key: params[in_key]
         for in_key, out_key in threshold_map.items()

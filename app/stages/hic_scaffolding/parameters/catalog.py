@@ -23,7 +23,7 @@ AUTOHIC_PARAMETER_CATALOG = (
 
 
 def load_autohic_parameter_catalog() -> MethodParameterCatalog:
-    """Return the validated one-parameter AutoHiC recommendation catalog."""
+    """Return the validated sparse AutoHiC recommendation catalog."""
 
     if not AUTOHIC_PARAMETER_CATALOG.is_file():
         raise FileNotFoundError(
@@ -41,8 +41,20 @@ def load_autohic_parameter_catalog() -> MethodParameterCatalog:
         name for name, specification in catalog.parameters.items()
         if specification.level == 2
     }
-    if adjustable != {"restriction_enzyme"}:
+    expected = {
+        "restriction_enzyme",
+        "number_of_edit_rounds",
+        "translocation_adjust",
+        "inversion_adjust",
+        "debris_adjust",
+        "error_max_epoch",
+        "error_min_len",
+        "error_max_len",
+        "error_filter_score",
+        "error_filter_iou_score",
+    }
+    if adjustable != expected:
         raise ValueError(
-            "AutoHiC parameter catalog must expose only restriction_enzyme at L2"
+            "AutoHiC parameter catalog does not match the Phase 13 L2 surface"
         )
     return catalog

@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.domains.assembly.selection import is_method_read_type_compatible, normalize_read_type
 from app.schemas.artifacts import FunctionDatabaseProvenance
@@ -83,8 +83,16 @@ class T2TRunConfig(BaseModel):
     telomere_motif: str = "TTAGGG"
     chromosome_list_ref: str | None = None
     assembly_fasta_ref: str | None = None
-    ont_reads_ref: str | None = None
+    ont_read_refs: list[str] = Field(default_factory=list)
     thresholds: T2TThresholdProfile = Field(default_factory=T2TThresholdProfile)
+
+    @field_validator("ont_read_refs")
+    @classmethod
+    def _read_refs_must_be_non_empty(cls, values: list[str]) -> list[str]:
+        normalized = [str(value).strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("t2t.ont_read_refs members must be non-empty paths")
+        return normalized
 
     @model_validator(mode="after")
     def _motif_is_dna(self) -> "T2TRunConfig":
@@ -443,6 +451,9 @@ class HiCScaffoldingRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     autohic_parameters: AutoHiCRunParameters | None = None
+    retry_on_execution_failure: bool = False
+    max_execution_retries: int = Field(default=0, ge=0)
+    max_review_retries: int = Field(default=1, ge=0)
 
 
 class FunctionAnnotationRunConfig(BaseModel):

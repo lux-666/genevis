@@ -978,8 +978,9 @@ class PlanPreviewRenderTests(unittest.TestCase):
         self.assertIn(("hic_scaffolding", "parameter_approval"), points)
         self.assertEqual(
             points[("t2t", "t2t_review")]["parameter_recommendation_status"],
-            "not_implemented",
+            "implemented",
         )
+        self.assertIn(("t2t", "parameter_approval"), points)
 
         with patch("sys.stdout", new_callable=io.StringIO) as stdout:
             _render_plan_summary(summary, title="Execution Plan")

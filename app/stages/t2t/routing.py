@@ -10,11 +10,41 @@ def _output(state: TopLevelState) -> dict:
     return (state.get("stage_outputs") or {}).get("t2t") or {}
 
 
+def route_after_enter(state: TopLevelState) -> str:
+    status = _output(state).get("status")
+    if status == "parameters_approved":
+        return "prepare_parameters"
+    if status == "parameters_ready":
+        return "scan_assembly"
+    if status == "assembly_scanned":
+        return "prepare_reads"
+    if status == "reads_prepared":
+        return "scan_reads"
+    if status in {"reads_scanned", "alignment_frozen", "alignment_ran"}:
+        return "alignment"
+    return "resolve"
+
+
 def route_after_resolve(state: TopLevelState) -> str:
     output = _output(state)
     if is_terminal_failure(output.get("status")):
         return "fail"
-    return "scan_assembly" if output.get("execution_enabled") else "report"
+    if not output.get("execution_enabled"):
+        return "report"
+    if not output.get("ont_read_refs"):
+        return "prepare_reads"
+    return "recommend"
+
+
+def route_after_parameter_recommendation(state: TopLevelState) -> str:
+    output = _output(state)
+    if output.get("status") == "blocked_human":
+        return "block"
+    return "fail"
+
+
+def route_after_parameter_profile(state: TopLevelState) -> str:
+    return "fail" if is_terminal_failure(_output(state).get("status")) else "scan_assembly"
 
 
 def route_after_assembly_scan(state: TopLevelState) -> str:
@@ -25,7 +55,7 @@ def route_after_read_prepare(state: TopLevelState) -> str:
     output = _output(state)
     if is_terminal_failure(output.get("status")):
         return "fail"
-    return "scan_reads" if output.get("ont_reads_path") else "report"
+    return "scan_reads" if output.get("ont_read_inputs") else "report"
 
 
 def route_after_read_scan(state: TopLevelState) -> str:

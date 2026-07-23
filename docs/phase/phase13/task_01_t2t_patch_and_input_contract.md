@@ -1,7 +1,7 @@
 # Task 01: Correct the T2T Patch and ONT Input Contract
 
 **Phase**: 13
-**Status**: Planned
+**Status**: Completed
 **Depends on**: None
 
 ## Goal
@@ -56,6 +56,11 @@ later joins must be unique across the complete list. Either preserve a unique
 registered asset ID with the original read ID or fail clearly on a duplicate;
 never let the last duplicate silently overwrite the first in a dictionary.
 
+An empty resolved list is not a malformed-input failure. It takes the no-read
+path before parameter recommendation or sequence scanning. A non-empty list is
+validated member by member, and any malformed member fails the stage instead of
+being converted into the no-read outcome.
+
 ### Junction-aware patch model
 
 Each selected candidate must retain enough immutable evidence to reconstruct
@@ -83,10 +88,21 @@ start:
 patched = oriented_read_tail + target[target_start:]
 ```
 
+Tail orientation is defined from the PAF query coordinates as follows. First
+orient the complete read into target-forward coordinates: retain the read for
+`strand=+`, and reverse-complement the complete read for `strand=-`. The aligned
+query interval in that oriented read is `[query_start, query_end)` for `+` and
+`[query_length-query_end, query_length-query_start)` for `-`. A left-target
+patch uses the oriented prefix before that interval; a right-target patch uses
+the oriented suffix after it. The selected source read end is evidence only and
+must agree with this normalized orientation.
+
 When both ends of one contig are patched, compute both cut coordinates first
 and require the retained interval to be non-negative. An overlapping or
 internally inconsistent pair is not materialized automatically. Preserve it as
-review evidence with a clear reason.
+review evidence with a clear reason. Patch materialization is atomic for the
+assembly: if any selected contig has conflicting cuts, no patched FASTA is
+published, even when other selected contigs would be individually valid.
 
 Patch records must report the actual target bases removed and the actual bases
 added. `extension_length` alone is not sufficient evidence for replay.
@@ -144,12 +160,12 @@ materialization for an already selected candidate.
 
 ## Acceptance Criteria
 
-- [ ] T2T consumes the complete canonical ONT read list.
-- [ ] Run-config materialization supports and normalizes the list field.
-- [ ] Read evidence remains attributable to its source asset.
-- [ ] Patch materialization uses PAF junction coordinates.
-- [ ] Patch records include target trimming evidence.
-- [ ] Conflicting junctions cannot be silently materialized.
-- [ ] No-read artifacts use work-to-immutable publication.
-- [ ] `T2TFinishingBundle` exposes `ont_read_refs` and no singular read ref.
-- [ ] Unit and stage tests cover multi-file reads and non-zero target distance.
+- [x] T2T consumes the complete canonical ONT read list.
+- [x] Run-config materialization supports and normalizes the list field.
+- [x] Read evidence remains attributable to its source asset.
+- [x] Patch materialization uses PAF junction coordinates.
+- [x] Patch records include target trimming evidence.
+- [x] Conflicting junctions cannot be silently materialized.
+- [x] No-read artifacts use work-to-immutable publication.
+- [x] `T2TFinishingBundle` exposes `ont_read_refs` and no singular read ref.
+- [x] Unit and stage tests cover multi-file reads and non-zero target distance.

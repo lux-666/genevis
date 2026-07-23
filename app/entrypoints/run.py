@@ -561,6 +561,13 @@ def _run_session(args: argparse.Namespace) -> int:
             hic_out["autohic_parameters"] = run_config.hic_scaffolding.autohic_parameters.model_dump(
                 exclude_none=True
             )
+        hic_out["parameter_retry_policy"] = {
+            "retry_on_execution_failure": (
+                run_config.hic_scaffolding.retry_on_execution_failure
+            ),
+            "max_execution_retries": run_config.hic_scaffolding.max_execution_retries,
+            "max_review_retries": run_config.hic_scaffolding.max_review_retries,
+        }
         stage_outputs["hic_scaffolding"] = hic_out
     if run_config and run_config.t2t:
         t2t_out = dict(stage_outputs.get("t2t") or {})

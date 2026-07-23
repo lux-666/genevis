@@ -1,7 +1,7 @@
 # Task 05: Close Phase 13 with Lifecycle, Replay, and HPC Coverage
 
 **Phase**: 13
-**Status**: Planned
+**Status**: Completed
 **Depends on**: Tasks 01-04
 
 ## Goal
@@ -150,16 +150,16 @@ when AutoHiC, minimap2, models, or real data are unavailable.
 
 ## Acceptance Criteria
 
-- [ ] Focused unit and integration suites pass.
-- [ ] T2T lifecycle, provenance, multi-input, and junction regressions pass.
-- [ ] Hi-C initial and retry attempt regressions pass.
-- [ ] Parameter tests prove sparse mappings, no predecessor merge, shape-only
+- [x] Focused unit and integration suites pass.
+- [x] T2T lifecycle, provenance, multi-input, and junction regressions pass.
+- [x] Hi-C initial and retry attempt regressions pass.
+- [x] Parameter tests prove sparse mappings, no predecessor merge, shape-only
       parsing, and mandatory human approval.
-- [ ] Assembly retry has no model-controlled approval bypass.
-- [ ] Collect failures cannot produce successful durable output.
-- [ ] T2T HPC smoke uses `output_assembly_ref`.
-- [ ] HPC smoke requires an immutable registered PAF after real execution.
-- [ ] Stable architecture, stage-contract, user-guide, and HPC docs reflect the
+- [x] Assembly retry has no model-controlled approval bypass.
+- [x] Collect failures cannot produce successful durable output.
+- [x] T2T HPC smoke uses `output_assembly_ref`.
+- [x] HPC smoke requires an immutable registered PAF after real execution.
+- [x] Stable architecture, stage-contract, user-guide, and HPC docs reflect the
       implemented behavior.
-- [ ] Any unavailable real-tool smoke is reported explicitly rather than
+- [x] Any unavailable real-tool smoke is reported explicitly rather than
       represented as passing.

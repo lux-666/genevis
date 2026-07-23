@@ -61,6 +61,7 @@ def build_full_parameter_profile(
     *,
     assembly_out: dict[str, Any] | None = None,
     previous_attempt: dict[str, Any] | None = None,
+    attempt_history: list[dict[str, Any]] | None = None,
     assembly_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the complete replay/audit profile for parameter recommendation."""
@@ -69,6 +70,7 @@ def build_full_parameter_profile(
     stage_outputs = state.get("stage_outputs") or {}
     genome_survey = _genome_survey_profile(stage_outputs.get("genome_survey") or {})
     return {
+        "species_facts": _species_facts(state),
         "sample": _sample_profile(state, assembly_out),
         "assets": _assets_profile(assembly_out),
         "read_qc": _read_qc_profile(
@@ -77,6 +79,10 @@ def build_full_parameter_profile(
         ),
         "genome_survey": genome_survey,
         "previous_attempt": _previous_attempt_profile(previous_attempt or assembly_out.get("previous_parameter_attempt") or {}),
+        "attempt_history": [
+            _attempt_history_profile(attempt)
+            for attempt in (attempt_history or [])
+        ],
         "assembly_review": _assembly_review_profile(assembly_review or stage_outputs.get("assembly_review") or {}),
     }
 
@@ -89,6 +95,7 @@ def build_prompt_profile(
 
     if task == "recommend_initial":
         return {
+            "species_facts": full_profile.get("species_facts"),
             "sample": _pick(full_profile.get("sample") or {}, INITIAL_SAMPLE_FIELDS),
             "assets": _pick(full_profile.get("assets") or {}, PROMPT_ASSET_FIELDS),
             "read_qc": _drop_empty(full_profile.get("read_qc") or {}),
@@ -96,6 +103,7 @@ def build_prompt_profile(
         }
     if task == "retry_after_execution_failure":
         return {
+            "species_facts": full_profile.get("species_facts"),
             "sample": _pick(
                 full_profile.get("sample") or {},
                 ("organism", "clade", "target_level"),
@@ -105,9 +113,11 @@ def build_prompt_profile(
                 full_profile.get("previous_attempt") or {},
                 EXECUTION_REPAIR_FIELDS,
             ),
+            "attempt_history": list(full_profile.get("attempt_history") or []),
         }
     if task == "retry_after_review_failure":
         return {
+            "species_facts": full_profile.get("species_facts"),
             "sample": _pick(full_profile.get("sample") or {}, INITIAL_SAMPLE_FIELDS),
             "previous_attempt": _pick(
                 full_profile.get("previous_attempt") or {},
@@ -117,6 +127,7 @@ def build_prompt_profile(
                 full_profile.get("assembly_review") or {},
                 QUALITY_REVIEW_FIELDS,
             ),
+            "attempt_history": list(full_profile.get("attempt_history") or []),
         }
     raise ValueError(f"Unknown parameter prompt task: {task}")
 
@@ -141,6 +152,14 @@ def _sample_profile(state: TopLevelState, assembly_out: dict[str, Any]) -> dict[
             "target_level": _first_value(_lookup(shared, "target_level"), _lookup(input_profile, "target_level")),
         }
     )
+
+
+def _species_facts(state: TopLevelState) -> dict[str, Any] | None:
+    shared = state.get("shared_parameters") or {}
+    if not isinstance(shared, dict):
+        return None
+    value = shared.get("species_facts")
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _assets_profile(assembly_out: dict[str, Any]) -> dict[str, Any]:
@@ -296,6 +315,38 @@ def _previous_attempt_profile(previous_attempt: dict[str, Any]) -> dict[str, Any
             ),
             "stderr_tail": previous_attempt.get("stderr_tail"),
             "stdout_tail": previous_attempt.get("stdout_tail"),
+        }
+    )
+
+
+def _attempt_history_profile(attempt: dict[str, Any]) -> dict[str, Any]:
+    """Project one immutable attempt into bounded chronological prompt evidence."""
+
+    execution = dict(attempt.get("execution_result") or {})
+    review = dict(attempt.get("review_outcome") or {})
+    return _drop_empty(
+        {
+            "attempt_id": attempt.get("attempt_id"),
+            "task": attempt.get("task"),
+            "status": attempt.get("status"),
+            "parameters": _first_value(
+                attempt.get("parameters"), attempt.get("recommended_params")
+            ),
+            "parameter_sources": attempt.get("parameter_sources"),
+            "rendered_parameters": attempt.get("rendered_parameters"),
+            "execution": _drop_empty(
+                {
+                    "status": execution.get("status"),
+                    "status_detail": execution.get("status_detail"),
+                    "return_code": _first_value(
+                        execution.get("return_code"), execution.get("exit_code")
+                    ),
+                    "error": execution.get("error"),
+                    "stdout_tail": execution.get("stdout_tail"),
+                    "stderr_tail": execution.get("stderr_tail"),
+                }
+            ),
+            "review": review,
         }
     )
 

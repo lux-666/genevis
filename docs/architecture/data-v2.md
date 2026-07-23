@@ -13,8 +13,8 @@ spread through artifacts, the artifact index, ledger events, checkpoints, and
 reports.
 
 Data v2 establishes one shared contract for all stages. The implemented
-Assembly and AutoHiC parameter-recommendation loops use the same persistence
-contract rather than stage-specific audit envelopes.
+Assembly, AutoHiC, and T2T parameter-recommendation loops use the same
+persistence contract rather than stage-specific audit envelopes.
 
 This specification supersedes earlier data-layout and persistence assumptions.
 Biological and stage contracts remain governed by their current specifications.

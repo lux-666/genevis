@@ -474,13 +474,13 @@ GA() {
 }
 
 resume_configured_parameter_gates() {
-    # Resume Assembly's parameter gate only when hpc_env.sh explicitly opts
+    # Resume any stage's parameter gate only when hpc_env.sh explicitly opts
     # into unattended approval. Production defaults remain human-reviewed.
     # Return 3 when a manual approval is required.
     local session_id="$1"
     local mode="${HPC_PARAMETER_APPROVAL_MODE:-manual}"
     local max_approvals="${HPC_MAX_PARAMETER_APPROVALS:-3}"
-    local inspect_json decision_json gate supervision approval_count=0
+    local inspect_json decision_json gate stage supervision approval_count=0
     HPC_PARAMETER_APPROVALS_RESUMED=0
 
     case "$mode" in
@@ -501,7 +501,7 @@ resume_configured_parameter_gates() {
             fail "cannot inspect session while checking parameter approval: ${session_id}"
             return 1
         fi
-        read -r supervision gate < <(python3 - "$inspect_json" <<'PY'
+        IFS=$'\t' read -r supervision gate stage < <(python3 - "$inspect_json" <<'PY'
 import json
 import sys
 
@@ -511,6 +511,8 @@ interrupt = summary.get("active_interrupt") or {}
 print(
     summary.get("supervision_state") or "unknown",
     requirements.get("gate_id") or interrupt.get("gate_id") or "none",
+    requirements.get("stage") or interrupt.get("stage") or summary.get("current_stage") or "unknown",
+    sep="\t",
 )
 PY
 )
@@ -519,7 +521,7 @@ PY
         fi
 
         if [[ "$mode" == "manual" ]]; then
-            warn "session ${session_id} is waiting at Assembly parameter_approval"
+            warn "session ${session_id} is waiting at ${stage} parameter_approval"
             info "Review it in the TUI, or generate a bound decision template:"
             info "  python3 -m app.entrypoints.run inspect --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --write-decision-template ${decision_json}"
             info "  python3 -m app.entrypoints.run resume --session-id ${session_id} --data-dir ${TEST_DATA_ROOT} --decision-file ${decision_json} --checkpointer ${CHECKPOINTER}"
@@ -540,13 +542,14 @@ PY
             fail "could not generate parameter-approval decision template"
             return 1
         fi
-        if ! python3 - "$decision_json" <<'PY'
+        if ! python3 - "$decision_json" "$stage" <<'PY'
 import json
 import sys
 
 path = sys.argv[1]
+expected_stage = sys.argv[2]
 decision = json.load(open(path, encoding="utf-8"))
-assert decision.get("stage") == "assembly", decision
+assert decision.get("stage") == expected_stage, decision
 assert decision.get("gate_id") == "parameter_approval", decision
 assert decision.get("decision") == "approve_parameters", decision
 metadata = decision.get("metadata") or {}

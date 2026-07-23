@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any
 
 from app.storage.ledger import Ledger
@@ -10,6 +13,7 @@ from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
+from app.execution.evidence import load_execution_evidence
 from app.llm.parameters.hic.recommender import (
     PROMPT_BUNDLE,
     autohic_parameter_prompt_hash,
@@ -33,6 +37,7 @@ from app.review.persistence import (
 )
 from app.schemas.artifacts import (
     HIC_PARAMETER_APPROVAL_DECISION,
+    HIC_PARAMETER_ATTEMPT_MANIFEST,
     HIC_PARAMETER_BASIS,
     HIC_PARAMETER_INPUT_PROFILE,
     HIC_PARAMETER_MODEL_REQUEST,
@@ -67,11 +72,49 @@ _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
 
 
 def recommend_autohic_parameters(state: TopLevelState) -> dict:
-    """Ask the LLM for restriction_enzyme and always open an approval gate."""
+    """Persist one attempt-local sparse recommendation and open approval."""
 
     hic_out = _hic_output(state)
-    if hic_out.get("status") != "resolved":
+    if hic_out.get("status") not in {
+        "resolved",
+        "retry_parameters_after_execution_failure",
+        "retry_parameters_after_review_failure",
+    }:
         return {}
+
+    task = _parameter_prompt_task(hic_out)
+    try:
+        attempts_before = _validate_parameter_attempt_chain(
+            state, list(hic_out.get("parameter_attempts") or [])
+        )
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC parameter attempt chain is invalid: {exc}",
+            failure_kind="parameter_recommendation",
+        )
+    recommendation_id = int(
+        hic_out.get("proposed_parameter_attempt_id")
+        if hic_out.get("proposed_parameter_attempt_id") is not None
+        else len(attempts_before)
+    )
+    previous_attempt = attempts_before[-1] if attempts_before else None
+    if task != "recommend_initial":
+        retry_request = dict(hic_out.get("parameter_retry_request") or {})
+        if (
+            previous_attempt is None
+            or previous_attempt.get("attempt_id") != recommendation_id - 1
+            or not previous_attempt.get("seal_hash")
+            or retry_request.get("previous_attempt_id")
+            != previous_attempt.get("attempt_id")
+            or retry_request.get("previous_attempt_seal_hash")
+            != previous_attempt.get("seal_hash")
+        ):
+            return _fail_update(
+                state,
+                "AutoHiC retry predecessor evidence is missing or changed",
+                failure_kind="parameter_recommendation",
+            )
 
     try:
         catalog = load_autohic_parameter_catalog()
@@ -82,14 +125,26 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             failure_kind="parameter_recommendation",
         )
 
-    recommendation_id = 0
-    input_profile = _input_profile(hic_out)
+    try:
+        attempt_history = [
+            _hydrate_parameter_attempt(state, attempt)
+            for attempt in attempts_before
+        ]
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC retry history is invalid: {exc}",
+            failure_kind="parameter_recommendation",
+        )
+    input_profile = _input_profile(state, hic_out, attempt_history=attempt_history)
     catalog_snapshot = catalog.model_dump(mode="json")
 
     try:
         model_request = build_autohic_parameter_request(
             input_profile=input_profile,
             catalog=catalog,
+            task=task,
+            attempt_history=attempt_history,
         ).model_dump(mode="json")
         input_profile_ref = write_autohic_parameter_artifact(
             state,
@@ -181,7 +236,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             {
                 "schema_version": 2,
                 "method_id": AUTOHIC_METHOD,
-                "task": "recommend_initial",
+                "task": task,
                 "recommendation": recommendation,
             },
             artifact_type=HIC_PARAMETER_RECOMMENDATION,
@@ -204,12 +259,20 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
                 "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
                 "stage": "hic_scaffolding",
                 "method_id": AUTOHIC_METHOD,
-                "task": "recommend_initial",
+                "task": task,
                 "recommendation_id": recommendation_id,
                 "status": "pending_approval" if decision.valid else "response_invalid",
-                "previous_attempt_id": None,
-                "previous_attempt_manifest_ref": None,
-                "previous_attempt_seal_hash": None,
+                "previous_attempt_id": (
+                    previous_attempt.get("attempt_id") if previous_attempt else None
+                ),
+                "previous_attempt_manifest_ref": (
+                    previous_attempt.get("attempt_manifest_ref")
+                    if previous_attempt
+                    else None
+                ),
+                "previous_attempt_seal_hash": (
+                    previous_attempt.get("seal_hash") if previous_attempt else None
+                ),
                 "refs": {
                     "input_profile_ref": input_profile_ref.model_dump(mode="json"),
                     "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
@@ -235,11 +298,16 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
     cursor = ParameterRecommendationCursor(
         recommendation_id=recommendation_id,
         method_id=AUTOHIC_METHOD,
-        task="recommend_initial",
+        task=task,
         status="pending_approval" if decision.valid else "response_invalid",
-        previous_attempt_id=None,
+        previous_attempt_id=(
+            previous_attempt.get("attempt_id") if previous_attempt else None
+        ),
         manifest_ref=manifest_ref,
         recommendation_hash=manifest_ref.sha256,
+        previous_attempt_seal_hash=(
+            previous_attempt.get("seal_hash") if previous_attempt else None
+        ),
     )
     if not decision.valid:
         return _fail_update(
@@ -249,11 +317,11 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             extra={"current_parameter_recommendation": cursor.model_dump(mode="json")},
         )
 
-    enzyme = recommendation["parameters"]["restriction_enzyme"]
+    sparse_parameters = dict(recommendation.get("parameters") or {})
     bindings = {
         "attempt_id": recommendation_id,
-        "task": "recommend_initial",
-        "previous_attempt_id": None,
+        "task": task,
+        "previous_attempt_id": cursor.previous_attempt_id,
         "recommendation_hash": manifest_ref.sha256,
     }
     try:
@@ -267,8 +335,8 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
                 "recommendation_manifest_ref": manifest_ref.model_dump(mode="json"),
                 "recommendation_manifest_hash": manifest_ref.sha256,
                 "method_id": AUTOHIC_METHOD,
-                "task": "recommend_initial",
-                "parameters": {"restriction_enzyme": enzyme},
+                "task": task,
+                "parameters": sparse_parameters,
                 "rationale": recommendation.get("summary"),
                 "response_parse_ref": response_parse_ref.model_dump(mode="json"),
                 "recommendation_ref": recommendation_ref.model_dump(mode="json"),
@@ -312,9 +380,11 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             "status": "blocked_human",
             "block_reason": "autohic_parameter_approval_required",
             "active_interrupt": interrupt,
-            "current_parameter_attempt_id": 0,
-            "proposed_parameter_attempt_id": 0,
-            "parameter_attempts": [],
+            "current_parameter_attempt_id": (
+                hic_out.get("current_parameter_attempt_id")
+            ),
+            "proposed_parameter_attempt_id": recommendation_id,
+            "parameter_attempts": attempts_before,
             "current_parameter_recommendation": cursor.model_dump(mode="json"),
         },
     )
@@ -421,14 +491,23 @@ def apply_autohic_parameter_approval_decision(
             "AutoHiC parameter recommendation evidence is missing or changed"
         ) from exc
     recommendation = dict(recommendation_record.get("recommendation") or {})
-    if not str(
-        (recommendation.get("parameters") or {}).get("restriction_enzyme") or ""
-    ).strip():
-        raise ResumeValidationError(
-            "AutoHiC recommendation does not contain restriction_enzyme"
+    if not isinstance(recommendation.get("parameters"), dict):
+        raise ResumeValidationError("AutoHiC recommendation has no parameters mapping")
+    try:
+        attempts = _validate_parameter_attempt_chain(
+            state, list(hic_out.get("parameter_attempts") or [])
         )
-    if hic_out.get("parameter_attempts"):
-        raise ResumeValidationError("AutoHiC parameter approval was already resolved")
+    except (OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        raise ResumeValidationError("AutoHiC parameter attempt chain is invalid") from exc
+    if cursor.recommendation_id != len(attempts):
+        raise ResumeValidationError("AutoHiC parameter approval attempt is not next")
+    if cursor.recommendation_id:
+        predecessor = attempts[-1]
+        if (
+            cursor.previous_attempt_id != predecessor.get("attempt_id")
+            or cursor.previous_attempt_seal_hash != predecessor.get("seal_hash")
+        ):
+            raise ResumeValidationError("AutoHiC parameter retry predecessor changed")
 
     try:
         decision_ref = persist_review_decision(
@@ -494,26 +573,35 @@ def apply_autohic_parameter_approval_decision(
             attempt_id=cursor.recommendation_id,
             method_id=AUTOHIC_METHOD,
             status="recommended",
-            task="recommend_initial",
-            previous_attempt_id=None,
+            task=cursor.task,
+            previous_attempt_id=cursor.previous_attempt_id,
             recommendation_manifest_ref=manifest_ref,
             approval_decision_ref=decision_ref,
             recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+            previous_attempt_seal_hash=cursor.previous_attempt_seal_hash,
         )
     except ValueError as exc:
         raise ResumeValidationError(
             "approved AutoHiC parameter attempt could not be recorded"
         ) from exc
+    attempts.append(attempt.model_dump(mode="json"))
+    retry_counts = dict(hic_out.get("retry_counts") or {})
+    if cursor.task == "retry_after_execution_failure":
+        retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
+    elif cursor.task == "retry_after_review_failure":
+        retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
     outputs["hic_scaffolding"] = {
         **hic_out,
         "status": "parameters_approved",
         "active_interrupt": None,
         "current_parameter_attempt_id": cursor.recommendation_id,
-        "parameter_attempts": [attempt.model_dump(mode="json")],
+        "parameter_attempts": attempts,
+        "retry_counts": retry_counts,
         "current_parameter_recommendation": cursor.model_copy(
             update={"status": "approved"}
         ).model_dump(mode="json"),
         "proposed_parameter_attempt_id": None,
+        "parameter_retry_request": None,
     }
     return {
         "current_stage": "hic_scaffolding",
@@ -575,14 +663,20 @@ def load_approved_autohic_parameters(state: TopLevelState) -> dict[str, Any]:
     parameters = (
         recommendation.get("parameters") if isinstance(recommendation, dict) else None
     )
-    if not isinstance(parameters, dict) or not parameters.get("restriction_enzyme"):
+    if not isinstance(parameters, dict):
         raise AutoHiCParameterPersistenceError(
-            "approved AutoHiC recommendation does not contain restriction_enzyme"
+            "approved AutoHiC recommendation has no parameters mapping"
         )
     return dict(parameters)
 
 
-def _input_profile(hic_out: dict[str, Any]) -> dict[str, Any]:
+def _input_profile(
+    state: TopLevelState,
+    hic_out: dict[str, Any],
+    *,
+    attempt_history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    shared = state.get("shared_parameters") or {}
     return {
         "schema_version": 2,
         "pre_hic_assembly_ref": hic_out.get("pre_hic_assembly_ref"),
@@ -592,6 +686,10 @@ def _input_profile(hic_out: dict[str, Any]) -> dict[str, Any]:
         "provided_restriction_enzyme": (
             (hic_out.get("autohic_parameters") or {}).get("restriction_enzyme")
         ),
+        "species_facts": (
+            shared.get("species_facts") if isinstance(shared, dict) else None
+        ),
+        "attempt_history": attempt_history,
     }
 
 
@@ -611,3 +709,312 @@ def _fail_update(
             **(extra or {}),
         },
     )
+
+
+def autohic_execution_retry_gate(state: TopLevelState) -> dict:
+    """Seal a failed execution and apply the operator-owned retry policy."""
+
+    hic_out = _hic_output(state)
+    if hic_out.get("status") != "failed" or hic_out.get("failure_kind") != "execution":
+        return {}
+    try:
+        attempts = _validate_parameter_attempt_chain(
+            state, list(hic_out.get("parameter_attempts") or [])
+        )
+        current_id = int(hic_out["current_parameter_attempt_id"])
+        current = ParameterAttempt.model_validate(attempts[current_id])
+        if current.execution_ref is None:
+            return {}
+        sealed = _seal_parameter_attempt(state, current.model_dump(mode="json"))
+    except (IndexError, KeyError, OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC execution retry evidence is invalid: {exc}",
+            failure_kind="execution",
+        )
+    attempts[current_id] = sealed
+    policy = _parameter_retry_policy(hic_out)
+    used = int((hic_out.get("retry_counts") or {}).get("execution", 0))
+    if not policy["retry_on_execution_failure"]:
+        return _update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "reason": hic_out.get("reason") or "AutoHiC execution failed",
+                "parameter_attempts": attempts,
+            },
+        )
+    if used >= policy["max_execution_retries"]:
+        return _update_hic_output(
+            state,
+            {
+                "status": "execution_parameter_retries_exhausted",
+                "reason": "autohic_execution_retry_budget_exhausted",
+                "parameter_attempts": attempts,
+            },
+        )
+    return _update_hic_output(
+        state,
+        {
+            "status": "retry_parameters_after_execution_failure",
+            "proposed_parameter_attempt_id": current_id + 1,
+            "parameter_attempts": attempts,
+            "parameter_retry_request": {
+                "origin": "autohic_execution",
+                "previous_attempt_id": current_id,
+                "previous_attempt_seal_hash": sealed["seal_hash"],
+                "failure_ref": sealed["execution_ref"],
+            },
+        },
+    )
+
+
+def prepare_autohic_review_retry(
+    state: TopLevelState,
+    decision_ref: ArtifactRef,
+) -> dict:
+    """Seal reviewer feedback and create a ref-only retry cursor."""
+
+    hic_out = _hic_output(state)
+    try:
+        attempts = _validate_parameter_attempt_chain(
+            state, list(hic_out.get("parameter_attempts") or [])
+        )
+        current_id = int(hic_out["current_parameter_attempt_id"])
+        current = ParameterAttempt.model_validate(attempts[current_id])
+        if current.status != "executed":
+            raise ValueError("AutoHiC review retry requires an executed attempt")
+        reviewed = current.model_copy(
+            update={"status": "review_failed", "review_ref": decision_ref}
+        ).model_dump(mode="json")
+        sealed = _seal_parameter_attempt(state, reviewed)
+    except (IndexError, KeyError, OSError, ValueError, AutoHiCParameterPersistenceError) as exc:
+        return _fail_update(
+            state,
+            f"AutoHiC review retry evidence is invalid: {exc}",
+            failure_kind="review",
+        )
+    attempts[current_id] = sealed
+    policy = _parameter_retry_policy(hic_out)
+    used = int((hic_out.get("retry_counts") or {}).get("review", 0))
+    if used >= policy["max_review_retries"]:
+        return _update_hic_output(
+            state,
+            {
+                "status": "review_parameter_retries_exhausted",
+                "reason": "autohic_review_retry_budget_exhausted",
+                "parameter_attempts": attempts,
+            },
+        )
+    return _update_hic_output(
+        state,
+        {
+            "status": "retry_parameters_after_review_failure",
+            "proposed_parameter_attempt_id": current_id + 1,
+            "parameter_attempts": attempts,
+            "parameter_retry_request": {
+                "origin": "autohic_review",
+                "previous_attempt_id": current_id,
+                "previous_attempt_seal_hash": sealed["seal_hash"],
+                "failure_ref": decision_ref.model_dump(mode="json"),
+            },
+        },
+    )
+
+
+def _parameter_prompt_task(hic_out: dict[str, Any]) -> str:
+    status = hic_out.get("status")
+    if status == "retry_parameters_after_execution_failure":
+        return "retry_after_execution_failure"
+    if status == "retry_parameters_after_review_failure":
+        return "retry_after_review_failure"
+    return "recommend_initial"
+
+
+def _parameter_retry_policy(hic_out: dict[str, Any]) -> dict[str, Any]:
+    policy = dict(hic_out.get("parameter_retry_policy") or {})
+    return {
+        "retry_on_execution_failure": bool(
+            policy.get("retry_on_execution_failure", False)
+        ),
+        "max_execution_retries": max(
+            0, int(policy.get("max_execution_retries", 0))
+        ),
+        "max_review_retries": max(0, int(policy.get("max_review_retries", 1))),
+    }
+
+
+def _hydrate_parameter_attempt(
+    state: TopLevelState, attempt_value: dict[str, Any]
+) -> dict[str, Any]:
+    attempt = ParameterAttempt.model_validate(attempt_value)
+    manifest = read_autohic_parameter_artifact(
+        state,
+        attempt.recommendation_manifest_ref,
+        expected_type=HIC_PARAMETER_RECOMMENDATION_MANIFEST,
+    )
+    recommendation_ref = ArtifactRef.model_validate(
+        (manifest.get("refs") or {}).get("recommendation_ref")
+    )
+    recommendation = read_autohic_parameter_artifact(
+        state, recommendation_ref, expected_type=HIC_PARAMETER_RECOMMENDATION
+    ).get("recommendation") or {}
+    approval = read_autohic_parameter_artifact(
+        state,
+        attempt.approval_decision_ref,
+        expected_type=HIC_PARAMETER_APPROVAL_DECISION,
+    ).get("decision") or {}
+    hydrated: dict[str, Any] = {
+        "attempt_id": attempt.attempt_id,
+        "task": attempt.task,
+        "status": attempt.status,
+        "parameters": dict(recommendation.get("parameters") or {}),
+        "approval_decision": approval.get("decision"),
+    }
+    if attempt.frozen_parameters_ref is not None:
+        frozen = read_autohic_parameter_artifact(
+            state,
+            attempt.frozen_parameters_ref,
+            expected_type="hic_scaffolding.parameter.frozen_parameters",
+        )
+        hydrated["approved_sparse_parameters"] = dict(
+            frozen.get("approved_sparse_parameters") or {}
+        )
+        hydrated["executor_defaults"] = {
+            key: value
+            for key, value in dict(frozen.get("executor_defaults") or {}).items()
+            if key in {
+                "number_of_edit_rounds",
+                "translocation_adjust",
+                "inversion_adjust",
+                "debris_adjust",
+                "error_max_epoch",
+                "error_min_len",
+                "error_max_len",
+                "error_filter_score",
+                "error_filter_iou_score",
+            }
+        }
+        hydrated["effective_parameters"] = {
+            key: value
+            for key, value in dict(frozen.get("parameters") or {}).items()
+            if key in {
+                "restriction_enzyme",
+                "number_of_edit_rounds",
+                "translocation_adjust",
+                "inversion_adjust",
+                "debris_adjust",
+                "error_max_epoch",
+                "error_min_len",
+                "error_max_len",
+                "error_filter_score",
+                "error_filter_iou_score",
+            }
+        }
+    if attempt.execution_ref is not None:
+        execution = load_execution_evidence(
+            state,
+            attempt.execution_ref,
+            expected_stage="hic_scaffolding",
+            expected_method_name=AUTOHIC_METHOD,
+        ).model_dump(mode="json")
+        hydrated["execution"] = {
+            key: execution.get(key)
+            for key in (
+                "status",
+                "status_detail",
+                "return_code",
+                "error",
+                "stdout_tail",
+                "stderr_tail",
+            )
+            if execution.get(key) is not None
+        }
+    if attempt.review_ref is not None:
+        hydrated["review"] = read_autohic_parameter_artifact(
+            state, attempt.review_ref
+        ).get("decision")
+    return hydrated
+
+
+def _seal_parameter_attempt(
+    state: TopLevelState, attempt_value: dict[str, Any]
+) -> dict[str, Any]:
+    value = ParameterAttempt.model_validate(attempt_value).model_dump(mode="json")
+    semantic = {
+        key: item
+        for key, item in value.items()
+        if key not in {"sealed_at", "seal_hash", "attempt_manifest_ref"}
+    }
+    digest = sha256(
+        json.dumps(
+            semantic, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    ).hexdigest()
+    if value.get("seal_hash"):
+        if value["seal_hash"] != digest or not value.get("attempt_manifest_ref"):
+            raise ValueError("sealed AutoHiC parameter attempt was mutated")
+        manifest = read_autohic_parameter_artifact(
+            state,
+            value["attempt_manifest_ref"],
+            expected_type=HIC_PARAMETER_ATTEMPT_MANIFEST,
+        )
+        if manifest.get("seal_hash") != digest:
+            raise ValueError("AutoHiC parameter attempt manifest seal mismatch")
+        return value
+    sealed_at = datetime.now(timezone.utc).isoformat()
+    manifest_ref = write_autohic_parameter_artifact(
+        state,
+        int(value["attempt_id"]),
+        "attempt_manifest.json",
+        {
+            "schema_version": 2,
+            "stage": "hic_scaffolding",
+            **semantic,
+            "sealed_at": sealed_at,
+            "seal_hash": digest,
+        },
+        artifact_type=HIC_PARAMETER_ATTEMPT_MANIFEST,
+        method_name=AUTOHIC_METHOD,
+        scope="attempt",
+    )
+    return ParameterAttempt.model_validate(
+        {
+            **value,
+            "sealed_at": sealed_at,
+            "seal_hash": digest,
+            "attempt_manifest_ref": manifest_ref.model_dump(mode="json"),
+        }
+    ).model_dump(mode="json")
+
+
+def _validate_parameter_attempt_chain(
+    state: TopLevelState, raw_attempts: list[Any]
+) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    for item in raw_attempts:
+        if not isinstance(item, dict):
+            raise ValueError("AutoHiC parameter attempt chain contains a non-mapping")
+        value = ParameterAttempt.model_validate(item).model_dump(mode="json")
+        if value.get("seal_hash"):
+            value = _seal_parameter_attempt(state, value)
+        attempts.append(value)
+    for sequence, attempt in enumerate(attempts):
+        if attempt["attempt_id"] != sequence:
+            raise ValueError("AutoHiC parameter attempt IDs must be sequential")
+        if sequence == 0:
+            if attempt["task"] != "recommend_initial":
+                raise ValueError("AutoHiC attempt 0 must be initial")
+            continue
+        previous = attempts[sequence - 1]
+        if attempt.get("previous_attempt_id") != sequence - 1:
+            raise ValueError("AutoHiC parameter attempt predecessor is broken")
+        if not previous.get("seal_hash"):
+            raise ValueError("AutoHiC retry predecessor is not sealed")
+        if attempt.get("previous_attempt_seal_hash") != previous.get("seal_hash"):
+            raise ValueError("AutoHiC retry predecessor seal is broken")
+        if attempt.get("recommendation_contract") != attempts[0].get(
+            "recommendation_contract"
+        ):
+            raise ValueError("AutoHiC recommendation contract drifted")
+    return attempts

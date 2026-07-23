@@ -352,22 +352,15 @@ def _persist_parameter_attempt(
 
 
 def _parameter_response(
-    *,
-    retry_disposition: str | None = None,
     **overrides: int | bool | str,
 ) -> dict:
-    response = {
+    return {
         "parameters": dict(overrides),
         "summary": "Present this parameter recommendation for human review.",
     }
-    if retry_disposition is not None:
-        response["retry_disposition"] = retry_disposition
-    return response
 
 
 def _complete_hifiasm_ont_response(
-    *,
-    retry_disposition: str | None = None,
     **overrides: int | bool | str,
 ) -> dict:
     catalog = load_parameter_catalog("assembly.candidate.hifiasm_ont")
@@ -379,10 +372,7 @@ def _complete_hifiasm_ont_response(
     unknown = sorted(set(overrides) - l2_parameters)
     if unknown:
         raise AssertionError(f"test response contains non-L2 ONT parameters: {unknown}")
-    return _parameter_response(
-        retry_disposition=retry_disposition,
-        **overrides,
-    )
+    return _parameter_response(**overrides)
 
 
 
@@ -687,7 +677,19 @@ class ParameterProfileTests(unittest.TestCase):
             previous_attempt=previous_attempt,
         )
 
-        self.assertEqual(set(full_profile), {"sample", "assets", "read_qc", "genome_survey", "previous_attempt", "assembly_review"})
+        self.assertEqual(
+            set(full_profile),
+            {
+                "sample",
+                "species_facts",
+                "assets",
+                "read_qc",
+                "genome_survey",
+                "previous_attempt",
+                "attempt_history",
+                "assembly_review",
+            },
+        )
         self.assertEqual(full_profile["sample"]["organism"], "Example species")
         self.assertEqual(full_profile["assets"]["assembly_route"], "ont")
         self.assertEqual(full_profile["assets"]["read_type"], "ont")
@@ -1361,7 +1363,6 @@ class ParameterRecommendationNodeTests(unittest.TestCase):
                 purge_level=1, read_length_cutoff=3000, score_cutoff=10
             )
             retry_payload = _complete_hifiasm_ont_response(
-                retry_disposition="retry",
                 purge_level=2, read_length_cutoff=5000, score_cutoff=12
             )
 
