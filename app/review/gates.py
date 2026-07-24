@@ -45,7 +45,9 @@ class ReviewGateDeclaration:
         module = import_module(module_name)
         applier = getattr(module, function_name)
         if not callable(applier):
-            raise TypeError(f"review gate applier is not callable: {self.decision_applier}")
+            raise TypeError(
+                f"review gate applier is not callable: {self.decision_applier}"
+            )
         return applier
 
     def load_timeout_applier(self) -> TimeoutApplier | None:
@@ -55,7 +57,9 @@ class ReviewGateDeclaration:
         module = import_module(module_name)
         applier = getattr(module, function_name)
         if not callable(applier):
-            raise TypeError(f"review gate timeout applier is not callable: {self.timeout_applier}")
+            raise TypeError(
+                f"review gate timeout applier is not callable: {self.timeout_applier}"
+            )
         return applier
 
 
@@ -68,7 +72,9 @@ def register_review_gate(declaration: ReviewGateDeclaration) -> ReviewGateDeclar
     if not declaration.gate_id:
         raise ValueError("review gate gate_id is required")
     if declaration.key in _DECLARATIONS:
-        raise ValueError(f"review gate already registered: {declaration.stage}/{declaration.gate_id}")
+        raise ValueError(
+            f"review gate already registered: {declaration.stage}/{declaration.gate_id}"
+        )
     _DECLARATIONS[declaration.key] = declaration
     return declaration
 
@@ -81,12 +87,18 @@ def get_review_gate(stage: str, gate_id: str | None = None) -> ReviewGateDeclara
     return gate
 
 
-def find_review_gate(stage: str | None, gate_id: str | None = None) -> ReviewGateDeclaration | None:
+def find_review_gate(
+    stage: str | None, gate_id: str | None = None
+) -> ReviewGateDeclaration | None:
     if not stage:
         return None
     if gate_id:
         return _DECLARATIONS.get((stage, gate_id))
-    matches = [gate for (registered_stage, _), gate in _DECLARATIONS.items() if registered_stage == stage]
+    matches = [
+        gate
+        for (registered_stage, _), gate in _DECLARATIONS.items()
+        if registered_stage == stage
+    ]
     if len(matches) == 1:
         return matches[0]
     return None
@@ -100,7 +112,9 @@ def registered_review_stages() -> tuple[str, ...]:
     return tuple(dict.fromkeys(stage for stage, _ in _DECLARATIONS))
 
 
-def planned_review_gates(stages: list[str] | tuple[str, ...]) -> list[ReviewGateDeclaration]:
+def planned_review_gates(
+    stages: list[str] | tuple[str, ...],
+) -> list[ReviewGateDeclaration]:
     """Return registered runtime gates in workflow and declaration order."""
 
     stage_order = {stage: index for index, stage in enumerate(stages)}
@@ -130,16 +144,23 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
 def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt") or {}
-    if isinstance(active_interrupt, dict) and active_interrupt.get("gate_id") == "parameter_approval":
+    if (
+        isinstance(active_interrupt, dict)
+        and active_interrupt.get("gate_id") == "parameter_approval"
+    ):
         if gate_id != "parameter_approval":
-            raise ValueError("parameter approval resume requires explicit gate_id=parameter_approval")
+            raise ValueError(
+                "parameter approval resume requires explicit gate_id=parameter_approval"
+            )
     elif isinstance(active_interrupt, dict):
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
     return gate.load_decision_applier()(state, request)
 
 
-def apply_review_gate_timeout(state: TopLevelState, request: Any, timeout: dict[str, Any]) -> dict[str, Any] | None:
+def apply_review_gate_timeout(
+    state: TopLevelState, request: Any, timeout: dict[str, Any]
+) -> dict[str, Any] | None:
     gate_id = getattr(request, "gate_id", None)
     active_interrupt = state.get("active_interrupt") or {}
     if isinstance(active_interrupt, dict):
@@ -157,8 +178,7 @@ register_review_gate(
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
         decision_applier=(
-            "app.stages.assembly.parameters.workflow:"
-            "apply_parameter_approval_decision"
+            "app.stages.assembly.parameters.workflow:apply_parameter_approval_decision"
         ),
         prompt_adapter="generic",
         proposal_kind="parameter_recommendation",
@@ -189,7 +209,6 @@ register_review_gate(
             "polish",
             "continue_low_confidence",
             "stop_human_review",
-            "rerun",
         ),
         decision_applier="app.stages.assembly_review.nodes:apply_assembly_review_resume_decision",
         prompt_bundle="review.assembly_review_recommend",
@@ -201,8 +220,10 @@ register_review_gate(
         parameter_recommendation_status="mixed",
         related_parameter_gate=("assembly", "parameter_approval"),
         parameter_recommendation_notes=(
-            "Phase 11 quality-gate failures route to assembly parameter recommendation and approval.",
-            "A human-selected rerun is checkpointed and executes through the shared Flye lifecycle.",
+            "Assembly quality-gate failures route through the canonical v3 "
+            "parameter recommendation and approval workflow.",
+            "Legacy human-selected rerun decisions and "
+            "metadata.rerun_parameters are unsupported.",
         ),
     )
 )
@@ -211,7 +232,12 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="assembly",
         gate_id="route_selection",
-        decisions_allowed=("select_cyclone", "select_ont", "select_hifi", "stop_human_review"),
+        decisions_allowed=(
+            "select_cyclone",
+            "select_ont",
+            "select_hifi",
+            "stop_human_review",
+        ),
         decision_applier="app.stages.assembly.nodes:apply_route_decision",
         timeout_applier="app.stages.assembly.nodes:apply_selection_timeout",
         prompt_bundle="assembly.route_selector",
@@ -265,8 +291,7 @@ register_review_gate(
         gate_id="parameter_approval",
         decisions_allowed=("approve_parameters", "reject_parameters"),
         decision_applier=(
-            "app.stages.t2t.parameters.workflow:"
-            "apply_t2t_parameter_approval_decision"
+            "app.stages.t2t.parameters.workflow:apply_t2t_parameter_approval_decision"
         ),
         prompt_adapter="generic",
         proposal_kind="parameter_recommendation",
@@ -280,7 +305,11 @@ register_review_gate(
     ReviewGateDeclaration(
         stage="t2t",
         gate_id="t2t_review",
-        decisions_allowed=("accept_selected_candidates", "continue_without_patch", "stop_pipeline"),
+        decisions_allowed=(
+            "accept_selected_candidates",
+            "continue_without_patch",
+            "stop_pipeline",
+        ),
         decision_applier="app.stages.t2t.nodes:apply_t2t_review_decision",
         prompt_adapter="t2t",
         template_preferred_decision="accept_selected_candidates",

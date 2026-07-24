@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 from app.domains.assembly.selection import NormalizedReadType
 from app.schemas.manifest import Platform
@@ -19,6 +21,9 @@ def normalize_dna_motif(value: str, *, field_name: str = "telomere_motif") -> st
     return motif
 
 
+DnaMotif = Annotated[str, BeforeValidator(normalize_dna_motif)]
+
+
 class SpeciesFacts(BaseModel):
     """Caller-supplied biological identity used by parameter recommenders."""
 
@@ -29,7 +34,7 @@ class SpeciesFacts(BaseModel):
     clade: str | None = None
     ploidy: int | None = Field(default=None, gt=0)
     expected_chromosome_count: int | None = Field(default=None, gt=0)
-    telomere_motif: str | None = None
+    telomere_motif: DnaMotif | None = None
 
     @field_validator("scientific_name", "clade")
     @classmethod
@@ -40,13 +45,6 @@ class SpeciesFacts(BaseModel):
         if not value:
             raise ValueError("must be non-empty")
         return value
-
-    @field_validator("telomere_motif")
-    @classmethod
-    def _dna_motif(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return normalize_dna_motif(value)
 
 
 class SharedParameters(BaseModel):

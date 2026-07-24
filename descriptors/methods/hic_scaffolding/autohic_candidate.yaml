@@ -34,16 +34,3 @@ resource_hints:
   memory_gb: 128.0
   gpu_required: false
   walltime_hours: 48.0
-planner:
-  required_parameters: []
-  parameter_defaults:
-    threads: 10
-    number_of_edit_rounds: 2
-    translocation_adjust: true
-    inversion_adjust: true
-    debris_adjust: false
-    error_max_epoch: 5
-    error_min_len: 15000
-    error_max_len: 20000000
-    error_filter_score: 0.9
-    error_filter_iou_score: 0.8

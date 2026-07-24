@@ -126,7 +126,10 @@ else:
 python3 -c "
 from app.stages.hic_scaffolding.parameters.catalog import load_autohic_parameter_catalog
 catalog = load_autohic_parameter_catalog()
-dynamic = {name for name, spec in catalog.parameters.items() if spec.level == 2}
+dynamic = {
+    name for name, spec in catalog.parameters.items()
+    if spec.layers.l2 is not None
+}
 assert dynamic == {
     'restriction_enzyme',
     'number_of_edit_rounds',

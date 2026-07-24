@@ -20,17 +20,18 @@ def _assembly_output(state: TopLevelState) -> dict:
 
 
 def route_after_enter(state: TopLevelState) -> str:
-    status = _assembly_output(state).get("status")
-    if status in {"flye_rerun_planned", "flye_rerun_frozen", "flye_rerun_ran"}:
-        return "flye_rerun"
-    return "resolve_candidates"
-
-
-def route_after_rerun(state: TopLevelState) -> str:
+    ar_out = _output(state)
     assembly_out = _assembly_output(state)
-    if is_terminal_failure(assembly_out.get("status")):
+    status = assembly_out.get("status")
+    if is_terminal_failure(ar_out.get("status")):
         return "fail"
-    return "resolve_candidates" if assembly_out.get("status") == "draft_ready" else "fail"
+    if assembly_out.get("rerun_request") is not None or status in {
+        "flye_rerun_planned",
+        "flye_rerun_frozen",
+        "flye_rerun_ran",
+    }:
+        return "fail"
+    return "resolve_candidates"
 
 
 def route_after_plan_metrics(state: TopLevelState) -> str:
@@ -65,7 +66,10 @@ def _has_available_review_metrics(ar_out: dict) -> bool:
     """Check if any review metrics are available (not pending/failed)."""
     signals = ar_out.get("signals") or []
     for signal in signals:
-        if signal.get("status") == "available" and signal.get("signal_name") in {"quast", "busco"}:
+        if signal.get("status") == "available" and signal.get("signal_name") in {
+            "quast",
+            "busco",
+        }:
             return True
     return False
 
@@ -75,10 +79,16 @@ def route_after_parameter_quality_gate(state: TopLevelState) -> str:
     ar_out = _output(state)
     if is_terminal_failure(ar_out.get("status")):
         return "fail"
-    if state.get("current_stage") == "assembly" and ar_out.get("status") == "parameter_replan_requested":
+    if (
+        state.get("current_stage") == "assembly"
+        and ar_out.get("status") == "parameter_replan_requested"
+    ):
         return "replan"
     assembly_out = (state.get("stage_outputs") or {}).get("assembly") or {}
-    if assembly_out.get("parameter_attempts") and ar_out.get("status") != "parameter_replan_requested":
+    if (
+        assembly_out.get("parameter_attempts")
+        and ar_out.get("status") != "parameter_replan_requested"
+    ):
         if ar_out.get("parameter_quality_checked"):
             return "related_species_sanity_check"
         if ar_out.get("parameter_retries_exhausted"):

@@ -12,14 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import yaml
-
-logger = logging.getLogger(__name__)
 
 from app.control.lifecycle import ResumeValidationError
 from app.reference.ncbi_metazoa import (
@@ -49,6 +46,10 @@ from app.schemas.artifacts import (
 )
 from app.schemas.plan import AssemblyReviewPlan
 from app.schemas.state import TopLevelState
+from app.stages.assembly.method_application.support import (
+    ASSEMBLY_EXECUTION_CONTRACT_KEY,
+    AssemblyExecutionContract,
+)
 from app.stages.assembly_review.method_application.support import (
     read_eval_bundle as _read_eval_bundle,
 )
@@ -74,11 +75,36 @@ from app.storage.artifacts import publish_artifact_record, register_artifact_rec
 from app.storage.ledger import Ledger
 from app.workflow import is_terminal_failure
 
+logger = logging.getLogger(__name__)
+
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
 
 def enter_assembly_review(state: TopLevelState) -> dict:
     """Mark assembly_review as running.  No side effects."""
+    stage_outputs = state.get("stage_outputs") or {}
+    assembly_out = stage_outputs.get("assembly") or {}
+    legacy_status = assembly_out.get("status")
+    has_legacy_request = assembly_out.get("rerun_request") is not None
+    if has_legacy_request or legacy_status in {
+        "flye_rerun_planned",
+        "flye_rerun_frozen",
+        "flye_rerun_ran",
+    }:
+        outputs = dict(stage_outputs)
+        outputs["assembly_review"] = {
+            **dict(outputs.get("assembly_review") or {}),
+            "status": "failed",
+            "reason": (
+                "unsupported legacy Flye rerun lifecycle state or rerun_request "
+                f"(status={legacy_status!r}); use the v3 Assembly parameter retry "
+                "workflow"
+            ),
+        }
+        return {
+            "supervision_state": "running_stage",
+            "stage_outputs": outputs,
+        }
     return {"supervision_state": "running_stage"}
 
 
@@ -102,14 +128,16 @@ def resolve_candidates(state: TopLevelState) -> dict:
         final_ref = (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
         if final_ref:
             materialized_from_bundles.add(str(final_ref))
-        candidates.append({
-            "candidate_id": bundle.get("candidate_id", "unknown"),
-            "method_name": bundle.get("method_name", "unknown"),
-            "source": assembly.source,
-            "bundle_ref": bundle.get("candidate_ref") or bundle.get("bundle_ref"),
-            "status": bundle.get("status", "planned"),
-            "final_assembly_ref": final_ref,
-        })
+        candidates.append(
+            {
+                "candidate_id": bundle.get("candidate_id", "unknown"),
+                "method_name": bundle.get("method_name", "unknown"),
+                "source": assembly.source,
+                "bundle_ref": bundle.get("candidate_ref") or bundle.get("bundle_ref"),
+                "status": bundle.get("status", "planned"),
+                "final_assembly_ref": final_ref,
+            }
+        )
     for index, assembly_ref in enumerate(assembly.paths):
         if assembly_ref in materialized_from_bundles:
             continue
@@ -123,17 +151,19 @@ def resolve_candidates(state: TopLevelState) -> dict:
             or "assembly_fasta_registered"
             in (assembly.metadata.get("asset_types") or [])
         )
-        candidates.append({
-            "candidate_id": (
-                "existing_assembly"
-                if is_registered_input and index == 0
-                else f"{assembly.source}:{index}"
-            ),
-            "method_name": assembly.metadata.get("method_name", "user_provided"),
-            "source": assembly.source,
-            "status": "materialized",
-            "final_assembly_ref": assembly_ref,
-        })
+        candidates.append(
+            {
+                "candidate_id": (
+                    "existing_assembly"
+                    if is_registered_input and index == 0
+                    else f"{assembly.source}:{index}"
+                ),
+                "method_name": assembly.metadata.get("method_name", "user_provided"),
+                "source": assembly.source,
+                "status": "materialized",
+                "final_assembly_ref": assembly_ref,
+            }
+        )
 
     # Build review plan
     review_plan = AssemblyReviewPlan(
@@ -149,9 +179,7 @@ def resolve_candidates(state: TopLevelState) -> dict:
         "status": "resolved",
         "candidate_count": len(candidates),
         "candidates": candidates,
-        "rejected_candidates": dict(
-            assembly.metadata.get("rejected_candidates") or {}
-        ),
+        "rejected_candidates": dict(assembly.metadata.get("rejected_candidates") or {}),
         "review_plan": review_plan.model_dump(mode="json"),
     }
 
@@ -175,7 +203,9 @@ def plan_review_metrics(state: TopLevelState) -> dict:
         return {}
 
     # Determine available inputs from asset registry or prior stages
-    _has_short_reads, _has_long_reads, available_inputs, missing_inputs = _available_review_inputs(state)
+    _has_short_reads, _has_long_reads, available_inputs, missing_inputs = (
+        _available_review_inputs(state)
+    )
 
     read_qc_out = stage_outputs.get("read_qc", {})
     if read_qc_out:
@@ -192,14 +222,19 @@ def plan_review_metrics(state: TopLevelState) -> dict:
 
     signals: list[dict[str, Any]] = []
     eval_signals: list[AssemblyEvalSignal] = []
-    candidate_ids = [candidate.get("candidate_id", "unknown") for candidate in ar_out.get("candidates", [])]
+    candidate_ids = [
+        candidate.get("candidate_id", "unknown")
+        for candidate in ar_out.get("candidates", [])
+    ]
     for signal_name in planned_signals:
         method_name = _review_signal_method_name(signal_name)
-        signals.append(ReviewSignal(
-            signal_name=signal_name,
-            method_name=method_name,
-            status="pending",
-        ).model_dump(mode="json"))
+        signals.append(
+            ReviewSignal(
+                signal_name=signal_name,
+                method_name=method_name,
+                status="pending",
+            ).model_dump(mode="json")
+        )
         for candidate_id in candidate_ids:
             eval_signals.append(
                 AssemblyEvalSignal(
@@ -226,7 +261,11 @@ def plan_review_metrics(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE,
     )
 
-    preserved = {key: ar_out[key] for key in ["execution_mode", "env", "quast_parameters"] if key in ar_out}
+    preserved = {
+        key: ar_out[key]
+        for key in ["execution_mode", "env", "quast_parameters"]
+        if key in ar_out
+    }
     ar_out["review_plan"] = review_plan_data
     ar_out["planned_signals"] = planned_signals
     ar_out["signals"] = [signal.model_dump(mode="json") for signal in eval_signals]
@@ -272,7 +311,9 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
         parameter_quality_gate as assembly_parameter_quality_gate,
     )
 
-    gate_update = assembly_parameter_quality_gate({**state, "stage_outputs": stage_outputs})
+    gate_update = assembly_parameter_quality_gate(
+        {**state, "stage_outputs": stage_outputs}
+    )
     updated_outputs = dict(gate_update.get("stage_outputs") or stage_outputs)
     updated_assembly = dict(updated_outputs.get("assembly") or {})
     quality_gate = updated_assembly.get("quality_gate")
@@ -317,7 +358,9 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
     species_name = _target_species_name(state)
     reference_dir = _related_species_reference_dir(ar_out)
     if reference_dir:
-        evidence_pack = _build_related_species_evidence_pack(species_name, reference_dir=reference_dir)
+        evidence_pack = _build_related_species_evidence_pack(
+            species_name, reference_dir=reference_dir
+        )
     else:
         evidence_pack = _build_related_species_evidence_pack(species_name)
     existing_ref = ar_out.get("related_species_evidence_pack_ref")
@@ -344,7 +387,9 @@ def _related_species_reference_dir(ar_out: dict[str, Any]) -> str | Path | None:
 
     Returns None if no valid path is configured, triggering default reference directory.
     """
-    value = ar_out.get("related_species_reference_dir") or os.environ.get("GENE_AGENT_NCBI_METAZOA_REFERENCE_DIR")
+    value = ar_out.get("related_species_reference_dir") or os.environ.get(
+        "GENE_AGENT_NCBI_METAZOA_REFERENCE_DIR"
+    )
     if not value:
         return None
 
@@ -385,18 +430,22 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
             species_name, reference_dir=reference_dir, target_metrics=target_metrics
         )
     else:
-        statistics_pack = _build_related_species_statistics_pack(species_name, target_metrics=target_metrics)
+        statistics_pack = _build_related_species_statistics_pack(
+            species_name, target_metrics=target_metrics
+        )
 
     existing_stats_ref = ar_out.get("related_species_statistics_pack_ref")
-    statistics_pack_unchanged = (
-        existing_stats_ref and _json_artifact_payload_matches(existing_stats_ref, statistics_pack)
+    statistics_pack_unchanged = existing_stats_ref and _json_artifact_payload_matches(
+        existing_stats_ref, statistics_pack
     )
 
     if statistics_pack_unchanged:
         existing_notebook_ref = ar_out.get("assembly_review_comparative_notebook_ref")
         if existing_notebook_ref and Path(existing_notebook_ref).exists():
             comparative_figures = ar_out.get("comparative_figures", {})
-            all_figures_exist = all(Path(p).exists() for p in comparative_figures.values())
+            all_figures_exist = all(
+                Path(p).exists() for p in comparative_figures.values()
+            )
             if all_figures_exist:
                 # Full skip: re-register artifacts for ledger consistency, then return
                 data_dir = absolute_data_dir(state)
@@ -466,7 +515,9 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
 
     out_dir = stage_artifacts_dir(state, "assembly_review")
     statistics_pack_relpath = "related_species_statistics_pack.json"
-    figures_relpaths = {name: f"figures/{Path(path).name}" for name, path in figure_paths.items()}
+    figures_relpaths = {
+        name: f"figures/{Path(path).name}" for name, path in figure_paths.items()
+    }
     evidence_pack = ar_out.get("related_species_evidence_pack", {})
 
     notebook = build_assembly_review_notebook(
@@ -509,8 +560,11 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
     return {"stage_outputs": outputs}
 
 
-def _extract_target_metrics_from_signals(ar_out: dict[str, Any]) -> dict[str, float] | None:
-    """Extract target assembly metrics from available signals for percentile computation.
+def _extract_target_metrics_from_signals(
+    ar_out: dict[str, Any],
+) -> dict[str, float] | None:
+    """Extract target assembly metrics from available signals for percentile """
+    """computation.
 
     Returns None when multiple candidates exist (no single target to position).
     """
@@ -546,7 +600,9 @@ def _extract_target_metrics_from_signals(ar_out: dict[str, Any]) -> dict[str, fl
     return target_metrics if target_metrics else None
 
 
-def _phase10_review_metrics(ar_out: dict[str, Any], assembly_out: dict[str, Any]) -> dict[str, Any]:
+def _phase10_review_metrics(
+    ar_out: dict[str, Any], assembly_out: dict[str, Any]
+) -> dict[str, Any]:
     if isinstance(ar_out.get("metrics"), dict):
         return dict(ar_out["metrics"])
     candidates = ar_out.get("candidates") or []
@@ -567,7 +623,9 @@ def _phase10_review_metrics(ar_out: dict[str, Any], assembly_out: dict[str, Any]
         genome_size = assembly_out.get("genome_size_prior")
         if genome_size:
             try:
-                metrics["assembly_size_ratio"] = float(quast["total_length"]) / float(genome_size)
+                metrics["assembly_size_ratio"] = float(quast["total_length"]) / float(
+                    genome_size
+                )
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
     if quast.get("n50") is not None:
@@ -585,7 +643,9 @@ def human_review_gate(state: TopLevelState) -> dict:
     """Set an active interrupt for unresolved assembly review decisions."""
     stage_outputs = state.get("stage_outputs") or {}
     ar_out = stage_outputs.get("assembly_review", {})
-    ar_out, report_refs, comparison_context = _ensure_assembly_review_reports(state, ar_out)
+    ar_out, report_refs, comparison_context = _ensure_assembly_review_reports(
+        state, ar_out
+    )
     candidates = ar_out.get("candidates", [])
     signals = ar_out.get("signals", [])
 
@@ -597,18 +657,26 @@ def human_review_gate(state: TopLevelState) -> dict:
         signals=[ReviewSignal.model_validate(s) for s in signals],
         decisions_allowed=[
             "accept",
-            "rerun",
             "stop_human_review",
         ],
         notes=[
             "Thresholds for BUSCO and QUAST require human approval before application.",
-            "Accept continues with the selected assembly to Hi-C scaffolding, then T2T, then annotation stages.",
-            "Rerun keeps the workflow at assembly review after a new assembly attempt; stop leaves downstream stages unstarted.",
+            (
+                "Accept continues with the selected assembly to Hi-C scaffolding, "
+                "then T2T, then annotation stages."
+            ),
+            (
+                "Assembly parameter retries use the v3 recommendation, approval, "
+                "and frozen-attempt workflow before this gate."
+            ),
+            "Stop leaves downstream stages unstarted.",
         ],
         auto_decidable=_assembly_review_auto_decidable(ar_out),
         report_refs=report_refs,
         candidate_comparison_context=comparison_context,
-        related_species_evidence_pack=dict(ar_out.get("related_species_evidence_pack") or {}),
+        related_species_evidence_pack=dict(
+            ar_out.get("related_species_evidence_pack") or {}
+        ),
     )
 
     persisted_request = persist_review_request(
@@ -762,7 +830,9 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         stage="assembly_review",
         decision=decision,
         candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidates if isinstance(rejected_candidates, list) else list(rejected_candidates),
+        rejected_candidates=rejected_candidates
+        if isinstance(rejected_candidates, list)
+        else list(rejected_candidates),
         final_assembly_ref=final_assembly_ref,
         notes=ar_out.get("notes", []),
         metadata=action_metadata,
@@ -770,7 +840,9 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     review_request_id = ar_out.get("review_request_id")
     review_request_hash = ar_out.get("review_request_hash")
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("assembly_review decision is missing review request binding")
+        raise ResumeValidationError(
+            "assembly_review decision is missing review request binding"
+        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=state["session_id"],
@@ -796,7 +868,12 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         review_request_id=review_request_id,
     )
     action_ref = None
-    if selected_candidate_id and pre_action_ref and final_assembly_ref and output_assembly_ref:
+    if (
+        selected_candidate_id
+        and pre_action_ref
+        and final_assembly_ref
+        and output_assembly_ref
+    ):
         action_artifact = AssemblyReviewActionArtifact(
             session_id=state["session_id"],
             decision=decision,
@@ -810,7 +887,9 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             evidence_refs=evidence_refs,
             evidence_notes=evidence_notes,
             notes=ar_out.get("notes", []),
-            metadata={"review_decision_artifact_ref": decision_ref.model_dump(mode="json")},
+            metadata={
+                "review_decision_artifact_ref": decision_ref.model_dump(mode="json")
+            },
         )
         action_ref = _write_json_artifact(
             state,
@@ -865,22 +944,43 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     return update
 
 
-def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_assembly_review_resume_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     """Apply a validated assembly review decision to a blocked state."""
 
     if request.stage != "assembly_review":
-        raise ResumeValidationError("assembly review resume requires stage assembly_review")
+        raise ResumeValidationError(
+            "assembly review resume requires stage assembly_review"
+        )
     ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
     active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("assembly_review decision is missing review request binding")
+        raise ResumeValidationError(
+            "assembly_review decision is missing review request binding"
+        )
     candidates = ar_out.get("candidates") or []
-    candidates_by_id = {candidate.get("candidate_id"): candidate for candidate in candidates}
-    allowed = {"accept", "pass", "purge", "polish", "continue_low_confidence", "stop_human_review", "rerun"}
+    candidates_by_id = {
+        candidate.get("candidate_id"): candidate for candidate in candidates
+    }
+    allowed = {
+        "accept",
+        "pass",
+        "purge",
+        "polish",
+        "continue_low_confidence",
+        "stop_human_review",
+    }
     if request.decision not in allowed:
-        raise ResumeValidationError(f"unsupported assembly_review decision: {request.decision}")
+        raise ResumeValidationError(
+            f"unsupported assembly_review decision: {request.decision}"
+        )
 
     if request.decision == "stop_human_review":
         return _stop_assembly_review(state, request)
@@ -888,12 +988,13 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
     if not request.candidate_id:
         raise ResumeValidationError("assembly_review resume requires candidate_id")
     if request.candidate_id not in candidates_by_id:
-        raise ResumeValidationError(f"unknown assembly_review candidate_id: {request.candidate_id}")
+        raise ResumeValidationError(
+            f"unknown assembly_review candidate_id: {request.candidate_id}"
+        )
 
-    if request.decision == "rerun":
-        return _apply_rerun_decision(state, request)
-
-    candidate_final_ref = candidates_by_id[request.candidate_id].get("final_assembly_ref")
+    candidate_final_ref = candidates_by_id[request.candidate_id].get(
+        "final_assembly_ref"
+    )
     action_payload = _assembly_review_action_payload(request, candidate_final_ref)
 
     stage_outputs = dict(state.get("stage_outputs") or {})
@@ -916,21 +1017,40 @@ def apply_assembly_review_resume_decision(state: TopLevelState, request: ResumeR
         "review_request_hash": review_request_hash,
     }
     if action_payload["action_type"] == "purge":
-        stage_outputs["assembly_review"]["purged_assembly"] = action_payload["final_assembly_ref"]
+        stage_outputs["assembly_review"]["purged_assembly"] = action_payload[
+            "final_assembly_ref"
+        ]
     if action_payload["action_type"] == "polish":
-        stage_outputs["assembly_review"]["polished_assembly"] = action_payload["final_assembly_ref"]
-    updated_state = {**state, "stage_outputs": stage_outputs, "active_interrupt": None, "supervision_state": "running_stage"}
+        stage_outputs["assembly_review"]["polished_assembly"] = action_payload[
+            "final_assembly_ref"
+        ]
+    updated_state = {
+        **state,
+        "stage_outputs": stage_outputs,
+        "active_interrupt": None,
+        "supervision_state": "running_stage",
+    }
     commit_update = commit_assembly_review(updated_state)
     return {**commit_update, "active_interrupt": None}
 
 
-def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_final_ref: str | None) -> dict[str, Any]:
+def _assembly_review_action_payload(
+    request: ResumeReviewRequest, candidate_final_ref: str | None
+) -> dict[str, Any]:
     if request.decision in {"accept", "pass", "continue_low_confidence"}:
         if not request.final_assembly_ref:
-            raise ResumeValidationError("assembly_review resume requires final_assembly_ref")
+            raise ResumeValidationError(
+                "assembly_review resume requires final_assembly_ref"
+            )
         if candidate_final_ref and request.final_assembly_ref != candidate_final_ref:
-            raise ResumeValidationError("assembly_review final_assembly_ref does not match selected candidate")
-        action_type = "pass_low_confidence" if request.decision == "continue_low_confidence" else "pass"
+            raise ResumeValidationError(
+                "assembly_review final_assembly_ref does not match selected candidate"
+            )
+        action_type = (
+            "pass_low_confidence"
+            if request.decision == "continue_low_confidence"
+            else "pass"
+        )
         return {
             "final_assembly_ref": request.final_assembly_ref,
             "pre_action_assembly_ref": request.final_assembly_ref,
@@ -941,32 +1061,71 @@ def _assembly_review_action_payload(request: ResumeReviewRequest, candidate_fina
         }
 
     if not candidate_final_ref:
-        raise ResumeValidationError("assembly_review transform action requires selected candidate final_assembly_ref")
+        raise ResumeValidationError(
+            "assembly_review transform action requires selected candidate "
+            "final_assembly_ref"
+        )
     metadata_output_ref = request.metadata.get("action_output_ref")
-    if metadata_output_ref and request.final_assembly_ref and metadata_output_ref != request.final_assembly_ref:
-        raise ResumeValidationError(f"assembly_review {request.decision} action_output_ref must match final_assembly_ref")
+    if (
+        metadata_output_ref
+        and request.final_assembly_ref
+        and metadata_output_ref != request.final_assembly_ref
+    ):
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} action_output_ref must match "
+            "final_assembly_ref"
+        )
     action_output_ref = metadata_output_ref or request.final_assembly_ref
     if not action_output_ref:
-        raise ResumeValidationError(f"assembly_review {request.decision} requires action_output_ref")
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} requires action_output_ref"
+        )
     if action_output_ref == candidate_final_ref:
-        raise ResumeValidationError(f"assembly_review {request.decision} output must differ from pre-action assembly")
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} output must differ from "
+            "pre-action assembly"
+        )
     if not Path(str(action_output_ref)).exists():
-        raise ResumeValidationError(f"assembly_review {request.decision} action output ref must exist")
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} action output ref must exist"
+        )
     # Trust boundary: human_approved_action is user-asserted, not system-verified.
     # This documents that a human performed and approved an external action.
-    # Additional validation (output exists, differs from input, has evidence) reduces risk.
-    if not (request.metadata.get("human_approved_action") is True or request.metadata.get("approval") == "human"):
-        raise ResumeValidationError(f"assembly_review {request.decision} requires human-approved action metadata")
+    # Additional validation (output exists, differs from input, has evidence)
+    # reduces risk.
+    if not (
+        request.metadata.get("human_approved_action") is True
+        or request.metadata.get("approval") == "human"
+    ):
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} requires human-approved action "
+            "metadata"
+        )
     evidence_refs = list(request.metadata.get("evidence_refs") or [])
     evidence_notes = list(request.metadata.get("evidence_notes") or [])
     if not evidence_refs and not evidence_notes:
-        raise ResumeValidationError(f"assembly_review {request.decision} requires action evidence metadata")
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} requires action evidence metadata"
+        )
     method_name = request.method_name or request.metadata.get("method_name")
-    if not method_name and not request.metadata.get("provenance_ref") and not request.metadata.get("provenance"):
-        raise ResumeValidationError(f"assembly_review {request.decision} requires method or provenance metadata")
-    if request.decision == "polish" and method_name in {"nextpolish_shortread", "pilon_shortread"}:
-        if not request.metadata.get("short_read_evidence_refs") and not request.metadata.get("short_read_evidence_notes"):
-            raise ResumeValidationError("short-read polishing requires explicit short-read evidence")
+    if (
+        not method_name
+        and not request.metadata.get("provenance_ref")
+        and not request.metadata.get("provenance")
+    ):
+        raise ResumeValidationError(
+            f"assembly_review {request.decision} requires method or provenance metadata"
+        )
+    if request.decision == "polish" and method_name in {
+        "nextpolish_shortread",
+        "pilon_shortread",
+    }:
+        if not request.metadata.get(
+            "short_read_evidence_refs"
+        ) and not request.metadata.get("short_read_evidence_notes"):
+            raise ResumeValidationError(
+                "short-read polishing requires explicit short-read evidence"
+            )
     return {
         "final_assembly_ref": str(action_output_ref),
         "pre_action_assembly_ref": candidate_final_ref,
@@ -994,10 +1153,16 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         metadata=request.metadata,
     )
     active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("assembly_review stop decision is missing review request binding")
+        raise ResumeValidationError(
+            "assembly_review stop decision is missing review request binding"
+        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=state["session_id"],
@@ -1040,262 +1205,6 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
     }
 
 
-def _apply_rerun_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
-    """Persist a validated Flye rerun request for the Assembly lifecycle."""
-    from app.domains.assembly.constants import FLYE_METHOD
-    from app.stages.assembly.method_application.flye import (
-        FLYE_READ_TYPE_FLAGS,
-        rerun_resource_refs,
-    )
-
-    stage_outputs = dict(state.get("stage_outputs") or {})
-    ar_out = dict(stage_outputs.get("assembly_review") or {})
-    assembly_out = dict(stage_outputs.get("assembly") or {})
-    session_id = state["session_id"]
-    data_dir = absolute_data_dir(state)
-    ledger = Ledger(data_dir)
-
-    rerun_params = request.metadata.get("rerun_parameters")
-    if not isinstance(rerun_params, dict):
-        raise ResumeValidationError("rerun requires metadata.rerun_parameters dict")
-
-    params, error = _validate_rerun_flye_parameters(rerun_params, FLYE_READ_TYPE_FLAGS)
-    if error:
-        raise ResumeValidationError(f"rerun flye_parameters invalid: {error}")
-
-    max_reruns = ar_out.get("max_reruns", 3)
-    existing_refs = list(assembly_out.get("selected_candidate_refs") or [])
-    selected_rerun_indices = _rerun_indices_from_refs(existing_refs)
-    completed_rerun_count = len(selected_rerun_indices)
-    if completed_rerun_count >= max_reruns:
-        raise ResumeValidationError(
-            f"rerun limit reached ({completed_rerun_count}/{max_reruns}); "
-            "adjust max_reruns in run_config or accept a candidate"
-        )
-
-    input_ref = assembly_out.get("input_ref")
-    input_type = assembly_out.get("input_type")
-    if not input_ref:
-        raise ResumeValidationError("rerun requires assembly stage input_ref (no inventory rebuild)")
-
-    candidate_dir = stage_artifacts_dir(state, "assembly", "candidates")
-    rerun_index, existing_bundle_ref = _next_rerun_index(
-        state,
-        candidate_dir,
-        max_reruns=max_reruns,
-        selected_rerun_indices=selected_rerun_indices,
-    )
-    active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
-    if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("assembly_review rerun is missing review request binding")
-    review_decision_ref = persist_review_decision(
-        data_dir,
-        session_id=session_id,
-        review_request_id=review_request_id,
-        stage="assembly_review",
-        gate_id="assembly_review",
-        decision=request,
-        request_hash=review_request_hash,
-        method_name=ASSEMBLY_REVIEW_CONTRACT_METHOD,
-        artifact_type="assembly_review.decision",
-    )
-    ledger.record_review_decision(
-        session_id,
-        "assembly_review",
-        decision="rerun",
-        candidate_id=request.candidate_id,
-        notes=list(request.notes),
-        artifact_ref=review_decision_ref.model_dump(mode="json"),
-        metadata=request.metadata,
-        decided_by=request.decided_by,
-        rationale_artifact_ref=request.rationale_artifact_ref,
-        review_request_id=review_request_id,
-    )
-    candidate_id = f"{session_id}:{FLYE_METHOD}:rerun_{rerun_index}"
-    bundle_path = candidate_dir / f"flye_rerun_{rerun_index}_candidate.json"
-
-    if existing_bundle_ref is not None:
-        _load_completed_rerun_bundle_if_matching(
-            bundle_path,
-            session_id=session_id,
-            candidate_id=candidate_id,
-            method_name=FLYE_METHOD,
-            input_ref=input_ref,
-            input_type=input_type,
-            params=params,
-            source_candidate_id=request.candidate_id,
-            rerun_index=rerun_index,
-        )
-        if existing_bundle_ref not in existing_refs:
-            existing_refs = [*existing_refs, existing_bundle_ref]
-        assembly_out.update(
-            {
-                "status": "draft_ready",
-                "rerun_request": None,
-                "selected_candidate_refs": existing_refs,
-            }
-        )
-        preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
-        preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
-        stage_outputs["assembly"] = assembly_out
-        stage_outputs["assembly_review"] = preserved
-        return {
-            "current_stage": "assembly_review",
-            "supervision_state": "running_stage",
-            "active_interrupt": None,
-            "stage_outputs": stage_outputs,
-            "resource_refs": rerun_resource_refs(state, existing_refs),
-        }
-
-    ledger.record_event(session_id, "rerun_requested", {
-        "candidate_id": candidate_id,
-        "rerun_index": rerun_index,
-        "parameters": params,
-        "rerun_reason": request.metadata.get("rerun_reason"),
-        "source_candidate_id": request.candidate_id,
-    })
-
-    assembly_out.update(
-        {
-            "status": "flye_rerun_planned",
-            "rerun_request": {
-                "candidate_id": candidate_id,
-                "rerun_index": rerun_index,
-                "parameters": params,
-                "source_candidate_id": request.candidate_id,
-                "rerun_reason": request.metadata.get("rerun_reason"),
-                "review_decision_ref": review_decision_ref.model_dump(mode="json"),
-            },
-        }
-    )
-    preserved_keys = {"execution_mode", "env", "quast_parameters", "busco_parameters", "review_policy", "max_reruns"}
-    preserved = {k: ar_out[k] for k in preserved_keys if k in ar_out}
-
-    stage_outputs["assembly"] = assembly_out
-    stage_outputs["assembly_review"] = preserved
-
-    return {
-        "current_stage": "assembly_review",
-        "supervision_state": "running_stage",
-        "active_interrupt": None,
-        "stage_outputs": stage_outputs,
-    }
-
-
-def _validate_rerun_flye_parameters(
-    params: dict[str, Any],
-    read_type_flags: dict[str, str],
-) -> tuple[dict[str, Any], str | None]:
-    read_type = params.get("read_type")
-    if not read_type or read_type not in read_type_flags:
-        return {}, f"read_type must be one of {sorted(read_type_flags)}"
-    raw_genome_size = params.get("estimated_genome_size")
-    try:
-        genome_size = int(raw_genome_size)
-    except (TypeError, ValueError):
-        return {}, "estimated_genome_size must be a positive integer"
-    if genome_size <= 0:
-        return {}, "estimated_genome_size must be a positive integer"
-    raw_threads = params.get("threads")
-    try:
-        threads = int(raw_threads)
-    except (TypeError, ValueError):
-        return {}, "threads must be a positive integer"
-    if threads <= 0:
-        return {}, "threads must be a positive integer"
-    return {"read_type": read_type, "estimated_genome_size": genome_size, "threads": threads}, None
-
-
-def _next_rerun_index(
-    state: TopLevelState,
-    candidate_dir: Path,
-    *,
-    max_reruns: int,
-    selected_rerun_indices: set[int],
-) -> tuple[int, str | None]:
-    index = 1
-    while index <= max_reruns:
-        if index in selected_rerun_indices:
-            index += 1
-            continue
-        bundle_path = candidate_dir / f"flye_rerun_{index}_candidate.json"
-        if bundle_path.exists():
-            return index, str(bundle_path)
-        working_dir = stage_work_dir(state, "assembly", f"flye_rerun_{index}")
-        artifact_dir = stage_artifacts_dir(state, "assembly", f"flye_rerun_{index}")
-        if working_dir.exists() or artifact_dir.exists():
-            index += 1
-            continue
-        return index, None
-    raise ResumeValidationError(
-        f"rerun limit reached ({max_reruns}/{max_reruns}); "
-        "adjust max_reruns in run_config or accept a candidate"
-    )
-
-
-def _rerun_indices_from_refs(refs: list[str]) -> set[int]:
-    indices: set[int] = set()
-    for ref in refs:
-        match = re.search(r"rerun_(\d+)", str(ref))
-        if match:
-            indices.add(int(match.group(1)))
-    return indices
-
-
-def _load_completed_rerun_bundle_if_matching(
-    bundle_path: Path,
-    *,
-    session_id: str,
-    candidate_id: str,
-    method_name: str,
-    input_ref: Any,
-    input_type: Any,
-    params: dict[str, Any],
-    source_candidate_id: str | None,
-    rerun_index: int,
-) -> dict[str, Any] | None:
-    if not bundle_path.exists():
-        return None
-    try:
-        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ResumeValidationError(f"existing rerun bundle is invalid JSON: {bundle_path}") from exc
-
-    metadata = bundle.get("metadata") or {}
-    expected = {
-        "session_id": session_id,
-        "candidate_id": candidate_id,
-        "method_name": method_name,
-        "status": "executed",
-        "input_ref": str(input_ref),
-        "input_type": str(input_type),
-    }
-    for key, value in expected.items():
-        if bundle.get(key) != value:
-            raise ResumeValidationError(
-                f"existing rerun bundle conflicts with requested rerun ({key}: {bundle.get(key)!r} != {value!r})"
-            )
-    metadata_expected = {
-        "rerun_index": rerun_index,
-        "source_candidate_id": source_candidate_id,
-        "read_profile": params["read_type"],
-        "estimated_genome_size": params["estimated_genome_size"],
-        "threads": params["threads"],
-    }
-    for key, value in metadata_expected.items():
-        if metadata.get(key) != value:
-            raise ResumeValidationError(
-                f"existing rerun bundle conflicts with requested rerun (metadata.{key}: {metadata.get(key)!r} != {value!r})"
-            )
-
-    draft_ref = (bundle.get("expected_outputs") or {}).get("draft_assembly_fasta")
-    if not draft_ref or not Path(str(draft_ref)).exists():
-        raise ResumeValidationError(f"existing rerun bundle is incomplete; draft assembly missing: {draft_ref}")
-    return bundle
-
-
 def generate_candidate_comparison(state: TopLevelState) -> dict:
     """Generate a candidate comparison artifact when multiple candidates exist."""
     stage_outputs = state.get("stage_outputs") or {}
@@ -1326,7 +1235,9 @@ def generate_candidate_comparison(state: TopLevelState) -> dict:
         "notes": ["thresholds_not_applied_without_human_approval"],
     }
     existing_ref = ar_out.get("candidate_comparison_ref")
-    if existing_ref and _json_artifact_payload_matches(existing_ref, comparison_payload):
+    if existing_ref and _json_artifact_payload_matches(
+        existing_ref, comparison_payload
+    ):
         return {}
 
     comparison_ref = _write_json_artifact(
@@ -1337,11 +1248,15 @@ def generate_candidate_comparison(state: TopLevelState) -> dict:
     )
 
     ledger = Ledger(state.get("data_dir", "data"))
-    ledger.record_event(state["session_id"], "candidate_comparison_generated", {
-        "candidate_ids": [c["candidate_id"] for c in comparison_candidates],
-        "candidate_count": len(comparison_candidates),
-        "comparison_artifact_ref": comparison_ref,
-    })
+    ledger.record_event(
+        state["session_id"],
+        "candidate_comparison_generated",
+        {
+            "candidate_ids": [c["candidate_id"] for c in comparison_candidates],
+            "candidate_count": len(comparison_candidates),
+            "comparison_artifact_ref": comparison_ref,
+        },
+    )
 
     outputs = dict(stage_outputs)
     outputs["assembly_review"] = {**ar_out, "candidate_comparison_ref": comparison_ref}
@@ -1369,13 +1284,22 @@ def _target_species_name(state: TopLevelState) -> str | None:
         return None
     try:
         text = path.read_text(encoding="utf-8")
-        raw = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+        raw = (
+            json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+        )
     except (OSError, json.JSONDecodeError, yaml.YAMLError):
         return None
     if not isinstance(raw, dict):
         return None
     metadata = dict(raw.get("user_metadata") or {})
-    for key in ("target_species", "species_name", "scientific_name", "organism", "species", "chinese_name"):
+    for key in (
+        "target_species",
+        "species_name",
+        "scientific_name",
+        "organism",
+        "species",
+        "chinese_name",
+    ):
         if key in raw:
             metadata.setdefault(key, raw[key])
     return species_name_from_metadata(metadata)
@@ -1386,7 +1310,11 @@ def _ensure_assembly_review_reports(
     ar_out: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
     candidates = ar_out.get("candidates", [])
-    report_kind = "candidate_comparison_review" if len(candidates) >= 2 else "single_candidate_review"
+    report_kind = (
+        "candidate_comparison_review"
+        if len(candidates) >= 2
+        else "single_candidate_review"
+    )
     payload = _assembly_review_report_payload(state, ar_out, report_kind=report_kind)
     data_ref = _write_report_json_artifact_if_changed(
         state,
@@ -1412,7 +1340,9 @@ def _ensure_assembly_review_reports(
     if ar_out.get("candidate_comparison_ref"):
         report_refs["candidate_comparison"] = str(ar_out["candidate_comparison_ref"])
     if ar_out.get("related_species_evidence_pack_ref"):
-        report_refs["related_species_evidence_pack"] = str(ar_out["related_species_evidence_pack_ref"])
+        report_refs["related_species_evidence_pack"] = str(
+            ar_out["related_species_evidence_pack_ref"]
+        )
 
     comparison_context = _candidate_comparison_context(updated)
     return updated, report_refs, comparison_context
@@ -1449,9 +1379,13 @@ def _assembly_review_report_payload(
         "raw_refs": {
             "eval_bundle_ref": ar_out.get("eval_bundle_ref"),
             "candidate_comparison_ref": ar_out.get("candidate_comparison_ref"),
-            "related_species_evidence_pack_ref": ar_out.get("related_species_evidence_pack_ref"),
+            "related_species_evidence_pack_ref": ar_out.get(
+                "related_species_evidence_pack_ref"
+            ),
         },
-        "related_species_sanity_check": dict(ar_out.get("related_species_evidence_pack") or {}),
+        "related_species_sanity_check": dict(
+            ar_out.get("related_species_evidence_pack") or {}
+        ),
         "notes": [
             "thresholds_not_applied_without_human_approval",
             "report_informs_human_decision_only",
@@ -1466,20 +1400,22 @@ def _candidate_report_row(
 ) -> dict[str, Any]:
     candidate_id = candidate.get("candidate_id", "unknown")
     candidate_signals = [
-        signal for signal in signals
-        if signal.get("candidate_id") == candidate_id
+        signal for signal in signals if signal.get("candidate_id") == candidate_id
     ]
     return {
         "candidate_id": candidate_id,
         "method_name": candidate.get("method_name"),
         "source": candidate.get("source"),
         "status": candidate.get("status", "unknown"),
-        "final_assembly_ref": candidate.get("final_assembly_ref") or candidate.get("assembly_ref"),
+        "final_assembly_ref": candidate.get("final_assembly_ref")
+        or candidate.get("assembly_ref"),
         "parameters": _candidate_parameters(candidate, assembly_out),
         "metrics": _candidate_metrics(candidate_id, signals),
         "signals": _signal_status_buckets(candidate_signals),
         "metric_refs_by_signal": {
-            str(signal.get("signal_name")): [str(ref) for ref in signal.get("metric_refs", [])]
+            str(signal.get("signal_name")): [
+                str(ref) for ref in signal.get("metric_refs", [])
+            ]
             for signal in candidate_signals
             if signal.get("metric_refs")
         },
@@ -1504,11 +1440,18 @@ def _signal_status_buckets(signals: list[dict[str, Any]]) -> dict[str, list[str]
 def _candidate_comparison_context(ar_out: dict[str, Any]) -> dict[str, Any]:
     candidates = ar_out.get("candidates", [])
     context: dict[str, Any] = {
-        "candidate_ids": [candidate.get("candidate_id") for candidate in candidates if candidate.get("candidate_id")],
-        "candidate_final_assembly_refs": {
-            str(candidate.get("candidate_id")): str(candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
+        "candidate_ids": [
+            candidate.get("candidate_id")
             for candidate in candidates
-            if candidate.get("candidate_id") and (candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
+            if candidate.get("candidate_id")
+        ],
+        "candidate_final_assembly_refs": {
+            str(candidate.get("candidate_id")): str(
+                candidate.get("final_assembly_ref") or candidate.get("assembly_ref")
+            )
+            for candidate in candidates
+            if candidate.get("candidate_id")
+            and (candidate.get("final_assembly_ref") or candidate.get("assembly_ref"))
         },
     }
     for key in ("candidate_comparison_ref",):
@@ -1521,12 +1464,23 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
     lines = [
         f"# {title}",
         "",
-        "No automatic biological thresholds are applied. This report informs the human decision only.",
+        (
+            "No automatic biological thresholds are applied. This report informs "
+            "the human decision only."
+        ),
         "",
         "## Candidate Metrics",
         "",
-        "| Candidate | Method | Source | Assembly ref | QUAST contigs | Total length | N50 | Largest contig | BUSCO C% | BUSCO S% | BUSCO D% | BUSCO F% | BUSCO M% | Available signals | Missing/failed/pending signals |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        (
+            "| Candidate | Method | Source | Assembly ref | QUAST contigs | "
+            "Total length | N50 | Largest contig | BUSCO C% | BUSCO S% | "
+            "BUSCO D% | BUSCO F% | BUSCO M% | Available signals | "
+            "Missing/failed/pending signals |"
+        ),
+        (
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+            "--- | --- | --- | --- | --- |"
+        ),
     ]
     for candidate in payload.get("candidates", []):
         metrics = candidate.get("metrics") or {}
@@ -1562,13 +1516,18 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
             + " |"
         )
 
-    lines.extend([
-        "",
-        "## Parameter Provenance",
-        "",
-        "| Candidate | Read profile | Estimated genome size | Threads | Rerun index |",
-        "| --- | --- | --- | --- | --- |",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Parameter Provenance",
+            "",
+            (
+                "| Candidate | Read profile | Estimated genome size | Threads | "
+                "Rerun index |"
+            ),
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for candidate in payload.get("candidates", []):
         params = candidate.get("parameters") or {}
         lines.append(
@@ -1586,7 +1545,9 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
             + " |"
         )
 
-    _append_related_species_sanity_check(lines, payload.get("related_species_sanity_check") or {})
+    _append_related_species_sanity_check(
+        lines, payload.get("related_species_sanity_check") or {}
+    )
 
     lines.extend(["", "## Evidence Refs", ""])
     raw_refs = payload.get("raw_refs") or {}
@@ -1597,7 +1558,9 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
         metric_refs = candidate.get("metric_refs_by_signal") or {}
         for signal_name, refs in metric_refs.items():
             for ref in refs:
-                lines.append(f"- {candidate.get('candidate_id')} {signal_name}: `{ref}`")
+                lines.append(
+                    f"- {candidate.get('candidate_id')} {signal_name}: `{ref}`"
+                )
 
     lines.extend(["", "## Missing Evidence", ""])
     for candidate in payload.get("candidates", []):
@@ -1607,7 +1570,9 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
             for signal_name in signal_buckets.get(status, []):
                 notes = ", ".join(notes_by_signal.get(signal_name, []))
                 suffix = f" — {notes}" if notes else ""
-                lines.append(f"- {candidate.get('candidate_id')} {signal_name}: {status}{suffix}")
+                lines.append(
+                    f"- {candidate.get('candidate_id')} {signal_name}: {status}{suffix}"
+                )
 
     lines.extend(["", "## Report Notes", ""])
     for note in payload.get("notes", []):
@@ -1616,44 +1581,80 @@ def _render_assembly_review_markdown(payload: dict[str, Any], *, title: str) -> 
     return "\n".join(lines)
 
 
-def _append_related_species_sanity_check(lines: list[str], pack: dict[str, Any]) -> None:
+def _append_related_species_sanity_check(
+    lines: list[str], pack: dict[str, Any]
+) -> None:
     lines.extend(["", "## Related-species sanity check", ""])
     if not pack:
         lines.append("- Reference evidence was not generated.")
         return
     target = pack.get("target") or {}
-    lines.extend([
-        f"- Target: {_markdown_cell(target.get('canonical_scientific_name') or target.get('input_name'))}",
-        f"- Matching mode: {_markdown_cell(pack.get('matching_mode'))}",
-        "- This evidence is comparative only; it is not an assembly prior or automatic-failure threshold.",
-        "",
-    ])
+    target_name = target.get("canonical_scientific_name") or target.get("input_name")
+    lines.extend(
+        [
+            f"- Target: {_markdown_cell(target_name)}",
+            f"- Matching mode: {_markdown_cell(pack.get('matching_mode'))}",
+            (
+                "- This evidence is comparative only; it is not an assembly prior "
+                "or automatic-failure threshold."
+            ),
+            "",
+        ]
+    )
     records = pack.get("selected_records") or []
     if records:
-        lines.extend([
-            "| Organism | Accession | Assembly | Total length | Chromosomes | Contig N50 | Scaffold N50 | GC | BUSCO lineage |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        ])
+        lines.extend(
+            [
+                (
+                    "| Organism | Accession | Assembly | Total length | "
+                    "Chromosomes | Contig N50 | Scaffold N50 | GC | "
+                    "BUSCO lineage |"
+                ),
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
         for record in records:
             busco = record.get("busco") or {}
             lines.append(
-                "| " + " | ".join(
-                    _markdown_cell(value) for value in [
-                        record.get("organism_name"), record.get("accession"), record.get("assembly_name"),
-                        record.get("total_sequence_length_bp"), record.get("chromosome_count"),
-                        record.get("contig_n50_bp"), record.get("scaffold_n50_bp"), record.get("gc_percent"),
+                "| "
+                + " | ".join(
+                    _markdown_cell(value)
+                    for value in [
+                        record.get("organism_name"),
+                        record.get("accession"),
+                        record.get("assembly_name"),
+                        record.get("total_sequence_length_bp"),
+                        record.get("chromosome_count"),
+                        record.get("contig_n50_bp"),
+                        record.get("scaffold_n50_bp"),
+                        record.get("gc_percent"),
                         busco.get("lineage"),
                     ]
-                ) + " |"
+                )
+                + " |"
             )
     else:
         lines.append("- No useful related-species primary assemblies were found.")
     excluded = pack.get("excluded_alternate_haplotype_records") or []
     if excluded:
-        lines.append(f"- Excluded alternate-haplotype records: {', '.join(str(record.get('accession')) for record in excluded)}")
+        excluded_accessions = ", ".join(
+            str(record.get("accession")) for record in excluded
+        )
+        lines.append(
+            f"- Excluded alternate-haplotype records: {excluded_accessions}"
+        )
     summary = pack.get("computed_summary") or {}
     if summary:
-        lines.extend(["", "Computed summary:", "", "```json", json.dumps(summary, ensure_ascii=False, sort_keys=True), "```"])
+        lines.extend(
+            [
+                "",
+                "Computed summary:",
+                "",
+                "```json",
+                json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                "```",
+            ]
+        )
     for note in pack.get("notes") or []:
         lines.append(f"- Reference note: {note}")
 
@@ -1700,8 +1701,9 @@ def _write_derived_report_text(
     return str(path)
 
 
-
-def _candidate_parameters(candidate: dict[str, Any], assembly_out: dict[str, Any]) -> dict[str, Any]:
+def _candidate_parameters(
+    candidate: dict[str, Any], assembly_out: dict[str, Any]
+) -> dict[str, Any]:
     bundle_ref = candidate.get("bundle_ref")
     if bundle_ref and Path(str(bundle_ref)).exists():
         bundle = json.loads(Path(str(bundle_ref)).read_text(encoding="utf-8"))
@@ -1713,15 +1715,30 @@ def _candidate_parameters(candidate: dict[str, Any], assembly_out: dict[str, Any
         if params:
             return params
     if candidate.get("source") == "assembly_stage":
+        read_type_prior = assembly_out.get("read_type_prior") or {}
+        execution_contract = assembly_out.get(ASSEMBLY_EXECUTION_CONTRACT_KEY)
+        threads = None
+        if execution_contract is not None:
+            validated_contract = AssemblyExecutionContract.model_validate(
+                execution_contract
+            )
+            if validated_contract.threads is not None:
+                threads = validated_contract.threads.value
         return {
-            "read_profile": assembly_out.get("flye_parameters", {}).get("read_type"),
-            "estimated_genome_size": assembly_out.get("flye_parameters", {}).get("estimated_genome_size"),
-            "threads": assembly_out.get("flye_parameters", {}).get("threads"),
+            "read_profile": (
+                read_type_prior.get("flye")
+                if isinstance(read_type_prior, dict)
+                else None
+            ),
+            "estimated_genome_size": assembly_out.get("genome_size_prior"),
+            "threads": threads,
         }
     return {}
 
 
-def _candidate_metrics(candidate_id: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+def _candidate_metrics(
+    candidate_id: str, signals: list[dict[str, Any]]
+) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for signal in signals:
         if signal.get("candidate_id") != candidate_id:
@@ -1748,7 +1765,9 @@ def fail_assembly_review(state: TopLevelState) -> dict:
     return {
         "current_stage": "assembly_review",
         "supervision_state": "failed_terminal",
-        "last_error": ar_out.get("reason") or assembly_out.get("reason") or default_reason,
+        "last_error": ar_out.get("reason")
+        or assembly_out.get("reason")
+        or default_reason,
     }
 
 
@@ -1813,7 +1832,9 @@ def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
     return True
 
 
-def _available_review_inputs(state: TopLevelState) -> tuple[bool, bool, set[str], set[str]]:
+def _available_review_inputs(
+    state: TopLevelState,
+) -> tuple[bool, bool, set[str], set[str]]:
     available_inputs: set[str] = set()
     missing_inputs: set[str] = set()
     registry_ref = state.get("asset_registry_ref")

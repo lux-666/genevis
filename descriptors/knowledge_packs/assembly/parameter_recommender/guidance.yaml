@@ -1,6 +1,6 @@
 guidance:
   - guidance_id: hifiasm.connectivity.low_coverage.v1
-    methods: [hifiasm, hifiasm_ont]
+    methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:
       - max_overlaps_per_read
       - high_freq_kmer_drop
@@ -19,7 +19,7 @@ guidance:
       - Read length and quality determine whether nominal coverage contributes useful overlaps.
 
   - guidance_id: hifiasm.purging.heterozygosity.v1
-    methods: [hifiasm, hifiasm_ont]
+    methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:
       - purge_level
       - purge_similarity
@@ -36,7 +36,7 @@ guidance:
       - Initial recommendations should remain conservative when no assembly review is available.
 
   - guidance_id: hifiasm.repeats.graph_handling.v1
-    methods: [hifiasm, hifiasm_ont]
+    methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:
       - kmer_length
       - high_freq_kmer_drop
@@ -56,7 +56,7 @@ guidance:
       - Aggressive filtering or cleaning can also remove valid low-support sequence.
 
   - guidance_id: hifiasm.retry.over_purging.v1
-    methods: [hifiasm, hifiasm_ont]
+    methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:
       - purge_level
       - purge_similarity
@@ -75,7 +75,7 @@ guidance:
       - Diagnose the failure mode before attributing it to purging.
 
   - guidance_id: hifiasm.retry.under_purging.v1
-    methods: [hifiasm, hifiasm_ont]
+    methods: [assembly.candidate.hifiasm, assembly.candidate.hifiasm_ont]
     parameters:
       - purge_level
       - purge_similarity

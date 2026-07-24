@@ -8,12 +8,21 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.storage.ledger import Ledger
+from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError, timeout_terminal_update
+from app.domains.assembly.constants import (
+    ASSEMBLY_AUTO_CANDIDATES,
+    ASSEMBLY_CANDIDATES,
+    FLYE_METHOD,
+    GENOME_SIZE_REQUIRED,
+    HIFIASM_METHOD,
+    HIFIASM_ONT_METHOD,
+    NEXTDENOVO_METHOD,
+)
 from app.domains.assembly.selection import (
-    AssemblySelection,
     PLATFORM_TO_SHARED_READ_TYPE,
     SHARED_TO_METHOD_READ_TYPE,
+    AssemblySelection,
     compatible_methods,
     default_primary_method,
     is_method_read_type_compatible,
@@ -21,15 +30,15 @@ from app.domains.assembly.selection import (
     normalize_method_id,
     normalize_read_type,
     resolve_read_type,
+)
+from app.domains.assembly.selection import (
     route_from_read_type as _route_from_read_type,
 )
 from app.domains.genome_size import resolve_genome_size
-from app.storage.artifacts import publish_artifact_record
 from app.execution.parameter_attempts import (
     ParameterAttemptStateError,
     current_parameter_attempt,
 )
-from app.workflow import next_stage_name
 from app.knowledge.packs import load_knowledge_pack
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
@@ -48,21 +57,17 @@ from app.schemas.artifacts import (
     AssemblyInputProfile,
     AssemblyRouteDecision,
 )
-from app.configuration import load_descriptor_registry
 from app.schemas.plan import AssemblyCandidatePlan
 from app.schemas.state import TopLevelState
-from app.domains.assembly.constants import (
-    ASSEMBLY_AUTO_CANDIDATES,
-    ASSEMBLY_CANDIDATES,
-    FLYE_METHOD,
-    GENOME_SIZE_REQUIRED,
-    HIFIASM_METHOD,
-    HIFIASM_ONT_METHOD,
-    NEXTDENOVO_METHOD,
-)
 from app.stages.assembly.decision import (
     AssemblyDecisionRequest,
     make_assembly_decision,
+)
+from app.stages.assembly.method_application.support import (
+    ASSEMBLY_EXECUTION_CONTRACT_KEY,
+    AssemblyExecutionContractParameterError,
+    build_assembly_execution_contract,
+    load_assembly_execution_contract,
 )
 from app.stages.base import (
     absolute_data_dir,
@@ -76,6 +81,9 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import HIC_READS_SPEC, LONG_READS_SPEC
+from app.storage.artifacts import publish_artifact_record
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 ROUTE_DECISION_MAP = {
     "select_cyclone": "cyclone",
@@ -99,7 +107,9 @@ def enter_assembly(state: TopLevelState) -> dict:
 def resolve_extended_inputs(state: TopLevelState) -> dict:
     """Resolve long-read, HiFi, Hi-C, platform, and route hints for assembly."""
     assembly_out = stage_output(state, "assembly")
-    explicit_long_ref = assembly_out.get("hifi_reads_ref") or assembly_out.get("ont_reads_ref")
+    explicit_long_ref = assembly_out.get("hifi_reads_ref") or assembly_out.get(
+        "ont_reads_ref"
+    )
     long_reads = resolve_stage_resource(
         state,
         resource_spec=LONG_READS_SPEC,
@@ -142,10 +152,15 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     has_explicit_hifi_ref = bool(assembly_out.get("hifi_reads_ref"))
     if not hifi_reads_ref and long_read_platform == "pacbio_hifi":
         hifi_reads_ref = primary_ref
-    ont_reads_ref = non_hifi_asset_refs[0] if non_hifi_asset_refs else (
-        None
-        if hifi_reads_ref and (has_explicit_hifi_ref or long_read_platform == "pacbio_hifi")
-        else primary_ref
+    ont_reads_ref = (
+        non_hifi_asset_refs[0]
+        if non_hifi_asset_refs
+        else (
+            None
+            if hifi_reads_ref
+            and (has_explicit_hifi_ref or long_read_platform == "pacbio_hifi")
+            else primary_ref
+        )
     )
     hic_reads = resolve_stage_resource(state, resource_spec=HIC_READS_SPEC)
     hic_reads_ref = assembly_out.get("hic_reads_ref") or hic_reads.path
@@ -153,7 +168,10 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     configured_route = assembly_out.get("assembly_route") or "auto"
     existing_selection = _selection_from_output(assembly_out)
     hinted_read_type = resolve_read_type(
-        ("assembly_selection.read_type", existing_selection.read_type if existing_selection else None),
+        (
+            "assembly_selection.read_type",
+            existing_selection.read_type if existing_selection else None,
+        ),
         ("assembly_route", configured_route if configured_route != "auto" else None),
         ("shared_parameters.read_type", _shared_parameters(state).get("read_type")),
         ("hifi_reads_ref", "pacbio_hifi" if hifi_reads_ref else None),
@@ -164,16 +182,26 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
         primary_long_reads_ref = hifi_reads_ref or primary_ref
     else:
         primary_long_reads_ref = ont_reads_ref or hifi_reads_ref
-    if hinted_read_type == "pacbio_hifi" and primary_long_reads_ref and not hifi_reads_ref:
+    if (
+        hinted_read_type == "pacbio_hifi"
+        and primary_long_reads_ref
+        and not hifi_reads_ref
+    ):
         hifi_reads_ref = primary_long_reads_ref
     if not primary_long_reads_ref:
         return _fail_update(state, "assembly requires long reads")
 
-    primary_platform = "pacbio_hifi" if hinted_read_type == "pacbio_hifi" or (hifi_reads_ref and not ont_reads_ref) else long_read_platform
+    primary_platform = (
+        "pacbio_hifi"
+        if hinted_read_type == "pacbio_hifi" or (hifi_reads_ref and not ont_reads_ref)
+        else long_read_platform
+    )
     input_source = long_reads.source
 
     resolved_genome_size = resolve_genome_size(state)
-    genome_size_prior = resolved_genome_size["value_bp"] if resolved_genome_size else None
+    genome_size_prior = (
+        resolved_genome_size["value_bp"] if resolved_genome_size else None
+    )
     read_type_prior = _read_type_prior(state)
     target_level = assembly_out.get("target_level") or "draft"
     explicit_route = configured_route if configured_route in ROUTE_VALUES else None
@@ -183,9 +211,7 @@ def resolve_extended_inputs(state: TopLevelState) -> dict:
     elif hinted_read_type != "pacbio_hifi" and non_hifi_asset_refs:
         selected_input_refs = non_hifi_asset_refs
     input_ref: str | list[str] = (
-        selected_input_refs[0]
-        if len(selected_input_refs) == 1
-        else selected_input_refs
+        selected_input_refs[0] if len(selected_input_refs) == 1 else selected_input_refs
     )
     input_type = (
         "long_reads.fofn"
@@ -303,7 +329,9 @@ def infer_input_profile(state: TopLevelState) -> dict:
         state,
         assembly_out,
         recommended_route=recommended_route,
-        reasoning=str(recommendation.get("reasoning") or "route selector recommendation"),
+        reasoning=str(
+            recommendation.get("reasoning") or "route selector recommendation"
+        ),
         uncertainty_notes=list(recommendation.get("uncertainty_notes") or []),
         profile_source="llm_inferred",
     )
@@ -321,7 +349,11 @@ def infer_input_profile(state: TopLevelState) -> dict:
             "status": "profile_ready",
             "input_profile": profile.model_dump(mode="json"),
             "input_profile_ref": profile_ref,
-            "recommended_assembly_selection": recommended_selection.model_dump(mode="json") if recommended_selection else None,
+            "recommended_assembly_selection": recommended_selection.model_dump(
+                mode="json"
+            )
+            if recommended_selection
+            else None,
         },
     )
 
@@ -340,10 +372,17 @@ def select_route(state: TopLevelState) -> dict:
         return _block_for_route_review(state, "assembly_route_insufficient_data")
 
     # All LLM recommendations require human gate (unless max_blocked_seconds configured)
-    return _block_for_route_review(state, "assembly_selection_human_confirmation_required")
+    return _block_for_route_review(
+        state, "assembly_selection_human_confirmation_required"
+    )
 
 
-def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, _selection_source: str = "human") -> dict[str, Any]:
+def apply_route_decision(
+    state: TopLevelState,
+    request: ResumeReviewRequest,
+    *,
+    _selection_source: str = "human",
+) -> dict[str, Any]:
     """Apply a human or timeout assembly-selection gate decision.
 
     Args:
@@ -387,18 +426,28 @@ def apply_route_decision(state: TopLevelState, request: ResumeReviewRequest, *, 
 
     selected_route = ROUTE_DECISION_MAP.get(request.decision)
     if selected_route not in ROUTE_VALUES:
-        raise ResumeValidationError(f"unsupported assembly selection decision: {request.decision}")
+        raise ResumeValidationError(
+            f"unsupported assembly selection decision: {request.decision}"
+        )
 
     assembly_out = stage_output(state, "assembly")
-    read_type, read_type_source = _requested_read_type(request, assembly_out, selected_route)
+    read_type, read_type_source = _requested_read_type(
+        request, assembly_out, selected_route
+    )
     method = _requested_method(request, assembly_out, read_type)
     try:
         selection = AssemblySelection(
             read_type=read_type,
             primary_method=method,
             source="timeout" if _selection_source == "timeout" else "human",
-            rationale="; ".join(request.notes) if request.notes else f"{_selection_source} selected {selected_route} read type",
-            metadata={"resume_decision": request.decision, **request.metadata, "read_type_source": read_type_source},
+            rationale="; ".join(request.notes)
+            if request.notes
+            else f"{_selection_source} selected {selected_route} read type",
+            metadata={
+                "resume_decision": request.decision,
+                **request.metadata,
+                "read_type_source": read_type_source,
+            },
         )
     except ValueError as exc:
         raise ResumeValidationError(str(exc)) from exc
@@ -465,14 +514,22 @@ def _route_review_binding(
     request: ResumeReviewRequest,
 ) -> tuple[str, str]:
     active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("assembly route decision is missing review request binding")
+        raise ResumeValidationError(
+            "assembly route decision is missing review request binding"
+        )
     return str(review_request_id), str(review_request_hash)
 
 
-def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+def apply_selection_timeout(
+    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
+) -> dict[str, Any]:
     """Commit the current assembly recommendation after a configured timeout."""
     active_interrupt = state.get("active_interrupt") or {}
     try:
@@ -491,14 +548,24 @@ def apply_selection_timeout(state: TopLevelState, request: ResumeReviewRequest, 
         route = _route_from_read_type(str(selection_payload.get("read_type")))
     except ValueError:
         return _timeout_stop_update(state, request, timeout)
-    decision = {"hifi": "select_hifi", "ont": "select_ont", "cyclone": "select_cyclone"}.get(route)
+    decision = {
+        "hifi": "select_hifi",
+        "ont": "select_ont",
+        "cyclone": "select_cyclone",
+    }.get(route)
     if not decision:
         return _timeout_stop_update(state, request, timeout)
     timeout_request = request.model_copy(
         update={
             "decision": decision,
             "method_name": selection_payload.get("primary_method"),
-            "notes": [*request.notes, f"timeout committed recommended assembly selection: {selection_payload.get('primary_method')}"],
+            "notes": [
+                *request.notes,
+                (
+                    "timeout committed recommended assembly selection: "
+                    f"{selection_payload.get('primary_method')}"
+                ),
+            ],
             "metadata": {
                 **request.metadata,
                 "read_type": selection_payload.get("read_type"),
@@ -518,7 +585,9 @@ def build_assembly_candidate_set(state: TopLevelState) -> dict:
 
     selection = _selection_from_output(assembly_out)
     if selection is None:
-        return _fail_update(state, "assembly_selection is required before candidate planning")
+        return _fail_update(
+            state, "assembly_selection is required before candidate planning"
+        )
 
     registry = load_descriptor_registry()
     planned_methods = _planned_candidate_methods(selection)
@@ -588,9 +657,13 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
 
     if requested_primary:
         if requested_primary not in ASSEMBLY_CANDIDATES:
-            return _block_for_human(state, f"unknown_assembly_method: {requested_primary}")
+            return _block_for_human(
+                state, f"unknown_assembly_method: {requested_primary}"
+            )
         if requested_primary not in compatible:
-            reason = assembly_out.get("rejected_candidates", {}).get(requested_primary, "method_not_compatible")
+            reason = assembly_out.get("rejected_candidates", {}).get(
+                requested_primary, "method_not_compatible"
+            )
             return _block_for_human(state, reason)
         primary = requested_primary
     elif compatible:
@@ -601,11 +674,15 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
     fallback = None
     if requested_fallback:
         if requested_fallback not in ASSEMBLY_CANDIDATES:
-            return _block_for_human(state, f"unknown_assembly_method: {requested_fallback}")
+            return _block_for_human(
+                state, f"unknown_assembly_method: {requested_fallback}"
+            )
         if requested_fallback not in compatible:
             return _block_for_human(
                 state,
-                assembly_out.get("rejected_candidates", {}).get(requested_fallback, "method_not_compatible"),
+                assembly_out.get("rejected_candidates", {}).get(
+                    requested_fallback, "method_not_compatible"
+                ),
             )
         if requested_fallback != primary:
             fallback = requested_fallback
@@ -628,7 +705,11 @@ def select_primary_and_fallback(state: TopLevelState) -> dict:
 def plan_candidate_attempts(state: TopLevelState) -> dict:
     """Write candidate bundles and select the optional local Flye route."""
     assembly_out = stage_output(state, "assembly")
-    if assembly_out.get("status") not in {"selected", "parameters_recommended", "parameters_approved"}:
+    if assembly_out.get("status") not in {
+        "selected",
+        "parameters_recommended",
+        "parameters_approved",
+    }:
         return {}
 
     data_dir = absolute_data_dir(state)
@@ -657,7 +738,10 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
     )
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
-    local_flye = assembly_out.get("execution_mode") == "local" and assembly_out.get("primary_method") == FLYE_METHOD
+    local_flye = (
+        assembly_out.get("execution_mode") == "local"
+        and assembly_out.get("primary_method") == FLYE_METHOD
+    )
     local_nextdenovo = (
         assembly_out.get("execution_mode") == "local"
         and assembly_out.get("primary_method") == NEXTDENOVO_METHOD
@@ -670,27 +754,69 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         assembly_out.get("execution_mode") == "local"
         and assembly_out.get("primary_method") == HIFIASM_ONT_METHOD
     )
+    execution_contract = None
+    if local_flye or local_nextdenovo or local_hifiasm or local_hifiasm_ont:
+        method_id = str(assembly_out["primary_method"])
+        try:
+            if ASSEMBLY_EXECUTION_CONTRACT_KEY in assembly_out:
+                execution_contract = load_assembly_execution_contract(
+                    assembly_out,
+                    method_id=method_id,
+                )
+            else:
+                execution_contract = build_assembly_execution_contract(
+                    assembly_out,
+                    method_id=method_id,
+                )
+        except AssemblyExecutionContractParameterError as exc:
+            return update_stage_output(state, "assembly", exc.stage_update())
+        except ValueError as exc:
+            return _fail_update(
+                state,
+                f"Assembly execution contract is invalid: {exc}",
+            )
     candidate_refs: list[str] = []
     selected_plans = []
     selection = _selection_from_output(assembly_out)
     for method_name in assembly_out["selected_methods"]:
         short_name = method_name.rsplit(".", 1)[-1]
-        fasta_path = stage_artifacts_dir(
-            state,
-            "assembly",
-            "attempts",
-            attempt_scope,
-            "outputs",
-            short_name,
-        ) / "draft_assembly.fasta"
+        fasta_path = (
+            stage_artifacts_dir(
+                state,
+                "assembly",
+                "attempts",
+                attempt_scope,
+                "outputs",
+                short_name,
+            )
+            / "draft_assembly.fasta"
+        )
         if method_name == NEXTDENOVO_METHOD:
-            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "nextdenovo") / "run.cfg"
+            log_path = (
+                stage_work_dir(
+                    state, "assembly", "attempts", attempt_scope, "nextdenovo"
+                )
+                / "run.cfg"
+            )
         elif method_name == HIFIASM_METHOD:
-            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm") / "run_hifiasm.sh"
+            log_path = (
+                stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm")
+                / "run_hifiasm.sh"
+            )
         elif method_name == HIFIASM_ONT_METHOD:
-            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, "hifiasm_ont") / "run_hifiasm_ont.sh"
+            log_path = (
+                stage_work_dir(
+                    state, "assembly", "attempts", attempt_scope, "hifiasm_ont"
+                )
+                / "run_hifiasm_ont.sh"
+            )
         else:
-            log_path = stage_work_dir(state, "assembly", "attempts", attempt_scope, short_name, "flye_out") / "flye.log"
+            log_path = (
+                stage_work_dir(
+                    state, "assembly", "attempts", attempt_scope, short_name, "flye_out"
+                )
+                / "flye.log"
+            )
         bundle_path = candidate_dir / f"{short_name}_candidate.planned.json"
         execution_enabled = (
             (local_flye and method_name == FLYE_METHOD)
@@ -710,13 +836,21 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             expected_outputs={"draft_assembly_fasta": str(fasta_path)},
             logs={"primary_log": str(log_path)},
             metadata={
-                "genome_survey_result_ref": assembly_out.get("genome_survey_result_ref"),
+                "genome_survey_result_ref": assembly_out.get(
+                    "genome_survey_result_ref"
+                ),
                 "read_type_prior": assembly_out.get("read_type_prior"),
-                "assembly_selection": selection.model_dump(mode="json") if selection else None,
-                "method_read_type": method_read_type(method_name, selection.read_type) if selection else None,
+                "assembly_selection": selection.model_dump(mode="json")
+                if selection
+                else None,
+                "method_read_type": method_read_type(method_name, selection.read_type)
+                if selection
+                else None,
                 "execution_enabled": execution_enabled,
                 "method_graph_requested": method_graph_requested,
-                "draft_assembly_ref_status": "pending_execution" if execution_enabled else "planned_path_not_materialized",
+                "draft_assembly_ref_status": "pending_execution"
+                if execution_enabled
+                else "planned_path_not_materialized",
             },
         )
         temporary = stage_work_dir(
@@ -735,7 +869,10 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             stage="assembly",
             method_name=method_name,
             artifact_type=ASSEMBLY_CANDIDATE_BUNDLE,
-            metadata={"candidate_id": bundle.candidate_id, "execution_enabled": execution_enabled},
+            metadata={
+                "candidate_id": bundle.candidate_id,
+                "execution_enabled": execution_enabled,
+            },
         )
         try:
             published = publish_artifact_record(
@@ -752,7 +889,9 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
             AssemblyCandidatePlan(
                 method_name=method_name,
                 status="selected",
-                role="primary" if method_name == assembly_out["primary_method"] else "fallback",
+                role="primary"
+                if method_name == assembly_out["primary_method"]
+                else "fallback",
                 required_inputs=["long_reads"],
                 optional_inputs=["genome_survey_result", "genome_size_prior"],
                 requires_genome_size=method_name in GENOME_SIZE_REQUIRED,
@@ -775,6 +914,15 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
         "assembly",
         {
             "status": status,
+            **(
+                {
+                    ASSEMBLY_EXECUTION_CONTRACT_KEY: (
+                        execution_contract.model_dump(mode="json")
+                    )
+                }
+                if execution_contract is not None
+                else {}
+            ),
             "selected_candidate_refs": candidate_refs,
             "candidate_artifact_refs": candidate_refs,
             "selected_candidate_plans": selected_plans,
@@ -784,25 +932,33 @@ def plan_candidate_attempts(state: TopLevelState) -> dict:
                     "name": "flye_assembly",
                     "status": "planned" if local_flye else "skipped",
                     "method_name": FLYE_METHOD,
-                    "skip_reason": None if local_flye else "local_execution_not_enabled",
+                    "skip_reason": None
+                    if local_flye
+                    else "local_execution_not_enabled",
                 },
                 "nextdenovo_assembly": {
                     "name": "nextdenovo_assembly",
                     "status": "planned" if local_nextdenovo else "skipped",
                     "method_name": NEXTDENOVO_METHOD,
-                    "skip_reason": None if local_nextdenovo else "local_execution_not_enabled",
+                    "skip_reason": None
+                    if local_nextdenovo
+                    else "local_execution_not_enabled",
                 },
                 "hifiasm_assembly": {
                     "name": "hifiasm_assembly",
                     "status": "planned" if local_hifiasm else "skipped",
                     "method_name": HIFIASM_METHOD,
-                    "skip_reason": None if local_hifiasm else "local_execution_not_enabled",
+                    "skip_reason": None
+                    if local_hifiasm
+                    else "local_execution_not_enabled",
                 },
                 "hifiasm_ont_assembly": {
                     "name": "hifiasm_ont_assembly",
                     "status": "planned" if local_hifiasm_ont else "skipped",
                     "method_name": HIFIASM_ONT_METHOD,
-                    "skip_reason": None if local_hifiasm_ont else "local_execution_not_enabled",
+                    "skip_reason": None
+                    if local_hifiasm_ont
+                    else "local_execution_not_enabled",
                 },
             },
         },
@@ -820,6 +976,7 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "candidate_plans",
         "draft_assembly_ref",
         "executed_candidate_refs",
+        "execution_mode",
         "fallback_method",
         "genome_size_prior",
         "genome_survey_result_ref",
@@ -841,9 +998,13 @@ def commit_assembly_plan(state: TopLevelState) -> dict:
         "status",
         "retry_counts",
         "substeps",
+        ASSEMBLY_EXECUTION_CONTRACT_KEY,
     ]
     outputs = dict(state.get("stage_outputs") or {})
-    outputs["assembly"] = {key: assembly_out[key] for key in committed_keys if key in assembly_out}
+    committed = {
+        key: assembly_out[key] for key in committed_keys if key in assembly_out
+    }
+    outputs["assembly"] = committed
     trace = append_route_trace(state, "assembly_stage")
     update = {
         "current_stage": next_stage_name("assembly"),
@@ -933,20 +1094,28 @@ def _block_for_human(state: TopLevelState, reason: str) -> dict:
 def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
     assembly_out = stage_output(state, "assembly")
     profile = dict(assembly_out.get("input_profile") or {})
-    recommended_selection = dict(assembly_out.get("recommended_assembly_selection") or {})
+    recommended_selection = dict(
+        assembly_out.get("recommended_assembly_selection") or {}
+    )
 
     # Construct ReviewPayload for policy evaluation
     payload = ReviewPayload(
         stage="assembly",
         gate_id="route_selection",
         reason=reason,
-        decisions_allowed=["select_cyclone", "select_ont", "select_hifi", "stop_human_review"],
+        decisions_allowed=[
+            "select_cyclone",
+            "select_ont",
+            "select_hifi",
+            "stop_human_review",
+        ],
         signals=[],
         notes=[
             f"Recommended read_type: {recommended_selection.get('read_type')}",
             f"Recommended method: {recommended_selection.get('primary_method')}",
             f"Reasoning: {profile.get('recommendation_reasoning')}",
-        ] + profile.get("uncertainty_notes", []),
+        ]
+        + profile.get("uncertainty_notes", []),
         auto_decidable=False,
     )
 
@@ -960,9 +1129,27 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
         "recommendation_reasoning": profile.get("recommendation_reasoning"),
         "uncertainty_notes": profile.get("uncertainty_notes", []),
         "available_routes": _available_routes(assembly_out),
-        "available_read_types": sorted({route for route in ["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]}),
+        "available_read_types": sorted(
+            {
+                route
+                for route in [
+                    "cyclone",
+                    "ont_raw",
+                    "ont_hq",
+                    "pacbio_clr",
+                    "pacbio_hifi",
+                ]
+            }
+        ),
         "compatible_methods": {
-            read_type: compatible_methods(read_type) for read_type in ["cyclone", "ont_raw", "ont_hq", "pacbio_clr", "pacbio_hifi"]
+            read_type: compatible_methods(read_type)
+            for read_type in [
+                "cyclone",
+                "ont_raw",
+                "ont_hq",
+                "pacbio_clr",
+                "pacbio_hifi",
+            ]
         },
         "review_policy": assembly_out.get("review_policy") or {"mode": outcome.mode},
         "review_policy_outcome": outcome.model_dump(mode="json"),
@@ -982,7 +1169,9 @@ def _block_for_route_review(state: TopLevelState, reason: str) -> dict:
         reason=reason,
         candidates=payload.candidates,
         signals=[signal.model_dump(mode="json") for signal in payload.signals],
-        review_request_artifact_ref=persisted_request.request_ref.model_dump(mode="json"),
+        review_request_artifact_ref=persisted_request.request_ref.model_dump(
+            mode="json"
+        ),
         auto_decidable=False,
         policy_mode=outcome.mode,
         pending_human_confirmation=True,
@@ -1027,7 +1216,9 @@ def _selection_from_output(assembly_out: dict[str, Any]) -> AssemblySelection | 
     return None
 
 
-def _selection_from_route(route: str | None, *, source: str, rationale: str) -> AssemblySelection | None:
+def _selection_from_route(
+    route: str | None, *, source: str, rationale: str
+) -> AssemblySelection | None:
     read_type = normalize_read_type(route)
     if not read_type:
         return None
@@ -1040,7 +1231,9 @@ def _selection_from_route(route: str | None, *, source: str, rationale: str) -> 
     )
 
 
-def _requested_read_type(request: ResumeReviewRequest, assembly_out: dict[str, Any], selected_route: str) -> tuple[str, str]:
+def _requested_read_type(
+    request: ResumeReviewRequest, assembly_out: dict[str, Any], selected_route: str
+) -> tuple[str, str]:
     route_read_type = normalize_read_type(selected_route)
     if route_read_type is None:
         raise ResumeValidationError(f"unsupported assembly route: {selected_route}")
@@ -1056,13 +1249,17 @@ def _requested_read_type(request: ResumeReviewRequest, assembly_out: dict[str, A
             raise ResumeValidationError(f"unsupported assembly {source}: {raw_value!r}")
         if _route_from_read_type(read_type) != selected_route:
             raise ResumeValidationError(
-                f"assembly selection {request.decision!r} maps to route {selected_route!r}, "
+                f"assembly selection {request.decision!r} maps to route "
+                f"{selected_route!r}, "
                 f"but {source}={raw_value!r} normalizes to read_type {read_type!r}"
             )
         return read_type, source
 
     prior_read_type = resolve_read_type(
-        ("read_type_prior", _normalized_read_type_from_prior(assembly_out.get("read_type_prior"))),
+        (
+            "read_type_prior",
+            _normalized_read_type_from_prior(assembly_out.get("read_type_prior")),
+        ),
         context="assembly.requested_read_type",
     )
     if prior_read_type and _route_from_read_type(prior_read_type) == selected_route:
@@ -1070,7 +1267,9 @@ def _requested_read_type(request: ResumeReviewRequest, assembly_out: dict[str, A
     return route_read_type, "selected_route"
 
 
-def _requested_method(request: ResumeReviewRequest, assembly_out: dict[str, Any], read_type: str) -> str:
+def _requested_method(
+    request: ResumeReviewRequest, assembly_out: dict[str, Any], read_type: str
+) -> str:
     try:
         if request.method_name:
             return normalize_method_id(request.method_name)
@@ -1086,7 +1285,9 @@ def _requested_method(request: ResumeReviewRequest, assembly_out: dict[str, Any]
         raise ResumeValidationError(str(exc)) from exc
 
 
-def _timeout_stop_update(state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]) -> dict[str, Any]:
+def _timeout_stop_update(
+    state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
+) -> dict[str, Any]:
     return timeout_terminal_update(state, request, timeout)
 
 
@@ -1124,7 +1325,9 @@ def _write_assembly_json_artifact(
         f".{path.name}.{uuid4().hex}.tmp",
     )
     temporary.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     artifact = ArtifactMeta.from_file(
         temporary,
         stage="assembly",
@@ -1189,7 +1392,8 @@ def _recommend_route_with_decision_boundary(
             kind="route_selection",
             session_id=state["session_id"],
             prompt_payload=prompt_payload,
-            system_prompt="You are an expert genome assembly route selector.\n\n" + str(ctx.get("skill_text") or ""),
+            system_prompt="You are an expert genome assembly route selector.\n\n"
+            + str(ctx.get("skill_text") or ""),
             allowed_actions=list(ctx.get("allowed_actions") or []),
         )
     )
@@ -1197,13 +1401,18 @@ def _recommend_route_with_decision_boundary(
         payload = decision.parsed
         return {
             "recommended_route": payload.get("recommended_route"),
-            "reasoning": str(payload.get("reasoning", payload.get("recommendation_reasoning", ""))),
+            "reasoning": str(
+                payload.get("reasoning", payload.get("recommendation_reasoning", ""))
+            ),
             "uncertainty_notes": list(payload.get("uncertainty_notes") or []),
             "source": "llm",
         }
     return {
         "recommended_route": "insufficient_data",
-        "reasoning": "route selector LLM unavailable; route selection requires human/data review",
+        "reasoning": (
+            "route selector LLM unavailable; route selection requires "
+            "human/data review"
+        ),
         "source": "llm_unavailable",
         "uncertainty_notes": [
             f"route selector LLM unavailable: {decision.error or 'invalid decision'}",
@@ -1239,10 +1448,6 @@ def _route_selector_payload(
         },
     }
 
-def _genome_size_prior(state: TopLevelState) -> int | None:
-    resolved = resolve_genome_size(state)
-    return resolved["value_bp"] if resolved else None
-
 
 def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
     assembly_out = stage_output(state, "assembly")
@@ -1253,10 +1458,6 @@ def _read_type_prior(state: TopLevelState) -> dict[str, str] | None:
             "shared_read_type": selection.read_type,
             "source": "assembly_selection",
         }
-    params = dict(assembly_out.get("flye_parameters") or {})
-    if params.get("read_type"):
-        return {"flye": str(params["read_type"]), "source": "flye_parameters"}
-
     shared = _shared_parameters(state)
     shared_read_type = shared.get("read_type")
     if shared_read_type in SHARED_TO_METHOD_READ_TYPE:
@@ -1284,7 +1485,10 @@ def _normalized_read_type_prior(state: TopLevelState) -> str | None:
 def _normalized_read_type_from_prior(prior: Any) -> str | None:
     if not isinstance(prior, dict):
         return None
-    return resolve_read_type(("read_type_prior.shared_read_type", prior.get("shared_read_type")), context="assembly.read_type_prior")
+    return resolve_read_type(
+        ("read_type_prior.shared_read_type", prior.get("shared_read_type")),
+        context="assembly.read_type_prior",
+    )
 
 
 def _shared_parameters(state: TopLevelState) -> dict[str, Any]:
@@ -1306,7 +1510,10 @@ def _long_read_platform(state: TopLevelState) -> str | None:
         return None
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     for asset in registry.get("assets", []):
-        if asset.get("asset_type") in {"raw_long_reads", "clean_long_reads"} and asset.get("platform"):
+        if asset.get("asset_type") in {
+            "raw_long_reads",
+            "clean_long_reads",
+        } and asset.get("platform"):
             return str(asset["platform"])
     return None
 

@@ -11,8 +11,13 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.artifacts import ArtifactRef, ParameterAttemptStatus, ParameterAttemptTask
-
+from app.domains.assembly.selection import NormalizedReadType
+from app.schemas.artifacts import (
+    ArtifactRef,
+    ParameterAttemptStatus,
+    ParameterAttemptTask,
+)
+from app.schemas.shared_parameters import DnaMotif
 
 # ---------------------------------------------------------------------------
 # Quantity facts
@@ -94,7 +99,7 @@ class CanonicalSpeciesFacts(BaseModel):
     clade: str | None = None
     ploidy: QuantityFact | None = None
     expected_chromosome_count: QuantityFact | None = None
-    supplied_telomere_motif: str | None = None
+    supplied_telomere_motif: DnaMotif | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +110,7 @@ class CanonicalSpeciesFacts(BaseModel):
 class CanonicalReadFacts(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    read_type: str | None = None
+    read_type: NormalizedReadType | None = None
     read_count: QuantityFact | None = None
     total_bases: QuantityFact | None = None
     read_n50: QuantityFact | None = None
@@ -163,15 +168,19 @@ class CanonicalAssetPresence(BaseModel):
 
 
 class CanonicalRecommendationFacts(BaseModel):
-    """The sole common biological and quantitative facts model for parameter recommendation."""
+    """Common biological and quantitative facts for parameter recommendation."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     species: CanonicalSpeciesFacts = Field(default_factory=CanonicalSpeciesFacts)
     reads: CanonicalReadFacts = Field(default_factory=CanonicalReadFacts)
     genome: CanonicalGenomeFacts = Field(default_factory=CanonicalGenomeFacts)
-    sequencing: CanonicalSequencingFacts = Field(default_factory=CanonicalSequencingFacts)
-    asset_presence: CanonicalAssetPresence = Field(default_factory=CanonicalAssetPresence)
+    sequencing: CanonicalSequencingFacts = Field(
+        default_factory=CanonicalSequencingFacts
+    )
+    asset_presence: CanonicalAssetPresence = Field(
+        default_factory=CanonicalAssetPresence
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +240,10 @@ class AutoHiCReviewEvidence(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    decision: Literal[
-        "accept_candidate", "keep_prior_assembly", "request_parameter_retry"
-    ] | None = None
+    decision: (
+        Literal["accept_candidate", "keep_prior_assembly", "request_parameter_retry"]
+        | None
+    ) = None
     notes: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("notes", mode="before")
@@ -285,15 +295,13 @@ class RecommendationRetryContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    trigger: ExecutionFailureTrigger | AutoHiCReviewEvidence | AssemblyReviewEvidence
+    trigger: ExecutionFailureTrigger | ReviewFailureTrigger
     attempt_history: tuple[ParameterAttemptEvidenceV3, ...]
 
 
 # ---------------------------------------------------------------------------
 # Stage-owned context models (discriminated union on ``stage``)
 # ---------------------------------------------------------------------------
-
-NormalizedReadType = Literal["hifi", "ont", "pacbio_raw", "nano_raw", "nano_hq"]
 
 
 class AssemblyRecommendationContext(BaseModel):
@@ -329,7 +337,7 @@ class T2TRecommendationContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     stage: Literal["t2t"]
-    resolved_telomere_motif: str = Field(min_length=2)
+    resolved_telomere_motif: DnaMotif
     motif_source: Literal["provided_species_fact", "llm_species_resolution"]
     ont_asset_count: int = Field(ge=1)
 
@@ -340,6 +348,20 @@ StageRecommendationContext = Annotated[
     | T2TRecommendationContext,
     Field(discriminator="stage"),
 ]
+
+
+def _contains_quantity_producer(value: Any, producer: str) -> bool:
+    if isinstance(value, dict):
+        origin = value.get("origin")
+        if isinstance(origin, dict) and origin.get("producer") == producer:
+            return True
+        return any(
+            _contains_quantity_producer(item, producer) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_quantity_producer(item, producer) for item in value)
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Dependency refs
@@ -368,6 +390,23 @@ class RecommendationDependencyRefs(BaseModel):
             raise ValueError("stage_input_refs must not exceed 1024 entries")
         return refs
 
+    @model_validator(mode="after")
+    def validate_canonical_refs(self) -> "RecommendationDependencyRefs":
+        stage_keys = [
+            (ref.artifact_type, ref.path_ref, ref.sha256)
+            for ref in self.stage_input_refs
+        ]
+        if len(stage_keys) != len(set(stage_keys)):
+            raise ValueError("stage_input_refs must not contain duplicates")
+
+        prior_keys = [
+            (ref.artifact_type, ref.path_ref, ref.sha256)
+            for ref in self.prior_attempt_manifest_refs
+        ]
+        if len(prior_keys) != len(set(prior_keys)):
+            raise ValueError("prior_attempt_manifest_refs must not contain duplicates")
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Input snapshot
@@ -379,7 +418,7 @@ class RecommendationInputSnapshotV3(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[3]
     snapshot_kind: Literal["parameter_recommendation"] = "parameter_recommendation"
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
@@ -408,8 +447,21 @@ class RecommendationInputSnapshotV3(BaseModel):
     @model_validator(mode="after")
     def validate_retry_refs_consistency(self) -> "RecommendationInputSnapshotV3":
         ctx = self.stage_context
-        retry = getattr(ctx, "retry", None)
+        retry = (
+            ctx.retry
+            if isinstance(
+                ctx,
+                (AssemblyRecommendationContext, AutoHiCRecommendationContext),
+            )
+            else None
+        )
         refs = self.dependency_refs
+        is_retry_task = self.task != "recommend_initial"
+        if is_retry_task != (retry is not None):
+            raise ValueError(
+                "retry recommendation tasks require typed retry context, and "
+                "initial tasks must not contain it"
+            )
         if retry is None:
             if refs.initial_input_snapshot_ref is not None:
                 raise ValueError(
@@ -429,6 +481,37 @@ class RecommendationInputSnapshotV3(BaseModel):
                 raise ValueError(
                     "prior_attempt_manifest_refs must have one entry per history item"
                 )
+        if self.stage_context.stage == "t2t":
+            if refs.motif_resolution_ref is None:
+                raise ValueError("T2T parameter snapshots require motif_resolution_ref")
+            has_exact_asset_refs = (
+                len(refs.stage_input_refs) == self.stage_context.ont_asset_count + 1
+            )
+            has_registry_manifest = len(refs.stage_input_refs) == 2 and any(
+                ref.artifact_type == "asset_registry" for ref in refs.stage_input_refs
+            )
+            if not has_exact_asset_refs and not has_registry_manifest:
+                raise ValueError(
+                    "T2T parameter snapshot stage_input_refs must contain the input "
+                    "assembly plus either every ONT asset or one asset_registry ref"
+                )
+        elif refs.motif_resolution_ref is not None:
+            raise ValueError(
+                "motif_resolution_ref is allowed only for T2T parameter snapshots"
+            )
+
+        facts_payload = self.facts.model_dump(mode="json", exclude_none=True)
+        required_fact_refs = {
+            "read_qc_summary": _contains_quantity_producer(facts_payload, "read_qc"),
+            "genome_survey_result": _contains_quantity_producer(
+                facts_payload, "genome_survey"
+            ),
+        }
+        for role, required in required_fact_refs.items():
+            if required and role not in refs.fact_source_refs:
+                raise ValueError(
+                    f"dependency_refs.{role} is required by canonical fact origins"
+                )
         return self
 
 
@@ -436,7 +519,9 @@ class RecommendationInputSnapshotV3(BaseModel):
 # T2T motif input snapshot
 # ---------------------------------------------------------------------------
 
-T2T_MOTIF_RESOLVER_ID = "t2t.telomere_motif_resolver"
+T2T_MOTIF_RESOLVER_ID: Literal["t2t.telomere_motif_resolver"] = (
+    "t2t.telomere_motif_resolver"
+)
 
 
 class T2TMotifInputSnapshotV3(BaseModel):
@@ -444,7 +529,7 @@ class T2TMotifInputSnapshotV3(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[3]
     snapshot_kind: Literal["t2t_motif_resolution"] = "t2t_motif_resolution"
     resolver_id: Literal["t2t.telomere_motif_resolver"] = T2T_MOTIF_RESOLVER_ID
     facts: CanonicalSpeciesFacts
@@ -464,9 +549,129 @@ class T2TMotifInputSnapshotV3(BaseModel):
                 "motif snapshot must not contain prior_attempt_manifest_refs"
             )
         if refs.motif_resolution_ref is not None:
-            raise ValueError(
-                "motif snapshot must not contain motif_resolution_ref"
-            )
+            raise ValueError("motif snapshot must not contain motif_resolution_ref")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Persisted recommendation-chain manifests
+# ---------------------------------------------------------------------------
+
+
+ParameterRecommendationStage = Literal["assembly", "hic_scaffolding", "t2t"]
+
+
+class ParameterRecommendationManifestRefsV3(BaseModel):
+    """Exact immutable records owned by one v3 recommendation manifest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_snapshot_ref: ArtifactRef
+    basis_snapshot_ref: ArtifactRef
+    model_request_ref: ArtifactRef
+    model_response_ref: ArtifactRef
+    response_parse_ref: ArtifactRef
+    recommendation_ref: ArtifactRef
+
+
+class ParameterRecommendationManifestV3(BaseModel):
+    """Strict root of one parameter-recommendation evidence chain."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[3]
+    recommendation_contract: Literal["parameter_recommendation_v1"]
+    stage: ParameterRecommendationStage
+    method_id: str = Field(min_length=1)
+    task: ParameterAttemptTask
+    recommendation_id: int = Field(ge=0)
+    status: Literal["response_invalid", "pending_approval"]
+    previous_attempt_id: int | None = Field(default=None, ge=0)
+    previous_attempt_manifest_ref: ArtifactRef | None = None
+    previous_attempt_seal_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    refs: ParameterRecommendationManifestRefsV3
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_attempt_chain_identity(self) -> "ParameterRecommendationManifestV3":
+        if self.task == "recommend_initial":
+            if self.recommendation_id != 0 or self.previous_attempt_id is not None:
+                raise ValueError(
+                    "initial recommendation manifest must be recommendation 0 "
+                    "without a predecessor"
+                )
+            if self.previous_attempt_manifest_ref is not None:
+                raise ValueError(
+                    "initial recommendation manifest cannot bind a predecessor manifest"
+                )
+            if self.previous_attempt_seal_hash is not None:
+                raise ValueError(
+                    "initial recommendation manifest cannot bind a predecessor seal"
+                )
+        else:
+            if (
+                self.recommendation_id == 0
+                or self.previous_attempt_id != self.recommendation_id - 1
+            ):
+                raise ValueError(
+                    "retry recommendation manifest must bind the immediately "
+                    "preceding attempt"
+                )
+            if self.previous_attempt_manifest_ref is None:
+                raise ValueError(
+                    "retry recommendation manifest requires predecessor manifest ref"
+                )
+            if self.previous_attempt_seal_hash is None:
+                raise ValueError(
+                    "retry recommendation manifest requires predecessor seal hash"
+                )
+        return self
+
+
+class T2TMotifResolutionManifestRefsV2(BaseModel):
+    """Conditional references for one T2T motif resolution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_snapshot_ref: ArtifactRef
+    resolution_ref: ArtifactRef
+    model_request_ref: ArtifactRef | None = None
+    model_response_ref: ArtifactRef | None = None
+    response_parse_ref: ArtifactRef | None = None
+
+
+class T2TMotifResolutionManifestV2(BaseModel):
+    """Strict schema-2 motif manifest with provided/LLM conditional refs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[2]
+    resolution_contract: Literal["t2t_telomere_motif_v1"]
+    resolver_id: Literal["t2t.telomere_motif_resolver"]
+    resolution_mode: Literal[
+        "provided_species_fact",
+        "llm_species_resolution",
+    ]
+    status: Literal["resolved", "unresolved", "invalid"]
+    refs: T2TMotifResolutionManifestRefsV2
+
+    @model_validator(mode="after")
+    def validate_conditional_model_refs(self) -> "T2TMotifResolutionManifestV2":
+        model_refs = (
+            self.refs.model_request_ref,
+            self.refs.model_response_ref,
+            self.refs.response_parse_ref,
+        )
+        if self.resolution_mode == "provided_species_fact":
+            if any(ref is not None for ref in model_refs):
+                raise ValueError("provided motif manifests must not contain model refs")
+            if self.status != "resolved":
+                raise ValueError("provided motif resolution must be resolved")
+        elif any(ref is None for ref in model_refs):
+            raise ValueError("LLM motif manifests require all model refs")
         return self
 
 

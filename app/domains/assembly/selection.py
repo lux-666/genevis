@@ -114,7 +114,6 @@ class AssemblySelection(BaseModel):
     source: AssemblySelectionSource
     rationale: str
     metadata: dict[str, Any] = Field(default_factory=dict)
-    parameter_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_methods(self) -> "AssemblySelection":
@@ -123,12 +122,16 @@ class AssemblySelection(BaseModel):
             self.fallback_method = normalize_method_id(self.fallback_method)
         if not is_method_read_type_compatible(self.primary_method, self.read_type):
             raise ValueError(
-                f"assembly_selection primary_method {self.primary_method!r} is incompatible "
+                "assembly_selection primary_method "
+                f"{self.primary_method!r} is incompatible "
                 f"with read_type {self.read_type!r}"
             )
-        if self.fallback_method and not is_method_read_type_compatible(self.fallback_method, self.read_type):
+        if self.fallback_method and not is_method_read_type_compatible(
+            self.fallback_method, self.read_type
+        ):
             raise ValueError(
-                f"assembly_selection fallback_method {self.fallback_method!r} is incompatible "
+                "assembly_selection fallback_method "
+                f"{self.fallback_method!r} is incompatible "
                 f"with read_type {self.read_type!r}"
             )
         return self
@@ -141,7 +144,9 @@ def normalize_method_id(value: str) -> str:
     return method
 
 
-def normalize_read_type(value: Any, *, platform: Any = None) -> NormalizedReadType | None:
+def normalize_read_type(
+    value: Any, *, platform: Any = None
+) -> NormalizedReadType | None:
     if value in SHARED_TO_METHOD_READ_TYPE:
         return value
     if value in ROUTE_TO_READ_TYPE:
@@ -188,7 +193,12 @@ def resolve_read_type_with_source(
         if read_type is None:
             logger.debug(
                 "ignored unrecognized assembly read_type candidate",
-                extra={"context": context, "source": source, "value": raw_value, "platform": platform},
+                extra={
+                    "context": context,
+                    "source": source,
+                    "value": raw_value,
+                    "platform": platform,
+                },
             )
             continue
         logger.debug(
@@ -219,7 +229,12 @@ def resolve_parameter_case_read_type(
         if read_type is None:
             logger.debug(
                 "ignored unrecognized assembly parameter case read_type candidate",
-                extra={"context": context, "source": source, "value": raw_value, "platform": platform},
+                extra={
+                    "context": context,
+                    "source": source,
+                    "value": raw_value,
+                    "platform": platform,
+                },
             )
             continue
         logger.debug(
@@ -246,14 +261,18 @@ def route_from_read_type(read_type: str) -> str:
     raise ValueError(f"unknown assembly read_type: {read_type}")
 
 
-def _read_type_candidate_parts(candidate: tuple[str, Any] | tuple[str, Any, Any]) -> tuple[str, Any, Any]:
+def _read_type_candidate_parts(
+    candidate: tuple[str, Any] | tuple[str, Any, Any],
+) -> tuple[str, Any, Any]:
     if len(candidate) == 2:
         source, raw_value = candidate
         return source, raw_value, None
     if len(candidate) == 3:
         source, raw_value, platform = candidate
         return source, raw_value, platform
-    raise ValueError("read-type candidates must be (source, value) or (source, value, platform)")
+    raise ValueError(
+        "read-type candidates must be (source, value) or (source, value, platform)"
+    )
 
 
 def method_read_type(method: str, read_type: NormalizedReadType) -> str | None:
@@ -272,15 +291,15 @@ def is_method_read_type_compatible(method: str, read_type: NormalizedReadType) -
 def compatible_methods(read_type: NormalizedReadType) -> list[str]:
     return [
         method
-        for method in (FLYE_METHOD, NEXTDENOVO_METHOD, HIFIASM_METHOD, HIFIASM_ONT_METHOD)
+        for method in (
+            FLYE_METHOD,
+            NEXTDENOVO_METHOD,
+            HIFIASM_METHOD,
+            HIFIASM_ONT_METHOD,
+        )
         if is_method_read_type_compatible(method, read_type)
     ]
 
 
 def default_primary_method(read_type: NormalizedReadType) -> str:
     return DEFAULT_PRIMARY_BY_READ_TYPE[read_type]
-
-
-def read_type_from_method_parameters(method: str, parameters: dict[str, Any] | None) -> NormalizedReadType | None:
-    params = parameters or {}
-    return normalize_read_type(params.get("read_type"))

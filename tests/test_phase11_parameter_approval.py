@@ -1,4 +1,4 @@
-"""Focused v2 contracts for the assembly parameter-approval gate.
+"""Focused v3 contracts for the assembly parameter-approval gate.
 
 Persistence breadth lives in ``test_parameter_persistence_v2`` and schema
 strictness lives in ``test_parameter_attempt_schema``.  These tests retain
@@ -12,8 +12,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-from pydantic import ValidationError
 
 from app.control.lifecycle import ResumeValidationError, resume_review_state
 from app.execution.parameter_attempts import (
@@ -59,6 +57,7 @@ def _attempt(
     execution_ref: ArtifactRef | None = None,
 ) -> dict:
     return ParameterAttempt(
+        schema_version=3,
         attempt_id=attempt_id,
         method_id="assembly.candidate.hifiasm_ont",
         status=status,
@@ -80,7 +79,7 @@ def _attempt(
     ).model_dump(mode="json")
 
 
-class ParameterApprovalGateV2Tests(unittest.TestCase):
+class ParameterApprovalGateV3Tests(unittest.TestCase):
     def _blocked(self, root: Path) -> dict:
         state = _state(root)
         with patch(
@@ -114,6 +113,27 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
             with self.assertRaises(ResumeValidationError):
                 resume_review_state(approved, request)
 
+    def test_pre_v3_attempt_chain_fails_closed_without_escaping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = _state(Path(tmp))
+            legacy_attempt = _attempt(0, task="recommend_initial")
+            legacy_attempt["schema_version"] = 2
+            state["stage_outputs"]["assembly"].update(
+                {
+                    "status": "retry_parameters_after_execution_failure",
+                    "parameter_attempts": [legacy_attempt],
+                }
+            )
+
+            update = recommend_assembly_parameters(state)
+
+            assembly = update["stage_outputs"]["assembly"]
+            self.assertEqual(assembly["status"], "failed")
+            self.assertIn(
+                "unsupported_parameter_recommendation_schema",
+                assembly["reason"],
+            )
+
     def test_compact_chain_seals_and_timeline_contains_only_refs(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = _state(Path(tmp))
@@ -141,7 +161,9 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
                 reason="completed",
             )
 
-            self.assertEqual([entry["attempt_id"] for entry in timeline["entries"]], [0, 1])
+            self.assertEqual(
+                [entry["attempt_id"] for entry in timeline["entries"]], [0, 1]
+            )
             self.assertEqual(timeline["terminal"]["review_retries_used"], 1)
             serialized = json.dumps(timeline, separators=(",", ":"))
             for forbidden in (
@@ -187,9 +209,9 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
                 command_ref=_ref("e1", "assembly.parameter.command").model_dump(
                     mode="json"
                 ),
-                frozen_attempt_ref=_ref(
-                    "f1", "assembly.frozen_attempt"
-                ).model_dump(mode="json"),
+                frozen_attempt_ref=_ref("f1", "assembly.frozen_attempt").model_dump(
+                    mode="json"
+                ),
             )
 
             self.assertEqual(
@@ -246,7 +268,8 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
                     output["current_parameter_attempt_id"] = cursor
                 with self.assertRaisesRegex(
                     ParameterAttemptStateError,
-                    "current_parameter_attempt_id must be an explicit non-negative integer",
+                    "current_parameter_attempt_id must be an explicit "
+                    "non-negative integer",
                 ):
                     current_parameter_attempt(
                         output,
@@ -283,7 +306,13 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
         self.assertEqual(attempts[0]["status"], "recommended")
 
         # Full-chain validation remains an explicit control-boundary check.
-        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValidationError):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.assertRaisesRegex(
+                ValueError,
+                "unsupported_parameter_recommendation_schema",
+            ),
+        ):
             _validate_parameter_attempt_chain(_state(Path(tmp)), attempts)
 
     def test_sealed_chain_rejects_reorder_delete_and_mutation(self):
@@ -330,7 +359,9 @@ class ParameterApprovalGateV2Tests(unittest.TestCase):
 
             output = execution_retry_gate(state)["stage_outputs"]["assembly"]
 
-            self.assertEqual(output["status"], "retry_parameters_after_execution_failure")
+            self.assertEqual(
+                output["status"], "retry_parameters_after_execution_failure"
+            )
             self.assertEqual(output["retry_counts"], {"execution": 0, "review": 0})
             self.assertEqual(output["proposed_parameter_attempt_id"], 1)
             self.assertEqual(

@@ -1,5 +1,5 @@
-catalog_id: assembly.nextdenovo
-method_id: assembly.nextdenovo
+catalog_id: nextdenovo
+method_id: assembly.candidate.nextdenovo
 tool: nextDenovo
 description: "NextDenovo long-read assembly catalog for Phase11 typed parameter attempts."
 
@@ -7,8 +7,9 @@ parameters:
   read_type:
     value_type: string
     application:
-      kind: stage_value
+      kind: config_key
       key: read_type
+    required_for_execution: true
     allowed_values: ["ont", "clr", "hifi"]
     layers:
       l0:
@@ -19,8 +20,9 @@ parameters:
   input_fofn:
     value_type: path
     application:
-      kind: stage_value
+      kind: config_key
       key: input_fofn
+    required_for_execution: true
     layers:
       l0:
         kind: runtime
@@ -30,8 +32,9 @@ parameters:
   work_dir:
     value_type: path
     application:
-      kind: stage_value
-      key: work_dir
+      kind: config_key
+      key: workdir
+    required_for_execution: true
     layers:
       l0:
         kind: runtime
@@ -41,8 +44,9 @@ parameters:
   genome_size:
     value_type: int
     application:
-      kind: stage_value
+      kind: config_key
       key: genome_size
+    required_for_execution: true
     min: 1
     layers:
       l1:
@@ -53,7 +57,7 @@ parameters:
   threads:
     value_type: int
     application:
-      kind: stage_value
+      kind: config_key
       key: threads
     min: 1
     layers:
@@ -64,34 +68,10 @@ parameters:
         materialized_default: 32
     description: "Number of CPU threads."
 
-  read_n50:
-    value_type: int
-    application:
-      kind: stage_value
-      key: read_n50
-    min: 1
-    layers:
-      l1:
-        fact: read_n50_bp
-        transform: identity
-    description: "Readonly read N50 context."
-
-  estimated_coverage:
-    value_type: float
-    application:
-      kind: stage_value
-      key: estimated_coverage
-    min: 0
-    layers:
-      l1:
-        fact: raw_coverage_x
-        transform: identity
-    description: "Readonly sequencing coverage context; omitted until a producer publishes this field."
-
   read_cutoff:
     value_type: int
     application:
-      kind: stage_value
+      kind: config_key
       key: read_cutoff
     min: 1
     max: 100000
@@ -103,7 +83,7 @@ parameters:
   nextgraph_a:
     value_type: int
     application:
-      kind: stage_value
+      kind: config_key
       key: nextgraph_a
     min: 1
     max: 10

@@ -7,13 +7,16 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from app.llm.factory import build_chat_model
 from app.llm.json_response import parse_json_object, response_text
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
-from app.schemas.parameter_recommendation import CanonicalSpeciesFacts
-from app.schemas.shared_parameters import normalize_dna_motif
+from app.schemas.parameter_recommendation import (
+    T2T_MOTIF_RESOLVER_ID,
+    CanonicalSpeciesFacts,
+)
+from app.schemas.shared_parameters import DnaMotif, normalize_dna_motif
 
 PROMPT_BUNDLE = "t2t.telomere_motif"
 MOTIF_RESOLUTION_CONTRACT = "t2t_telomere_motif_v1"
@@ -22,21 +25,24 @@ MOTIF_RESOLUTION_CONTRACT = "t2t_telomere_motif_v1"
 class T2TMotifRequest(BaseModel):
     """Model-visible species context for one motif-resolution call."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     schema_version: Literal[3] = 3
-    resolution_contract: Literal["t2t_telomere_motif_v1"] = (
-        MOTIF_RESOLUTION_CONTRACT
-    )
-    task: Literal["resolve_telomere_motif"] = "resolve_telomere_motif"
-    species_facts: CanonicalSpeciesFacts
+    resolution_contract: Literal["t2t_telomere_motif_v1"] = MOTIF_RESOLUTION_CONTRACT
+    resolver_id: Literal["t2t.telomere_motif_resolver"] = T2T_MOTIF_RESOLVER_ID
+    facts: CanonicalSpeciesFacts
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def _requires_typed_facts(cls, value: Any) -> CanonicalSpeciesFacts:
+        if not isinstance(value, CanonicalSpeciesFacts):
+            raise ValueError("T2T motif request requires typed canonical species facts")
+        return value
 
     @model_validator(mode="after")
     def _requires_context(self) -> "T2TMotifRequest":
-        if self.species_facts is None:
-            raise ValueError(
-                "T2T motif resolution requires species_facts"
-            )
+        if not self.facts.scientific_name:
+            raise ValueError("T2T motif resolution requires facts.scientific_name")
         return self
 
 
@@ -46,7 +52,7 @@ class T2TMotifDecision:
 
     raw_response: str
     status: Literal["resolved", "unresolved"] | None
-    resolved_telomere_motif: str | None
+    resolved_telomere_motif: DnaMotif | None
     summary: str | None
     valid: bool
     error: str | None = None
@@ -60,7 +66,7 @@ def build_t2t_motif_request(
     """Build a small, allowlisted DTO without paths or execution metadata."""
 
     return T2TMotifRequest(
-        species_facts=facts,
+        facts=facts,
     ).model_dump(mode="json", exclude_none=True)
 
 
@@ -100,9 +106,7 @@ def resolve_t2t_motif(
     """Ask once and validate only the declared response shape and DNA syntax."""
 
     invocation_messages = (
-        messages
-        if messages is not None
-        else render_t2t_motif_messages(request_dto)
+        messages if messages is not None else render_t2t_motif_messages(request_dto)
     )
     try:
         model = build_chat_model()
@@ -143,8 +147,8 @@ def resolve_t2t_motif(
 def restore_t2t_motif_decision(record: Mapping[str, Any]) -> T2TMotifDecision:
     """Rehydrate a decision from an immutable model-response artifact."""
 
-    if record.get("schema_version") not in {2, 3}:
-        raise ValueError("persisted T2T motif model response is not schema v2 or v3")
+    if record.get("schema_version") != 2:
+        raise ValueError("persisted T2T motif model response is not schema v2")
     raw = record.get("raw_response")
     validity = record.get("validity")
     error = record.get("error")

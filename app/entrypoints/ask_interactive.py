@@ -12,12 +12,17 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.domains.assembly.selection import (
+    FLYE_TO_SHARED_READ_TYPE,
+    PLATFORM_TO_SHARED_READ_TYPE,
+    SHARED_TO_METHOD_READ_TYPE,
+)
 from app.entrypoints.ask_planner import (
+    _STAGES_NEEDING_METHOD_SELECTION,
     FUNCTION_DATABASE_PROVENANCE_FIELD,
     READ_QC_FILTER_METHODS,
     READ_QC_FILTER_SKIP,
     READ_QC_STATS_METHOD,
-    _STAGES_NEEDING_METHOD_SELECTION,
     _all_selectable_stages,
     _auto_fill_inferred_defaults,
     _default_methods_for_stage,
@@ -29,12 +34,11 @@ from app.entrypoints.ask_planner import (
     next_clarification,
     save_plan_to_default_path,
 )
-from app.schemas.ask_plan import AskClarificationRequest, AskClarificationResponse, AskPlanState
 from app.schemas.artifacts import FunctionDatabaseProvenance
-from app.domains.assembly.selection import (
-    FLYE_TO_SHARED_READ_TYPE,
-    PLATFORM_TO_SHARED_READ_TYPE,
-    SHARED_TO_METHOD_READ_TYPE,
+from app.schemas.ask_plan import (
+    AskClarificationRequest,
+    AskClarificationResponse,
+    AskPlanState,
 )
 from app.schemas.shared_parameters import (
     SharedParameters,
@@ -42,6 +46,7 @@ from app.schemas.shared_parameters import (
 
 try:
     import questionary
+
     _HAS_QUESTIONARY = True
 except ImportError:
     _HAS_QUESTIONARY = False
@@ -73,15 +78,17 @@ def run_interactive_loop(plan: AskPlanState, args: argparse.Namespace) -> int:
 
 
 def _reset_plan_selection(plan: AskPlanState) -> AskPlanState:
-    return plan.model_copy(update={
-        "selected_stages": None,
-        "resolved_execution_order": None,
-        "selected_methods": None,
-        "shared_parameters": None,
-        "method_parameters": None,
-        "stage_parameters": None,
-        "confirmed": False,
-    })
+    return plan.model_copy(
+        update={
+            "selected_stages": None,
+            "resolved_execution_order": None,
+            "selected_methods": None,
+            "shared_parameters": None,
+            "method_parameters": None,
+            "stage_parameters": None,
+            "confirmed": False,
+        }
+    )
 
 
 def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int:
@@ -127,7 +134,14 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                         continue
                     elif choice == "provide_data":
                         print("\n📝 Please add the missing assets to your manifest.")
-                        raw = input("After updating the manifest, press Enter to re-validate, or type b to edit the plan: ").strip().lower()
+                        raw = (
+                            input(
+                                "After updating the manifest, press Enter to "
+                                "re-validate, or type b to edit the plan: "
+                            )
+                            .strip()
+                            .lower()
+                        )
                         if raw in {"b", "back", "edit"}:
                             print("\n--- Restarting from stage selection ---\n")
                             plan = _reset_plan_selection(plan)
@@ -139,7 +153,10 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                         validation_attempted = _attempt_preflight_validation(plan)
                         if validation_attempted:
                             # Still has blocking issues - reset to stage selection
-                            print("\n⚠️  Validation still failed. Returning to stage selection so you can edit the plan.\n")
+                            print(
+                                "\n⚠️  Validation still failed. Returning to "
+                                "stage selection so you can edit the plan.\n"
+                            )
                             plan = _reset_plan_selection(plan)
                             plan_ref = save_plan_to_default_path(plan)
                             continue
@@ -147,8 +164,14 @@ def _interactive_loop_inner(plan: AskPlanState, args: argparse.Namespace) -> int
                             # Validation passed - continue to confirmation
                             print("✓ Validation passed! Continuing...\n")
                     elif choice == "proceed_anyway":
-                        print("\n⚠️  Warning: continuing despite preflight validation errors.")
-                        print("Execution may fail later or stop at a human-review gate if required inputs are still missing.")
+                        print(
+                            "\n⚠️  Warning: continuing despite preflight "
+                            "validation errors."
+                        )
+                        print(
+                            "Execution may fail later or stop at a human-review "
+                            "gate if required inputs are still missing."
+                        )
 
             _render_confirm(clarification)
             if not _prompt_confirm("Proceed?"):
@@ -192,7 +215,9 @@ _ROLE_LABELS = {
 }
 
 _PARAM_HINTS: dict[str, str] = {
-    "assembly_review.eval.busco.lineage_path": "path to BUSCO lineage dir, e.g. /db/busco/insecta_odb10",
+    "assembly_review.eval.busco.lineage_path": (
+        "path to BUSCO lineage dir, e.g. /db/busco/insecta_odb10"
+    ),
     "assembly_review.eval.busco.lineage_name": "auto-derived from path",
     "assembly_review.eval.busco.lineage_version": "e.g. odb10; auto-detected from name",
     "assembly_review.eval.busco.lineage_source": "local / busco_downloads",
@@ -208,18 +233,18 @@ _PARAM_HINTS: dict[str, str] = {
     "repeat_annotation.masking.repeatmasker.threads": "CPU threads for RepeatMasker",
     "read_qc.length_filter.seqkit_seq.min_len": "minimum read length to keep (bp)",
     "t2t.alignment.minimap2.mode": "auto_patch / manual_review / propose_only",
-    "t2t.alignment.minimap2.telomere_motif": "optional terminal-repeat compatibility hint, e.g. TTAGGG",
-    "t2t.alignment.minimap2.threshold_min_motif_copies": "minimum motif copies at a read/contig end",
-    "t2t.alignment.minimap2.threshold_terminal_window_bp": "terminal window scanned for telomere signal",
-    "t2t.alignment.minimap2.threshold_min_mapq": "minimum minimap2 mapping quality for candidate reads",
-    "t2t.alignment.minimap2.threshold_max_target_terminal_distance_bp": "maximum distance from contig end",
-    "t2t.alignment.minimap2.threshold_min_overlap_bp": "minimum read-to-assembly overlap",
-    "t2t.alignment.minimap2.threshold_min_supporting_reads": "compatible telomeric reads required before patching",
 }
 
 _GENOME_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kmg]?)$", re.IGNORECASE)
 _GENOME_SIZE_MULTIPLIERS = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
-_SHARED_PLATFORM_VALUES = ("cycloneseq", "ont", "clr", "pacbio_hifi", "illumina", "unknown")
+_SHARED_PLATFORM_VALUES = (
+    "cycloneseq",
+    "ont",
+    "clr",
+    "pacbio_hifi",
+    "illumina",
+    "unknown",
+)
 _SHARED_READ_TYPE_VALUES = tuple(SHARED_TO_METHOD_READ_TYPE.keys())
 
 _STAGE_DESCRIPTIONS: dict[str, str] = {
@@ -250,7 +275,10 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
             if blocking_items:
                 _render_draft_blockers(blocking_items)
                 continue
-            print("\nDraft locked. Next, review the final run plan before execution starts.")
+            print(
+                "\nDraft locked. Next, review the final run plan before "
+                "execution starts."
+            )
             return plan
         if action == "restart":
             return None
@@ -275,7 +303,10 @@ def _review_plan_draft(draft: AskPlanState) -> AskPlanState | None:
             _, stage = action.split(":", 1)
             plan = _edit_stage_parameters(plan, stage)
             continue
-        print("Unknown action. Press Enter to continue, a stage number to edit, s for stages, or r to restart.")
+        print(
+            "Unknown action. Press Enter to continue, a stage number to edit, "
+            "s for stages, or r to restart."
+        )
 
 
 def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
@@ -293,8 +324,14 @@ def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
     print("  - Execution will NOT start yet.")
     print("  - Missing fields shown below must be fixed here first.")
     print("  - An execution-route plan will be shown before execution.")
-    print("  - Runtime-derived proposals are deferred until their prerequisite results exist.")
-    print("  - Each deferred proposal will return here as a human gate before the action runs.")
+    print(
+        "  - Runtime-derived proposals are deferred until their prerequisite "
+        "results exist."
+    )
+    print(
+        "  - Each deferred proposal will return here as a human gate before "
+        "the action runs."
+    )
     print("  - You can edit a stage here first, then return to this plan.")
 
     attention_items = _draft_attention_items(plan, summary)
@@ -312,7 +349,11 @@ def _render_draft_review(plan: AskPlanState, summary: dict[str, Any]) -> None:
     else:
         print("\nStages: none selected")
 
-    stages_needing_attention = [stage for stage in order if _draft_stage_attention(stage, plan, summary, attention_items)]
+    stages_needing_attention = [
+        stage
+        for stage in order
+        if _draft_stage_attention(stage, plan, summary, attention_items)
+    ]
     if stages_needing_attention:
         print("\nNeeds attention:")
         for stage in stages_needing_attention:
@@ -338,7 +379,9 @@ def _render_summary_inputs(summary: dict[str, Any]) -> None:
             label_parts = [str(asset.get("asset_type") or "input")]
             platform = asset.get("platform")
             fmt = asset.get("format")
-            details = [str(value) for value in (platform, fmt) if value and value != "unknown"]
+            details = [
+                str(value) for value in (platform, fmt) if value and value != "unknown"
+            ]
             if details:
                 label_parts.append(f"[{'/'.join(details)}]")
             label = " ".join(label_parts)
@@ -370,7 +413,11 @@ def _render_draft_stage_summary(
             print(f"     {line}")
     parameter_lines = _draft_stage_parameter_lines(stage, plan, summary)
     if parameter_lines:
-        heading = "planning/static parameters:" if _runtime_points_for_stage(summary, stage) else "parameters:"
+        heading = (
+            "planning/static parameters:"
+            if _runtime_points_for_stage(summary, stage)
+            else "parameters:"
+        )
         print(f"   {heading}")
         for line in parameter_lines:
             print(f"     {line}")
@@ -379,7 +426,10 @@ def _render_draft_stage_summary(
     for contract in runtime_parameter_contracts:
         names = list(contract.get("parameter_names") or [])
         preview_names = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
-        print(f"   runtime-derived parameters [{contract.get('method', '').rsplit('.', 1)[-1]}]: deferred")
+        print(
+            "   runtime-derived parameters "
+            f"[{contract.get('method', '').rsplit('.', 1)[-1]}]: deferred"
+        )
         if preview_names:
             print(f"     catalog L2: {preview_names}")
         constraints = contract.get("user_constraints") or {}
@@ -419,7 +469,9 @@ def _draft_stage_status(stage: str, plan: AskPlanState, summary: dict[str, Any])
     return "included"
 
 
-def _draft_stage_method_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
+def _draft_stage_method_lines(
+    stage: str, plan: AskPlanState, summary: dict[str, Any]
+) -> list[str]:
     if stage in _FIXED_METHOD_STAGES:
         return []
     selected = _selected_methods_for_stage(plan, stage)
@@ -428,7 +480,9 @@ def _draft_stage_method_lines(stage: str, plan: AskPlanState, summary: dict[str,
     return list(selected)
 
 
-def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[str, Any]) -> list[str]:
+def _draft_stage_parameter_lines(
+    stage: str, plan: AskPlanState, summary: dict[str, Any]
+) -> list[str]:
     lines: list[str] = []
     seen: set[str] = set()
     missing = set(summary.get("missing_parameter_fields") or [])
@@ -443,7 +497,9 @@ def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[s
             seen.add(field)
             note = _source_note(shared_sources.get(key), fallback="recommended")
             lines.append(f"{key}: {value}{note}")
-        for field in sorted(item for item in missing if item.startswith("shared_parameters.")):
+        for field in sorted(
+            item for item in missing if item.startswith("shared_parameters.")
+        ):
             seen.add(field)
             lines.append(f"{field.rsplit('.', 1)[-1]}: missing")
 
@@ -461,7 +517,11 @@ def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[s
                 continue
             field = f"{method}.{key}"
             seen.add(field)
-            note = _source_note(method_sources.get(key), fallback="recommended") if key in (defaults.get(method) or {}) else ""
+            note = (
+                _source_note(method_sources.get(key), fallback="recommended")
+                if key in (defaults.get(method) or {})
+                else ""
+            )
             lines.append(f"[{short}] {key}: {value}{note}")
         for field in sorted(item for item in missing if item.startswith(f"{method}.")):
             if field not in seen:
@@ -469,7 +529,9 @@ def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[s
                 lines.append(f"[{short}] {field.rsplit('.', 1)[-1]}: missing")
 
     stage_values = {}
-    stage_values.update((summary.get("stage_parameter_defaults") or {}).get(stage) or {})
+    stage_values.update(
+        (summary.get("stage_parameter_defaults") or {}).get(stage) or {}
+    )
     stage_values.update((summary.get("stage_parameters") or {}).get(stage) or {})
     for key, value in stage_values.items():
         field = f"{stage}.{key}"
@@ -478,7 +540,9 @@ def _draft_stage_parameter_lines(stage: str, plan: AskPlanState, summary: dict[s
             lines.append(f"{key}: {len(value)} record(s)")
         else:
             lines.append(f"{key}: {value}")
-    for field in sorted(item for item in missing if _stage_for_field(item, plan) == stage):
+    for field in sorted(
+        item for item in missing if _stage_for_field(item, plan) == stage
+    ):
         if field not in seen:
             lines.append(f"{field.rsplit('.', 1)[-1]}: missing")
     return lines
@@ -490,7 +554,10 @@ def _draft_stage_attention(
     summary: dict[str, Any],
     attention_items: list[tuple[str, str]],
 ) -> list[str]:
-    """Collect attention items for a specific stage. Filters inline instead of pre-aggregating."""
+    (
+        "Collect attention items for a specific stage. "
+        "Filters inline instead of pre-aggregating."
+    )
     attention: list[str] = []
     for item_stage, message in attention_items:
         if item_stage == stage:
@@ -508,7 +575,9 @@ def _draft_stage_attention(
     return attention
 
 
-def _runtime_points_for_stage(summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
+def _runtime_points_for_stage(
+    summary: dict[str, Any], stage: str
+) -> list[dict[str, Any]]:
     return [
         point
         for point in summary.get("runtime_decision_points") or []
@@ -516,7 +585,9 @@ def _runtime_points_for_stage(summary: dict[str, Any], stage: str) -> list[dict[
     ]
 
 
-def _runtime_parameter_contracts_for_stage(summary: dict[str, Any], stage: str) -> list[dict[str, Any]]:
+def _runtime_parameter_contracts_for_stage(
+    summary: dict[str, Any], stage: str
+) -> list[dict[str, Any]]:
     return [
         contract
         for contract in summary.get("runtime_parameter_contracts") or []
@@ -531,27 +602,38 @@ def _deferred_parameter_names(summary: dict[str, Any], method: str) -> set[str]:
     return set()
 
 
-def _draft_attention_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+def _draft_attention_items(
+    plan: AskPlanState, summary: dict[str, Any]
+) -> list[tuple[str, str]]:
     items = list(_draft_blocking_items(plan, summary))
     return list(dict.fromkeys(items))
 
 
-def _draft_blocking_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+def _draft_blocking_items(
+    plan: AskPlanState, summary: dict[str, Any]
+) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     for stage in plan.resolved_execution_order or []:
-        if stage in _STAGES_NEEDING_METHOD_SELECTION and not _selected_methods_for_stage(plan, stage):
+        if (
+            stage in _STAGES_NEEDING_METHOD_SELECTION
+            and not _selected_methods_for_stage(plan, stage)
+        ):
             items.append((stage, "method is missing"))
     for field in summary.get("missing_parameter_fields") or []:
         stage = _stage_for_field(str(field), plan)
         items.append((stage, f"{_field_label(str(field))} is missing"))
     if summary.get("run_config_preview_error"):
         stage = (plan.resolved_execution_order or ["plan"])[0]
-        items.append((stage, f"run config is not ready: {summary['run_config_preview_error']}"))
+        items.append(
+            (stage, f"run config is not ready: {summary['run_config_preview_error']}")
+        )
     items.extend(_next_clarification_blocking_items(plan, summary))
     return list(dict.fromkeys(items))
 
 
-def _next_clarification_blocking_items(plan: AskPlanState, summary: dict[str, Any]) -> list[tuple[str, str]]:
+def _next_clarification_blocking_items(
+    plan: AskPlanState, summary: dict[str, Any]
+) -> list[tuple[str, str]]:
     clarification = next_clarification(plan, ask_plan_ref="<draft>")
     if clarification is None or clarification.kind == "confirm":
         return []
@@ -576,11 +658,16 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
     if _HAS_QUESTIONARY:
         choices = [
             questionary.Choice("continue", value="continue"),
-            *[questionary.Choice(f"edit {idx}. {stage}", value=f"stage:{stage}") for idx, stage in enumerate(stages, 1)],
+            *[
+                questionary.Choice(f"edit {idx}. {stage}", value=f"stage:{stage}")
+                for idx, stage in enumerate(stages, 1)
+            ],
             questionary.Choice("edit stage list", value="stages"),
             questionary.Choice("restart manually", value="restart"),
         ]
-        return _safe_ask(questionary.select("Plan action:", choices=choices, default="continue"))
+        return _safe_ask(
+            questionary.select("Plan action:", choices=choices, default="continue")
+        )
 
     raw = input("plan> ").strip().lower()
     if raw in ("", "c", "continue", "y", "yes"):
@@ -652,9 +739,15 @@ def _edit_draft_stages(plan: AskPlanState) -> AskPlanState:
         ask_plan_ref="<draft>",
         manifest_ref=plan.manifest_ref,
         question="Which workflow stages should run?",
-        choices={"available_stages": _all_selectable_stages(), "suggested_stages": plan.selected_stages or []},
+        choices={
+            "available_stages": _all_selectable_stages(),
+            "suggested_stages": plan.selected_stages or [],
+        },
         required_fields=["selected_stages"],
-        response_schema={"kind": "stage_selection", "selected_stages": plan.selected_stages or []},
+        response_schema={
+            "kind": "stage_selection",
+            "selected_stages": plan.selected_stages or [],
+        },
         next_action={},
     )
     response = _prompt_stage_selection(req)
@@ -692,7 +785,10 @@ def _edit_stage_methods(plan: AskPlanState, stage: str) -> AskPlanState:
             "defaults": {stage: default} if default else {},
         },
         required_fields=["selected_methods"],
-        response_schema={"kind": "method_selection", "selected_methods": {stage: default}},
+        response_schema={
+            "kind": "method_selection",
+            "selected_methods": {stage: default},
+        },
         next_action={},
     )
     response = _prompt_method_selection(req)
@@ -713,9 +809,13 @@ def _edit_stage_parameters(plan: AskPlanState, stage: str) -> AskPlanState:
         manifest_ref=plan.manifest_ref,
         question=f"Edit parameters for {stage}.",
         choices={
-            "defaults": _filter_method_map_for_stage(summary.get("parameter_defaults") or {}, plan, stage),
+            "defaults": _filter_method_map_for_stage(
+                summary.get("parameter_defaults") or {}, plan, stage
+            ),
             "shared_defaults": summary.get("shared_parameter_defaults") or {},
-            "stage_defaults": {stage: (summary.get("stage_parameter_defaults") or {}).get(stage) or {}},
+            "stage_defaults": {
+                stage: (summary.get("stage_parameter_defaults") or {}).get(stage) or {}
+            },
         },
         required_fields=fields,
         response_schema={"kind": "parameter_values"},
@@ -749,11 +849,16 @@ def _editable_parameter_fields_for_stage(
                 keys.add(str(field).rsplit(".", 1)[-1])
         fields.extend(f"{method}.{key}" for key in sorted(keys))
 
-    stage_keys = set(((summary.get("stage_parameter_defaults") or {}).get(stage) or {}).keys())
+    stage_keys = set(
+        ((summary.get("stage_parameter_defaults") or {}).get(stage) or {}).keys()
+    )
     stage_keys.update(((summary.get("stage_parameters") or {}).get(stage) or {}).keys())
     for field in summary.get("missing_parameter_fields") or []:
         field_text = str(field)
-        method_scoped = any(field_text.startswith(f"{method}.") for method in _selected_methods_for_stage(plan, stage))
+        method_scoped = any(
+            field_text.startswith(f"{method}.")
+            for method in _selected_methods_for_stage(plan, stage)
+        )
         if (
             _stage_for_field(field_text, plan) == stage
             and field_text.startswith(f"{stage}.")
@@ -890,14 +995,20 @@ def _render_plan_summary(
     shared_defaults = summary.get("shared_parameter_defaults", {}) if preview else {}
     pending_shared = _pending_shared_parameter_names(missing_fields)
     deferred_shared = summary.get("deferred_shared_parameters", {}) if preview else {}
-    shared_sources = summary.get("shared_parameter_default_sources", {}) if preview else {}
+    shared_sources = (
+        summary.get("shared_parameter_default_sources", {}) if preview else {}
+    )
     shared = {**shared_defaults, **(summary.get("shared_parameters", {}) or {})}
     if shared or deferred_shared or (preview and pending_shared):
         print("\nShared parameters:")
         for k, v in shared.items():
             note = ""
             if draft is not None:
-                note = "  (from request)" if k in explicit_shared else _source_note(shared_sources.get(k), fallback="recommended")
+                note = (
+                    "  (from request)"
+                    if k in explicit_shared
+                    else _source_note(shared_sources.get(k), fallback="recommended")
+                )
             elif preview and k in shared_sources:
                 note = _source_note(shared_sources.get(k), fallback="recommended")
             print(f"  {k}: {v}{note}")
@@ -917,7 +1028,9 @@ def _render_plan_summary(
 
     params = summary.get("method_parameters", {})
     if preview:
-        _render_preview_parameters(summary, params, recommended_params=draft is not None)
+        _render_preview_parameters(
+            summary, params, recommended_params=draft is not None
+        )
     elif params:
         print("\nParameters:")
         for method, pdict in params.items():
@@ -971,7 +1084,10 @@ def _render_plan_summary(
             recommendation_status = point.get("parameter_recommendation_status")
             if recommendation_status and recommendation_status != "not_applicable":
                 print(f"    parameter recommendation: {recommendation_status}")
-        print("  The TUI pauses at each reached gate, shows its runtime evidence/proposal, and asks for a decision.")
+        print(
+            "  The TUI pauses at each reached gate, shows its runtime "
+            "evidence/proposal, and asks for a decision."
+        )
 
     warnings = summary.get("warnings", [])
     for w in warnings:
@@ -996,7 +1112,9 @@ def _render_preview_parameters(
     sources = summary.get("parameter_default_sources", {}) or {}
     missing_fields = list(summary.get("missing_parameter_fields") or [])
     method_order = _ordered_summary_methods(summary)
-    pending_by_method = _pending_method_parameter_names(missing_fields, set(method_order) | set(defaults) | set(params))
+    pending_by_method = _pending_method_parameter_names(
+        missing_fields, set(method_order) | set(defaults) | set(params)
+    )
     combined: dict[str, dict[str, Any]] = {}
     for method, values in defaults.items():
         combined[method] = dict(values or {})
@@ -1054,11 +1172,14 @@ def _ordered_summary_methods(summary: dict[str, Any]) -> list[str]:
     return ordered
 
 
-def _group_missing_fields_by_scope(missing_fields: list[str], methods: set[str] | None = None) -> dict[str, Any]:
+def _group_missing_fields_by_scope(
+    missing_fields: list[str], methods: set[str] | None = None
+) -> dict[str, Any]:
     """Parse missing_fields and group by scope: shared, stage, or method.
 
     Returns dict with keys:
-        - shared: list[str] of shared parameter names (without 'shared_parameters.' prefix)
+        - shared: list[str] of shared parameter names
+          (without 'shared_parameters.' prefix)
         - stage: dict[str, list[str]] mapping stage name to parameter names
         - method: dict[str, list[str]] mapping method name to parameter names
 
@@ -1072,14 +1193,14 @@ def _group_missing_fields_by_scope(missing_fields: list[str], methods: set[str] 
 
     for field in missing_fields:
         if field.startswith("shared_parameters."):
-            shared.append(field[len("shared_parameters."):])
+            shared.append(field[len("shared_parameters.") :])
         elif methods:
             # Try to match against known methods
             matched = False
             for m in methods:
                 prefix = f"{m}."
                 if field.startswith(prefix):
-                    method.setdefault(m, []).append(field[len(prefix):])
+                    method.setdefault(m, []).append(field[len(prefix) :])
                     matched = True
                     break
             if not matched:
@@ -1088,14 +1209,20 @@ def _group_missing_fields_by_scope(missing_fields: list[str], methods: set[str] 
                 if len(parts) == 2:
                     stage.setdefault(parts[0], []).append(parts[1])
                 else:
-                    logger.debug("Dropping unclassifiable missing field %r (no matching method, not stage-scoped)", field)
+                    logger.debug(
+                        "Dropping unclassifiable missing field %r "
+                        "(no matching method, not stage-scoped)",
+                        field,
+                    )
         else:
             # No methods provided, assume stage-scoped
             parts = field.split(".")
             if len(parts) == 2:
                 stage.setdefault(parts[0], []).append(parts[1])
             else:
-                logger.debug("Dropping unclassifiable missing field %r (not stage-scoped)", field)
+                logger.debug(
+                    "Dropping unclassifiable missing field %r (not stage-scoped)", field
+                )
 
     return {"shared": shared, "stage": stage, "method": method}
 
@@ -1110,7 +1237,9 @@ def _pending_stage_parameter_names(missing_fields: list[str]) -> dict[str, list[
     return _group_missing_fields_by_scope(missing_fields)["stage"]
 
 
-def _pending_method_parameter_names(missing_fields: list[str], methods: set[str]) -> dict[str, list[str]]:
+def _pending_method_parameter_names(
+    missing_fields: list[str], methods: set[str]
+) -> dict[str, list[str]]:
     """Extract method-scoped parameter names from missing_fields."""
     return _group_missing_fields_by_scope(missing_fields, methods=methods)["method"]
 
@@ -1150,7 +1279,9 @@ def _render_stage_plan_details(details: list[dict[str, Any]]) -> None:
                 missing = method.get("missing_parameters") or []
                 if params:
                     short = method_name.rsplit(".", 1)[-1]
-                    rendered = ", ".join(f"{key}={value}" for key, value in params.items())
+                    rendered = ", ".join(
+                        f"{key}={value}" for key, value in params.items()
+                    )
                     print(f"      params [{short}]: {rendered}")
                 if missing:
                     print(f"      pending: {', '.join(str(name) for name in missing)}")
@@ -1163,6 +1294,7 @@ def _render_stage_plan_details(details: list[dict[str, Any]]) -> None:
 # Prompting
 # ---------------------------------------------------------------------------
 
+
 def _safe_ask(question: Any) -> Any:
     """Call questionary .ask() with Ctrl+C / Esc handling."""
     try:
@@ -1174,7 +1306,9 @@ def _safe_ask(question: Any) -> Any:
     return result
 
 
-def _prompt_for_answer(req: AskClarificationRequest, plan: AskPlanState) -> AskClarificationResponse:
+def _prompt_for_answer(
+    req: AskClarificationRequest, plan: AskPlanState
+) -> AskClarificationResponse:
     if req.kind == "stage_selection":
         return _prompt_stage_selection(req)
     if req.kind == "method_selection":
@@ -1208,7 +1342,9 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
 
     if _HAS_QUESTIONARY:
         print("\n--- Step 1: Stage Selection ---")
-        print("  Recommended stages are pre-checked based on your request/input data.\n")
+        print(
+            "  Recommended stages are pre-checked based on your request/input data.\n"
+        )
         choices = [
             questionary.Choice(
                 f"{stage} — {_STAGE_DESCRIPTIONS.get(stage, '')}",
@@ -1217,14 +1353,18 @@ def _prompt_stage_selection(req: AskClarificationRequest) -> AskClarificationRes
             )
             for stage in available
         ]
-        selected = _safe_ask(questionary.checkbox(
-            "Select stages:",
-            choices=choices,
-            instruction="(Space toggle, Enter confirm)",
-        ))
+        selected = _safe_ask(
+            questionary.checkbox(
+                "Select stages:",
+                choices=choices,
+                instruction="(Space toggle, Enter confirm)",
+            )
+        )
         if not selected:
             selected = suggested
-        return AskClarificationResponse(kind="stage_selection", selected_stages=selected)
+        return AskClarificationResponse(
+            kind="stage_selection", selected_stages=selected
+        )
 
     # Plain-text fallback
     print("\n--- Step 1: Stage Selection ---")
@@ -1253,13 +1393,17 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
     for stage, methods in methods_by_stage.items():
         method_names = [m["method_name"] for m in methods]
         if stage == "read_qc":
-            selected[stage] = _prompt_read_qc_filter_choice(methods, req.choices.get("defaults", {}).get(stage))
+            selected[stage] = _prompt_read_qc_filter_choice(
+                methods, req.choices.get("defaults", {}).get(stage)
+            )
             continue
         requested_default = req.choices.get("defaults", {}).get(stage)
         if isinstance(requested_default, list):
             default_checked = [m for m in requested_default if m in method_names]
         elif requested_default:
-            default_checked = [requested_default] if requested_default in method_names else []
+            default_checked = (
+                [requested_default] if requested_default in method_names else []
+            )
         else:
             default_checked = []
         # The assembly graph executes one primary candidate at a time. Keep
@@ -1271,24 +1415,30 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
         if _HAS_QUESTIONARY:
             choices = []
             for m in methods:
-                choices.append(questionary.Choice(
-                    m["method_name"],
-                    value=m["method_name"],
-                    checked=(m["method_name"] in default_checked),
-                ))
+                choices.append(
+                    questionary.Choice(
+                        m["method_name"],
+                        value=m["method_name"],
+                        checked=(m["method_name"] in default_checked),
+                    )
+                )
             if stage == "assembly":
-                selected[stage] = _safe_ask(questionary.select(
-                    f"Primary method for {stage}:",
-                    choices=choices,
-                    default=default_checked[0],
-                    instruction="(choose one primary)",
-                ))
+                selected[stage] = _safe_ask(
+                    questionary.select(
+                        f"Primary method for {stage}:",
+                        choices=choices,
+                        default=default_checked[0],
+                        instruction="(choose one primary)",
+                    )
+                )
             else:
-                answer = _safe_ask(questionary.checkbox(
-                    f"Methods for {stage}:",
-                    choices=choices,
-                    instruction="(Space toggle, Enter confirm)",
-                ))
+                answer = _safe_ask(
+                    questionary.checkbox(
+                        f"Methods for {stage}:",
+                        choices=choices,
+                        instruction="(Space toggle, Enter confirm)",
+                    )
+                )
                 if not answer:
                     answer = default_checked
                 selected[stage] = answer[0] if len(answer) == 1 else answer
@@ -1297,21 +1447,34 @@ def _prompt_method_selection(req: AskClarificationRequest) -> AskClarificationRe
             for i, m in enumerate(methods, 1):
                 marker = "*" if m["method_name"] in default_checked else " "
                 print(f"    {marker} {i}. {m['method_name']}")
-            prompt = "Choose one number or name" if stage == "assembly" else "Enter numbers or names"
+            prompt = (
+                "Choose one number or name"
+                if stage == "assembly"
+                else "Enter numbers or names"
+            )
             print(f"\n  {prompt}. Enter = {', '.join(default_checked)}:")
             raw = input(f"  {stage}> ").strip()
             if not raw:
                 picks = default_checked
             else:
                 picks = _parse_selection(raw, method_names)
-            selected[stage] = picks[0] if stage == "assembly" or len(picks) == 1 else picks
+            selected[stage] = (
+                picks[0] if stage == "assembly" or len(picks) == 1 else picks
+            )
 
     return AskClarificationResponse(kind="method_selection", selected_methods=selected)
 
 
-def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | list[str] | None) -> list[str]:
-    default_methods = default if isinstance(default, list) else [default] if default else []
-    default_filter = next((method for method in default_methods if method in READ_QC_FILTER_METHODS), READ_QC_FILTER_SKIP)
+def _prompt_read_qc_filter_choice(
+    methods: list[dict[str, Any]], default: str | list[str] | None
+) -> list[str]:
+    default_methods = (
+        default if isinstance(default, list) else [default] if default else []
+    )
+    default_filter = next(
+        (method for method in default_methods if method in READ_QC_FILTER_METHODS),
+        READ_QC_FILTER_SKIP,
+    )
     filters = [m for m in methods if m.get("method_name") in READ_QC_FILTER_METHODS]
     filter_names = [m["method_name"] for m in filters]
 
@@ -1323,12 +1486,14 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
             )
             for m in filters
         ]
-        answer = _safe_ask(questionary.select(
-            "Read QC length filtering:",
-            choices=choices,
-            default=default_filter,
-            instruction="(↑↓ navigate, Enter confirm)",
-        ))
+        answer = _safe_ask(
+            questionary.select(
+                "Read QC length filtering:",
+                choices=choices,
+                default=default_filter,
+                instruction="(↑↓ navigate, Enter confirm)",
+            )
+        )
         filter_method = answer or default_filter
     else:
         print("  Methods for [read_qc]:")
@@ -1346,7 +1511,9 @@ def _prompt_read_qc_filter_choice(methods: list[dict[str, Any]], default: str | 
     return [READ_QC_STATS_METHOD, filter_method]
 
 
-def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -> AskClarificationResponse:
+def _prompt_parameter_values(
+    req: AskClarificationRequest, plan: AskPlanState
+) -> AskClarificationResponse:
     defaults = req.choices.get("defaults", {})
     shared_defaults = dict(req.choices.get("shared_defaults", {}))
     stage_defaults = dict(req.choices.get("stage_defaults", {}))
@@ -1366,18 +1533,30 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
         stage_name = method_key.split(".")[0] if "." in method_key else method_key
         label = f"[{stage_name} / {short_method}] {param_name}"
 
-        hint = _PARAM_HINTS.get(f"{method_key}.{param_name}") or _PARAM_HINTS.get(param_name)
+        hint = _PARAM_HINTS.get(f"{method_key}.{param_name}") or _PARAM_HINTS.get(
+            param_name
+        )
         if hint:
             label = f"{label}  ({hint})"
 
         if method_key == "shared_parameters":
-            current_shared_defaults = _derive_shared_parameter_defaults({**shared_defaults, **shared_params})
+            current_shared_defaults = _derive_shared_parameter_defaults(
+                {**shared_defaults, **shared_params}
+            )
             default = current_shared_defaults.get(param_name)
-            if param_name == "read_type" and default and current_shared_defaults.get("platform"):
+            if (
+                param_name == "read_type"
+                and default
+                and current_shared_defaults.get("platform")
+            ):
                 if not _shared_parameter_value_is_valid("read_type", default):
                     default = None
                 else:
-                    print(f"  [shared_parameters] read_type derived from platform={current_shared_defaults.get('platform')}: {default}")
+                    print(
+                        "  [shared_parameters] read_type derived from "
+                        f"platform={current_shared_defaults.get('platform')}: "
+                        f"{default}"
+                    )
                     shared_params[param_name] = default
                     continue
         else:
@@ -1389,7 +1568,9 @@ def _prompt_parameter_values(req: AskClarificationRequest, plan: AskPlanState) -
             shared_params = _derive_shared_parameter_defaults(shared_params)
         elif field == "function_annotation.database_provenance":
             value = _prompt_function_database_provenance(plan)
-            stage_params.setdefault("function_annotation", {})["database_provenance"] = value
+            stage_params.setdefault("function_annotation", {})[
+                "database_provenance"
+            ] = value
         else:
             value = _prompt_text_value(label, default, required=True)
             if param_name == "estimated_genome_size" and isinstance(value, str):
@@ -1459,7 +1640,9 @@ def _prompt_function_database_provenance(plan: AskPlanState) -> list[dict[str, A
             "database_source_ref": db_path,
             "descriptor_version": f"{method.rsplit('.', 1)[-1]}.yaml",
         }
-        records.append(FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json"))
+        records.append(
+            FunctionDatabaseProvenance.model_validate(record).model_dump(mode="json")
+        )
 
     if not records:
         return records
@@ -1472,10 +1655,12 @@ def _prompt_text_value(label: str, default: Any, *, required: bool = False) -> A
     invalid_attempts = 0
     while True:
         if _HAS_QUESTIONARY:
-            answer = _safe_ask(questionary.text(
-                f"{label}:",
-                default=str(default) if default is not None else "",
-            ))
+            answer = _safe_ask(
+                questionary.text(
+                    f"{label}:",
+                    default=str(default) if default is not None else "",
+                )
+            )
         else:
             if default is not None:
                 answer = input(f"  {label} [{default}]: ").strip()
@@ -1510,12 +1695,16 @@ def _prompt_shared_parameter(label: str, param_name: str, default: Any) -> Any:
 def _prompt_shared_platform(label: str, default: Any) -> Any:
     default_value = _normalize_shared_platform(default)
     if _HAS_QUESTIONARY:
-        return _safe_ask(questionary.select(
-            f"{label}:",
-            choices=list(_SHARED_PLATFORM_VALUES),
-            default=default_value if default_value in _SHARED_PLATFORM_VALUES else "unknown",
-            instruction="(used for asset registry platform)",
-        ))
+        return _safe_ask(
+            questionary.select(
+                f"{label}:",
+                choices=list(_SHARED_PLATFORM_VALUES),
+                default=default_value
+                if default_value in _SHARED_PLATFORM_VALUES
+                else "unknown",
+                instruction="(used for asset registry platform)",
+            )
+        )
 
     print("    platform choices:")
     for idx, value in enumerate(_SHARED_PLATFORM_VALUES, start=1):
@@ -1531,17 +1720,23 @@ def _prompt_shared_platform(label: str, default: Any) -> Any:
 def _prompt_shared_read_type(label: str, default: Any) -> Any:
     default_value = _normalize_shared_read_type(default)
     if _HAS_QUESTIONARY:
-        return _safe_ask(questionary.select(
-            f"{label}:",
-            choices=[
-                questionary.Choice(_read_type_choice_label(value), value=value)
-                for value in _SHARED_READ_TYPE_VALUES
-            ],
-            default=default_value if default_value in _SHARED_READ_TYPE_VALUES else None,
-            instruction="(use normalized shared read type)",
-        ))
+        return _safe_ask(
+            questionary.select(
+                f"{label}:",
+                choices=[
+                    questionary.Choice(_read_type_choice_label(value), value=value)
+                    for value in _SHARED_READ_TYPE_VALUES
+                ],
+                default=default_value
+                if default_value in _SHARED_READ_TYPE_VALUES
+                else None,
+                instruction="(use normalized shared read type)",
+            )
+        )
 
-    alias_text = ", ".join(f"{alias}->{value}" for alias, value in sorted(FLYE_TO_SHARED_READ_TYPE.items()))
+    alias_text = ", ".join(
+        f"{alias}->{value}" for alias, value in sorted(FLYE_TO_SHARED_READ_TYPE.items())
+    )
     print(f"    accepted: {', '.join(_SHARED_READ_TYPE_VALUES)}")
     print(f"    Flye aliases accepted: {alias_text}")
     while True:
@@ -1552,7 +1747,11 @@ def _prompt_shared_read_type(label: str, default: Any) -> Any:
 
 
 def _read_type_choice_label(value: str) -> str:
-    flye_aliases = sorted(alias for alias, normalized in FLYE_TO_SHARED_READ_TYPE.items() if normalized == value)
+    flye_aliases = sorted(
+        alias
+        for alias, normalized in FLYE_TO_SHARED_READ_TYPE.items()
+        if normalized == value
+    )
     suffix = f" (Flye: {', '.join(flye_aliases)})" if flye_aliases else ""
     return f"{value}{suffix}"
 
@@ -1596,6 +1795,7 @@ def _shared_parameter_value_is_valid(param_name: str, value: Any) -> bool:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _parse_selection(raw: str, options: list[str]) -> list[str]:
     normalized = raw.replace("，", ",").replace("、", ",").replace(" ", ",")
     items = [s.strip() for s in normalized.split(",") if s.strip()]
@@ -1624,10 +1824,20 @@ def _find_default(field: str, defaults: dict[str, Any]) -> Any:
     return None
 
 
-def _update_derived_defaults(method_key: str, param_name: str, value: Any, defaults: dict[str, Any]) -> None:
-    """After user provides a value, derive related defaults (e.g. BUSCO lineage fields from path)."""
-    if method_key == "assembly_review.eval.busco" and param_name == "lineage_path" and value:
+def _update_derived_defaults(
+    method_key: str, param_name: str, value: Any, defaults: dict[str, Any]
+) -> None:
+    (
+        "After user provides a value, derive related defaults "
+        "(e.g. BUSCO lineage fields from path)."
+    )
+    if (
+        method_key == "assembly_review.eval.busco"
+        and param_name == "lineage_path"
+        and value
+    ):
         from pathlib import Path as _Path
+
         name = _Path(str(value)).name
         bucket = defaults.setdefault(method_key, {})
         bucket.setdefault("lineage_name", name)
@@ -1671,7 +1881,11 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
         "hic_threads": ("hic_scaffolding.candidate.autohic", "threads"),
     }
     existing = dict(plan.method_parameters or {})
-    shared = plan.shared_parameters.model_dump(exclude_none=True) if plan.shared_parameters else {}
+    shared = (
+        plan.shared_parameters.model_dump(exclude_none=True)
+        if plan.shared_parameters
+        else {}
+    )
     for key, value in parsed.items():
         alias = _PARAM_ALIASES.get(key)
         if alias:
@@ -1708,15 +1922,19 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
     """
     try:
         # Load the manifest and run inventory in a disposable session layout.
-        from app.stages.inventory.nodes import register_assets, validate_inputs
-        from app.storage.materialization import materialize_run_layout
         from app.schemas.state import initial_state
+        from app.stages.inventory.nodes import register_assets, validate_inputs
         from app.stages.preflight import validate_execution_plan
+        from app.storage.materialization import materialize_run_layout
         from app.storage.paths import SessionPaths
 
         manifest_path = Path(plan.manifest_ref)
         if not manifest_path.exists():
-            print(f"\nPreflight validation could not run: manifest not found: {manifest_path}", file=sys.stderr)
+            print(
+                "\nPreflight validation could not run: manifest not found: "
+                f"{manifest_path}",
+                file=sys.stderr,
+            )
             return True
 
         with tempfile.TemporaryDirectory(prefix="gene-agent-preflight-") as temp_root:
@@ -1758,7 +1976,11 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
             f"\nPreflight validation could not complete: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
-        print("Fix the validation error, edit the plan, or choose the advanced override to proceed anyway.", file=sys.stderr)
+        print(
+            "Fix the validation error, edit the plan, or choose the advanced "
+            "override to proceed anyway.",
+            file=sys.stderr,
+        )
         return True
 
 
@@ -1814,4 +2036,5 @@ def _prompt_validation_action() -> str:
 
 def _execute_confirmed_plan(plan: AskPlanState, args: argparse.Namespace) -> int:
     from app.entrypoints.ask_execution import execute_confirmed_plan
+
     return execute_confirmed_plan(plan, args)

@@ -191,7 +191,7 @@ fi
 info "Checking genome_size_prior propagation to assembly"
 cd "${PROJECT_ROOT}"
 python3 -c "
-from app.stages.assembly.nodes import _genome_size_prior
+from app.domains.genome_size import resolve_genome_size
 state = {
     'stage_outputs': {
         'genome_survey': {
@@ -200,7 +200,11 @@ state = {
         }
     }
 }
-assert _genome_size_prior(state) == 123456789
+assert resolve_genome_size(state) == {
+    'value_bp': 123456789,
+    'source': 'survey',
+    'source_path': 'genome_survey.genome_size_prior',
+}
 print('assembly resolves genome_survey.genome_size_prior before fallback estimates')
 " 2>&1 && pass "assembly stage genome_size wiring check" || fail "assembly stage genome_size wiring broken"
 

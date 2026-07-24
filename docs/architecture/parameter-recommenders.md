@@ -26,8 +26,15 @@ app/llm/parameters/
     ├── request.py       # T2T threshold model-input DTO
     └── recommender.py   # prompt rendering, model call, response parsing
 
+app/domains/parameter_recommendation/
+└── facts.py             # authoritative mappings -> canonical typed facts
+
+app/schemas/
+└── parameter_recommendation.py
+                         # canonical facts, typed contexts, v3 snapshots/manifests
+
 app/stages/assembly/parameters/
-├── profile.py           # audit profile and task-scoped facts
+├── context.py           # typed Assembly stage context
 ├── basis.py             # immutable catalog/evidence snapshot
 ├── catalog.py           # executor/catalog metadata
 ├── workflow.py          # persistence, approval, retry transitions
@@ -35,13 +42,19 @@ app/stages/assembly/parameters/
 
 app/stages/hic_scaffolding/parameters/
 ├── catalog.py
+├── context.py
 ├── workflow.py
 └── storage.py
 
 app/stages/t2t/parameters/
 ├── catalog.py
+├── context.py
 ├── workflow.py
 └── storage.py
+
+app/storage/
+└── parameter_evidence.py
+                         # strict v3 chain loader and approved bundle boundary
 ```
 
 The `llm/parameters/<stage>` packages own everything at the model boundary.
@@ -52,8 +65,9 @@ construction and are not merely prompt assets.
 ## Required flow
 
 ```text
-selected method + run facts
-  -> full audit profile
+selected method + allowlisted producer outputs/run facts
+  -> canonical typed facts through the anti-corruption boundary
+  -> schema-3 input snapshot with typed stage context and dependency refs
   -> immutable basis snapshot
   -> strict stage-specific request DTO
   -> exact rendered messages persisted
@@ -81,35 +95,42 @@ validator and not permission to silently replace the value.
 
 Assembly `AssemblyParameterRequestDTO` contains:
 
+- `schema_version`: `3`;
 - `recommendation_contract`: `parameter_recommendation_v1`;
 - `method_id` and `task`;
-- authoritative `species_facts` when explicitly supplied;
-- `observations`;
+- `facts` as strict `CanonicalRecommendationFacts`;
+- typed `assembly_context` with the route, normalized read type, target level,
+  and bounded chronological attempt history when retrying;
 - `adjustable_parameters` with descriptive/type metadata but no default value;
-- optional `method_guidance`, `literature_selection`, and `literature_cases`;
-- bounded chronological `attempt_history` for retry tasks.
+- optional `method_guidance`, `literature_selection`, and `literature_cases`.
 
 AutoHiC `AutoHiCParameterRequest` contains:
 
-- schema and recommendation contract;
+- schema-3 and recommendation contract;
 - current task and fixed method id;
-- `input_facts` with library protocols, explicitly supplied species facts, and
-  an explicitly provided restriction enzyme;
-- bounded chronological `attempt_history`;
+- canonical species facts;
+- typed `autohic_context` with library protocols, an explicitly provided
+  restriction enzyme, and bounded chronological attempt history when retrying;
 - the adjustable AutoHiC catalog: restriction enzyme, edit rounds, correction
   switches, and error-detection thresholds.
 
 T2T `T2TParameterRequest` contains:
 
+- schema-3 and recommendation contract;
 - current task and fixed minimap2 method id;
-- supplied species facts, the resolved telomere motif, and bounded assembly/read
-  facts;
+- canonical species facts;
+- typed `t2t_context` with the resolved telomere motif, its source, and the
+  exact ONT input count;
 - the adjustable telomere and alignment threshold catalog.
 
 Before this threshold request, T2T performs a separate motif-resolution call
-using caller-supplied species identity and any legacy motif hint. It persists
-the exact messages, raw response, parse result, and resolved source. The
-threshold request and all scan/patch consumers use only that resolved value.
+only when the canonical supplied species facts do not already contain a motif.
+A supplied motif is validated and persisted as `provided_species_fact` without
+a model call; otherwise the resolver requires the supplied scientific name and
+persists the exact messages, raw response, parse result, and resolved source.
+Pre-v3 motif/config checkpoint fields are rejected. The threshold snapshot
+binds the verified motif-resolution ref, and all scan/patch consumers use only
+that resolved evidence.
 
 All DTOs forbid unknown top-level fields and exclude session identity, paths,
 artifact IDs/hashes, storage metadata, credentials, and unrestricted registry
@@ -145,17 +166,29 @@ inherit omitted parameters from the prior attempt or require any key to change.
 
 ## Durable records and checkpoints
 
+`input_snapshot.json` is a strict `RecommendationInputSnapshotV3` containing
+`CanonicalRecommendationFacts`, one discriminated stage context, and immutable
+dependency refs. `basis_snapshot.json` freezes the selected catalog and any
+stage-owned knowledge basis. `recommendation_manifest.json` is the strict
+`ParameterRecommendationManifestV3` root binding those records to the method,
+task, recommendation ID, and predecessor identity.
+
 `model_request.json` owns the exact compact-JSON messages and prompt identity.
 Run, request-correlation, and retrieval-query identities are derived from the
 run path, recommendation directory, and manifest rather than repeated in the
-profile, basis, or model-request body.
+input snapshot, basis, or model-request body.
 `model_response.json` owns the raw provider response. `recommendation.json`
 owns the parsed recommendation. `response_parse.json` records only whether the
 declared response shape parsed and, on failure, the parser error.
 
-The recommendation manifest binds those records by immutable refs/hashes.
-Checkpoint state contains bounded cursors and refs, not the request/response
-bodies. No execution attempt is added before human approval.
+The v3 loader verifies artifact type, hash, schema, stage, method, task, and
+attempt-chain identity before returning the chain. Pre-v3 roots, pre-v3 ref
+names, and mixed identities fail closed. The response, parse, recommendation,
+and T2T motif-manifest leaves retain their own declared schema versions; the
+hard cutover applies to the recommendation snapshot/manifest root and the
+approved attempt boundary. Checkpoint state contains bounded cursors and refs,
+not the request/response bodies. No execution attempt is added before human
+approval.
 
 After approval, the compact `ParameterAttempt` is the only relation owner for
 the approved parameters, constructed command, frozen runner input, execution,
@@ -171,7 +204,9 @@ does not score attempts, derive a parameter delta, or choose the next mapping.
 Assembly input-presence signals come from the asset registry and are snapshotted
 into the typed `AssemblyInputProfile`. For example, raw or clean RNA-seq assets
 set `has_rnaseq`; a synthetic `stage_outputs["rnaseq"]` entry is neither a valid
-stage nor an input signal.
+stage nor an input signal. This upstream Assembly routing profile is not a
+parameter-recommendation evidence record; the recommender persists the separate
+schema-3 canonical input snapshot described above.
 
 ## Conformance rules
 
@@ -182,10 +217,11 @@ Tests must prove that:
 - persisted messages equal the messages passed to the model;
 - only the declared response shape is accepted;
 - unknown parameter names and values survive parsing and reach human review;
-- aliases, patches, rich wrappers, and top-level compatibility fields fail;
+- aliases, patches, rich wrappers, and undeclared top-level fields fail;
+- schema-3 snapshots/manifests reject pre-v3 ref names and mixed identities;
 - model failure produces `response_invalid` and never fabricates defaults;
 - human approval is hash-bound to the immutable recommendation;
-- approved parameters, unchanged, are the L2 input to command construction.
+- approved parameters, unchanged, are the L2 input to command construction;
 - empty sparse mappings still reach approval;
 - retry mappings are never merged with predecessors;
 - every retry prompt contains ordered evidence for all earlier attempts;

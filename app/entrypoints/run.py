@@ -14,25 +14,23 @@ import os
 import re
 import shutil
 import sys
-import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
+
+import yaml
 
 from app.config import default_data_root
 from app.control.lifecycle import finalize_terminal_state
 from app.domains.assembly.selection import (
     AssemblySelection,
     default_primary_method,
-    read_type_from_method_parameters,
     resolve_read_type,
 )
-from app.storage.ledger import Ledger
-from app.storage.materialization import RunMaterializationError, materialize_run_layout
-from app.schemas.entry import EntryRequest
-from app.schemas.manifest import InputManifest
 from app.graph.builder import build_graph
 from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
+from app.schemas.entry import EntryRequest
+from app.schemas.manifest import InputManifest
 from app.schemas.run_config import (
     AssemblyRunConfig,
     LocalExecStage,
@@ -43,6 +41,8 @@ from app.schemas.run_config import (
     validate_local_assembly_execution,
 )
 from app.schemas.state import initial_state
+from app.storage.ledger import Ledger
+from app.storage.materialization import RunMaterializationError, materialize_run_layout
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
@@ -73,13 +73,6 @@ def _assembly_parameter_dump(
     return parameters.model_dump(exclude_none=True) if parameters else None
 
 
-def _configured_assembly_parameter_items(assembly: AssemblyRunConfig):
-    for method in _ASSEMBLY_PARAMETER_ATTRS:
-        params = _assembly_parameter_dump(assembly, method)
-        if params:
-            yield method, params
-
-
 def _build_assembly_selection(
     *,
     assembly: AssemblyRunConfig,
@@ -89,10 +82,6 @@ def _build_assembly_selection(
     assembly_method = infer_assembly_method(assembly)
     if assembly_method:
         read_type = resolve_read_type(
-            (
-                f"assembly.{assembly_method}_parameters.read_type",
-                read_type_from_method_parameters(assembly_method, _assembly_parameter_dump(assembly, assembly_method)),
-            ),
             ("assembly.assembly_route", assembly.assembly_route),
             ("shared_parameters.read_type", (shared_parameters or {}).get("read_type")),
             ("shared_parameters.platform", None, shared_platform),
@@ -101,9 +90,10 @@ def _build_assembly_selection(
         if read_type is None:
             if assembly.assembly_method is not None:
                 raise ValueError(
-                    "run_config: assembly.assembly_method is set but no read_type could be inferred; "
-                    "set assembly.<method>_parameters.read_type, assembly.assembly_route, "
-                    "shared_parameters.read_type, or shared_parameters.platform"
+                    "run_config: assembly.assembly_method is set but no "
+                    "read_type could be inferred; "
+                    "set assembly.assembly_route, shared_parameters.read_type, or "
+                    "shared_parameters.platform"
                 )
             return None
         return AssemblySelection(
@@ -111,17 +101,16 @@ def _build_assembly_selection(
             primary_method=_ASSEMBLY_METHOD_NAMES[assembly_method],
             source="run_config",
             rationale="run_config explicitly selected assembly method",
-            parameter_overrides={
-                _ASSEMBLY_METHOD_NAMES[name]: params
-                for name, params in _configured_assembly_parameter_items(assembly)
-            },
             metadata={"assembly_route": assembly.assembly_route},
         )
 
     if assembly.assembly_route == "auto":
         return None
 
-    read_type = resolve_read_type(("assembly.assembly_route", assembly.assembly_route), context="entrypoints.run.assembly_route")
+    read_type = resolve_read_type(
+        ("assembly.assembly_route", assembly.assembly_route),
+        context="entrypoints.run.assembly_route",
+    )
     if read_type is None:
         return None
     return AssemblySelection(
@@ -138,9 +127,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run a genome workflow session")
-    run_parser.add_argument("--session-id", help="Unique session identifier; generated when omitted")
-    run_parser.add_argument("--manifest", required=True, help="Path to input manifest YAML/JSON")
-    run_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    run_parser.add_argument(
+        "--session-id", help="Unique session identifier; generated when omitted"
+    )
+    run_parser.add_argument(
+        "--manifest", required=True, help="Path to input manifest YAML/JSON"
+    )
+    run_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
     run_parser.add_argument(
         "--local-exec",
         action="append",
@@ -176,14 +171,45 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
 
-    ask_parser = subparsers.add_parser("ask", help="Start a workflow from a natural-language request")
-    ask_parser.add_argument("request_text", nargs="?", default=None, help="Natural-language request; required unless --ask-plan is provided")
-    ask_parser.add_argument("--session-id", help="Default session identifier if omitted from the request")
-    ask_parser.add_argument("--data-dir", help="Default output data directory if omitted from the request")
-    ask_parser.add_argument("--ask-plan", dest="ask_plan", default=None, help="Continue a previously emitted ask clarification plan")
-    ask_parser.add_argument("--clarification-response", dest="clarification_response", default=None, help="JSON response to the current clarification request")
-    ask_parser.add_argument("--write-clarification-template", dest="write_clarification_template", default=None, help="Write a clarification response template to a file")
-    ask_parser.add_argument("--json", action="store_true", default=False, help="Emit clarification payloads as JSON")
+    ask_parser = subparsers.add_parser(
+        "ask", help="Start a workflow from a natural-language request"
+    )
+    ask_parser.add_argument(
+        "request_text",
+        nargs="?",
+        default=None,
+        help="Natural-language request; required unless --ask-plan is provided",
+    )
+    ask_parser.add_argument(
+        "--session-id", help="Default session identifier if omitted from the request"
+    )
+    ask_parser.add_argument(
+        "--data-dir", help="Default output data directory if omitted from the request"
+    )
+    ask_parser.add_argument(
+        "--ask-plan",
+        dest="ask_plan",
+        default=None,
+        help="Continue a previously emitted ask clarification plan",
+    )
+    ask_parser.add_argument(
+        "--clarification-response",
+        dest="clarification_response",
+        default=None,
+        help="JSON response to the current clarification request",
+    )
+    ask_parser.add_argument(
+        "--write-clarification-template",
+        dest="write_clarification_template",
+        default=None,
+        help="Write a clarification response template to a file",
+    )
+    ask_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit clarification payloads as JSON",
+    )
     ask_parser.add_argument(
         "--run-config",
         dest="run_config",
@@ -226,11 +252,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Checkpoint backend for the structured run launched by ask.",
     )
 
-    inspect_parser = subparsers.add_parser("inspect", help="Inspect a workflow session from durable records")
-    inspect_parser.add_argument("--session-id", required=True, help="Session identifier to inspect")
-    inspect_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
-    inspect_parser.add_argument("--filter", action="append", default=[], help="Filter inspect output, currently supports decided_by=<origin>")
-    inspect_parser.add_argument("--json", action="store_true", help="Emit a machine-readable inspect summary")
+    inspect_parser = subparsers.add_parser(
+        "inspect", help="Inspect a workflow session from durable records"
+    )
+    inspect_parser.add_argument(
+        "--session-id", required=True, help="Session identifier to inspect"
+    )
+    inspect_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
+    inspect_parser.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        help="Filter inspect output, currently supports decided_by=<origin>",
+    )
+    inspect_parser.add_argument(
+        "--json", action="store_true", help="Emit a machine-readable inspect summary"
+    )
     inspect_parser.add_argument(
         "--trace",
         action="store_true",
@@ -269,19 +308,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "resume",
         help="Resume a blocked workflow session from a structured decision file",
     )
-    resume_parser.add_argument("--session-id", required=True, help="Session identifier to resume")
+    resume_parser.add_argument(
+        "--session-id", required=True, help="Session identifier to resume"
+    )
     resume_parser.add_argument(
         "--decision-file",
         dest="decision_file",
         required=True,
         help="Path to a JSON decision file matching ResumeReviewRequest",
     )
-    resume_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    resume_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
     resume_parser.add_argument(
         "--max-blocked-seconds",
         type=float,
         default=None,
-        help="Reject/convert a blocked resume if the gate has been blocked for at least this many seconds",
+        help=(
+            "Reject/convert a blocked resume if the gate has been blocked for "
+            "at least this many seconds"
+        ),
     )
     resume_parser.add_argument(
         "--checkpointer",
@@ -297,8 +343,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "review",
         help="Interactively review and resume a blocked human gate",
     )
-    review_parser.add_argument("--session-id", required=True, help="Session identifier to review")
-    review_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    review_parser.add_argument(
+        "--session-id", required=True, help="Session identifier to review"
+    )
+    review_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
     review_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -316,17 +366,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "tui",
         help="Launch a workflow or interactively review a blocked session",
     )
-    tui_parser.add_argument("--data-dir", default=default_data_root(), help="Workflow data root")
+    tui_parser.add_argument(
+        "--data-dir", default=default_data_root(), help="Workflow data root"
+    )
     tui_parser.add_argument(
         "--resume-session",
         default=None,
         metavar="SESSION_ID",
-        help="Attach to one blocked durable workflow session and review its active gate",
+        help=(
+            "Attach to one blocked durable workflow session and review its "
+            "active gate"
+        ),
     )
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
-        help="Initialize and validate project configuration, then check external packages",
+        help=(
+            "Initialize and validate project configuration, then check "
+            "external packages"
+        ),
     )
     bootstrap_parser.add_argument(
         "--apply",
@@ -400,7 +458,9 @@ def _peek_manifest_session_id(manifest_path: Path) -> str | None:
 
 def _run_session(args: argparse.Namespace) -> int:
     try:
-        request = EntryRequest(session_id=args.session_id, manifest=args.manifest, data_dir=args.data_dir)
+        request = EntryRequest(
+            session_id=args.session_id, manifest=args.manifest, data_dir=args.data_dir
+        )
     except ValueError as exc:
         print(f"error: invalid run request: {exc}", file=sys.stderr)
         return 1
@@ -461,10 +521,16 @@ def _run_session(args: argparse.Namespace) -> int:
 
     if "assembly" in local_stages:
         try:
-            validate_local_assembly_execution(run_config.assembly if run_config else None)
-            manifest = InputManifest.model_validate(yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {})
+            validate_local_assembly_execution(
+                run_config.assembly if run_config else None
+            )
+            manifest = InputManifest.model_validate(
+                yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+            )
             assert run_config is not None
-            validate_genome_size_execution_plan(run_config, manifest, local_stages=local_stages)
+            validate_genome_size_execution_plan(
+                run_config, manifest, local_stages=local_stages
+            )
         except (OSError, yaml.YAMLError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -488,7 +554,11 @@ def _run_session(args: argparse.Namespace) -> int:
     manifest_ref = paths.to_ref(paths.manifest_path)
     Ledger(request.data_dir).create_session(request.session_id, manifest_ref)
 
-    requested_stages = list(run_config.requested_stages) if run_config and run_config.requested_stages else None
+    requested_stages = (
+        list(run_config.requested_stages)
+        if run_config and run_config.requested_stages
+        else None
+    )
     state = initial_state(
         session_id=request.session_id,
         input_manifest_ref=manifest_ref,
@@ -503,14 +573,24 @@ def _run_session(args: argparse.Namespace) -> int:
             existing["execution_mode"] = "local"
             stage_outputs[stage_name] = existing
     if run_config and run_config.shared_parameters:
-        state["shared_parameters"] = run_config.shared_parameters.model_dump(exclude_none=True)
+        state["shared_parameters"] = run_config.shared_parameters.model_dump(
+            exclude_none=True
+        )
     if run_config and run_config.read_qc and run_config.read_qc.length_filter:
         read_qc_out = dict(stage_outputs.get("read_qc") or {})
-        read_qc_out["length_filter_request"] = run_config.read_qc.length_filter.model_dump(mode="json")
+        read_qc_out["length_filter_request"] = (
+            run_config.read_qc.length_filter.model_dump(mode="json")
+        )
         stage_outputs["read_qc"] = read_qc_out
-    if run_config and run_config.genome_survey and run_config.genome_survey.survey_parameters:
+    if (
+        run_config
+        and run_config.genome_survey
+        and run_config.genome_survey.survey_parameters
+    ):
         survey_out = dict(stage_outputs.get("genome_survey") or {})
-        survey_out["survey_parameters"] = run_config.genome_survey.survey_parameters.model_dump(exclude_none=True)
+        survey_out["survey_parameters"] = (
+            run_config.genome_survey.survey_parameters.model_dump(exclude_none=True)
+        )
         stage_outputs["genome_survey"] = survey_out
     if "repeat_annotation" in local_stages:
         repeat_out = dict(stage_outputs.get("repeat_annotation") or {})
@@ -524,7 +604,11 @@ def _run_session(args: argparse.Namespace) -> int:
             selection = _build_assembly_selection(
                 assembly=run_config.assembly,
                 shared_parameters=state.get("shared_parameters"),
-                shared_platform=(run_config.shared_parameters.platform if run_config.shared_parameters else None),
+                shared_platform=(
+                    run_config.shared_parameters.platform
+                    if run_config.shared_parameters
+                    else None
+                ),
             )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -532,14 +616,27 @@ def _run_session(args: argparse.Namespace) -> int:
         if selection:
             assembly_out["assembly_selection"] = selection.model_dump(mode="json")
         if run_config.assembly.flye_parameters:
-            assembly_out["flye_parameters"] = _assembly_parameter_dump(run_config.assembly, "flye")
+            assembly_out["flye_parameters"] = _assembly_parameter_dump(
+                run_config.assembly, "flye"
+            )
         if run_config.assembly.nextdenovo_parameters:
-            assembly_out["nextdenovo_parameters"] = _assembly_parameter_dump(run_config.assembly, "nextdenovo")
+            assembly_out["nextdenovo_parameters"] = _assembly_parameter_dump(
+                run_config.assembly, "nextdenovo"
+            )
         if run_config.assembly.hifiasm_parameters:
-            assembly_out["hifiasm_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm")
+            assembly_out["hifiasm_parameters"] = _assembly_parameter_dump(
+                run_config.assembly, "hifiasm"
+            )
         if run_config.assembly.hifiasm_ont_parameters:
-            assembly_out["hifiasm_ont_parameters"] = _assembly_parameter_dump(run_config.assembly, "hifiasm_ont")
-        for key in ["hifi_reads_ref", "hic_reads_ref", "target_level", "assembly_route"]:
+            assembly_out["hifiasm_ont_parameters"] = _assembly_parameter_dump(
+                run_config.assembly, "hifiasm_ont"
+            )
+        for key in [
+            "hifi_reads_ref",
+            "hic_reads_ref",
+            "target_level",
+            "assembly_route",
+        ]:
             value = getattr(run_config.assembly, key)
             if value is not None:
                 assembly_out[key] = value
@@ -548,18 +645,26 @@ def _run_session(args: argparse.Namespace) -> int:
     if run_config and run_config.assembly_review:
         review_out = dict(stage_outputs.get("assembly_review") or {})
         if run_config.assembly_review.quast:
-            review_out["quast_parameters"] = run_config.assembly_review.quast.model_dump()
+            review_out["quast_parameters"] = (
+                run_config.assembly_review.quast.model_dump()
+            )
         if run_config.assembly_review.busco:
-            review_out["busco_parameters"] = run_config.assembly_review.busco.model_dump()
+            review_out["busco_parameters"] = (
+                run_config.assembly_review.busco.model_dump()
+            )
         review_out["max_reruns"] = run_config.assembly_review.max_reruns
         if run_config.assembly_review.related_species_reference_dir:
-            review_out["related_species_reference_dir"] = run_config.assembly_review.related_species_reference_dir
+            review_out["related_species_reference_dir"] = (
+                run_config.assembly_review.related_species_reference_dir
+            )
         stage_outputs["assembly_review"] = review_out
     if run_config and run_config.hic_scaffolding:
         hic_out = dict(stage_outputs.get("hic_scaffolding") or {})
         if run_config.hic_scaffolding.autohic_parameters:
-            hic_out["autohic_parameters"] = run_config.hic_scaffolding.autohic_parameters.model_dump(
-                exclude_none=True
+            hic_out["autohic_parameters"] = (
+                run_config.hic_scaffolding.autohic_parameters.model_dump(
+                    exclude_none=True
+                )
             )
         hic_out["parameter_retry_policy"] = {
             "retry_on_execution_failure": (
@@ -576,16 +681,29 @@ def _run_session(args: argparse.Namespace) -> int:
     if run_config and run_config.review_policy:
         for review_stage in ["assembly", "assembly_review", "hic_scaffolding"]:
             stage_out = dict(stage_outputs.get(review_stage) or {})
-            stage_out["review_policy"] = run_config.review_policy.effective_for_stage(review_stage)
+            stage_out["review_policy"] = run_config.review_policy.effective_for_stage(
+                review_stage
+            )
             stage_outputs[review_stage] = stage_out
-    if run_config and run_config.gene_annotation and run_config.gene_annotation.lineage_or_species_hints:
+    if (
+        run_config
+        and run_config.gene_annotation
+        and run_config.gene_annotation.lineage_or_species_hints
+    ):
         gene_out = dict(stage_outputs.get("gene_annotation") or {})
-        gene_out["lineage_or_species_hints"] = dict(run_config.gene_annotation.lineage_or_species_hints)
+        gene_out["lineage_or_species_hints"] = dict(
+            run_config.gene_annotation.lineage_or_species_hints
+        )
         stage_outputs["gene_annotation"] = gene_out
-    if run_config and run_config.function_annotation and run_config.function_annotation.database_provenance:
+    if (
+        run_config
+        and run_config.function_annotation
+        and run_config.function_annotation.database_provenance
+    ):
         fn_out = dict(stage_outputs.get("function_annotation") or {})
         fn_out["database_provenance"] = [
-            p.model_dump(mode="json") for p in run_config.function_annotation.database_provenance
+            p.model_dump(mode="json")
+            for p in run_config.function_annotation.database_provenance
         ]
         stage_outputs["function_annotation"] = fn_out
     if stage_outputs != (state.get("stage_outputs") or {}):
@@ -620,8 +738,12 @@ def _run_session(args: argparse.Namespace) -> int:
             "checkpoint_persistence": backend,
         }
         compaction_warning = finalize_terminal_state(
-            graph, config, failure_result, request.session_id,
-            request.data_dir, backend,
+            graph,
+            config,
+            failure_result,
+            request.session_id,
+            request.data_dir,
+            backend,
             report_kind="operator",
         )
         if compaction_warning:
@@ -640,7 +762,9 @@ def _run_session(args: argparse.Namespace) -> int:
 
     terminal_finalized_by_resume = False
     if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
-        result = _interactive_gate_loop(graph, config, result, request.session_id, request.data_dir)
+        result = _interactive_gate_loop(
+            graph, config, result, request.session_id, request.data_dir
+        )
         supervision = result.get("supervision_state", "unknown")
         terminal_finalized_by_resume = supervision in {"completed", "failed_terminal"}
 
@@ -657,10 +781,14 @@ def _run_session(args: argparse.Namespace) -> int:
     if supervision == "blocked_human":
         if backend == "sqlite":
             print(
-                "resume_note: use `gene-agent review` or `gene-agent resume` to continue"
+                "resume_note: use `gene-agent review` or `gene-agent resume` "
+                "to continue"
             )
         else:
-            print("resume_note: durable cross-process resume requires --checkpointer sqlite")
+            print(
+                "resume_note: durable cross-process resume requires "
+                "--checkpointer sqlite"
+            )
     print(f"route_trace: {route_trace}")
     if active_interrupt:
         print(f"active_interrupt: {active_interrupt}")
@@ -675,7 +803,12 @@ def _run_session(args: argparse.Namespace) -> int:
     compaction_warning = None
     if not terminal_finalized_by_resume:
         compaction_warning = finalize_terminal_state(
-            graph, config, result, request.session_id, request.data_dir, backend,
+            graph,
+            config,
+            result,
+            request.session_id,
+            request.data_dir,
+            backend,
             report_kind="final",
         )
     if compaction_warning:
@@ -737,23 +870,28 @@ def _interactive_gate_loop(
             print(f"decision_artifact: {transaction.decision_artifact_path}")
         if transaction.annotation_intake_artifact_ref is not None:
             print(
-                "annotation_intake_plan: "
-                f"{transaction.annotation_intake_artifact_ref}"
+                f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}"
             )
-        print(f"\nresumed → stage={result.get('current_stage')} state={result.get('supervision_state')}")
+        print(
+            f"\nresumed → stage={result.get('current_stage')} "
+            f"state={result.get('supervision_state')}"
+        )
 
     return result
 
 
 def _run_ask(args: argparse.Namespace) -> int:
-    from app.entrypoints.ask_interactive import apply_set_params, is_interactive, run_interactive_loop
+    from app.entrypoints.ask_interactive import (
+        apply_set_params,
+        is_interactive,
+        run_interactive_loop,
+    )
     from app.entrypoints.ask_planner import (
         clarification_template,
         locate_ask_plan_path,
         merge_clarification_response,
         next_clarification,
         save_plan_to_default_path,
-        write_ask_run_config,
     )
     from app.schemas.ask_plan import load_ask_clarification_response, load_ask_plan
 
@@ -777,7 +915,11 @@ def _run_ask(args: argparse.Namespace) -> int:
             plan = load_ask_plan(args.ask_plan)
         else:
             if not getattr(args, "request_text", None):
-                print("error: request_text is required unless --ask-plan or --resume is provided", file=sys.stderr)
+                print(
+                    "error: request_text is required unless --ask-plan or "
+                    "--resume is provided",
+                    file=sys.stderr,
+                )
                 return 1
             plan = _create_ask_plan(args)
 
@@ -805,11 +947,21 @@ def _run_ask(args: argparse.Namespace) -> int:
     if clarification:
         if getattr(args, "write_clarification_template", None):
             template = clarification_template(clarification)
-            template_path = Path(args.write_clarification_template).expanduser().resolve(strict=False)
+            template_path = (
+                Path(args.write_clarification_template)
+                .expanduser()
+                .resolve(strict=False)
+            )
             template_path.parent.mkdir(parents=True, exist_ok=True)
-            template_path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
+            template_path.write_text(
+                json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         if getattr(args, "json", False):
-            print(json.dumps(clarification.model_dump(mode="json"), ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    clarification.model_dump(mode="json"), ensure_ascii=False, indent=2
+                )
+            )
         else:
             print(f"status: {clarification.status}")
             print(f"clarification.kind: {clarification.kind}")
@@ -818,28 +970,20 @@ def _run_ask(args: argparse.Namespace) -> int:
             print(f"manifest_ref: {clarification.manifest_ref}")
             print(f"question: {clarification.question}")
             if clarification.summary:
-                print(f"summary: {json.dumps(clarification.summary, ensure_ascii=False, indent=2, default=str)}")
+                summary_json = json.dumps(
+                    clarification.summary,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+                print(f"summary: {summary_json}")
             print(f"required_fields: {clarification.required_fields}")
             print(f"next_action.command: {clarification.next_action.get('command')}")
         return 0
 
-    try:
-        run_config_path = str(write_ask_run_config(plan))
-    except (ValueError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    from app.entrypoints.ask_execution import execute_confirmed_plan
 
-    entry_request = dict(plan.entry_request or {})
-    entry_request.pop("intent_parse_source", None)
-    request = EntryRequest.model_validate(entry_request)
-    if not request.manifest:
-        request = request.model_copy(update={"manifest": plan.manifest_ref})
-    argv = request.to_cli_argv()
-    argv.extend(["--run-config", run_config_path])
-    if getattr(args, "checkpointer", None):
-        argv.extend(["--checkpointer", args.checkpointer])
-    structured_args = _parse_args(argv)
-    return _run_session(structured_args)
+    return execute_confirmed_plan(plan, args)
 
 
 def _create_ask_plan(args: argparse.Namespace) -> "AskPlanState":
@@ -857,7 +1001,9 @@ def _create_ask_plan(args: argparse.Namespace) -> "AskPlanState":
     request = materialize_entry_manifest(request)
     if intent_parse_source:
         request._intent_parse_source = intent_parse_source
-    stored_request = request.model_copy(update={"source_paths": []}) if request.manifest else request
+    stored_request = (
+        request.model_copy(update={"source_paths": []}) if request.manifest else request
+    )
     entry_request = stored_request.model_dump(mode="json")
     if intent_parse_source:
         entry_request["intent_parse_source"] = intent_parse_source
@@ -875,7 +1021,10 @@ def _run_ask_with_explicit_config(args: argparse.Namespace) -> int:
     from app.entrypoints.manifest_materializer import materialize_entry_manifest
 
     if not getattr(args, "request_text", None):
-        print("error: request_text is required for gene-agent ask --run-config", file=sys.stderr)
+        print(
+            "error: request_text is required for gene-agent ask --run-config",
+            file=sys.stderr,
+        )
         return 1
     data_dir = args.data_dir or default_data_root()
     defaults = {
@@ -898,7 +1047,9 @@ def _run_ask_with_explicit_config(args: argparse.Namespace) -> int:
     return _run_session(structured_args)
 
 
-def generate_session_id(data_dir: str | Path | None = None, *, now: datetime | None = None) -> str:
+def generate_session_id(
+    data_dir: str | Path | None = None, *, now: datetime | None = None
+) -> str:
     date = (now or datetime.now()).strftime("%Y%m%d")
     root = Path(data_dir or default_data_root())
     pattern = re.compile(rf"^gene-{date}-(\d{{6}})$")
@@ -936,7 +1087,11 @@ def _run_storage_audit(args: argparse.Namespace) -> int:
 
 
 def _run_inspect(args: argparse.Namespace) -> int:
-    from app.control.lifecycle import ResumeValidationError, build_resume_decision_template, inspect_session
+    from app.control.lifecycle import (
+        ResumeValidationError,
+        build_resume_decision_template,
+        inspect_session,
+    )
 
     filters = _parse_inspect_filters(getattr(args, "filter", []) or [])
     if filters is None:
@@ -955,9 +1110,12 @@ def _run_inspect(args: argparse.Namespace) -> int:
             return 1
         out_path = Path(template_path).expanduser().resolve(strict=False)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
+        out_path.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         resume_command = (
-            f"gene-agent resume --session-id {args.session_id} --data-dir {args.data_dir} "
+            "gene-agent resume "
+            f"--session-id {args.session_id} --data-dir {args.data_dir} "
             f"--decision-file {out_path} --checkpointer sqlite"
         )
         summary["decision_template_written"] = str(out_path)
@@ -996,13 +1154,18 @@ def _print_inspect_text(summary: dict, filters: dict[str, str]) -> None:
     print(f"session_id: {summary['session_id']}")
     print(f"supervision_state: {summary['supervision_state']}")
     print(f"checkpoint_persistence: {summary['checkpoint_persistence']}")
-    print(f"durable_resume_available: {str(summary['durable_resume_available']).lower()}")
+    print(
+        f"durable_resume_available: {str(summary['durable_resume_available']).lower()}"
+    )
     print(f"artifact_count: {summary.get('artifact_count', 0)}")
     print(f"decisions_by_origin: {summary.get('decisions_by_origin', {})}")
     if summary.get("latest_review_request"):
         print(f"latest_review_request: {summary['latest_review_request']}")
     if summary.get("latest_review_request_artifact"):
-        print(f"latest_review_request_artifact: {summary['latest_review_request_artifact']}")
+        print(
+            "latest_review_request_artifact: "
+            f"{summary['latest_review_request_artifact']}"
+        )
     if summary.get("latest_operator_report"):
         print(f"latest_operator_report: {summary['latest_operator_report']}")
     if summary.get("latest_final_report"):
@@ -1013,12 +1176,19 @@ def _print_inspect_text(summary: dict, filters: dict[str, str]) -> None:
         decisions_allowed = requirements.get("decisions_allowed") or []
         print(f"decision_requirements.decisions_allowed: {decisions_allowed}")
         if requirements.get("candidate_ids"):
-            print(f"decision_requirements.candidate_ids: {requirements['candidate_ids']}")
+            print(
+                f"decision_requirements.candidate_ids: {requirements['candidate_ids']}"
+            )
         if requirements.get("candidate_methods"):
-            print(f"decision_requirements.candidate_methods: {requirements['candidate_methods']}")
+            print(
+                "decision_requirements.candidate_methods: "
+                f"{requirements['candidate_methods']}"
+            )
     if summary.get("latest_review_decision"):
         print(f"latest_review_decision: {summary['latest_review_decision']}")
-    review_decisions = _filter_review_decisions(summary.get("review_decisions") or [], filters)
+    review_decisions = _filter_review_decisions(
+        summary.get("review_decisions") or [], filters
+    )
     if filters:
         print(f"review_decisions: {review_decisions}")
     next_action = summary.get("next_action") or {}
@@ -1038,21 +1208,32 @@ def _parse_inspect_filters(raw_filters: list[str]) -> dict[str, str] | None:
     parsed: dict[str, str] = {}
     for raw_filter in raw_filters:
         if "=" not in raw_filter:
-            print(f"error: unsupported inspect filter {raw_filter!r}; expected key=value", file=sys.stderr)
+            print(
+                f"error: unsupported inspect filter {raw_filter!r}; expected key=value",
+                file=sys.stderr,
+            )
             return None
         key, value = raw_filter.split("=", 1)
         if key != "decided_by":
-            print(f"error: unsupported inspect filter key {key!r}; only decided_by is supported", file=sys.stderr)
+            print(
+                f"error: unsupported inspect filter key {key!r}; "
+                "only decided_by is supported",
+                file=sys.stderr,
+            )
             return None
         parsed[key] = value
     return parsed
 
 
-def _filter_review_decisions(decisions: list[dict], filters: dict[str, str]) -> list[dict]:
+def _filter_review_decisions(
+    decisions: list[dict], filters: dict[str, str]
+) -> list[dict]:
     decided_by = filters.get("decided_by")
     if not decided_by:
         return decisions
-    return [decision for decision in decisions if decision.get("decided_by") == decided_by]
+    return [
+        decision for decision in decisions if decision.get("decided_by") == decided_by
+    ]
 
 
 def _load_dotenv_without_override(paths: list[Path] | None = None) -> None:
@@ -1097,7 +1278,8 @@ def _snapshot_resume_decision(
         if destination.exists():
             if destination.read_bytes() != source_bytes:
                 raise ValueError(
-                    f"run-local resume decision already exists with different content: {destination}"
+                    "run-local resume decision already exists with different "
+                    f"content: {destination}"
                 )
         else:
             shutil.copy2(source, destination)
@@ -1170,7 +1352,9 @@ def _run_resume(args: argparse.Namespace) -> int:
         )
         decision_ref = paths.to_ref(decision_path)
     except (OSError, ValueError) as exc:
-        print(f"error: resume decision could not be materialized: {exc}", file=sys.stderr)
+        print(
+            f"error: resume decision could not be materialized: {exc}", file=sys.stderr
+        )
         return 1
     event_context = {
         "decision_file_ref": decision_ref,
@@ -1197,10 +1381,7 @@ def _run_resume(args: argparse.Namespace) -> int:
 
     result = transaction.state
     if transaction.annotation_intake_artifact_ref is not None:
-        print(
-            "annotation_intake_plan: "
-            f"{transaction.annotation_intake_artifact_ref}"
-        )
+        print(f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}")
     current_stage = result.get("current_stage", "unknown")
     supervision = result.get("supervision_state", "unknown")
     route_trace = result.get("route_trace", [])
@@ -1251,7 +1432,11 @@ def _run_tui(args: argparse.Namespace) -> int:
 def _run_bootstrap(args: argparse.Namespace) -> int:
     """Initialize project config, then validate and conform packages."""
     from app.execution import env_resolver
-    from app.execution.package_bootstrap import conform_juicer, preflight_all, verify_envs_yaml
+    from app.execution.package_bootstrap import (
+        conform_juicer,
+        preflight_all,
+        verify_envs_yaml,
+    )
     from app.execution.project_bootstrap import (
         apply_project_bootstrap_plan,
         collect_project_bootstrap_plan,
@@ -1279,7 +1464,9 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 secret_prompt=getpass.getpass,
             )
         except (OSError, ValueError, yaml.YAMLError) as exc:
-            print(f"\n❌ Failed to inspect project configuration: {exc}", file=sys.stderr)
+            print(
+                f"\n❌ Failed to inspect project configuration: {exc}", file=sys.stderr
+            )
             return 1
 
         if init_plan.changes:
@@ -1299,7 +1486,10 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                 apply_project_bootstrap_plan(init_plan)
                 _load_dotenv_without_override([init_plan.dotenv_path])
             except (OSError, ValueError, yaml.YAMLError) as exc:
-                print(f"\n❌ Failed to initialize project configuration: {exc}", file=sys.stderr)
+                print(
+                    f"\n❌ Failed to initialize project configuration: {exc}",
+                    file=sys.stderr,
+                )
                 return 1
             print("✓ Project configuration initialized")
 
@@ -1346,7 +1536,9 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
                     if juicer_tools_spec:
                         print("    - Link juicer_tools.jar into scripts/common/")
 
-    if not args.apply and any(pkg.conform_on_bootstrap for pkg in resolver.packages.values()):
+    if not args.apply and any(
+        pkg.conform_on_bootstrap for pkg in resolver.packages.values()
+    ):
         print("\n💡 Run with --apply to execute conformance actions")
 
     # Step 4: Preflight all packages

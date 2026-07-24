@@ -216,12 +216,11 @@ TUI/ask 最终会把选择落到 run config：
   ],
   "shared_parameters": {
     "platform": "ont",
-    "read_type": "ont_raw",
-    "estimated_genome_size": 500000000
+    "read_type": "ont_raw"
   },
   "read_qc": {
     "length_filter": {
-      "method": "read_qc.filter.seqkit_seq",
+      "method": "read_qc.length_filter.seqkit_seq",
       "approved": true,
       "thresholds": {
         "min_len": 1000
@@ -237,9 +236,8 @@ TUI/ask 最终会把选择落到 run config：
   },
   "assembly": {
     "assembly_method": "flye",
+    "assembly_route": "ont",
     "flye_parameters": {
-      "read_type": "nano-raw",
-      "estimated_genome_size": 500000000,
       "threads": 16
     }
   },
@@ -257,6 +255,10 @@ TUI/ask 最终会把选择落到 run config：
   }
 }
 ```
+
+用户提供的 genome size 属于输入样本事实，只写在 manifest 的
+`genome_size_estimate`；RunConfig 不重复保存该值。运行中由 genome survey
+得到的测量值则保留为独立的 stage output。
 
 `local_exec` 是安全阀：只有列在这里的 stage 才会尝试执行本地工具。没有列入
 `local_exec` 的 stage 仍然可以参与规划、写 artifact、进入 review gate 或作为

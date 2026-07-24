@@ -55,12 +55,16 @@ def route_after_parameter_recommendation(state: TopLevelState) -> str:
     return "fail"
 
 
-def route_after_parameter_profile(state: TopLevelState) -> str:
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "scan_assembly"
+def route_after_parameter_freeze(state: TopLevelState) -> str:
+    return (
+        "fail" if is_terminal_failure(_output(state).get("status")) else "scan_assembly"
+    )
 
 
 def route_after_assembly_scan(state: TopLevelState) -> str:
-    return "fail" if is_terminal_failure(_output(state).get("status")) else "prepare_reads"
+    return (
+        "fail" if is_terminal_failure(_output(state).get("status")) else "prepare_reads"
+    )
 
 
 def route_after_read_prepare(state: TopLevelState) -> str:

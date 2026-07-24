@@ -25,12 +25,21 @@ def build_t2t_recommendation_context(
             "resolved_telomere_motif is required and must be a non-empty string"
         )
 
-    motif_source = t2t_out.get("motif_source") or "llm_species_resolution"
-    ont_asset_count = t2t_out.get("ont_asset_count") or 1
+    motif_source = t2t_out.get("resolved_telomere_motif_source")
+    if motif_source not in {"provided_species_fact", "llm_species_resolution"}:
+        raise ValueError(
+            "resolved_telomere_motif_source must be provided_species_fact or "
+            "llm_species_resolution"
+        )
+    ont_read_inputs = t2t_out.get("ont_read_inputs")
+    if not isinstance(ont_read_inputs, list) or not ont_read_inputs:
+        raise ValueError(
+            "ont_read_inputs must contain at least one canonical ONT asset"
+        )
 
     return T2TRecommendationContext(
         stage="t2t",
         resolved_telomere_motif=resolved_telomere_motif,
-        motif_source=motif_source,  # type: ignore[arg-type]
-        ont_asset_count=int(ont_asset_count),
+        motif_source=motif_source,
+        ont_asset_count=len(ont_read_inputs),
     )

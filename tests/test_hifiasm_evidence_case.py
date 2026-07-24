@@ -18,20 +18,31 @@ from app.domains.assembly.evidence_case import (
     project_hifiasm_prompt_safe_case,
     validate_hifiasm_evidence_cases,
 )
-from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.knowledge.evidence_cases import (
-    EvidenceCaseValidationError,
+    MAX_METHODS_FILE_BYTES,
     MAX_SOURCE_EXCERPT_CHARS,
     MAX_SOURCE_EXCERPT_CHARS_PER_DOCUMENT,
     MAX_SOURCE_EXCERPTS_PER_CASE,
     MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE,
-    MAX_METHODS_FILE_BYTES,
+    EvidenceCaseValidationError,
 )
 from app.knowledge.packs import load_knowledge_pack
 from app.llm.parameters.assembly.request import build_parameter_request_dto
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    CanonicalGenomeFacts,
+    CanonicalReadFacts,
+    CanonicalRecommendationFacts,
+    CanonicalSequencingFacts,
+    CanonicalSpeciesFacts,
+    QuantityFact,
+    QuantityOrigin,
+)
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.stages.assembly.parameters.profile import build_prompt_profile
+
+HIFIASM_METHOD = "assembly.candidate.hifiasm"
+
 
 def _write_methods(path: Path, text: str = "Methods source.\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,34 +105,81 @@ def _replace_evidence_spans(case: dict, *, spans: list[dict[str, str]]) -> None:
     case["intervention"]["parameters"]["purge_level"]["evidence_span_ids"] = span_ids
 
 
-def _initial_profile() -> dict:
-    return {
-        "sample": {"sample_id": "case_match", "ploidy": 2},
-        "assets": {"read_type": "hifi"},
-        "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18_000},
-        "genome_survey": {"estimated_genome_size": 1_200_000_000},
-        "previous_attempt": {},
-        "assembly_review": {},
-    }
+def _quantity(
+    value: int | float,
+    unit: str,
+    *,
+    kind: str,
+    producer: str,
+) -> QuantityFact:
+    return QuantityFact(
+        value=value,
+        unit=unit,
+        origin=QuantityOrigin(kind=kind, producer=producer),
+    )
+
+
+def _initial_facts() -> CanonicalRecommendationFacts:
+    return CanonicalRecommendationFacts(
+        species=CanonicalSpeciesFacts(
+            ploidy=_quantity(2, "count", kind="provided", producer="run_config")
+        ),
+        reads=CanonicalReadFacts(
+            read_type="pacbio_hifi",
+            read_n50=_quantity(
+                18_000,
+                "bp",
+                kind="measured",
+                producer="read_qc",
+            ),
+        ),
+        genome=CanonicalGenomeFacts(
+            effective_genome_size=_quantity(
+                1_200_000_000,
+                "bp",
+                kind="resolved",
+                producer="genome_survey",
+            )
+        ),
+        sequencing=CanonicalSequencingFacts(
+            raw_coverage=_quantity(
+                30.0,
+                "x",
+                kind="derived",
+                producer="parameter_recommendation",
+            )
+        ),
+    )
+
+
+def _initial_context() -> AssemblyRecommendationContext:
+    return AssemblyRecommendationContext(
+        stage="assembly",
+        assembly_route="hifi",
+        read_type="pacbio_hifi",
+        target_level="draft",
+    )
 
 
 def _build_parameter_request(
-    full_profile: dict,
+    facts: CanonicalRecommendationFacts,
     *,
     knowledge_root: Path,
 ) -> tuple[dict, dict]:
-    catalog = load_parameter_catalog("hifiasm")
-    prompt_profile = build_prompt_profile(full_profile, "recommend_initial")
+    catalog = load_parameter_catalog(HIFIASM_METHOD)
+    context = _initial_context()
     basis = build_parameter_basis_snapshot(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=prompt_profile,
+        facts=facts,
+        context=context,
         knowledge_root=knowledge_root,
     )
     request = build_parameter_request_dto(
-        method_id="hifiasm",
+        method_id=HIFIASM_METHOD,
         catalog=catalog,
-        prompt_profile=prompt_profile,
+        facts=facts,
+        context=context,
         task="recommend_initial",
         basis_snapshot=basis,
     )
@@ -136,35 +194,6 @@ def _retrieval_query() -> dict:
         "assembly_goal": "primary",
         "numeric_features": {"coverage": {"value": 30.0}},
         "categorical_context": {},
-    }
-
-
-def _methods_prompt(
-    cases: list[dict],
-    case_retrieval: dict | None = None,
-) -> dict:
-    case_ids = [case["case_id"] for case in cases]
-    retrieval = (
-        {
-            **case_retrieval,
-            "evidence_case_ids": case_ids,
-        }
-        if case_retrieval is not None
-        else {
-            "retrieval_backend": "hifiasm_numeric",
-            "candidate_case_ids": case_ids,
-            "evidence_case_ids": case_ids,
-        }
-    )
-    return {
-        "method_id": "hifiasm",
-        "task": "recommend_initial",
-        "prompt_profile": {},
-        "rules": {"rules": []},
-        "recommendation_policy": {"allowed_evidence_bases": ["case", "catalog_default"]},
-        "adjustable_params": {"purge_level": {"level": 2, "default": 0}},
-        "case_selection": retrieval,
-        "evidence_cases": cases,
     }
 
 
@@ -183,8 +212,7 @@ def test_approved_case_projects_only_referenced_declared_spans(tmp_path):
         "methods.command",
     }
     assert all(
-        set(span) == {"span_id", "document", "quote"}
-        and span["document"] == "methods"
+        set(span) == {"span_id", "document", "quote"} and span["document"] == "methods"
         for span in validated[0]["source_excerpts"]
     )
     assert "Study body" not in str(validated[0]["source_excerpts"])
@@ -207,7 +235,9 @@ def test_approved_case_projects_only_referenced_declared_spans(tmp_path):
     }
 
 
-def test_prompt_case_is_one_enriched_literature_card_without_rewritten_sections(tmp_path):
+def test_prompt_case_is_one_enriched_literature_card_without_rewritten_sections(
+    tmp_path,
+):
     case = _approved_case(tmp_path)
     case["evidence_spans"].append(
         {
@@ -241,13 +271,22 @@ def test_prompt_case_is_one_enriched_literature_card_without_rewritten_sections(
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        (lambda case: case["source"].__setitem__("full_text", "ENTIRE DOCUMENT SENTINEL"), "source.full_text"),
         (
-            lambda case: case["intervention"].__setitem__("methods_text", "METHODS SENTINEL"),
+            lambda case: case["source"].__setitem__(
+                "full_text", "ENTIRE DOCUMENT SENTINEL"
+            ),
+            "source.full_text",
+        ),
+        (
+            lambda case: case["intervention"].__setitem__(
+                "methods_text", "METHODS SENTINEL"
+            ),
             "intervention.methods_text",
         ),
         (
-            lambda case: case["observed_facts"]["coverage"].__setitem__("notes", "CURATOR NOTES"),
+            lambda case: case["observed_facts"]["coverage"].__setitem__(
+                "notes", "CURATOR NOTES"
+            ),
             "observed_facts.coverage.notes",
         ),
         (
@@ -277,7 +316,9 @@ def test_nested_unknown_fields_fail_closed(tmp_path, mutate, message):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
-@pytest.mark.parametrize("legacy_field", ["source_documents", "body", "sha256", "document"])
+@pytest.mark.parametrize(
+    "legacy_field", ["source_documents", "body", "sha256", "document"]
+)
 def test_legacy_source_fields_fail_as_unknown_schema(tmp_path, legacy_field):
     case = _approved_case(tmp_path)
     if legacy_field == "source_documents":
@@ -313,14 +354,18 @@ def test_rationale_statement_has_prompt_safe_text_ceiling(tmp_path):
         }
     ]
 
-    with pytest.raises(EvidenceCaseValidationError, match=r"rationale_claims\[0\].statement.*character limit"):
+    with pytest.raises(
+        EvidenceCaseValidationError,
+        match=r"rationale_claims\[0\].statement.*character limit",
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 def test_prompt_safe_case_has_total_text_ceiling(tmp_path):
     case = _approved_case(tmp_path)
     case["source"]["artifact_refs"] = [
-        f"artifact_{index}_" + "A" * (MAX_EVIDENCE_TEXT_FIELD_CHARS - len(f"artifact_{index}_"))
+        f"artifact_{index}_"
+        + "A" * (MAX_EVIDENCE_TEXT_FIELD_CHARS - len(f"artifact_{index}_"))
         for index in range(16)
     ]
 
@@ -342,7 +387,10 @@ def test_documented_optional_schema_survives_prompt_safe_rebuild(tmp_path):
     case["applicability"]["source_tool_version"] = "0.21.0"
     case["observed_facts"].update(
         {
-            "organism": {"value": "Example species", "evidence_span_ids": ["methods.genome"]},
+            "organism": {
+                "value": "Example species",
+                "evidence_span_ids": ["methods.genome"],
+            },
             "clade": {"value": "vertebrate", "evidence_span_ids": ["methods.genome"]},
             "heterozygosity": {
                 "value": 0.012,
@@ -376,7 +424,9 @@ def test_documented_optional_schema_survives_prompt_safe_rebuild(tmp_path):
 
     assert validated["source"]["title"] == "Example"
     assert validated["source"]["artifact_refs"] == ["artifact://source-record"]
-    assert validated["observed_facts"]["heterozygosity"]["uncertainty"] == {"kind": "point"}
+    assert validated["observed_facts"]["heterozygosity"]["uncertainty"] == {
+        "kind": "point"
+    }
     assert validated["rationale_claims"][0]["claim_id"] == "preserve_haplotype_signal"
     assert set(validated["outcomes"]) == {
         "assembly_size_mb",
@@ -394,7 +444,9 @@ def test_source_text_identifiers_reject_non_string_scalars(tmp_path, field_name,
     case = _approved_case(tmp_path)
     case["source"][field_name] = value
 
-    with pytest.raises(EvidenceCaseValidationError, match=rf"source\.{field_name}.*non-empty string"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match=rf"source\.{field_name}.*non-empty string"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -426,13 +478,19 @@ def test_public_prompt_safe_projection_is_deep_and_omits_derived_metadata(tmp_pa
     assert "evidence_spans" not in projected
     assert "curation" not in projected
 
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
     validated["numeric_match"] = {"distance": 0.1}
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(validated)
 
     case["methods_path"] = "forged.md"
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(case)
 
 
@@ -443,17 +501,23 @@ def test_public_projection_rejects_unvalidated_and_modified_source_excerpts(tmp_
         {"span_id": "forged", "document": "methods", "quote": "Forged quote."}
     ]
 
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(ordinary)
 
     validated = validate_hifiasm_evidence_cases([raw], pack_root=tmp_path)[0]
     validated["source_excerpts"][0]["quote"] = "Replacement quote."
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(validated)
 
 
 def test_validation_proof_is_external_and_direct_construction_cannot_mint_it(tmp_path):
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
 
     assert not hasattr(evidence_case_module, "_ValidatedHifiasmEvidenceCase")
     assert not hasattr(evidence_case_module, "_VALIDATED_CASE_TOKEN")
@@ -466,16 +530,24 @@ def test_validation_proof_is_external_and_direct_construction_cannot_mint_it(tmp
 
     forged = dict.__new__(case_type)
     dict.__init__(forged, deepcopy(dict(validated)))
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(forged)
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         copy(forged)
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         deepcopy(forged)
 
 
 def test_registered_copy_and_deepcopy_preserve_proof_without_exposing_it(tmp_path):
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
 
     shallow = copy(validated)
     deep = deepcopy(validated)
@@ -483,17 +555,23 @@ def test_registered_copy_and_deepcopy_preserve_proof_without_exposing_it(tmp_pat
     assert project_hifiasm_prompt_safe_case(deep)["source_excerpts"]
 
     deep["source_excerpts"][0]["quote"] = "Synchronized public/internal forgery."
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(deep)
     assert project_hifiasm_prompt_safe_case(validated)["source_excerpts"]
 
     ordinary = dict(validated)
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(ordinary)
 
 
 def test_validation_registry_does_not_retain_cases_and_forged_identity_fails(tmp_path):
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
     case_type = type(validated)
     values = deepcopy(dict(validated))
     reference = weakref.ref(validated)
@@ -504,26 +582,40 @@ def test_validation_registry_does_not_retain_cases_and_forged_identity_fails(tmp
 
     forged = dict.__new__(case_type)
     dict.__init__(forged, values)
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(forged)
 
 
 def test_public_projection_rejects_added_and_duplicate_validated_spans(tmp_path):
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
     validated["source_excerpts"].append(
         {"span_id": "added", "document": "methods", "quote": "Added quote."}
     )
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(validated)
 
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
     validated["source_excerpts"].append(dict(validated["source_excerpts"][0]))
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(validated)
 
-    validated = validate_hifiasm_evidence_cases([_approved_case(tmp_path)], pack_root=tmp_path)[0]
+    validated = validate_hifiasm_evidence_cases(
+        [_approved_case(tmp_path)], pack_root=tmp_path
+    )[0]
     validated.pop("source_excerpts")
-    with pytest.raises(EvidenceCaseValidationError, match="Task 2 validation-owned attestation"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="Task 2 validation-owned attestation"
+    ):
         project_hifiasm_prompt_safe_case(validated)
 
 
@@ -540,11 +632,11 @@ def test_prompt_safe_excerpt_budget_accepts_12000_and_rejects_12001(tmp_path):
     assert sum(len(span["quote"]) for span in projected["source_excerpts"]) == 12_000
 
     rejected = _approved_case(tmp_path)
-    rejected_spans = accepted_spans + [
-        {"span_id": "methods.extra", "quote": "Z"}
-    ]
+    rejected_spans = accepted_spans + [{"span_id": "methods.extra", "quote": "Z"}]
     _replace_evidence_spans(rejected, spans=rejected_spans)
-    with pytest.raises(EvidenceCaseValidationError, match="per-document.*character limit"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="per-document.*character limit"
+    ):
         validate_hifiasm_evidence_cases([rejected], pack_root=tmp_path)
 
 
@@ -565,7 +657,9 @@ def test_approved_case_rejects_empty_methods_file(tmp_path):
     case = _approved_case(tmp_path)
     _write_methods(tmp_path / case["methods_path"], "  \n\t")
 
-    with pytest.raises(EvidenceCaseValidationError, match="methods file must be non-empty"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="methods file must be non-empty"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -618,7 +712,9 @@ def test_approved_case_rejects_excessive_total_source_excerpt_chars(tmp_path):
     case = _approved_case(tmp_path)
     case["evidence_spans"] = [
         {"span_id": f"methods.{index}", "quote": "Q" * MAX_SOURCE_EXCERPT_CHARS}
-        for index in range(MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE // MAX_SOURCE_EXCERPT_CHARS + 1)
+        for index in range(
+            MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE // MAX_SOURCE_EXCERPT_CHARS + 1
+        )
     ]
 
     with pytest.raises(EvidenceCaseValidationError, match="total quote characters"):
@@ -628,13 +724,17 @@ def test_approved_case_rejects_excessive_total_source_excerpt_chars(tmp_path):
 def test_approved_case_rejects_excessive_referenced_chars_per_document(tmp_path):
     case = _approved_case(tmp_path)
     spans = [
-        {"span_id": f"methods.{index}", "quote": "Q" * 1_900}
-        for index in range(7)
+        {"span_id": f"methods.{index}", "quote": "Q" * 1_900} for index in range(7)
     ]
     _replace_evidence_spans(case, spans=spans)
-    assert sum(len(span["quote"]) for span in spans) > MAX_SOURCE_EXCERPT_CHARS_PER_DOCUMENT
+    assert (
+        sum(len(span["quote"]) for span in spans)
+        > MAX_SOURCE_EXCERPT_CHARS_PER_DOCUMENT
+    )
 
-    with pytest.raises(EvidenceCaseValidationError, match="per-document.*character limit"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="per-document.*character limit"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -658,7 +758,9 @@ def test_numeric_fact_requires_at_least_one_evidence_span(tmp_path):
     case = _approved_case(tmp_path)
     case["observed_facts"]["coverage"].pop("evidence_span_ids")
 
-    with pytest.raises(EvidenceCaseValidationError, match="numeric observed_facts.coverage"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="numeric observed_facts.coverage"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -666,7 +768,9 @@ def test_approved_case_rejects_path_traversal(tmp_path):
     case = _approved_case(tmp_path)
     case["methods_path"] = "../outside.md"
 
-    with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="escapes knowledge-pack root"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -674,7 +778,9 @@ def test_approved_case_rejects_absolute_source_path(tmp_path):
     case = _approved_case(tmp_path)
     case["methods_path"] = str((tmp_path / case["methods_path"]).resolve())
 
-    with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="escapes knowledge-pack root"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -686,7 +792,9 @@ def test_approved_case_rejects_symlink_escape(tmp_path):
     link.symlink_to(outside)
     case["methods_path"] = "sources/case_001/methods_link.md"
 
-    with pytest.raises(EvidenceCaseValidationError, match="escapes knowledge-pack root"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="escapes knowledge-pack root"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -719,7 +827,9 @@ def test_initial_case_rejects_retry_only_context(tmp_path):
     case = _approved_case(tmp_path)
     case["previous_attempt"] = {"parameters": {}, "failure_mode": "under_purged"}
 
-    with pytest.raises(EvidenceCaseValidationError, match="unknown field previous_attempt"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="unknown field previous_attempt"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -728,7 +838,9 @@ def test_non_initial_case_types_fail_closed(tmp_path, case_type):
     case = _approved_case(tmp_path)
     case["case_type"] = case_type
 
-    with pytest.raises(EvidenceCaseValidationError, match="case_type must be one of.*initial"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="case_type must be one of.*initial"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -819,12 +931,17 @@ def test_reported_parameter_requires_explicit_span_citation(tmp_path):
     case = _approved_case(tmp_path)
     case["intervention"]["parameters"]["purge_level"]["evidence_span_ids"] = []
 
-    with pytest.raises(EvidenceCaseValidationError, match="reported parameter.*requires evidence_span_ids"):
+    with pytest.raises(
+        EvidenceCaseValidationError,
+        match="reported parameter.*requires evidence_span_ids",
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
 @pytest.mark.parametrize("missing_field", ["value", "reported"])
-def test_approved_parameter_requires_complete_reported_value_contract(tmp_path, missing_field):
+def test_approved_parameter_requires_complete_reported_value_contract(
+    tmp_path, missing_field
+):
     case = _approved_case(tmp_path)
     case["intervention"]["parameters"]["purge_level"].pop(missing_field)
 
@@ -836,7 +953,9 @@ def test_approved_parameter_requires_complete_reported_value_contract(tmp_path, 
 
 
 @pytest.mark.parametrize("field_name", ["claim_id", "statement", "effect_area"])
-def test_approved_rationale_requires_nonempty_identity_and_statement(tmp_path, field_name):
+def test_approved_rationale_requires_nonempty_identity_and_statement(
+    tmp_path, field_name
+):
     case = _approved_case(tmp_path)
     case["rationale_claims"] = [
         {
@@ -874,11 +993,16 @@ def test_explicit_rationale_must_cite_methods_while_inference_remains_labeled(tm
 
     case["rationale_claims"][0]["explicitness"] = "explicit"
     case["rationale_claims"][0]["evidence_span_ids"] = []
-    with pytest.raises(EvidenceCaseValidationError, match=r"explicit rationale_claims\[0\] requires evidence_span_ids"):
+    with pytest.raises(
+        EvidenceCaseValidationError,
+        match=r"explicit rationale_claims\[0\] requires evidence_span_ids",
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
-def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(tmp_path):
+def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(
+    tmp_path,
+):
     pack_dir = tmp_path / "parameter_recommender"
     case = _approved_case(pack_dir)
     _write_case_pack(
@@ -893,14 +1017,7 @@ def test_hifiasm_prompt_contains_only_validated_excerpts_from_shortlisted_case(t
     )
 
     _, request = _build_parameter_request(
-        {
-            "sample": {"sample_id": "case_match", "ploidy": 2},
-            "assets": {"read_type": "hifi"},
-            "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
-            "genome_survey": {"estimated_genome_size": 1200000000},
-            "previous_attempt": {},
-            "assembly_review": {},
-        },
+        _initial_facts(),
         knowledge_root=tmp_path,
     )
 
@@ -928,14 +1045,7 @@ def test_hifiasm_selection_omits_identity_and_embeds_card_once(tmp_path):
         enable_hifiasm_numeric=True,
     )
     basis, request = _build_parameter_request(
-        {
-            "sample": {"sample_id": "case_match", "ploidy": 2},
-            "assets": {"read_type": "hifi"},
-            "read_qc": {"effective_coverage_1kb": 30.0, "read_n50": 18000},
-            "genome_survey": {"estimated_genome_size": 1200000000},
-            "previous_attempt": {},
-            "assembly_review": {},
-        },
+        _initial_facts(),
         knowledge_root=tmp_path,
     )
 
@@ -961,7 +1071,9 @@ def test_declared_unsupported_hifiasm_schema_version_is_rejected(tmp_path):
     case = _approved_case(tmp_path)
     case["schema_version"] = 2
 
-    with pytest.raises(EvidenceCaseValidationError, match="unsupported hifiasm schema_version"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="unsupported hifiasm schema_version"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 
@@ -1013,15 +1125,17 @@ def test_hifiasm_v3_shard_requires_exact_integer_schema_version_full_chain(
         enable_hifiasm_numeric=True,
     )
 
-    with pytest.raises(EvidenceCaseValidationError, match="v3 shard requires schema_version=3"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="v3 shard requires schema_version=3"
+    ):
         _build_parameter_request(
-            _initial_profile(),
+            _initial_facts(),
             knowledge_root=tmp_path,
         )
 
 
 @pytest.mark.parametrize("identifier_state", ["typo", "wrong_type", "missing"])
-def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_ids_full_chain(
+def test_v3_provenance_rejects_missing_version_with_bad_tool_ids(
     tmp_path, identifier_state
 ):
     pack_dir = tmp_path / "parameter_recommender"
@@ -1047,14 +1161,18 @@ def test_hifiasm_v3_shard_provenance_rejects_missing_version_despite_bad_tool_id
         enable_hifiasm_numeric=True,
     )
 
-    with pytest.raises(EvidenceCaseValidationError, match="v3 shard requires schema_version=3"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="v3 shard requires schema_version=3"
+    ):
         _build_parameter_request(
-            _initial_profile(),
+            _initial_facts(),
             knowledge_root=tmp_path,
         )
 
 
-@pytest.mark.parametrize("field_path", ["applicability.source_tool", "intervention.tool"])
+@pytest.mark.parametrize(
+    "field_path", ["applicability.source_tool", "intervention.tool"]
+)
 @pytest.mark.parametrize("identifier_state", ["wrong_type", "missing"])
 def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
     tmp_path, field_path, identifier_state
@@ -1077,9 +1195,11 @@ def test_hifiasm_v3_tool_identifier_errors_fail_closed_full_chain(
         enable_hifiasm_numeric=True,
     )
 
-    with pytest.raises(EvidenceCaseValidationError, match=field_path.replace(".", r"\.")):
+    with pytest.raises(
+        EvidenceCaseValidationError, match=field_path.replace(".", r"\.")
+    ):
         _build_parameter_request(
-            _initial_profile(),
+            _initial_facts(),
             knowledge_root=tmp_path,
         )
 
@@ -1108,7 +1228,10 @@ def test_legacy_seed_case_with_nested_hifiasm_tool_remains_ignored(tmp_path):
         ),
         (
             "coverage",
-            {"value": None, "uncertainty": {"kind": "interval", "min": 20, "max": "40"}},
+            {
+                "value": None,
+                "uncertainty": {"kind": "interval", "min": 20, "max": "40"},
+            },
             "min and max must be finite numbers",
         ),
         (
@@ -1126,7 +1249,9 @@ def test_legacy_seed_case_with_nested_hifiasm_tool_remains_ignored(tmp_path):
         ("ploidy", {"value": 2.5}, "ploidy.value must be a positive integer"),
     ],
 )
-def test_approved_case_numeric_features_require_valid_schema(tmp_path, field_name, fact, message):
+def test_approved_case_numeric_features_require_valid_schema(
+    tmp_path, field_name, fact, message
+):
     case = _approved_case(tmp_path)
     case["observed_facts"][field_name] = {
         **fact,
@@ -1145,7 +1270,9 @@ def test_approved_case_outcomes_require_finite_numeric_values(tmp_path, value):
         "evidence_span_ids": ["methods.genome"],
     }
 
-    with pytest.raises(EvidenceCaseValidationError, match="outcomes.assembly_size_mb.value"):
+    with pytest.raises(
+        EvidenceCaseValidationError, match="outcomes.assembly_size_mb.value"
+    ):
         validate_hifiasm_evidence_cases([case], pack_root=tmp_path)
 
 

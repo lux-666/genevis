@@ -1,10 +1,11 @@
 {
   "local_exec": ["read_qc", "assembly", "assembly_review", "repeat_annotation"],
   "shared_parameters": {
-    "read_type": "ont_raw",
-    "estimated_genome_size": 5000000
+    "read_type": "cyclone"
   },
   "assembly": {
+    "assembly_method": "flye",
+    "assembly_route": "cyclone",
     "flye_parameters": {
       "threads": 4
     }

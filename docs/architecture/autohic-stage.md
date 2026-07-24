@@ -14,7 +14,8 @@ parameter-recommendation gate
    with AutoHiC. Missing required inputs block the stage; an attempted AutoHiC
    run that does not complete is a stage failure.
 4. The stage has no local method-selection or skip/no-op branch.
-5. AutoHiC uses the shared parameter-recommendation and approval contracts.
+5. AutoHiC uses the shared schema-3 canonical-snapshot, recommendation-manifest,
+   and approval contracts.
 6. The recommender returns an attempt-local sparse mapping from the complete
    adjustable AutoHiC L2 catalog. The mapping may be empty, and every
    shape-valid recommendation requires human approval before execution.
@@ -107,7 +108,8 @@ already been fixed as the method and before any execution plan is frozen.
 It follows the assembly parameter-recommendation loop:
 
 ```text
-build full input profile and immutable basis
+build canonical facts and typed AutoHiC context
+  -> persist schema-3 input snapshot and immutable basis
   -> construct the strict model-facing DTO directly
   -> render and persist the exact model request
   -> call LLM for a parameter recommendation
@@ -129,6 +131,14 @@ An explicitly supplied restriction enzyme is an L1 fact. If the sparse L2
 mapping omits it, freeze uses that fact; if both are absent, the post-approval
 executability check blocks. A retry receives ordered, bounded prior-attempt
 evidence but creates a fresh mapping with no inheritance, patch, or delta rule.
+
+The schema-3 recommendation manifest is the only accepted root for this chain.
+It binds `input_snapshot.json`, `basis_snapshot.json`, the exact model records,
+and the parsed recommendation to the AutoHiC method/task/attempt identity.
+Retries reuse canonical facts from the verified initial chain, add typed retry
+context and predecessor refs, and do not rebuild those facts from mutable stage
+state. Pre-v3 recommendation refs, mixed identities, or an unverified
+predecessor fail closed before approval or execution.
 
 ### 4.2 Other AutoHiC configuration
 

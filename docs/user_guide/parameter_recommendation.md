@@ -2,7 +2,9 @@
 
 Assembly, AutoHiC, and T2T ask an LLM for parameters after the execution method
 has already been selected. Every successfully parsed recommendation is shown
-to a human before an execution attempt exists.
+to a human before an execution attempt exists. All three stages use the strict
+schema-3 input-snapshot and recommendation-manifest contract; pre-v3
+recommendation roots are not accepted.
 
 ## What the model returns
 
@@ -37,21 +39,34 @@ unavailable or its response is malformed. That condition is recorded as
 
 ## Model input
 
-Assembly receives selected biological observations, the adjustable parameter
-descriptions, optional method guidance/literature, and ordered attempt history
-when applicable. AutoHiC receives library protocol facts, an explicitly
+At each recommendation point, the stage first persists `input_snapshot.json`.
+This schema-3 record contains typed canonical facts, a stage-specific context,
+and immutable dependency refs. Quantitative facts carry their unit and semantic
+origin. The strict model-facing DTO is built from the same validated facts and
+context recorded in that snapshot, plus the immutable basis; storage paths,
+session identity, and unrestricted source mappings never cross the model
+boundary.
+
+Assembly receives canonical biological observations, its typed assembly
+context, the adjustable parameter descriptions, optional method
+guidance/literature, and bounded ordered attempt history when applicable.
+AutoHiC receives canonical species facts, library protocols, an explicitly
 supplied enzyme if present, the complete adjustable L2 catalog, and bounded
-ordered attempt history. T2T receives bounded assembly/read facts and its
-adjustable threshold catalog.
+ordered attempt history. T2T receives canonical species facts, the verified
+motif resolution, the ONT input count, and its adjustable threshold catalog.
 
 Species identity is used only when supplied explicitly through
 `shared_parameters.species_facts`; it is not inferred from filenames,
-free-form metadata, retrieval results, or another model. Before T2T scans, a
-small resolver prompt uses those facts (and any legacy motif hint) to produce
-`resolved_telomere_motif`. The resolver stores its prompt/response evidence and
-source. T2T scans and patch checks never read the legacy motif field directly.
-If neither species facts nor a compatibility hint is supplied, T2T fails before
-scanning rather than assuming `TTAGGG`.
+free-form metadata, retrieval results, or another model. Before T2T threshold
+recommendation or scanning, T2T persists a schema-3
+`motif_input_snapshot.json`. A supplied
+`shared_parameters.species_facts.telomere_motif` is validated and recorded as a
+`provided_species_fact` resolution without an LLM call. Otherwise the motif
+resolver uses the supplied scientific name and persists its exact
+request/response/parse evidence. Missing scientific identity, an unresolved
+response, or any pre-v3 motif/config checkpoint field fails closed. No common
+repeat is assumed. The later T2T snapshot binds the verified motif-resolution
+ref, and execution consumes only that resolved value and source.
 
 Session IDs, run paths, artifact refs, hashes, credentials, and arbitrary asset
 metadata are kept out of model input.
@@ -62,8 +77,8 @@ For recommendation `N`, inspect:
 
 ```text
 artifacts/<stage>/parameter_recommendations/<N>/
-├── input_profile.json
-├── basis_snapshot.json
+├── input_snapshot.json
+├── basis_snapshot.json        # initial basis; a retry may reuse its ref
 ├── model_request.json
 ├── model_response.json
 ├── recommendation.json
@@ -74,7 +89,14 @@ artifacts/<stage>/parameter_recommendations/<N>/
 `recommendation.json` contains the exact parsed parameters.
 `response_parse.json` reports only parsing success or failure. The manifest
 binds all files by immutable refs and hashes; the approval decision is bound to
-that manifest.
+that manifest. On an Assembly retry, `basis_snapshot_ref` may deliberately
+reuse the verified initial basis rather than publish a new copy.
+
+`input_snapshot.json`, `basis_snapshot.json`, `model_request.json`, and the
+recommendation manifest use schema 3. Response, parse, and recommendation
+leaves retain their own declared schema versions. The strict v3 loader verifies
+artifact types, hashes, stage/method/task identity, and the exact ref names;
+pre-v3 recommendation refs and mixed-version roots fail closed.
 
 After approval, the exact parameter mapping is handed to command construction.
 If a name is unknown, belongs to another parameter level, or cannot be rendered
@@ -120,10 +142,11 @@ inputs. A current run-config can express them as follows:
 }
 ```
 
-The `species_facts.telomere_motif` value is optional compatibility evidence,
-not a direct scan override. When species facts are present, T2T asks the motif
-resolver to reconcile the identity and hint; the resulting resolved value is
-the only motif consumed by execution.
+The `species_facts.telomere_motif` value is an optional canonical supplied fact,
+not a direct scan override. When present, it is validated and frozen through the
+provided-fact motif-resolution chain. When absent, T2T resolves the motif from
+the explicitly supplied scientific name through the model boundary. A T2T-local
+motif config field or pre-v3 checkpoint value is rejected outright.
 
 Relative paths in `ont_read_refs` are resolved independently against the
 run-config file's directory while preserving list order. The singular

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.domains.assembly.case_selector import select_evidence_cases
+from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
 from app.domains.assembly.method_guidance import load_method_guidance
 from app.knowledge.packs import load_knowledge_pack
 from app.schemas.parameter_catalog import MethodParameterCatalog
@@ -28,7 +29,8 @@ def build_parameter_basis_snapshot(
 
     if method_id != catalog.method_id:
         raise ValueError(
-            f"parameter basis method {method_id!r} does not match catalog {catalog.method_id!r}"
+            f"parameter basis method {method_id!r} does not match catalog "
+            f"{catalog.method_id!r}"
         )
     knowledge_pack = load_knowledge_pack(knowledge_pack_id, root=knowledge_root)
     literature_cases, literature_selection = select_evidence_cases(
@@ -51,6 +53,6 @@ def build_parameter_basis_snapshot(
 
 
 def _method_guidance(method_id: str) -> list[dict[str, Any]]:
-    if method_id not in {"assembly.hifiasm", "assembly.hifiasm_ont"}:
+    if method_id not in {HIFIASM_METHOD, HIFIASM_ONT_METHOD}:
         return []
     return load_method_guidance().model_cards_for_method(method_id)

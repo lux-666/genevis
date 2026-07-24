@@ -10,7 +10,8 @@ recommendation code receives the source mappings.
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from app.schemas.parameter_recommendation import (
     CanonicalAssetPresence,
@@ -22,7 +23,6 @@ from app.schemas.parameter_recommendation import (
     QuantityFact,
     QuantityOrigin,
 )
-
 
 # ---------------------------------------------------------------------------
 # Private adapter-local source models (never exposed downstream)
@@ -43,17 +43,48 @@ class _ReadQCRecommendationSource:
     )
 
     def __init__(self, summary: dict[str, Any]) -> None:
-        self.read_count: int | None = _pos_int_or_none(summary.get("num_seqs"))
-        self.total_bases_bp: int | None = _pos_int_or_none(summary.get("total_bases"))
-        self.read_n50_bp: int | None = _pos_int_or_none(summary.get("n50"))
-        self.mean_read_length_bp: float | None = _pos_float_or_none(summary.get("avg_len"))
-        self.longest_read_bp: int | None = _pos_int_or_none(summary.get("max_len"))
-        self.q20_fraction: float | None = _percent_to_fraction(summary.get("q20_percent"))
-        self.mean_quality: float | None = _pos_float_or_none(summary.get("avg_qual"))
+        self.read_count: int | None = _pos_int_or_none(
+            summary.get("num_seqs"),
+            "read_qc.summary.num_seqs",
+        )
+        self.total_bases_bp: int | None = _pos_int_or_none(
+            summary.get("total_bases"),
+            "read_qc.summary.total_bases",
+        )
+        self.read_n50_bp: int | None = _pos_int_or_none(
+            summary.get("n50"),
+            "read_qc.summary.n50",
+        )
+        self.mean_read_length_bp: float | None = _pos_float_or_none(
+            summary.get("avg_len"),
+            "read_qc.summary.avg_len",
+        )
+        self.longest_read_bp: int | None = _pos_int_or_none(
+            summary.get("max_len"),
+            "read_qc.summary.max_len",
+        )
+        self.q20_fraction: float | None = _percent_to_fraction(
+            summary.get("q20_percent"),
+            "read_qc.summary.q20_percent",
+        )
+        self.mean_quality: float | None = _pos_float_or_none(
+            summary.get("avg_qual"),
+            "read_qc.summary.avg_qual",
+        )
 
 
 class _GenomeSurveyRecommendationSource:
     """Validated projection of the genome survey estimate mappings."""
+
+    effective_genome_size_bp: int | None
+    measured_genome_size_bp: int | None
+    provided_genome_size_bp: int | None
+    heterozygosity: float | None
+    repeat_fraction: float | None
+    estimate_confidence: Literal["high", "low", "none"] | None
+    genome_size_origin: Literal["measured", "provided", "resolved"]
+    effective_genome_size_producer: Literal["run_config", "genome_survey"]
+    provided_genome_size_producer: Literal["run_config", "genome_survey"]
 
     __slots__ = (
         "effective_genome_size_bp",
@@ -63,6 +94,8 @@ class _GenomeSurveyRecommendationSource:
         "repeat_fraction",
         "estimate_confidence",
         "genome_size_origin",
+        "effective_genome_size_producer",
+        "provided_genome_size_producer",
     )
 
     def __init__(
@@ -72,24 +105,63 @@ class _GenomeSurveyRecommendationSource:
         provided: dict[str, Any],
         sources: dict[str, Any],
         confidence: str | None,
+        shared_parameters: dict[str, Any],
     ) -> None:
-        self.effective_genome_size_bp: int | None = _pos_int_or_none(
-            estimates.get("genome_size")
+        survey_effective = _pos_int_or_none(
+            estimates.get("genome_size"),
+            "genome_survey.estimates.genome_size",
         )
         self.measured_genome_size_bp: int | None = _pos_int_or_none(
-            measured.get("genome_size")
+            measured.get("genome_size"),
+            "genome_survey.measured_estimates.genome_size",
         )
-        self.provided_genome_size_bp: int | None = _pos_int_or_none(
-            provided.get("genome_size")
+        survey_provided = _pos_int_or_none(
+            provided.get("genome_size"),
+            "genome_survey.provided_overrides.genome_size",
         )
+        shared_provided = _pos_int_or_none(
+            shared_parameters.get("estimated_genome_size"),
+            "shared_parameters.estimated_genome_size",
+        )
+        if (
+            shared_provided is not None
+            and survey_provided is not None
+            and shared_provided != survey_provided
+        ):
+            raise ValueError(
+                "shared_parameters.estimated_genome_size conflicts with "
+                "genome_survey.provided_overrides.genome_size"
+            )
         self.heterozygosity: float | None = _fraction_or_none(
-            estimates.get("heterozygosity")
+            estimates.get("heterozygosity"),
+            "genome_survey.estimates.heterozygosity",
         )
         self.repeat_fraction: float | None = _fraction_or_none(
-            estimates.get("repeat_fraction")
+            estimates.get("repeat_fraction"),
+            "genome_survey.estimates.repeat_fraction",
         )
-        self.estimate_confidence = confidence if confidence in {"high", "low", "none"} else None
+        self.estimate_confidence = _confidence_or_none(
+            confidence,
+            "genome_survey.confidence",
+        )
         raw_source = sources.get("genome_size")
+        if raw_source is not None and raw_source not in ("survey", "provided"):
+            raise ValueError(
+                "genome_survey.estimate_sources.genome_size must be "
+                "'survey' or 'provided'"
+            )
+        if shared_provided is not None:
+            self.effective_genome_size_bp = shared_provided
+            self.provided_genome_size_bp = shared_provided
+            self.genome_size_origin = "provided"
+            self.effective_genome_size_producer = "run_config"
+            self.provided_genome_size_producer = "run_config"
+            return
+
+        self.effective_genome_size_bp = survey_effective
+        self.provided_genome_size_bp = survey_provided
+        self.effective_genome_size_producer = "genome_survey"
+        self.provided_genome_size_producer = "genome_survey"
         if raw_source == "survey":
             self.genome_size_origin = "measured"
         elif raw_source == "provided":
@@ -117,26 +189,67 @@ def build_canonical_facts(
     """
 
     # --- Species facts from shared_parameters ---
-    species = _build_species_facts(shared_parameters or {})
+    shared = _top_level_mapping_or_empty(
+        shared_parameters,
+        "shared_parameters",
+    )
+    species = _build_species_facts(shared)
 
     # --- Read facts from Read-QC summary ---
     rqc_summary: dict[str, Any] = {}
-    if read_qc_output and isinstance(read_qc_output, dict):
-        raw_summary = read_qc_output.get("summary") or {}
-        if isinstance(raw_summary, dict):
-            rqc_summary = raw_summary
+    read_qc = _top_level_mapping_or_empty(
+        read_qc_output,
+        "read_qc",
+    )
+    if read_qc_output is not None:
+        rqc_summary = _nested_mapping_or_empty(
+            read_qc,
+            "summary",
+            "read_qc.summary",
+        )
     rqc_source = _ReadQCRecommendationSource(rqc_summary)
-    reads = _build_read_facts(rqc_source)
+    reads = _build_read_facts(
+        rqc_source,
+        read_type=shared.get("read_type"),
+    )
 
     # --- Genome facts from genome survey ---
     gs_source: _GenomeSurveyRecommendationSource | None = None
-    if genome_survey_result and isinstance(genome_survey_result, dict):
+    survey = _top_level_mapping_or_empty(
+        genome_survey_result,
+        "genome_survey",
+    )
+    if (
+        genome_survey_result is not None
+        or _pos_int_or_none(
+            shared.get("estimated_genome_size"),
+            "shared_parameters.estimated_genome_size",
+        )
+        is not None
+    ):
         gs_source = _GenomeSurveyRecommendationSource(
-            estimates=dict(genome_survey_result.get("estimates") or {}),
-            measured=dict(genome_survey_result.get("measured_estimates") or {}),
-            provided=dict(genome_survey_result.get("provided_overrides") or {}),
-            sources=dict(genome_survey_result.get("estimate_sources") or {}),
-            confidence=genome_survey_result.get("confidence"),
+            estimates=_nested_mapping_or_empty(
+                survey,
+                "estimates",
+                "genome_survey.estimates",
+            ),
+            measured=_nested_mapping_or_empty(
+                survey,
+                "measured_estimates",
+                "genome_survey.measured_estimates",
+            ),
+            provided=_nested_mapping_or_empty(
+                survey,
+                "provided_overrides",
+                "genome_survey.provided_overrides",
+            ),
+            sources=_nested_mapping_or_empty(
+                survey,
+                "estimate_sources",
+                "genome_survey.estimate_sources",
+            ),
+            confidence=survey.get("confidence"),
+            shared_parameters=shared,
         )
     genome = _build_genome_facts(gs_source)
 
@@ -144,7 +257,9 @@ def build_canonical_facts(
     sequencing = _build_sequencing_facts(rqc_source, gs_source)
 
     # --- Asset presence ---
-    asset_presence = _build_asset_presence(asset_flags or {})
+    asset_presence = _build_asset_presence(
+        _top_level_mapping_or_empty(asset_flags, "asset_flags")
+    )
 
     return CanonicalRecommendationFacts(
         species=species,
@@ -162,44 +277,65 @@ def build_canonical_facts(
 
 def _build_species_facts(shared: dict[str, Any]) -> CanonicalSpeciesFacts:
     raw_species: dict[str, Any] = {}
-    if isinstance(shared.get("species_facts"), dict):
-        raw_species = shared["species_facts"]
+    if shared.get("species_facts") is not None:
+        raw_species = _mapping_value(
+            shared["species_facts"],
+            "shared_parameters.species_facts",
+        )
 
-    ploidy_val = _pos_int_or_none(
-        raw_species.get("ploidy") or shared.get("ploidy")
-    )
-    chr_count_val = _pos_int_or_none(
-        raw_species.get("expected_chromosome_count")
-        or shared.get("expected_chromosome_count")
-    )
+    raw_ploidy = raw_species.get("ploidy")
+    if raw_ploidy is not None:
+        ploidy_val = _pos_int_or_none(
+            raw_ploidy,
+            "shared_parameters.species_facts.ploidy",
+        )
+    else:
+        ploidy_val = _pos_int_or_none(
+            shared.get("ploidy"),
+            "shared_parameters.ploidy",
+        )
+
+    raw_chr_count = raw_species.get("expected_chromosome_count")
+    if raw_chr_count is not None:
+        chr_count_val = _pos_int_or_none(
+            raw_chr_count,
+            "shared_parameters.species_facts.expected_chromosome_count",
+        )
+    else:
+        chr_count_val = _pos_int_or_none(
+            shared.get("expected_chromosome_count"),
+            "shared_parameters.expected_chromosome_count",
+        )
 
     return CanonicalSpeciesFacts(
         scientific_name=_str_or_none(
             raw_species.get("scientific_name") or shared.get("organism")
         ),
-        taxon_id=_str_or_none(
-            raw_species.get("taxon_id") or shared.get("taxon_id")
-        ),
-        clade=_str_or_none(
-            raw_species.get("clade") or shared.get("clade")
-        ),
+        taxon_id=_str_or_none(raw_species.get("taxon_id") or shared.get("taxon_id")),
+        clade=_str_or_none(raw_species.get("clade") or shared.get("clade")),
         ploidy=QuantityFact(
             value=ploidy_val,
             unit="count",
             origin=QuantityOrigin(kind="provided", producer="run_config"),
-        ) if ploidy_val is not None else None,
+        )
+        if ploidy_val is not None
+        else None,
         expected_chromosome_count=QuantityFact(
             value=chr_count_val,
             unit="count",
             origin=QuantityOrigin(kind="provided", producer="run_config"),
-        ) if chr_count_val is not None else None,
-        supplied_telomere_motif=_str_or_none(
-            raw_species.get("telomere_motif")
-        ),
+        )
+        if chr_count_val is not None
+        else None,
+        supplied_telomere_motif=_str_or_none(raw_species.get("telomere_motif")),
     )
 
 
-def _build_read_facts(src: _ReadQCRecommendationSource) -> CanonicalReadFacts:
+def _build_read_facts(
+    src: _ReadQCRecommendationSource,
+    *,
+    read_type: Any,
+) -> CanonicalReadFacts:
     def _bp_fact(v: int | float | None, kind: str = "measured") -> QuantityFact | None:
         if v is None:
             return None
@@ -238,6 +374,7 @@ def _build_read_facts(src: _ReadQCRecommendationSource) -> CanonicalReadFacts:
     )
 
     return CanonicalReadFacts(
+        read_type=read_type,
         read_count=read_count_fact,
         total_bases=_bp_fact(src.total_bases_bp),
         read_n50=_bp_fact(src.read_n50_bp),
@@ -248,17 +385,23 @@ def _build_read_facts(src: _ReadQCRecommendationSource) -> CanonicalReadFacts:
     )
 
 
-def _build_genome_facts(src: _GenomeSurveyRecommendationSource | None) -> CanonicalGenomeFacts:
+def _build_genome_facts(
+    src: _GenomeSurveyRecommendationSource | None,
+) -> CanonicalGenomeFacts:
     if src is None:
         return CanonicalGenomeFacts()
 
-    def _bp_fact(v: int | None, origin_kind: str) -> QuantityFact | None:
+    def _bp_fact(
+        v: int | None,
+        origin_kind: str,
+        producer: str,
+    ) -> QuantityFact | None:
         if v is None:
             return None
         return QuantityFact(
             value=v,
             unit="bp",
-            origin=QuantityOrigin(kind=origin_kind, producer="genome_survey"),  # type: ignore[arg-type]
+            origin=QuantityOrigin(kind=origin_kind, producer=producer),  # type: ignore[arg-type]
         )
 
     # Determine effective genome size origin
@@ -300,9 +443,21 @@ def _build_genome_facts(src: _GenomeSurveyRecommendationSource | None) -> Canoni
     )
 
     return CanonicalGenomeFacts(
-        effective_genome_size=_bp_fact(src.effective_genome_size_bp, eff_origin),
-        measured_genome_size=_bp_fact(src.measured_genome_size_bp, "measured"),
-        provided_genome_size=_bp_fact(src.provided_genome_size_bp, "provided"),
+        effective_genome_size=_bp_fact(
+            src.effective_genome_size_bp,
+            eff_origin,
+            src.effective_genome_size_producer,
+        ),
+        measured_genome_size=_bp_fact(
+            src.measured_genome_size_bp,
+            "measured",
+            "genome_survey",
+        ),
+        provided_genome_size=_bp_fact(
+            src.provided_genome_size_bp,
+            "provided",
+            src.provided_genome_size_producer,
+        ),
         provided_vs_measured_relative_change=delta_fact,
         heterozygosity=het_fact,
         repeat_fraction=repeat_fact,
@@ -327,7 +482,10 @@ def _build_sequencing_facts(
             raw_coverage=QuantityFact(
                 value=coverage,
                 unit="x",
-                origin=QuantityOrigin(kind="derived", producer="parameter_recommendation"),
+                origin=QuantityOrigin(
+                    kind="derived",
+                    producer="parameter_recommendation",
+                ),
             )
         )
     return CanonicalSequencingFacts()
@@ -335,10 +493,13 @@ def _build_sequencing_facts(
 
 def _build_asset_presence(flags: dict[str, bool | None]) -> CanonicalAssetPresence:
     return CanonicalAssetPresence(
-        has_hifi=_bool_or_none(flags.get("has_hifi")),
-        has_ont=_bool_or_none(flags.get("has_ont")),
-        has_hic=_bool_or_none(flags.get("has_hic")),
-        has_rnaseq=_bool_or_none(flags.get("has_rnaseq")),
+        has_hifi=_bool_or_none(flags.get("has_hifi"), "asset_flags.has_hifi"),
+        has_ont=_bool_or_none(flags.get("has_ont"), "asset_flags.has_ont"),
+        has_hic=_bool_or_none(flags.get("has_hic"), "asset_flags.has_hic"),
+        has_rnaseq=_bool_or_none(
+            flags.get("has_rnaseq"),
+            "asset_flags.has_rnaseq",
+        ),
     )
 
 
@@ -393,39 +554,95 @@ def apply_fact_transform(transform: str, value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _pos_int_or_none(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    fv = float(value)
-    if not math.isfinite(fv) or fv <= 0:
-        return None
-    return int(fv)
+def _nested_mapping_or_empty(
+    container: dict[str, Any],
+    key: str,
+    field: str,
+) -> dict[str, Any]:
+    if key not in container:
+        return {}
+    return _mapping_value(container[key], field)
 
 
-def _pos_float_or_none(value: Any) -> float | None:
+def _top_level_mapping_or_empty(
+    value: Mapping[str, Any] | None,
+    field: str,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+    return _mapping_value(value, field)
+
+
+def _mapping_value(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field} must be a mapping")
+    return dict(value)
+
+
+def _pos_int_or_none(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a positive integer")
+    try:
+        finite_value = math.isfinite(float(value))
+    except OverflowError:
+        finite_value = False
+    if not finite_value:
+        raise ValueError(f"{field} must be finite")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"{field} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{field} must be positive")
+    return int(value)
+
+
+def _pos_float_or_none(value: Any, field: str) -> float | None:
+    if value is None:
         return None
-    fv = float(value)
-    if not math.isfinite(fv) or fv <= 0:
-        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a positive number")
+    try:
+        fv = float(value)
+    except OverflowError:
+        raise ValueError(f"{field} must be finite") from None
+    if not math.isfinite(fv):
+        raise ValueError(f"{field} must be finite")
+    if fv <= 0:
+        raise ValueError(f"{field} must be positive")
     return fv
 
 
-def _fraction_or_none(value: Any) -> float | None:
+def _fraction_or_none(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    fv = float(value)
-    if not math.isfinite(fv) or not (0.0 <= fv <= 1.0):
-        return None
+        raise ValueError(f"{field} must be a number between 0 and 1")
+    try:
+        fv = float(value)
+    except OverflowError:
+        raise ValueError(f"{field} must be finite") from None
+    if not math.isfinite(fv):
+        raise ValueError(f"{field} must be finite")
+    if not (0.0 <= fv <= 1.0):
+        raise ValueError(f"{field} must be between 0 and 1")
     return fv
 
 
-def _percent_to_fraction(value: Any) -> float | None:
+def _percent_to_fraction(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    fv = float(value)
-    if not math.isfinite(fv) or not (0.0 <= fv <= 100.0):
-        return None
+        raise ValueError(f"{field} must be a number between 0 and 100")
+    try:
+        fv = float(value)
+    except OverflowError:
+        raise ValueError(f"{field} must be finite") from None
+    if not math.isfinite(fv):
+        raise ValueError(f"{field} must be finite")
+    if not (0.0 <= fv <= 100.0):
+        raise ValueError(f"{field} must be between 0 and 100")
     return fv / 100.0
 
 
@@ -436,7 +653,24 @@ def _str_or_none(value: Any) -> str | None:
     return s if s else None
 
 
-def _bool_or_none(value: Any) -> bool | None:
+def _bool_or_none(value: Any, field: str) -> bool | None:
     if value is None:
         return None
-    return bool(value)
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _confidence_or_none(
+    value: Any,
+    field: str,
+) -> Literal["high", "low", "none"] | None:
+    if value is None:
+        return None
+    if value == "high":
+        return "high"
+    if value == "low":
+        return "low"
+    if value == "none":
+        return "none"
+    raise ValueError(f"{field} must be 'high', 'low', or 'none'")

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from app.domains.assembly.constants import HIFIASM_METHOD, HIFIASM_ONT_METHOD
 from app.domains.assembly.method_guidance import (
     DEFAULT_GUIDANCE_PATH,
     load_method_guidance,
@@ -34,13 +35,24 @@ def test_checked_in_guidance_loads_and_covers_mvp_areas():
 def test_model_cards_are_method_filtered_and_deterministic():
     registry = load_method_guidance()
 
-    hifi_cards = registry.model_cards_for_method("hifiasm")
-    ont_cards = registry.model_cards_for_method("hifiasm_ont")
+    hifi_cards = registry.model_cards_for_method(HIFIASM_METHOD)
+    ont_cards = registry.model_cards_for_method(HIFIASM_ONT_METHOD)
 
     assert [card["guidance_id"] for card in hifi_cards] == sorted(registry.by_id)
     assert hifi_cards == ont_cards
-    assert hifi_cards == registry.model_cards_for_method("hifiasm")
-    assert all(set(card) == {"guidance_id", "methods", "parameters", "relevant_metrics", "guidance", "caveats"} for card in hifi_cards)
+    assert hifi_cards == registry.model_cards_for_method(HIFIASM_METHOD)
+    assert all(
+        set(card)
+        == {
+            "guidance_id",
+            "methods",
+            "parameters",
+            "relevant_metrics",
+            "guidance",
+            "caveats",
+        }
+        for card in hifi_cards
+    )
 
 
 def test_registry_exposes_fail_closed_id_resolution():
@@ -59,7 +71,7 @@ def test_duplicate_guidance_ids_are_rejected(tmp_path: Path):
 guidance:
   - &item
     guidance_id: duplicate
-    methods: [hifiasm]
+    methods: [assembly.candidate.hifiasm]
     parameters: [purge_level]
     relevant_metrics: [genome_survey.heterozygosity]
     guidance: First card.
@@ -74,22 +86,24 @@ guidance:
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [
-        ("methods: [flye]", "unknown method id"),
+        ("methods: [hifiasm]", "unknown method id"),
         ("parameters: []", "at least 1 item"),
         ("guidance: '   '", "must not be blank"),
     ],
 )
-def test_invalid_guidance_contract_is_rejected(tmp_path: Path, replacement: str, message: str):
+def test_invalid_guidance_contract_is_rejected(
+    tmp_path: Path, replacement: str, message: str
+):
     base = """
 guidance:
   - guidance_id: test.guidance.v1
-    methods: [hifiasm]
+    methods: [assembly.candidate.hifiasm]
     parameters: [purge_level]
     relevant_metrics: [genome_survey.heterozygosity]
     guidance: Mechanism text.
 """
     old = {
-        "methods: [flye]": "methods: [hifiasm]",
+        "methods: [hifiasm]": "methods: [assembly.candidate.hifiasm]",
         "parameters: []": "parameters: [purge_level]",
         "guidance: '   '": "guidance: Mechanism text.",
     }[replacement]
@@ -103,4 +117,4 @@ def test_unknown_method_projection_is_rejected():
     registry = load_method_guidance()
 
     with pytest.raises(ValueError, match="Unknown method id"):
-        registry.model_cards_for_method("flye")
+        registry.model_cards_for_method("hifiasm")

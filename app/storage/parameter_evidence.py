@@ -1,24 +1,59 @@
 """Stage-neutral persistence for parameter-recommendation evidence.
 
 Recommendation logic remains owned by each biological stage.  This module
-owns only the shared Data Architecture v2 boundary: safe run-local paths,
-immutable publication, artifact-index registration, and integrity-checked
-reads.
+owns safe run-local paths, immutable publication, artifact-index registration,
+and the strict v3 recommendation-chain read boundary.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
 from uuid import uuid4
 
+from app.schemas.artifacts import (
+    ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    ASSEMBLY_PARAMETER_BASIS,
+    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+    ASSEMBLY_PARAMETER_MODEL_REQUEST,
+    ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+    ASSEMBLY_PARAMETER_RECOMMENDATION,
+    ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+    ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+    HIC_PARAMETER_APPROVAL_DECISION,
+    HIC_PARAMETER_BASIS,
+    HIC_PARAMETER_INPUT_SNAPSHOT,
+    HIC_PARAMETER_MODEL_REQUEST,
+    HIC_PARAMETER_MODEL_RESPONSE,
+    HIC_PARAMETER_RECOMMENDATION,
+    HIC_PARAMETER_RECOMMENDATION_MANIFEST,
+    HIC_PARAMETER_RESPONSE_PARSE,
+    T2T_PARAMETER_APPROVAL_DECISION,
+    T2T_PARAMETER_BASIS,
+    T2T_PARAMETER_INPUT_SNAPSHOT,
+    T2T_PARAMETER_MODEL_REQUEST,
+    T2T_PARAMETER_MODEL_RESPONSE,
+    T2T_PARAMETER_RECOMMENDATION,
+    T2T_PARAMETER_RECOMMENDATION_MANIFEST,
+    T2T_PARAMETER_RESPONSE_PARSE,
+    ArtifactMeta,
+    ArtifactRef,
+    ParameterAttempt,
+)
+from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    ParameterRecommendationManifestV3,
+    RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
+)
 from app.storage.artifacts import (
+    artifact_ref_for_path,
     publish_artifact_record,
     recover_published_artifact,
     resolve_artifact_ref,
 )
-from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.storage.paths import SessionPaths
 
 ParameterEvidenceScope = Literal["recommendation", "attempt"]
@@ -26,6 +61,435 @@ ParameterEvidenceScope = Literal["recommendation", "attempt"]
 
 class ParameterEvidenceError(ValueError):
     """Raised when shared parameter evidence is unsafe or inconsistent."""
+
+
+@dataclass(frozen=True)
+class ParameterRecommendationArtifactTypes:
+    """Stage-owned artifact types participating in the shared v3 chain."""
+
+    input_snapshot: str
+    basis_snapshot: str
+    model_request: str
+    model_response: str
+    response_parse: str
+    recommendation: str
+    recommendation_manifest: str
+    approval_decision: str
+
+
+@dataclass(frozen=True)
+class ParameterRecommendationChainV3:
+    """Integrity-checked records bound by one schema-3 manifest."""
+
+    manifest_ref: ArtifactRef
+    manifest: ParameterRecommendationManifestV3
+    input_snapshot: RecommendationInputSnapshotV3
+    basis_snapshot: dict[str, Any]
+    catalog: MethodParameterCatalog
+    model_request: dict[str, Any]
+    model_response: dict[str, Any]
+    response_parse: dict[str, Any]
+    recommendation: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ApprovedParameterBundleV3:
+    """The sole approved input accepted by parameterized execution adapters."""
+
+    attempt: ParameterAttempt
+    chain: ParameterRecommendationChainV3
+    approval_decision: dict[str, Any]
+
+    @property
+    def approved_l2(self) -> dict[str, Any]:
+        recommendation = self.chain.recommendation.get("recommendation")
+        if not isinstance(recommendation, dict):
+            raise ParameterEvidenceError(
+                "approved recommendation has no recommendation mapping"
+            )
+        parameters = recommendation.get("parameters")
+        if not isinstance(parameters, dict):
+            raise ParameterEvidenceError(
+                "approved recommendation has no parameters mapping"
+            )
+        return dict(parameters)
+
+
+_PARAMETER_ARTIFACT_TYPES: dict[
+    Literal["assembly", "hic_scaffolding", "t2t"],
+    ParameterRecommendationArtifactTypes,
+] = {
+    "assembly": ParameterRecommendationArtifactTypes(
+        input_snapshot=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+        basis_snapshot=ASSEMBLY_PARAMETER_BASIS,
+        model_request=ASSEMBLY_PARAMETER_MODEL_REQUEST,
+        model_response=ASSEMBLY_PARAMETER_MODEL_RESPONSE,
+        response_parse=ASSEMBLY_PARAMETER_RESPONSE_PARSE,
+        recommendation=ASSEMBLY_PARAMETER_RECOMMENDATION,
+        recommendation_manifest=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
+        approval_decision=ASSEMBLY_PARAMETER_APPROVAL_DECISION,
+    ),
+    "hic_scaffolding": ParameterRecommendationArtifactTypes(
+        input_snapshot=HIC_PARAMETER_INPUT_SNAPSHOT,
+        basis_snapshot=HIC_PARAMETER_BASIS,
+        model_request=HIC_PARAMETER_MODEL_REQUEST,
+        model_response=HIC_PARAMETER_MODEL_RESPONSE,
+        response_parse=HIC_PARAMETER_RESPONSE_PARSE,
+        recommendation=HIC_PARAMETER_RECOMMENDATION,
+        recommendation_manifest=HIC_PARAMETER_RECOMMENDATION_MANIFEST,
+        approval_decision=HIC_PARAMETER_APPROVAL_DECISION,
+    ),
+    "t2t": ParameterRecommendationArtifactTypes(
+        input_snapshot=T2T_PARAMETER_INPUT_SNAPSHOT,
+        basis_snapshot=T2T_PARAMETER_BASIS,
+        model_request=T2T_PARAMETER_MODEL_REQUEST,
+        model_response=T2T_PARAMETER_MODEL_RESPONSE,
+        response_parse=T2T_PARAMETER_RESPONSE_PARSE,
+        recommendation=T2T_PARAMETER_RECOMMENDATION,
+        recommendation_manifest=T2T_PARAMETER_RECOMMENDATION_MANIFEST,
+        approval_decision=T2T_PARAMETER_APPROVAL_DECISION,
+    ),
+}
+
+
+def load_parameter_recommendation_chain_v3(
+    state: Mapping[str, Any],
+    *,
+    manifest_ref: ArtifactRef | Mapping[str, Any],
+    expected_stage: Literal["assembly", "hic_scaffolding", "t2t"],
+    expected_method_id: str,
+) -> ParameterRecommendationChainV3:
+    """Load one exact v3 chain; pre-v3 roots and mixed identities fail closed."""
+
+    types = _PARAMETER_ARTIFACT_TYPES[expected_stage]
+    ref = _verified_ref(state, manifest_ref)
+    manifest_record = read_parameter_json(
+        state,
+        ref,
+        expected_type=types.recommendation_manifest,
+    )
+    _require_schema(manifest_record, 3, "recommendation manifest")
+    try:
+        manifest = ParameterRecommendationManifestV3.model_validate(manifest_record)
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "invalid schema-3 recommendation manifest"
+        ) from exc
+    if manifest.stage != expected_stage:
+        raise ParameterEvidenceError(
+            f"recommendation stage mismatch: expected {expected_stage!r}, "
+            f"got {manifest.stage!r}"
+        )
+    if manifest.method_id != expected_method_id:
+        raise ParameterEvidenceError(
+            f"recommendation method mismatch: expected {expected_method_id!r}, "
+            f"got {manifest.method_id!r}"
+        )
+
+    refs = manifest.refs
+    input_record = read_parameter_json(
+        state,
+        refs.input_snapshot_ref,
+        expected_type=types.input_snapshot,
+    )
+    _require_schema(input_record, 3, "recommendation input snapshot")
+    try:
+        input_snapshot = RecommendationInputSnapshotV3.model_validate(input_record)
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "invalid schema-3 recommendation input snapshot"
+        ) from exc
+
+    basis_snapshot = read_parameter_json(
+        state,
+        refs.basis_snapshot_ref,
+        expected_type=types.basis_snapshot,
+    )
+    _require_schema(basis_snapshot, 3, "recommendation basis snapshot")
+    if basis_snapshot.get("method_id") != expected_method_id:
+        raise ParameterEvidenceError("recommendation basis method identity mismatch")
+    catalog_record = basis_snapshot.get("catalog_snapshot")
+    if not isinstance(catalog_record, dict):
+        raise ParameterEvidenceError(
+            "recommendation basis has no catalog_snapshot mapping"
+        )
+    try:
+        catalog = MethodParameterCatalog.model_validate(catalog_record)
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "recommendation catalog snapshot is invalid"
+        ) from exc
+
+    model_request = read_parameter_json(
+        state,
+        refs.model_request_ref,
+        expected_type=types.model_request,
+    )
+    _require_schema(model_request, 3, "parameter model request")
+    model_response = read_parameter_json(
+        state,
+        refs.model_response_ref,
+        expected_type=types.model_response,
+    )
+    _require_schema(model_response, 2, "parameter model response")
+    response_parse = read_parameter_json(
+        state,
+        refs.response_parse_ref,
+        expected_type=types.response_parse,
+    )
+    _require_schema(response_parse, 1, "parameter response parse")
+    recommendation = read_parameter_json(
+        state,
+        refs.recommendation_ref,
+        expected_type=types.recommendation,
+    )
+    _require_schema(recommendation, 2, "parameter recommendation")
+
+    identities = {
+        "input snapshot": (
+            input_snapshot.method_id,
+            input_snapshot.task,
+        ),
+        "catalog snapshot": (catalog.method_id, manifest.task),
+        "recommendation": (
+            recommendation.get("method_id"),
+            recommendation.get("task"),
+        ),
+    }
+    expected_identity = (expected_method_id, manifest.task)
+    for label, identity in identities.items():
+        if identity != expected_identity:
+            raise ParameterEvidenceError(
+                f"{label} identity does not match recommendation manifest"
+            )
+    if input_snapshot.stage_context.stage != expected_stage:
+        raise ParameterEvidenceError(
+            "recommendation input stage context does not match manifest"
+        )
+
+    return ParameterRecommendationChainV3(
+        manifest_ref=ref,
+        manifest=manifest,
+        input_snapshot=input_snapshot,
+        basis_snapshot=dict(basis_snapshot),
+        catalog=catalog,
+        model_request=dict(model_request),
+        model_response=dict(model_response),
+        response_parse=dict(response_parse),
+        recommendation=dict(recommendation),
+    )
+
+
+def load_approved_parameter_chain_v3(
+    state: Mapping[str, Any],
+    *,
+    attempt: ParameterAttempt | Mapping[str, Any],
+    expected_stage: Literal["assembly", "hic_scaffolding", "t2t"],
+    expected_method_id: str,
+) -> ApprovedParameterBundleV3:
+    """Load the immutable snapshot/catalog/L2 bundle approved for execution."""
+
+    if not isinstance(attempt, ParameterAttempt):
+        if attempt.get("schema_version") != 3:
+            raise ParameterEvidenceError("unsupported_parameter_recommendation_schema")
+        try:
+            validated_attempt = ParameterAttempt.model_validate(attempt)
+        except ValueError as exc:
+            raise ParameterEvidenceError("invalid schema-3 parameter attempt") from exc
+    else:
+        validated_attempt = attempt
+    if validated_attempt.schema_version != 3:
+        raise ParameterEvidenceError("unsupported_parameter_recommendation_schema")
+    if validated_attempt.method_id != expected_method_id:
+        raise ParameterEvidenceError("approved parameter attempt method mismatch")
+    chain = load_parameter_recommendation_chain_v3(
+        state,
+        manifest_ref=validated_attempt.recommendation_manifest_ref,
+        expected_stage=expected_stage,
+        expected_method_id=expected_method_id,
+    )
+    manifest = chain.manifest
+    if (
+        validated_attempt.attempt_id != manifest.recommendation_id
+        or validated_attempt.task != manifest.task
+        or validated_attempt.previous_attempt_id != manifest.previous_attempt_id
+        or validated_attempt.previous_attempt_seal_hash
+        != manifest.previous_attempt_seal_hash
+    ):
+        raise ParameterEvidenceError(
+            "approved parameter attempt does not match recommendation manifest"
+        )
+
+    types = _PARAMETER_ARTIFACT_TYPES[expected_stage]
+    approval = read_parameter_json(
+        state,
+        validated_attempt.approval_decision_ref,
+        expected_type=types.approval_decision,
+    )
+    _require_schema(approval, 2, "parameter approval decision")
+    if (
+        approval.get("stage") != expected_stage
+        or approval.get("gate_id") != "parameter_approval"
+    ):
+        raise ParameterEvidenceError("parameter approval decision identity mismatch")
+    decision = approval.get("decision")
+    if not isinstance(decision, dict):
+        raise ParameterEvidenceError(
+            "parameter approval decision has no decision mapping"
+        )
+    _require_schema(decision, 2, "parameter approval payload")
+    if decision.get("decision") != "approve_parameters":
+        raise ParameterEvidenceError("parameter recommendation was not approved")
+    if decision.get("validated_recommendation_hash") != chain.manifest_ref.sha256:
+        raise ParameterEvidenceError(
+            "parameter approval is not bound to the recommendation manifest"
+        )
+    try:
+        approved_manifest_ref = ArtifactRef.model_validate(
+            decision.get("validated_recommendation_manifest_ref")
+        )
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "parameter approval has no validated manifest ref"
+        ) from exc
+    if approved_manifest_ref != chain.manifest_ref:
+        raise ParameterEvidenceError(
+            "parameter approval manifest ref does not match the attempt"
+        )
+
+    request_ref_value = approval.get("request_ref")
+    try:
+        request_ref = ArtifactRef.model_validate(request_ref_value)
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "parameter approval decision has no review request ref"
+        ) from exc
+    if approval.get("request_hash") != request_ref.sha256:
+        raise ParameterEvidenceError("parameter approval request hash mismatch")
+    review_request = read_parameter_json(state, request_ref)
+    _require_schema(review_request, 2, "parameter approval request")
+    if (
+        review_request.get("review_request_id") != approval.get("review_request_id")
+        or review_request.get("stage") != expected_stage
+        or review_request.get("gate_id") != "parameter_approval"
+    ):
+        raise ParameterEvidenceError("parameter approval request identity mismatch")
+    payload = review_request.get("payload")
+    if not isinstance(payload, dict):
+        raise ParameterEvidenceError("parameter approval request has no payload")
+    try:
+        requested_manifest_ref = ArtifactRef.model_validate(
+            payload.get("recommendation_manifest_ref")
+        )
+    except ValueError as exc:
+        raise ParameterEvidenceError(
+            "parameter approval request has no recommendation manifest ref"
+        ) from exc
+    if (
+        requested_manifest_ref != chain.manifest_ref
+        or payload.get("recommendation_manifest_hash") != chain.manifest_ref.sha256
+    ):
+        raise ParameterEvidenceError(
+            "parameter approval request does not match the recommendation manifest"
+        )
+
+    # Force shape validation at the approved boundary, including unknown L2 keys
+    # later rejected by the shared resolver.
+    _ = ApprovedParameterBundleV3(
+        attempt=validated_attempt,
+        chain=chain,
+        approval_decision=dict(approval),
+    ).approved_l2
+    return ApprovedParameterBundleV3(
+        attempt=validated_attempt,
+        chain=chain,
+        approval_decision=dict(approval),
+    )
+
+
+def build_recommendation_dependency_refs(
+    state: Mapping[str, Any],
+    *,
+    fact_source_paths: Mapping[
+        Literal["read_qc_summary", "genome_survey_result"],
+        ArtifactRef | Mapping[str, Any] | str | Path | None,
+    ]
+    | None = None,
+    stage_input_paths: Mapping[
+        str,
+        ArtifactRef | Mapping[str, Any] | str | Path | None,
+    ]
+    | None = None,
+    initial_input_snapshot_ref: ArtifactRef | Mapping[str, Any] | None = None,
+    prior_attempt_manifest_refs: Sequence[ArtifactRef | Mapping[str, Any]] = (),
+    motif_resolution_ref: ArtifactRef | Mapping[str, Any] | None = None,
+) -> RecommendationDependencyRefs:
+    """Build verified dependency refs in canonical role order."""
+
+    fact_refs: dict[
+        Literal["read_qc_summary", "genome_survey_result"],
+        ArtifactRef,
+    ] = {}
+    for role, value in sorted((fact_source_paths or {}).items()):
+        if value is not None:
+            fact_refs[role] = _dependency_ref(state, value)
+
+    stage_refs: list[ArtifactRef] = []
+    seen: set[tuple[str, str, str]] = set()
+    for _role, value in sorted((stage_input_paths or {}).items()):
+        if value is None:
+            continue
+        ref = _dependency_ref(state, value)
+        identity = (ref.artifact_type, ref.path_ref, ref.sha256)
+        if identity in seen:
+            raise ParameterEvidenceError(
+                "stage input dependency paths must not resolve to duplicate refs"
+            )
+        seen.add(identity)
+        stage_refs.append(ref)
+
+    return RecommendationDependencyRefs(
+        fact_source_refs=fact_refs,
+        stage_input_refs=tuple(stage_refs),
+        initial_input_snapshot_ref=(
+            _dependency_ref(state, initial_input_snapshot_ref)
+            if initial_input_snapshot_ref is not None
+            else None
+        ),
+        prior_attempt_manifest_refs=tuple(
+            _dependency_ref(state, ref) for ref in prior_attempt_manifest_refs
+        ),
+        motif_resolution_ref=(
+            _dependency_ref(state, motif_resolution_ref)
+            if motif_resolution_ref is not None
+            else None
+        ),
+    )
+
+
+def canonical_parameter_dependency(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any] | str | Path | None,
+) -> ArtifactRef | Mapping[str, Any] | Path | None:
+    """Keep only refs or paths eligible for the immutable dependency chain."""
+
+    if value is None or isinstance(value, ArtifactRef):
+        return value
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, (str, Path)):
+        return None
+
+    paths, _session_id = _session_paths(state)
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = paths.run_dir / candidate
+    candidate = candidate.resolve(strict=False)
+    try:
+        candidate.relative_to(paths.artifacts_dir.resolve(strict=False))
+    except ValueError:
+        return None
+    return candidate
 
 
 def publish_parameter_json(
@@ -215,6 +679,49 @@ def recover_parameter_json(
     ref = recovered.ref
     payload = read_parameter_json(state, ref, expected_type=expected_type)
     return ref, payload
+
+
+def _require_schema(record: Mapping[str, Any], expected: int, label: str) -> None:
+    actual = record.get("schema_version")
+    if type(actual) is not int or actual != expected:
+        raise ParameterEvidenceError(
+            "unsupported_parameter_recommendation_schema: "
+            f"{label} requires schema {expected}, got {actual!r}"
+        )
+
+
+def _verified_ref(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any],
+) -> ArtifactRef:
+    try:
+        ref = (
+            value
+            if isinstance(value, ArtifactRef)
+            else ArtifactRef.model_validate(value)
+        )
+        paths, session_id = _session_paths(state)
+        resolve_artifact_ref(paths.run_dir, session_id, ref)
+    except (OSError, ValueError) as exc:
+        raise ParameterEvidenceError(
+            "invalid or unreadable parameter artifact ref"
+        ) from exc
+    return ref
+
+
+def _dependency_ref(
+    state: Mapping[str, Any],
+    value: ArtifactRef | Mapping[str, Any] | str | Path,
+) -> ArtifactRef:
+    if isinstance(value, (ArtifactRef, Mapping)):
+        return _verified_ref(state, value)
+    try:
+        paths, session_id = _session_paths(state)
+        return artifact_ref_for_path(paths.run_dir, session_id, value)
+    except (OSError, ValueError) as exc:
+        raise ParameterEvidenceError(
+            f"dependency path is not a verified run artifact: {value}"
+        ) from exc
 
 
 def _session_paths(state: Mapping[str, Any]) -> tuple[SessionPaths, str]:

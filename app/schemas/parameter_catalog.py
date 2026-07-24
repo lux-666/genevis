@@ -10,7 +10,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 ParameterValueType = Literal["int", "float", "string", "boolean", "path", "path_list"]
 
 # ---------------------------------------------------------------------------
@@ -121,6 +120,8 @@ ExecutorBindingKey = Literal[
     "assembly_output_dir",
     "assembly_output_prefix",
     "assembly_threads",
+    "hic_threads",
+    "t2t_mode",
 ]
 
 
@@ -206,12 +207,12 @@ class ParameterLayers(BaseModel):
 
     @model_validator(mode="after")
     def validate_fixed_cannot_coexist(self) -> "ParameterLayers":
-        if (
-            isinstance(self.l0, FixedExecutorSource)
-            and (self.l1 is not None or self.l2 is not None)
+        if isinstance(self.l0, FixedExecutorSource) and (
+            self.l1 is not None or self.l2 is not None
         ):
             raise ValueError(
-                "l0.fixed cannot coexist with L1 or L2 — a fixed value cannot be overridden"
+                "l0.fixed cannot coexist with L1 or L2 — a fixed value cannot "
+                "be overridden"
             )
         return self
 
@@ -276,7 +277,8 @@ class MethodParameterCatalog(BaseModel):
                 if app.selector in choice_selector_refs:
                     raise ValueError(
                         f"selector {app.selector!r} is referenced by more than one "
-                        f"choice_option: {choice_selector_refs[app.selector]!r} and {name!r}"
+                        "choice_option: "
+                        f"{choice_selector_refs[app.selector]!r} and {name!r}"
                     )
                 choice_selector_refs[app.selector] = name
             elif isinstance(app, PositionalApplication):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, TypedDict
 
+
 class ResolvedGenomeSize(TypedDict):
     """One positive genome-size value with deterministic provenance."""
 
@@ -15,23 +16,16 @@ class ResolvedGenomeSize(TypedDict):
 def resolve_explicit_genome_size(state: Mapping[str, Any]) -> ResolvedGenomeSize | None:
     """Resolve only operator-provided values, never a survey measurement."""
 
-    assembly = _mapping((state.get("stage_outputs") or {}).get("assembly"))
     candidates = (
-        (
-            "assembly.flye_parameters.estimated_genome_size",
-            _mapping(assembly.get("flye_parameters")).get("estimated_genome_size"),
-        ),
-        (
-            "assembly.nextdenovo_parameters.genome_size",
-            _mapping(assembly.get("nextdenovo_parameters")).get("genome_size"),
-        ),
         (
             "shared_parameters.estimated_genome_size",
             _mapping(state.get("shared_parameters")).get("estimated_genome_size"),
         ),
         (
             "inventory.genome_size_estimate",
-            _mapping((state.get("stage_outputs") or {}).get("inventory")).get("genome_size_estimate"),
+            _mapping((state.get("stage_outputs") or {}).get("inventory")).get(
+                "genome_size_estimate"
+            ),
         ),
     )
     for source_path, value in candidates:
@@ -50,7 +44,9 @@ def resolve_genome_size(state: Mapping[str, Any]) -> ResolvedGenomeSize | None:
 
     survey = _mapping((state.get("stage_outputs") or {}).get("genome_survey"))
     if survey.get("genome_size_source") == "survey":
-        return _resolved(survey.get("genome_size_prior"), "survey", "genome_survey.genome_size_prior")
+        return _resolved(
+            survey.get("genome_size_prior"), "survey", "genome_survey.genome_size_prior"
+        )
     return None
 
 

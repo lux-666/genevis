@@ -15,18 +15,38 @@ from types import SimpleNamespace
 from typing import get_args
 from unittest.mock import patch
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import read_artifact_records
-from app.execution.env_resolver import PreflightResult
+from app.entrypoints.ask_execution import execute_confirmed_plan
+from app.entrypoints.manifest_materializer import materialize_manifest_genome_size
 from app.entrypoints.review_interactive import run_interactive_review
+from app.entrypoints.run import (
+    _LOCAL_EXEC_STAGE_CHOICES,
+    _build_assembly_selection,
+    _interactive_gate_loop,
+    _load_dotenv_without_override,
+    _parse_args,
+    _resolve_checkpointer_backend,
+    _resolve_data_dir,
+    _run_ask,
+    _run_inspect,
+    _run_resume,
+    _run_session,
+    _run_storage_audit,
+    generate_session_id,
+)
 from app.entrypoints.tui import _tui_main, run_tui
-from app.entrypoints.run import _LOCAL_EXEC_STAGE_CHOICES, _build_assembly_selection, _interactive_gate_loop, _load_dotenv_without_override, _parse_args, _resolve_checkpointer_backend, _resolve_data_dir, _run_ask, _run_inspect, _run_resume, _run_session, _run_storage_audit, generate_session_id
+from app.execution.env_resolver import PreflightResult
 from app.review.base import ResumeReviewRequest, ReviewPayload
-from app.review.persistence import PersistedReviewRequest, load_review_request, persist_review_request
+from app.review.persistence import (
+    PersistedReviewRequest,
+    load_review_request,
+    persist_review_request,
+)
 from app.schemas.artifacts import ArtifactRef
-from app.schemas.entry import EntryRequest
 from app.schemas.ask_plan import AskPlanState, save_ask_plan
+from app.schemas.entry import EntryRequest
 from app.schemas.run_config import AssemblyRunConfig, LocalExecStage
+from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout, locate_session_data_dir
 from tests.data_v2 import v2_run_dir
 
@@ -44,7 +64,11 @@ class _FakeGraph:
 class _FakeResumeGraph:
     def __init__(self, state: dict, result: dict | None = None) -> None:
         self.state = state
-        self.result = result or {"current_stage": "done", "supervision_state": "completed", "route_trace": []}
+        self.result = result or {
+            "current_stage": "done",
+            "supervision_state": "completed",
+            "route_trace": [],
+        }
         self.updated: list[dict] = []
         self.invocations: list[tuple[dict | None, dict]] = []
 
@@ -100,7 +124,10 @@ def _write_assembly_review_request(
 
 def _artifact_types(data_dir: Path, session_id: str) -> list[str]:
     session_dir = locate_session_data_dir(data_dir, session_id)
-    return [record["artifact_type"] for record in read_artifact_records(session_dir, session_id)]
+    return [
+        record["artifact_type"]
+        for record in read_artifact_records(session_dir, session_id)
+    ]
 
 
 def _load_assembly_review_request(
@@ -136,24 +163,25 @@ def _add_gene_method_bins(bin_dir: Path) -> Path:
     augustus = bin_dir / "augustus"
     augustus.write_text(
         "#!/bin/sh\n"
-        "printf '##gff-version 3\\nctg1\\tAUGUSTUS\\tgene\\t1\\t6\\t.\\t+\\t.\\tID=g1\\n'\n",
+        "printf '##gff-version 3\\n"
+        "ctg1\\tAUGUSTUS\\tgene\\t1\\t6\\t.\\t+\\t.\\tID=g1\\n'\n",
         encoding="utf-8",
     )
     augustus.chmod(0o755)
     gffread = bin_dir / "gffread"
     gffread.write_text(
         "#!/bin/sh\n"
-        "prot=\"\"; cds=\"\"\n"
+        'prot=""; cds=""\n'
         "while [ $# -gt 0 ]; do\n"
-        "  case \"$1\" in\n"
-        "    -y) prot=\"$2\"; shift 2;;\n"
-        "    -x) cds=\"$2\"; shift 2;;\n"
+        '  case "$1" in\n'
+        '    -y) prot="$2"; shift 2;;\n'
+        '    -x) cds="$2"; shift 2;;\n'
         "    -g) shift 2;;\n"
         "    *) shift;;\n"
         "  esac\n"
         "done\n"
-        "[ -n \"$prot\" ] && printf '>g1\\nMKT\\n' > \"$prot\"\n"
-        "[ -n \"$cds\" ] && printf '>g1\\nATGAAAACC\\n' > \"$cds\"\n",
+        '[ -n "$prot" ] && printf \'>g1\\nMKT\\n\' > "$prot"\n'
+        '[ -n "$cds" ] && printf \'>g1\\nATGAAAACC\\n\' > "$cds"\n',
         encoding="utf-8",
     )
     gffread.chmod(0o755)
@@ -175,10 +203,18 @@ def _assert_existing_assembly_blocks_at_review(
     test.assertIn("current_stage: assembly_review", stdout)
     test.assertIn("supervision_state: blocked_human", stdout)
     if checkpointer == "sqlite":
-        test.assertIn("resume_note: use `gene-agent review` or `gene-agent resume` to continue", stdout)
+        test.assertIn(
+            "resume_note: use `gene-agent review` or `gene-agent resume` to continue",
+            stdout,
+        )
     else:
-        test.assertIn("resume_note: durable cross-process resume requires --checkpointer sqlite", stdout)
-    run_dir, _request_ref, request_record = _load_assembly_review_request(data_dir, session_id)
+        test.assertIn(
+            "resume_note: durable cross-process resume requires --checkpointer sqlite",
+            stdout,
+        )
+    run_dir, _request_ref, request_record = _load_assembly_review_request(
+        data_dir, session_id
+    )
     blocked_report = run_dir / "reports" / "current_status.json"
     test.assertTrue(blocked_report.exists())
 
@@ -199,13 +235,20 @@ def _assert_existing_assembly_blocks_at_review(
     test.assertTrue((run_dir / "reports" / "assembly_review.md").exists())
 
     events_path = run_dir / "ledger" / "events.jsonl"
-    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
     test.assertTrue(any(event["event_type"] == "review_requested" for event in events))
     test.assertFalse(any(event["event_type"] == "review_decision" for event in events))
 
 
-def _write_accept_existing_assembly_decision(data_dir: Path, session_id: str, path: Path) -> Path:
-    run_dir, request_ref, request_record = _load_assembly_review_request(data_dir, session_id)
+def _write_accept_existing_assembly_decision(
+    data_dir: Path, session_id: str, path: Path
+) -> Path:
+    run_dir, request_ref, request_record = _load_assembly_review_request(
+        data_dir, session_id
+    )
     request = request_record["payload"]
     candidate = request["candidates"][0]
     decision_path = run_dir / "control" / path.name
@@ -269,7 +312,11 @@ class EntrypointTests(unittest.TestCase):
     def test_tui_prompt_example_mentions_target_species(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), patch("builtins.input", return_value=""):
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            patch("builtins.input", return_value=""),
+        ):
             code = _tui_main("data")
 
         self.assertEqual(code, 1)
@@ -278,7 +325,10 @@ class EntrypointTests(unittest.TestCase):
 
     def test_tui_request_interrupt_reports_phase(self):
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout), patch("builtins.input", side_effect=KeyboardInterrupt):
+        with (
+            contextlib.redirect_stdout(stdout),
+            patch("builtins.input", side_effect=KeyboardInterrupt),
+        ):
             code = run_tui("data")
 
         self.assertEqual(code, 1)
@@ -309,7 +359,16 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(args.resume_session, "blocked-session")
 
     def test_ask_args_parse_minimal_defaults(self):
-        args = _parse_args(["ask", "use inputs/manifest.yaml to start s1", "--session-id", "s1", "--data-dir", "out"])
+        args = _parse_args(
+            [
+                "ask",
+                "use inputs/manifest.yaml to start s1",
+                "--session-id",
+                "s1",
+                "--data-dir",
+                "out",
+            ]
+        )
 
         self.assertEqual(args.command, "ask")
         self.assertEqual(args.request_text, "use inputs/manifest.yaml to start s1")
@@ -323,23 +382,25 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(cli_choices, schema_choices)
 
     def test_ask_args_accept_execution_flags(self):
-        args = _parse_args([
-            "ask",
-            "run reads",
-            "--local-exec",
-            "read_qc",
-            "--local-exec",
-            "assembly",
-            "--run-config",
-            "run_config.json",
-            "--checkpointer",
-            "sqlite",
-            "--ask-plan",
-            "plan.json",
-            "--clarification-response",
-            "response.json",
-            "--json",
-        ])
+        args = _parse_args(
+            [
+                "ask",
+                "run reads",
+                "--local-exec",
+                "read_qc",
+                "--local-exec",
+                "assembly",
+                "--run-config",
+                "run_config.json",
+                "--checkpointer",
+                "sqlite",
+                "--ask-plan",
+                "plan.json",
+                "--clarification-response",
+                "response.json",
+                "--json",
+            ]
+        )
 
         self.assertEqual(args.command, "ask")
         self.assertEqual(args.local_exec, ["read_qc", "assembly"])
@@ -357,16 +418,18 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(args.data_dir, "out")
 
     def test_inspect_args_accept_json_and_template_flags(self):
-        args = _parse_args([
-            "inspect",
-            "--session-id",
-            "s1",
-            "--data-dir",
-            "out",
-            "--json",
-            "--write-decision-template",
-            "decision.json",
-        ])
+        args = _parse_args(
+            [
+                "inspect",
+                "--session-id",
+                "s1",
+                "--data-dir",
+                "out",
+                "--json",
+                "--write-decision-template",
+                "decision.json",
+            ]
+        )
 
         self.assertTrue(args.json)
         self.assertEqual(args.write_decision_template, "decision.json")
@@ -448,15 +511,17 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("storage audit failed", stderr.getvalue())
 
     def test_review_args_accept_checkpointer_flag(self):
-        args = _parse_args([
-            "review",
-            "--session-id",
-            "s1",
-            "--data-dir",
-            "out",
-            "--checkpointer",
-            "sqlite",
-        ])
+        args = _parse_args(
+            [
+                "review",
+                "--session-id",
+                "s1",
+                "--data-dir",
+                "out",
+                "--checkpointer",
+                "sqlite",
+            ]
+        )
 
         self.assertEqual(args.command, "review")
         self.assertEqual(args.session_id, "s1")
@@ -476,24 +541,33 @@ class EntrypointTests(unittest.TestCase):
             v2_run_dir(data_dir, "gene-20260508-000003")
             v2_run_dir(data_dir, "other-session")
 
-            session_id = generate_session_id(data_dir, now=datetime(2026, 5, 8, 10, 0, 0))
+            session_id = generate_session_id(
+                data_dir, now=datetime(2026, 5, 8, 10, 0, 0)
+            )
 
         self.assertEqual(session_id, "gene-20260508-000004")
 
     def test_generate_session_id_starts_at_one_for_new_day(self):
         with tempfile.TemporaryDirectory() as tmp:
-            session_id = generate_session_id(Path(tmp) / "data", now=datetime(2026, 5, 8, 10, 0, 0))
+            session_id = generate_session_id(
+                Path(tmp) / "data", now=datetime(2026, 5, 8, 10, 0, 0)
+            )
 
         self.assertEqual(session_id, "gene-20260508-000001")
 
-    def test_build_assembly_selection_materializes_assembly_route_as_canonical_selection(self):
+    def test_build_selection_materializes_route_as_canonical_selection(
+        self,
+    ):
         selection = _build_assembly_selection(
             assembly=AssemblyRunConfig(assembly_route="ont"),
             shared_parameters=None,
         )
 
         self.assertIsNotNone(selection)
-        self.assertEqual(selection.model_dump(mode="json")["primary_method"], "assembly.candidate.hifiasm_ont")
+        self.assertEqual(
+            selection.model_dump(mode="json")["primary_method"],
+            "assembly.candidate.hifiasm_ont",
+        )
         self.assertEqual(selection.model_dump(mode="json")["read_type"], "ont_raw")
         self.assertEqual(selection.model_dump(mode="json")["source"], "run_config")
 
@@ -502,46 +576,89 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("assets: []\n", encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
             captured = {}
 
             def fake_initial_state(**kwargs):
                 captured.update(kwargs)
                 return {"session_id": kwargs["session_id"]}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
-            ), patch("app.entrypoints.run.generate_session_id", return_value="gene-20260508-000001"):
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
+                patch(
+                    "app.entrypoints.run.generate_session_id",
+                    return_value="gene-20260508-000001",
+                ),
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
-                    argparse.Namespace(session_id=None, manifest=str(manifest), data_dir=str(root / "data")),
+                    argparse.Namespace(
+                        session_id=None,
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             self.assertIn("session_id: gene-20260508-000001", stdout)
             self.assertEqual(captured["session_id"], "gene-20260508-000001")
-            self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "gene-20260508-000001"}})
-            self.assertTrue((root / "data" / "runs" / "gene-20260508-000001" / "ledger" / "events.jsonl").exists())
+            self.assertEqual(
+                graph.invocations[0][1],
+                {"configurable": {"thread_id": "gene-20260508-000001"}},
+            )
+            self.assertTrue(
+                (
+                    root
+                    / "data"
+                    / "runs"
+                    / "gene-20260508-000001"
+                    / "ledger"
+                    / "events.jsonl"
+                ).exists()
+            )
 
     def test_structured_run_uses_manifest_session_id_when_cli_omits_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
             captured = {}
 
             def fake_initial_state(**kwargs):
                 captured.update(kwargs)
                 return {"session_id": kwargs["session_id"]}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
-            ), patch("app.entrypoints.run.generate_session_id") as gen_id:
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
+                patch("app.entrypoints.run.generate_session_id") as gen_id,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
-                    argparse.Namespace(session_id=None, manifest=str(manifest), data_dir=str(root / "data")),
+                    argparse.Namespace(
+                        session_id=None,
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 0)
@@ -569,8 +686,11 @@ class EntrypointTests(unittest.TestCase):
                 captured.update(kwargs)
                 return {"session_id": kwargs["session_id"]}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
@@ -595,8 +715,12 @@ class EntrypointTests(unittest.TestCase):
                     "requested_stages": None,
                 },
             )
-            self.assertEqual(graph.invocations[0][1], {"configurable": {"thread_id": "s1"}})
-            self.assertTrue((root / "data" / "runs" / "s1" / "ledger" / "events.jsonl").exists())
+            self.assertEqual(
+                graph.invocations[0][1], {"configurable": {"thread_id": "s1"}}
+            )
+            self.assertTrue(
+                (root / "data" / "runs" / "s1" / "ledger" / "events.jsonl").exists()
+            )
 
     def test_structured_run_does_not_refinalize_interactive_resume_terminal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,9 +740,13 @@ class EntrypointTests(unittest.TestCase):
                 "route_trace": ["assembly_stage", "done_stage"],
             }
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run._interactive_gate_loop", return_value=terminal
-            ), patch("app.entrypoints.run.finalize_terminal_state") as finalize:
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run._interactive_gate_loop", return_value=terminal
+                ),
+                patch("app.entrypoints.run.finalize_terminal_state") as finalize,
+            ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
                     argparse.Namespace(
@@ -639,7 +767,13 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
             captured = {}
             old_cwd = Path.cwd()
 
@@ -650,8 +784,14 @@ class EntrypointTests(unittest.TestCase):
             try:
                 os.chdir(root)
                 expected = str(SessionPaths(_resolve_data_dir("out"), "s1").run_dir)
-                with patch("app.entrypoints.run.build_graph", return_value=graph) as build_graph, patch(
-                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                with (
+                    patch(
+                        "app.entrypoints.run.build_graph", return_value=graph
+                    ) as build_graph,
+                    patch(
+                        "app.entrypoints.run.initial_state",
+                        side_effect=fake_initial_state,
+                    ),
                 ):
                     code, _stdout, stderr = _capture_cli(
                         _run_session,
@@ -671,13 +811,22 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             self.assertEqual(captured["data_dir"], expected)
             build_graph.assert_called_once_with(backend="memory", data_dir=expected)
-            self.assertTrue((root / "out" / "runs" / "s1" / "ledger" / "events.jsonl").exists())
+            self.assertTrue(
+                (root / "out" / "runs" / "s1" / "ledger" / "events.jsonl").exists()
+            )
 
     def test_missing_manifest_returns_before_graph_invocation(self):
-        with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("app.entrypoints.run.build_graph") as build_graph,
+        ):
             code, stdout, stderr = _capture_cli(
                 _run_session,
-                argparse.Namespace(session_id="s1", manifest="missing.yaml", data_dir=str(Path(tmp) / "data")),
+                argparse.Namespace(
+                    session_id="s1",
+                    manifest="missing.yaml",
+                    data_dir=str(Path(tmp) / "data"),
+                ),
             )
 
         self.assertEqual(code, 1)
@@ -724,10 +873,15 @@ class EntrypointTests(unittest.TestCase):
         self.assertNotIn("missing asset_registry_ref", stderr)
 
     def test_blank_manifest_is_rejected_before_path_resolution(self):
-        with tempfile.TemporaryDirectory() as tmp, patch("app.entrypoints.run.build_graph") as build_graph:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("app.entrypoints.run.build_graph") as build_graph,
+        ):
             code, stdout, stderr = _capture_cli(
                 _run_session,
-                argparse.Namespace(session_id="s1", manifest="", data_dir=str(Path(tmp) / "data")),
+                argparse.Namespace(
+                    session_id="s1", manifest="", data_dir=str(Path(tmp) / "data")
+                ),
             )
 
         self.assertEqual(code, 1)
@@ -743,7 +897,11 @@ class EntrypointTests(unittest.TestCase):
             with patch("app.entrypoints.run.build_graph") as build_graph:
                 code, stdout, stderr = _capture_cli(
                     _run_session,
-                    argparse.Namespace(session_id="/tmp/x", manifest=str(manifest), data_dir=str(root / "data")),
+                    argparse.Namespace(
+                        session_id="/tmp/x",
+                        manifest=str(manifest),
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 1)
@@ -756,10 +914,13 @@ class EntrypointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
-            manifest.write_text("session_id: from-manifest\nassets: []\n", encoding="utf-8")
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            manifest.write_text(
+                "session_id: from-manifest\nassets: []\n", encoding="utf-8"
+            )
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     argparse.Namespace(
@@ -782,15 +943,24 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: agreed\nassets: []\n", encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
             captured = {}
 
             def fake_initial_state(**kwargs):
                 captured.update(kwargs)
                 return {"session_id": kwargs["session_id"]}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -814,9 +984,10 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: ../escape\nassets: []\n", encoding="utf-8")
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     argparse.Namespace(
@@ -836,12 +1007,23 @@ class EntrypointTests(unittest.TestCase):
     def test_ask_generates_default_session_id_for_parser_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with patch("app.entrypoints.intent.parse_request_with_llm", side_effect=ValueError("stop")) as parse_request, patch(
-                "app.entrypoints.run.generate_session_id", return_value="gene-20260508-000001"
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    side_effect=ValueError("stop"),
+                ) as parse_request,
+                patch(
+                    "app.entrypoints.run.generate_session_id",
+                    return_value="gene-20260508-000001",
+                ),
             ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text="use manifest", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(
+                        request_text="use manifest",
+                        session_id=None,
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 1)
@@ -849,7 +1031,10 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("stop", stderr)
             parse_request.assert_called_once_with(
                 "use manifest",
-                defaults={"session_id": "gene-20260508-000001", "data_dir": str(root / "data")},
+                defaults={
+                    "session_id": "gene-20260508-000001",
+                    "data_dir": str(root / "data"),
+                },
             )
 
     def test_ask_without_run_config_emits_clarification(self):
@@ -857,14 +1042,24 @@ class EntrypointTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
+            request = EntryRequest(
+                session_id="s1", manifest=str(manifest), data_dir=str(root / "data")
+            )
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph"
-            ) as build_graph:
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch("app.entrypoints.run.build_graph") as build_graph,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text="use manifest", session_id="default", data_dir=str(root / "default_data")),
+                    self._ask_namespace(
+                        request_text="use manifest",
+                        session_id="default",
+                        data_dir=str(root / "default_data"),
+                    ),
                 )
 
             self.assertEqual(code, 0)
@@ -880,18 +1075,38 @@ class EntrypointTests(unittest.TestCase):
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
             config_path = root / "run_config.json"
             config_path.write_text(json.dumps({}), encoding="utf-8")
-            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            request = EntryRequest(
+                session_id="s1", manifest=str(manifest), data_dir=str(root / "data")
+            )
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"]}
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph", return_value=graph
-            ), patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text="use manifest", session_id="s1", data_dir=str(root / "data"), run_config=str(config_path)),
+                    self._ask_namespace(
+                        request_text="use manifest",
+                        session_id="s1",
+                        data_dir=str(root / "data"),
+                        run_config=str(config_path),
+                    ),
                 )
 
             self.assertEqual(code, 0)
@@ -911,12 +1126,20 @@ class EntrypointTests(unittest.TestCase):
                 target_species="卵鳎",
             )
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph"
-            ) as build_graph:
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch("app.entrypoints.run.build_graph") as build_graph,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text=f"use {assembly}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(
+                        request_text=f"use {assembly}",
+                        session_id=None,
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 0)
@@ -929,6 +1152,80 @@ class EntrypointTests(unittest.TestCase):
             self.assertIn("target_species: 卵鳎", text)
             build_graph.assert_not_called()
 
+    def test_ask_genome_size_is_written_only_to_session_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reads = root / "reads.fastq"
+            reads.write_text("@r1\nACGT\n+\n!!!!\n", encoding="utf-8")
+            source_manifest = root / "manifest.yaml"
+            source_text = (
+                "session_id: s1\n"
+                "assets:\n"
+                "  - asset_type: raw_long_reads\n"
+                "    paths: [reads.fastq]\n"
+                "    platform: ont\n"
+            )
+            source_manifest.write_text(source_text, encoding="utf-8")
+
+            materialized = materialize_manifest_genome_size(
+                manifest_path=source_manifest,
+                data_dir=str(root / "data"),
+                session_id="s1",
+                genome_size_estimate=2_000_000,
+            )
+
+            self.assertEqual(source_manifest.read_text(encoding="utf-8"), source_text)
+            self.assertNotEqual(materialized, source_manifest)
+            materialized_text = materialized.read_text(encoding="utf-8")
+            self.assertIn("genome_size_estimate: 2000000", materialized_text)
+            self.assertIn(str(reads.resolve()), materialized_text)
+
+    def test_confirmed_ask_moves_genome_size_from_plan_to_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_manifest = root / "manifest.yaml"
+            source_text = "session_id: s1\nassets: []\n"
+            source_manifest.write_text(source_text, encoding="utf-8")
+            data_dir = root / "data"
+            plan = AskPlanState(
+                session_id="s1",
+                data_dir=str(data_dir),
+                entry_request={
+                    "command": "run",
+                    "session_id": "s1",
+                    "manifest": str(source_manifest),
+                    "data_dir": str(data_dir),
+                },
+                manifest_ref=str(source_manifest),
+                shared_parameters={"estimated_genome_size": 2_000_000},
+                confirmed=True,
+            )
+
+            with patch(
+                "app.entrypoints.run._run_session",
+                return_value=0,
+            ) as run_session:
+                code = execute_confirmed_plan(
+                    plan,
+                    argparse.Namespace(checkpointer=None),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(source_manifest.read_text(encoding="utf-8"), source_text)
+            session_paths = SessionPaths(data_dir, "s1")
+            self.assertIn(
+                "genome_size_estimate: 2000000",
+                session_paths.manifest_path.read_text(encoding="utf-8"),
+            )
+            run_config = json.loads(
+                session_paths.run_config_path.read_text(encoding="utf-8")
+            )
+            self.assertNotIn("shared_parameters", run_config)
+            self.assertEqual(
+                run_session.call_args.args[0].manifest,
+                str(session_paths.manifest_path),
+            )
+
     def test_ask_resume_does_not_adopt_legacy_plan_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
@@ -938,7 +1235,11 @@ class EntrypointTests(unittest.TestCase):
                     session_id="s1",
                     data_dir=str(data_dir),
                     request_text="assemble inputs",
-                    entry_request={"command": "run", "manifest": "manifest.yaml", "data_dir": str(data_dir)},
+                    entry_request={
+                        "command": "run",
+                        "manifest": "manifest.yaml",
+                        "data_dir": str(data_dir),
+                    },
                     manifest_ref="manifest.yaml",
                 ),
                 legacy_plan,
@@ -972,12 +1273,19 @@ class EntrypointTests(unittest.TestCase):
                 genome_size_estimate=2_000_000,
             )
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph"
-            ) as build_graph:
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch("app.entrypoints.run.build_graph") as build_graph,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text=f"帮我跑一下这个 cyclone文件：{reads}", data_dir=str(root / "data")),
+                    self._ask_namespace(
+                        request_text=f"帮我跑一下这个 cyclone文件：{reads}",
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 0)
@@ -993,16 +1301,35 @@ class EntrypointTests(unittest.TestCase):
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
             config_path = root / "run_config.json"
-            config_path.write_text(json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8")
-            request = EntryRequest(session_id="s1", manifest=str(manifest), data_dir=str(root / "data"))
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            config_path.write_text(
+                json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8"
+            )
+            request = EntryRequest(
+                session_id="s1", manifest=str(manifest), data_dir=str(root / "data")
+            )
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph", return_value=graph
-            ) as build_graph, patch("app.entrypoints.run.initial_state", side_effect=fake_initial_state):
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch(
+                    "app.entrypoints.run.build_graph", return_value=graph
+                ) as build_graph,
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
                     self._ask_namespace(
@@ -1017,24 +1344,39 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             self.assertIn("checkpoint_persistence: sqlite", stdout)
-            self.assertIn(f"run_config_ref: {config_path.resolve(strict=False)}", stdout)
+            self.assertIn(
+                f"run_config_ref: {config_path.resolve(strict=False)}", stdout
+            )
             build_graph.assert_called_once()
             self.assertEqual(build_graph.call_args.kwargs["backend"], "sqlite")
-            self.assertEqual(graph.invocations[0][0]["stage_outputs"]["read_qc"]["execution_mode"], "local")
+            self.assertEqual(
+                graph.invocations[0][0]["stage_outputs"]["read_qc"]["execution_mode"],
+                "local",
+            )
 
     def test_ask_rejects_unsupported_source_file_before_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             notes = root / "notes.txt"
             notes.write_text("not a biological input\n", encoding="utf-8")
-            request = EntryRequest(session_id="s1", source_paths=[str(notes)], data_dir=str(root / "data"))
+            request = EntryRequest(
+                session_id="s1", source_paths=[str(notes)], data_dir=str(root / "data")
+            )
 
-            with patch("app.entrypoints.intent.parse_request_with_llm", return_value=request), patch(
-                "app.entrypoints.run.build_graph"
-            ) as build_graph:
+            with (
+                patch(
+                    "app.entrypoints.intent.parse_request_with_llm",
+                    return_value=request,
+                ),
+                patch("app.entrypoints.run.build_graph") as build_graph,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_ask,
-                    self._ask_namespace(request_text=f"use {notes}", session_id=None, data_dir=str(root / "data")),
+                    self._ask_namespace(
+                        request_text=f"use {notes}",
+                        session_id=None,
+                        data_dir=str(root / "data"),
+                    ),
                 )
 
             self.assertEqual(code, 1)
@@ -1043,12 +1385,18 @@ class EntrypointTests(unittest.TestCase):
             build_graph.assert_not_called()
 
     def test_ask_lifecycle_failure_does_not_invoke_graph(self):
-        with patch("app.entrypoints.intent.parse_request_with_llm", side_effect=ValueError("Lifecycle requests")), patch(
-            "app.entrypoints.run.build_graph"
-        ) as build_graph:
+        with (
+            patch(
+                "app.entrypoints.intent.parse_request_with_llm",
+                side_effect=ValueError("Lifecycle requests"),
+            ),
+            patch("app.entrypoints.run.build_graph") as build_graph,
+        ):
             code, stdout, stderr = _capture_cli(
                 _run_ask,
-                self._ask_namespace(request_text="resume s1", session_id=None, data_dir=None),
+                self._ask_namespace(
+                    request_text="resume s1", session_id=None, data_dir=None
+                ),
             )
 
         self.assertEqual(code, 1)
@@ -1057,7 +1405,9 @@ class EntrypointTests(unittest.TestCase):
         build_graph.assert_not_called()
 
     def test_ask_rejects_local_exec_without_run_config(self):
-        ns = self._ask_namespace(request_text="run reads", session_id=None, data_dir=None)
+        ns = self._ask_namespace(
+            request_text="run reads", session_id=None, data_dir=None
+        )
         ns.local_exec = ["read_qc"]
         ns.run_config = None
         code, stdout, stderr = _capture_cli(_run_ask, ns)
@@ -1084,7 +1434,9 @@ class EntrypointTests(unittest.TestCase):
             v2_run_dir(data_root, "existing")
             code, stdout, stderr = _capture_cli(
                 _run_inspect,
-                argparse.Namespace(session_id="missing", data_dir=str(data_root), json=True),
+                argparse.Namespace(
+                    session_id="missing", data_dir=str(data_root), json=True
+                ),
             )
 
         self.assertEqual(code, 1)
@@ -1098,7 +1450,9 @@ class EntrypointTests(unittest.TestCase):
             data_dir = Path(tmp) / "data"
             run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
             ledger = Ledger(run_dir)
-            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
+            ledger.create_session(
+                "s1", SessionPaths.from_run_dir(run_dir).manifest_path
+            )
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
@@ -1123,7 +1477,9 @@ class EntrypointTests(unittest.TestCase):
             data_dir = Path(tmp) / "data"
             run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
             ledger = Ledger(run_dir)
-            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
+            ledger.create_session(
+                "s1", SessionPaths.from_run_dir(run_dir).manifest_path
+            )
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
@@ -1158,14 +1514,19 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(template["candidate_id"], "flye")
             self.assertEqual(template["final_assembly_ref"], "draft.fasta")
             self.assertEqual(template["decided_by"], "human")
-            self.assertIn("assembly_review_report", template["metadata"]["template_guidance"]["report_refs"])
+            self.assertIn(
+                "assembly_review_report",
+                template["metadata"]["template_guidance"]["report_refs"],
+            )
 
     def test_inspect_json_includes_review_next_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             run_dir, persisted = _write_assembly_review_request(data_dir, "s1")
             ledger = Ledger(run_dir)
-            ledger.create_session("s1", SessionPaths.from_run_dir(run_dir).manifest_path)
+            ledger.create_session(
+                "s1", SessionPaths.from_run_dir(run_dir).manifest_path
+            )
             ledger.record_review_requested(
                 "s1",
                 "assembly_review",
@@ -1185,7 +1546,10 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(summary["next_action"]["kind"], "review_decision_required")
         self.assertIn("gene-agent resume", summary["next_action"]["resume_command"])
         self.assertTrue(
-            any(ref.endswith("assembly_review.md") for ref in summary["next_action"]["relevant_refs"])
+            any(
+                ref.endswith("assembly_review.md")
+                for ref in summary["next_action"]["relevant_refs"]
+            )
         )
 
     def test_dotenv_loader_uses_gene_agent_local_env_without_override(self):
@@ -1229,14 +1593,22 @@ class EntrypointTests(unittest.TestCase):
                 with patch("os.getcwd", return_value=str(root)):
                     # Resume will exit non-zero (no decision file etc.) — we
                     # only care that .env was loaded before _run_resume runs.
-                    main([
-                        "resume",
-                        "--session-id", "s1",
-                        "--decision-file", str(root / "missing.json"),
-                        "--data-dir", str(root / "data"),
-                        "--checkpointer", "sqlite",
-                    ])
-                self.assertEqual(os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"), "from-dotenv")
+                    main(
+                        [
+                            "resume",
+                            "--session-id",
+                            "s1",
+                            "--decision-file",
+                            str(root / "missing.json"),
+                            "--data-dir",
+                            str(root / "data"),
+                            "--checkpointer",
+                            "sqlite",
+                        ]
+                    )
+                self.assertEqual(
+                    os.environ.get("GENE_AGENT_DOTENV_RESUME_PROBE"), "from-dotenv"
+                )
             finally:
                 if old is None:
                     os.environ.pop("GENE_AGENT_DOTENV_RESUME_PROBE", None)
@@ -1266,12 +1638,18 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            manifest.write_text(
+                "session_id: s1\ngenome_size_estimate: 2000000\nassets: []\n",
+                encoding="utf-8",
+            )
             config_path = root / "run_config.json"
             config_path.write_text(
                 json.dumps(
                     {
                         "local_exec": ["read_qc", "assembly", "assembly_review"],
+                        "shared_parameters": {
+                            "read_type": "ont_raw",
+                        },
                         "read_qc": {
                             "length_filter": {
                                 "method": "read_qc.length_filter.seqkit_seq",
@@ -1288,8 +1666,6 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                         },
                         "assembly": {
                             "flye_parameters": {
-                                "read_type": "nano-raw",
-                                "estimated_genome_size": 2_000_000,
                                 "threads": 4,
                             }
                         },
@@ -1301,15 +1677,24 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
             captured = {}
 
             def fake_initial_state(**kwargs):
                 captured.update(kwargs)
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1340,13 +1725,11 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 stage_outputs["assembly"]["flye_parameters"],
-                {
-                    "read_type": "nano-raw",
-                    "estimated_genome_size": 2_000_000,
-                    "threads": 4,
-                },
+                {"threads": 4},
             )
-            self.assertEqual(stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2})
+            self.assertEqual(
+                stage_outputs["assembly_review"]["quast_parameters"], {"threads": 2}
+            )
             self.assertEqual(
                 stage_outputs["assembly_review"]["related_species_reference_dir"],
                 "/ref/ncbi_metazoa",
@@ -1362,24 +1745,31 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps(
                     {
                         "local_exec": ["assembly"],
+                        "shared_parameters": {"platform": "ont"},
                         "assembly": {
                             "assembly_method": "hifiasm_ont",
-                            "hifiasm_ont_parameters": {
-                                "read_type": "ont",
-                                "threads": 4,
-                            },
+                            "hifiasm_ont_parameters": {"threads": 4},
                         },
                     }
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1394,13 +1784,18 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
             self.assertEqual(assembly_out["execution_mode"], "local")
-            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(
+                assembly_out["assembly_selection"]["primary_method"],
+                "assembly.candidate.hifiasm_ont",
+            )
             self.assertEqual(assembly_out["assembly_selection"]["read_type"], "ont_raw")
             self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
             self.assertNotIn("method_decision", assembly_out)
-            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"threads": 4})
 
-    def test_run_config_explicit_assembly_method_without_read_type_fails_before_graph(self):
+    def test_run_config_explicit_assembly_method_without_read_type_fails_before_graph(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
@@ -1431,7 +1826,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertEqual(stdout, "")
-            self.assertIn("assembly.assembly_method is set but no read_type could be inferred", stderr)
+            self.assertIn(
+                "assembly.assembly_method is set but no read_type could be inferred",
+                stderr,
+            )
             build_graph.assert_not_called()
 
     def test_run_config_inferrs_hifiasm_ont_method_from_single_parameter_block(self):
@@ -1445,22 +1843,29 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                     {
                         "local_exec": ["assembly"],
                         "assembly": {
-                            "hifiasm_ont_parameters": {
-                                "read_type": "ont",
-                                "threads": 4,
-                            },
+                            "assembly_route": "ont",
+                            "hifiasm_ont_parameters": {"threads": 4},
                         },
                     }
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1474,11 +1879,14 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm_ont")
+            self.assertEqual(
+                assembly_out["assembly_selection"]["primary_method"],
+                "assembly.candidate.hifiasm_ont",
+            )
             self.assertEqual(assembly_out["assembly_selection"]["read_type"], "ont_raw")
             self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
             self.assertNotIn("method_decision", assembly_out)
-            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"read_type": "ont", "threads": 4})
+            self.assertEqual(assembly_out["hifiasm_ont_parameters"], {"threads": 4})
 
     def test_run_config_inferrs_hifiasm_method_from_single_parameter_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1490,23 +1898,30 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps(
                     {
                         "local_exec": ["assembly"],
+                        "shared_parameters": {"read_type": "pacbio_hifi"},
                         "assembly": {
-                            "hifiasm_parameters": {
-                                "read_type": "hifi",
-                                "threads": 4,
-                            },
+                            "hifiasm_parameters": {"threads": 4},
                         },
                     }
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1520,11 +1935,16 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             assembly_out = graph.invocations[0][0]["stage_outputs"]["assembly"]
-            self.assertEqual(assembly_out["assembly_selection"]["primary_method"], "assembly.candidate.hifiasm")
-            self.assertEqual(assembly_out["assembly_selection"]["read_type"], "pacbio_hifi")
+            self.assertEqual(
+                assembly_out["assembly_selection"]["primary_method"],
+                "assembly.candidate.hifiasm",
+            )
+            self.assertEqual(
+                assembly_out["assembly_selection"]["read_type"], "pacbio_hifi"
+            )
             self.assertEqual(assembly_out["assembly_selection"]["source"], "run_config")
             self.assertNotIn("method_decision", assembly_out)
-            self.assertEqual(assembly_out["hifiasm_parameters"], {"read_type": "hifi", "threads": 4})
+            self.assertEqual(assembly_out["hifiasm_parameters"], {"threads": 4})
 
     def test_run_session_materializes_storage_contract_before_graph_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1534,14 +1954,23 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             config_path = root / "run_config.json"
             config_payload = {"local_exec": ["read_qc"]}
             config_path.write_text(json.dumps(config_payload), encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
             data_dir = root / "data"
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1564,21 +1993,36 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 paths.checkpoints_dir,
             ):
                 self.assertTrue(directory.exists(), directory)
-            self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), manifest.read_text(encoding="utf-8"))
+            self.assertEqual(
+                paths.manifest_path.read_text(encoding="utf-8"),
+                manifest.read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 json.loads(paths.run_config_path.read_text(encoding="utf-8")),
                 config_payload,
             )
 
-    def test_run_session_materialization_is_safe_when_sources_are_canonical_destinations(self):
+    def test_materialization_is_safe_for_canonical_source_destinations(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
             paths = SessionPaths(data_dir, "s1")
             ensure_run_layout(paths)
-            paths.manifest_path.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            paths.run_config_path.write_text(json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8")
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            paths.manifest_path.write_text(
+                "session_id: s1\nassets: []\n", encoding="utf-8"
+            )
+            paths.run_config_path.write_text(
+                json.dumps({"local_exec": ["read_qc"]}), encoding="utf-8"
+            )
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             with patch("app.entrypoints.run.build_graph", return_value=graph):
                 code, _stdout, stderr = _capture_cli(
@@ -1592,8 +2036,14 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
-            self.assertEqual(paths.manifest_path.read_text(encoding="utf-8"), "session_id: s1\nassets: []\n")
-            self.assertEqual(json.loads(paths.run_config_path.read_text(encoding="utf-8")), {"local_exec": ["read_qc"]})
+            self.assertEqual(
+                paths.manifest_path.read_text(encoding="utf-8"),
+                "session_id: s1\nassets: []\n",
+            )
+            self.assertEqual(
+                json.loads(paths.run_config_path.read_text(encoding="utf-8")),
+                {"local_exec": ["read_qc"]},
+            )
 
     def test_run_session_reports_malformed_manifest_without_raising(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1633,7 +2083,9 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                         }
                     )
 
-            with patch("app.entrypoints.run.build_graph", return_value=_ExplodingGraph()):
+            with patch(
+                "app.entrypoints.run.build_graph", return_value=_ExplodingGraph()
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -1652,11 +2104,15 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["supervision_state"], "failed_terminal")
             self.assertEqual(report["current_stage"], "assembly")
-            self.assertIn("parameter artifact validation exploded", report["last_error"])
+            self.assertIn(
+                "parameter artifact validation exploded", report["last_error"]
+            )
             self.assertEqual(report["next_action"]["kind"], "failed_terminal")
 
             events = Ledger(session_dir).read_events("s1")
-            terminal = [event for event in events if event["event_type"] == "session_terminal"]
+            terminal = [
+                event for event in events if event["event_type"] == "session_terminal"
+            ]
             self.assertEqual(len(terminal), 1)
             self.assertEqual(terminal[0]["outcome"], "failed")
 
@@ -1694,9 +2150,12 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 self.assertIsNone(terminal_state.get("active_interrupt"))
                 return True
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.graph.checkpoint_compaction.compact_terminal_checkpoint",
-                side_effect=compact,
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.graph.checkpoint_compaction.compact_terminal_checkpoint",
+                    side_effect=compact,
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1725,30 +2184,39 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            manifest.write_text(
+                "session_id: s1\ngenome_size_estimate: 2000000\nassets: []\n",
+                encoding="utf-8",
+            )
             config_path = root / "run_config.json"
             config_path.write_text(
                 json.dumps(
                     {
                         "local_exec": ["assembly"],
-                        "assembly": {
-                            "nextdenovo_parameters": {
-                                "read_type": "ont",
-                                "genome_size": 2_000_000,
-                                "threads": 4,
-                            }
+                        "shared_parameters": {
+                            "read_type": "ont_raw",
                         },
+                        "assembly": {"nextdenovo_parameters": {"threads": 4}},
                     }
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1772,14 +2240,17 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertNotIn("method_decision", assembly_out)
             self.assertEqual(
                 assembly_out["nextdenovo_parameters"],
-                {"read_type": "ont", "genome_size": 2_000_000, "threads": 4, "read_cutoff": 1000},
+                {"threads": 4},
             )
 
-    def test_run_config_seeds_shared_parameters_and_flye_threads_only(self):
+    def test_run_config_seeds_shared_hints_and_flye_threads_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / "manifest.yaml"
-            manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
+            manifest.write_text(
+                "session_id: s1\ngenome_size_estimate: 2000000\nassets: []\n",
+                encoding="utf-8",
+            )
             config_path = root / "run_config.json"
             config_path.write_text(
                 json.dumps(
@@ -1787,20 +2258,28 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                         "local_exec": ["assembly"],
                         "shared_parameters": {
                             "read_type": "ont_raw",
-                            "estimated_genome_size": 2_000_000,
                         },
                         "assembly": {"flye_parameters": {"threads": 4}},
                     }
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1816,9 +2295,11 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             state = graph.invocations[0][0]
             self.assertEqual(
                 state["shared_parameters"],
-                {"read_type": "ont_raw", "estimated_genome_size": 2_000_000},
+                {"read_type": "ont_raw"},
             )
-            self.assertEqual(state["stage_outputs"]["assembly"]["flye_parameters"], {"threads": 4})
+            self.assertEqual(
+                state["stage_outputs"]["assembly"]["flye_parameters"], {"threads": 4}
+            )
 
     def test_run_config_local_exec_unions_with_cli_local_exec(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1830,13 +2311,22 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps({"local_exec": ["assembly_review"]}),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1865,13 +2355,22 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps({"local_exec": ["repeat_annotation"]}),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1886,7 +2385,9 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertEqual(stderr, "")
             repeat = graph.invocations[0][0]["stage_outputs"]["repeat_annotation"]
             self.assertEqual(repeat["execution_mode"], "local")
-            self.assertEqual(repeat["primary_method"], "repeat_annotation.masking.repeatmasker")
+            self.assertEqual(
+                repeat["primary_method"], "repeat_annotation.masking.repeatmasker"
+            )
 
     def test_run_config_gene_annotation_seeds_lineage_or_species_hints(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1907,13 +2408,22 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            graph = _FakeGraph({"current_stage": "done", "supervision_state": "completed", "route_trace": []})
+            graph = _FakeGraph(
+                {
+                    "current_stage": "done",
+                    "supervision_state": "completed",
+                    "route_trace": [],
+                }
+            )
 
             def fake_initial_state(**kwargs):
                 return {"session_id": kwargs["session_id"], "stage_outputs": {}}
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), patch(
-                "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.entrypoints.run.initial_state", side_effect=fake_initial_state
+                ),
             ):
                 code, _stdout, stderr = _capture_cli(
                     _run_session,
@@ -1940,9 +2450,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -1969,9 +2480,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps({"local_exec": ["assembly"]}),
                 encoding="utf-8",
             )
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -1989,13 +2501,15 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             self.assertFalse((root / "data" / "ledger").exists())
 
     def test_parser_accepts_run_config_flag(self):
-        args = _parse_args([
-            "run",
-            "--manifest",
-            "m.yaml",
-            "--run-config",
-            "r.json",
-        ])
+        args = _parse_args(
+            [
+                "run",
+                "--manifest",
+                "m.yaml",
+                "--run-config",
+                "r.json",
+            ]
+        )
 
         self.assertEqual(args.run_config, "r.json")
 
@@ -2009,9 +2523,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 json.dumps({"local_exec": ["read_qc"]}),
                 encoding="utf-8",
             )
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -2046,9 +2561,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -2071,9 +2587,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             manifest = root / "manifest.yaml"
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -2098,9 +2615,10 @@ class RunConfigCLIIntegrationTests(unittest.TestCase):
             manifest.write_text("session_id: s1\nassets: []\n", encoding="utf-8")
             directory = root / "config_dir"
             directory.mkdir()
-            with patch("app.entrypoints.run.build_graph") as build_graph, patch(
-                "app.entrypoints.run.initial_state"
-            ) as initial_state:
+            with (
+                patch("app.entrypoints.run.build_graph") as build_graph,
+                patch("app.entrypoints.run.initial_state") as initial_state,
+            ):
                 code, stdout, stderr = _capture_cli(
                     _run_session,
                     self._namespace(
@@ -2132,15 +2650,21 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             "    print('fake RepeatMasker failed', file=sys.stderr)\n"
             "    sys.exit(9)\n"
             "assembly = pathlib.Path(sys.argv[-1])\n"
-            "assembly.with_name(assembly.name + '.masked').write_text('>ctg1\\nacgtacgt\\n', encoding='utf-8')\n"
-            "assembly.with_name(assembly.name + '.out.gff').write_text('##gff-version 3\\nctg1\\tRepeatMasker\\trepeat_region\\t1\\t8\\t.\\t+\\t.\\tID=repeat1\\n', encoding='utf-8')\n"
+            "assembly.with_name(assembly.name + '.masked').write_text("
+            "'>ctg1\\nacgtacgt\\n', encoding='utf-8')\n"
+            "assembly.with_name(assembly.name + '.out.gff').write_text("
+            "'##gff-version 3\\n"
+            "ctg1\\tRepeatMasker\\trepeat_region\\t1\\t8\\t.\\t+\\t.\\t"
+            "ID=repeat1\\n', encoding='utf-8')\n"
             "print('fake RepeatMasker ok')\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
         return bin_dir
 
-    def _write_existing_assembly_inputs(self, root: Path, *, session_id: str = "phase5-e2e") -> tuple[Path, Path, Path]:
+    def _write_existing_assembly_inputs(
+        self, root: Path, *, session_id: str = "phase5-e2e"
+    ) -> tuple[Path, Path, Path]:
         assembly = root / "existing_assembly.fa"
         library = root / "trusted_repeats.fa"
         assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
@@ -2196,17 +2720,31 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             checkpointer=checkpointer,
         )
 
-    def test_existing_assembly_repeatmasker_backbone_blocks_at_assembly_review_gate(self):
+    def test_existing_assembly_repeatmasker_backbone_blocks_at_assembly_review_gate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-e2e"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
+                root, session_id=session_id
+            )
             bin_dir = self._fake_repeatmasker_bin(root)
-            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+            )
 
-            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
-                "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
+            with (
+                patch.dict(
+                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+                ),
+                patch(
+                    "app.stages.repeat_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -2220,9 +2758,24 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             )
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
-            function_bundle = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            repeat_bundle = (
+                run_dir
+                / "artifacts"
+                / "repeat_annotation"
+                / "repeat_annotation_bundle.json"
+            )
+            gene_bundle = (
+                run_dir
+                / "artifacts"
+                / "gene_annotation"
+                / "gene_annotation_bundle.json"
+            )
+            function_bundle = (
+                run_dir
+                / "artifacts"
+                / "function_annotation"
+                / "function_annotation_bundle.json"
+            )
             self.assertFalse(repeat_bundle.exists())
             self.assertFalse(gene_bundle.exists())
             self.assertFalse(function_bundle.exists())
@@ -2233,11 +2786,15 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertNotIn("gene_annotation.bundle", artifact_types)
             self.assertNotIn("operator_report.failed_terminal", artifact_types)
 
-    def test_existing_assembly_repeatmasker_backbone_resumes_to_function_provenance_gate(self):
+    def test_repeatmasker_backbone_resumes_to_function_provenance_gate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-e2e-resume"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
+                root, session_id=session_id
+            )
             bin_dir = self._fake_repeatmasker_bin(root)
             _add_gene_method_bins(bin_dir)
             args = self._run_args(
@@ -2248,15 +2805,22 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                 checkpointer="sqlite",
             )
 
-            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
-                "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
-            ), patch(
-                "app.stages.gene_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
-            ), patch(
-                "app.stages.gene_annotation.nodes._lineage_or_species_hints",
-                return_value={"augustus_species_model": "test_species"},
+            with (
+                patch.dict(
+                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+                ),
+                patch(
+                    "app.stages.repeat_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.gene_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.gene_annotation.nodes._lineage_or_species_hints",
+                    return_value={"augustus_species_model": "test_species"},
+                ),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -2270,7 +2834,9 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                     checkpointer="sqlite",
                 )
 
-                decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
+                decision = _write_accept_existing_assembly_decision(
+                    data_dir, session_id, root / "decision.json"
+                )
                 resume_code, resume_stdout, resume_stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
@@ -2288,9 +2854,24 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertIn("database_provenance", resume_stderr)
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
-            function_bundle = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            repeat_bundle = (
+                run_dir
+                / "artifacts"
+                / "repeat_annotation"
+                / "repeat_annotation_bundle.json"
+            )
+            gene_bundle = (
+                run_dir
+                / "artifacts"
+                / "gene_annotation"
+                / "gene_annotation_bundle.json"
+            )
+            function_bundle = (
+                run_dir
+                / "artifacts"
+                / "function_annotation"
+                / "function_annotation_bundle.json"
+            )
             self.assertTrue(repeat_bundle.exists())
             self.assertTrue(gene_bundle.exists())
             self.assertFalse(function_bundle.exists())
@@ -2307,11 +2888,15 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             self.assertNotIn("operator_report.failed_terminal", artifact_types)
             self.assertTrue((run_dir / "reports" / "current_status.json").exists())
 
-    def test_existing_assembly_interactive_review_reports_missing_function_provenance(self):
+    def test_existing_assembly_interactive_review_reports_missing_function_provenance(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase6-intake-sqlite-smoke"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
+                root, session_id=session_id
+            )
             bin_dir = self._fake_repeatmasker_bin(root)
             _add_gene_method_bins(bin_dir)
             args = self._run_args(
@@ -2322,15 +2907,22 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                 checkpointer="sqlite",
             )
 
-            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
-                "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
-            ), patch(
-                "app.stages.gene_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
-            ), patch(
-                "app.stages.gene_annotation.nodes._lineage_or_species_hints",
-                return_value={"augustus_species_model": "test_species"},
+            with (
+                patch.dict(
+                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+                ),
+                patch(
+                    "app.stages.repeat_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.gene_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch(
+                    "app.stages.gene_annotation.nodes._lineage_or_species_hints",
+                    return_value={"augustus_species_model": "test_species"},
+                ),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
                 _assert_existing_assembly_blocks_at_review(
@@ -2344,9 +2936,12 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                 )
 
                 inputs = iter(["accept", "", "y"])
-                with patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False), patch(
-                    "builtins.input",
-                    side_effect=lambda _: next(inputs),
+                with (
+                    patch("app.entrypoints.ask_interactive._HAS_QUESTIONARY", False),
+                    patch(
+                        "builtins.input",
+                        side_effect=lambda _: next(inputs),
+                    ),
                 ):
                     review_code, review_stdout, review_stderr = _capture_cli(
                         run_interactive_review,
@@ -2362,20 +2957,34 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertNotIn("annotation.intake_plan", artifact_types)
 
-            events = Ledger(SessionPaths(data_dir, session_id).run_dir).read_events(session_id)
+            events = Ledger(SessionPaths(data_dir, session_id).run_dir).read_events(
+                session_id
+            )
             failed = [
                 event for event in events if event["event_type"] == "resume_failed"
             ]
             self.assertEqual(len(failed), 1)
             self.assertEqual(failed[0]["phase"], "annotation_intake")
-            self.assertFalse(any(event["event_type"] == "annotation_intake_planned" for event in events))
+            self.assertFalse(
+                any(
+                    event["event_type"] == "annotation_intake_planned"
+                    for event in events
+                )
+            )
 
     def test_repeatmasker_preflight_block_stops_before_command_and_gene_planning(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-preflight-block"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
-            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
+                root, session_id=session_id
+            )
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+            )
 
             with patch(
                 "app.execution.env_dispatch.preflight",
@@ -2400,12 +3009,24 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
             repeat_work = run_dir / "work" / "repeat_annotation" / "repeatmasker"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
+            gene_bundle = (
+                run_dir
+                / "artifacts"
+                / "gene_annotation"
+                / "gene_annotation_bundle.json"
+            )
             self.assertFalse(repeat_work.exists())
             self.assertFalse(gene_bundle.exists())
             events_path = run_dir / "ledger" / "events.jsonl"
-            events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
-            blocks = [event for event in events if event["event_type"] == "env_preflight_blocked"]
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            blocks = [
+                event
+                for event in events
+                if event["event_type"] == "env_preflight_blocked"
+            ]
             self.assertEqual(blocks, [])
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertNotIn("operator_report.failed_terminal", artifact_types)
@@ -2414,13 +3035,25 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-repeatmasker-fails"
-            manifest, run_config, data_dir = self._write_existing_assembly_inputs(root, session_id=session_id)
+            manifest, run_config, data_dir = self._write_existing_assembly_inputs(
+                root, session_id=session_id
+            )
             bin_dir = self._fake_repeatmasker_bin(root, fail=True)
-            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+            )
 
-            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}), patch(
-                "app.stages.repeat_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
+            with (
+                patch.dict(
+                    os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+                ),
+                patch(
+                    "app.stages.repeat_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
             ):
                 code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -2433,8 +3066,18 @@ class Phase5RepeatMaskerEntrypointE2ETests(unittest.TestCase):
                 session_id=session_id,
             )
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            repeat_bundle = run_dir / "artifacts" / "repeat_annotation" / "repeat_annotation_bundle.json"
-            gene_bundle = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
+            repeat_bundle = (
+                run_dir
+                / "artifacts"
+                / "repeat_annotation"
+                / "repeat_annotation_bundle.json"
+            )
+            gene_bundle = (
+                run_dir
+                / "artifacts"
+                / "gene_annotation"
+                / "gene_annotation_bundle.json"
+            )
             self.assertFalse(repeat_bundle.exists())
             self.assertFalse(gene_bundle.exists())
             artifact_types = _artifact_types(data_dir, session_id)
@@ -2455,7 +3098,10 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
         transcripts = root / "transcripts.fa"
         database_fasta = root / "uniprot.fasta"
         assembly.write_text(">ctg1\nACGTACGT\n", encoding="utf-8")
-        gene_models.write_text("##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n", encoding="utf-8")
+        gene_models.write_text(
+            "##gff-version 3\nctg1\tprediction\tgene\t1\t8\t.\t+\t.\tID=gene1\n",
+            encoding="utf-8",
+        )
         proteins.write_text(">prot1\nMACGT\n", encoding="utf-8")
         transcripts.write_text(">tx1\nACGTACGT\n", encoding="utf-8")
         database_fasta.write_text(">sp|P12345\nMACGT\n", encoding="utf-8")
@@ -2528,8 +3174,15 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-provided-ann-e2e"
-            manifest, run_config, data_dir = self._write_provided_annotation_inputs(root, session_id=session_id)
-            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+            manifest, run_config, data_dir = self._write_provided_annotation_inputs(
+                root, session_id=session_id
+            )
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+            )
 
             code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -2543,19 +3196,35 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             )
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            gene_bundle_path = run_dir / "artifacts" / "gene_annotation" / "gene_annotation_bundle.json"
-            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            gene_bundle_path = (
+                run_dir
+                / "artifacts"
+                / "gene_annotation"
+                / "gene_annotation_bundle.json"
+            )
+            function_bundle_path = (
+                run_dir
+                / "artifacts"
+                / "function_annotation"
+                / "function_annotation_bundle.json"
+            )
             self.assertFalse(gene_bundle_path.exists())
             self.assertFalse(function_bundle_path.exists())
 
             artifact_types = _artifact_types(data_dir, session_id)
             self.assertNotIn("gene_annotation.provided_gene_models", artifact_types)
-            self.assertNotIn("gene_annotation.provided_predicted_proteins", artifact_types)
-            self.assertNotIn("gene_annotation.provided_transcripts_fasta", artifact_types)
+            self.assertNotIn(
+                "gene_annotation.provided_predicted_proteins", artifact_types
+            )
+            self.assertNotIn(
+                "gene_annotation.provided_transcripts_fasta", artifact_types
+            )
             self.assertNotIn("gene_annotation.bundle", artifact_types)
             self.assertNotIn("operator_report.failed_terminal", artifact_types)
 
-    def test_existing_assembly_provided_annotation_with_provenance_still_blocks_at_assembly_review_gate(self):
+    def test_provided_annotation_still_blocks_at_assembly_review_gate(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-function-provenance-e2e"
@@ -2564,7 +3233,12 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                 session_id=session_id,
                 include_provenance=True,
             )
-            args = self._run_args(session_id=session_id, manifest=manifest, run_config=run_config, data_dir=data_dir)
+            args = self._run_args(
+                session_id=session_id,
+                manifest=manifest,
+                run_config=run_config,
+                data_dir=data_dir,
+            )
 
             code, stdout, stderr = _capture_cli(_run_session, args)
 
@@ -2578,7 +3252,12 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             )
 
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            function_bundle_path = (
+                run_dir
+                / "artifacts"
+                / "function_annotation"
+                / "function_annotation_bundle.json"
+            )
             final_report_path = run_dir / "reports" / "session_summary.json"
             self.assertFalse(function_bundle_path.exists())
             self.assertFalse(final_report_path.exists())
@@ -2587,7 +3266,9 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             self.assertNotIn("function_annotation.bundle", artifact_types)
             self.assertNotIn("final_report.review_decisions", artifact_types)
 
-            events_path = SessionPaths(data_dir, session_id).run_dir / "ledger" / "events.jsonl"
+            events_path = (
+                SessionPaths(data_dir, session_id).run_dir / "ledger" / "events.jsonl"
+            )
             artifact_events = [
                 json.loads(line)["artifact"]["artifact_type"]
                 for line in events_path.read_text(encoding="utf-8").splitlines()
@@ -2597,7 +3278,9 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
             self.assertNotIn("function_annotation.bundle", artifact_events)
             self.assertNotIn("final_report.review_decisions", artifact_events)
 
-    def test_existing_assembly_provided_annotation_with_provenance_resumes_and_completes(self):
+    def test_provided_annotation_with_provenance_resumes_and_completes(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             session_id = "phase5-function-provenance-resume"
@@ -2625,7 +3308,9 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                 checkpointer="sqlite",
             )
 
-            decision = _write_accept_existing_assembly_decision(data_dir, session_id, root / "decision.json")
+            decision = _write_accept_existing_assembly_decision(
+                data_dir, session_id, root / "decision.json"
+            )
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_diamond = fake_bin / "diamond"
@@ -2633,20 +3318,24 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "out=''\n"
                 "while [ $# -gt 0 ]; do\n"
-                "  if [ \"$1\" = '--out' ]; then out=\"$2\"; shift 2; continue; fi\n"
+                '  if [ "$1" = \'--out\' ]; then out="$2"; shift 2; continue; fi\n'
                 "  shift\n"
                 "done\n"
-                "if [ -n \"$out\" ]; then\n"
-                "  printf 'prot1\\tsp|P12345\\t100.0\\t5\\t0\\t0\\t1\\t5\\t1\\t5\\t0.0\\t10\\n' > \"$out\"\n"
+                'if [ -n "$out" ]; then\n'
+                "  printf 'prot1\\tsp|P12345\\t100.0\\t5\\t0\\t0\\t"
+                '1\\t5\\t1\\t5\\t0.0\\t10\\n\' > "$out"\n'
                 "fi\n",
                 encoding="utf-8",
             )
             fake_diamond.chmod(0o755)
             fake_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
-            with patch(
-                "app.stages.function_annotation.nodes.resolve_method_env",
-                return_value=(None, [], None),
-            ), patch.dict(os.environ, {"PATH": fake_path}):
+            with (
+                patch(
+                    "app.stages.function_annotation.nodes.resolve_method_env",
+                    return_value=(None, [], None),
+                ),
+                patch.dict(os.environ, {"PATH": fake_path}),
+            ):
                 resume_code, resume_stdout, resume_stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
@@ -2664,14 +3353,22 @@ class Phase5ProvidedAnnotationEntrypointE2ETests(unittest.TestCase):
 
             proteins_file = root / "predicted_proteins.fasta"
             run_dir = SessionPaths(data_dir, session_id).run_dir
-            function_bundle_path = run_dir / "artifacts" / "function_annotation" / "function_annotation_bundle.json"
+            function_bundle_path = (
+                run_dir
+                / "artifacts"
+                / "function_annotation"
+                / "function_annotation_bundle.json"
+            )
             final_report_path = run_dir / "reports" / "session_summary.json"
             self.assertTrue(function_bundle_path.exists())
             self.assertTrue(final_report_path.exists())
 
             bundle = json.loads(function_bundle_path.read_text(encoding="utf-8"))
             self.assertEqual(bundle["proteins_fasta_ref"], str(proteins_file))
-            self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], str(proteins_file))
+            self.assertEqual(
+                bundle["database_provenance"][0]["input_proteins_ref"],
+                str(proteins_file),
+            )
             self.assertEqual(
                 bundle["database_provenance"][0]["database_source_ref"],
                 str(root / "uniprot.fasta"),
@@ -2706,14 +3403,21 @@ class InteractiveGateLoopTests(unittest.TestCase):
                     "assembly_review": {
                         "status": "blocked_human",
                         "candidates": [
-                            {"candidate_id": "flye", "final_assembly_ref": "draft.fasta"}
+                            {
+                                "candidate_id": "flye",
+                                "final_assembly_ref": "draft.fasta",
+                            }
                         ],
-                        "review_request_artifact_ref": persisted.request_ref.model_dump(mode="json"),
+                        "review_request_artifact_ref": persisted.request_ref.model_dump(
+                            mode="json"
+                        ),
                     }
                 },
                 "route_trace": [],
             }
-            graph = _FakeResumeGraph(state, result={"supervision_state": "blocked_human"})
+            graph = _FakeResumeGraph(
+                state, result={"supervision_state": "blocked_human"}
+            )
             request = ResumeReviewRequest(
                 session_id=session_id,
                 stage="assembly_review",
@@ -2726,9 +3430,19 @@ class InteractiveGateLoopTests(unittest.TestCase):
             )
             raw_decision = request.model_dump(mode="json")
 
-            with patch("app.entrypoints.review_interactive.collect_gate_decision", return_value=(request, raw_decision)), \
-                    patch("app.review.annotation_intake.collect_annotation_intake_selection", side_effect=RuntimeError("annotation intake cancelled")) as intake_prompt, \
-                    patch("app.control.resume_transaction.resume_review_state") as resume_mock:
+            with (
+                patch(
+                    "app.entrypoints.review_interactive.collect_gate_decision",
+                    return_value=(request, raw_decision),
+                ),
+                patch(
+                    "app.review.annotation_intake.collect_annotation_intake_selection",
+                    side_effect=RuntimeError("annotation intake cancelled"),
+                ) as intake_prompt,
+                patch(
+                    "app.control.resume_transaction.resume_review_state"
+                ) as resume_mock,
+            ):
                 result = _interactive_gate_loop(
                     graph,
                     {"configurable": {"thread_id": session_id}},
@@ -2741,10 +3455,18 @@ class InteractiveGateLoopTests(unittest.TestCase):
             intake_prompt.assert_called_once()
             resume_mock.assert_not_called()
             self.assertEqual(graph.updated, [])
-            decision_path = run_dir / "artifacts" / "reviews" / persisted.review_request_id / "decision.json"
+            decision_path = (
+                run_dir
+                / "artifacts"
+                / "reviews"
+                / persisted.review_request_id
+                / "decision.json"
+            )
             self.assertFalse(decision_path.exists())
             events = Ledger(run_dir).read_events(session_id)
-            self.assertFalse(any(event["event_type"] == "review_decision" for event in events))
+            self.assertFalse(
+                any(event["event_type"] == "review_decision" for event in events)
+            )
 
 
 class ResumeCLITests(unittest.TestCase):
@@ -2765,9 +3487,12 @@ class ResumeCLITests(unittest.TestCase):
         args = _parse_args(
             [
                 "resume",
-                "--session-id", "s1",
-                "--decision-file", "decision.json",
-                "--data-dir", "out",
+                "--session-id",
+                "s1",
+                "--decision-file",
+                "decision.json",
+                "--data-dir",
+                "out",
             ]
         )
         self.assertEqual(args.command, "resume")
@@ -2796,7 +3521,9 @@ class ResumeCLITests(unittest.TestCase):
 
     def test_resume_rejects_decision_session_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            decision = self._write_decision(Path(tmp) / "decision.json", session_id="other")
+            decision = self._write_decision(
+                Path(tmp) / "decision.json", session_id="other"
+            )
             code, stdout, stderr = _capture_cli(
                 _run_resume,
                 argparse.Namespace(
@@ -2889,12 +3616,20 @@ class ResumeCLITests(unittest.TestCase):
             }
             graph = _FakeResumeGraph(state)
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), \
-                    patch(
-                        "app.control.resume_transaction.resume_review_state",
-                        return_value={"current_stage": "done", "supervision_state": "completed"},
-                    ), \
-                    patch("app.control.resume_transaction.maybe_collect_annotation_intake", return_value=None):
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.control.resume_transaction.resume_review_state",
+                    return_value={
+                        "current_stage": "done",
+                        "supervision_state": "completed",
+                    },
+                ),
+                patch(
+                    "app.control.resume_transaction.maybe_collect_annotation_intake",
+                    return_value=None,
+                ),
+            ):
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
@@ -2909,7 +3644,9 @@ class ResumeCLITests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             events = Ledger(run_dir).read_events(session_id)
-            started = [event for event in events if event["event_type"] == "resume_started"]
+            started = [
+                event for event in events if event["event_type"] == "resume_started"
+            ]
             self.assertEqual(started[0]["data_dir"], str(run_dir))
 
     def test_resume_decision_file_records_recommended_intake_without_prompting(self):
@@ -2967,12 +3704,19 @@ class ResumeCLITests(unittest.TestCase):
             }
             graph = _FakeResumeGraph(state)
 
-            with patch("app.entrypoints.run.build_graph", return_value=graph), \
-                    patch(
-                        "app.control.resume_transaction.resume_review_state",
-                        return_value={"current_stage": "done", "supervision_state": "completed"},
-                    ), \
-                    patch("app.review.annotation_intake.prompt_annotation_intake_plan") as intake_prompt:
+            with (
+                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch(
+                    "app.control.resume_transaction.resume_review_state",
+                    return_value={
+                        "current_stage": "done",
+                        "supervision_state": "completed",
+                    },
+                ),
+                patch(
+                    "app.review.annotation_intake.prompt_annotation_intake_plan"
+                ) as intake_prompt,
+            ):
                 code, _stdout, stderr = _capture_cli(
                     _run_resume,
                     argparse.Namespace(
@@ -2987,7 +3731,10 @@ class ResumeCLITests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(stderr, "")
             intake_prompt.assert_not_called()
-            artifact_types = [record["artifact_type"] for record in read_artifact_records(run_dir, session_id)]
+            artifact_types = [
+                record["artifact_type"]
+                for record in read_artifact_records(run_dir, session_id)
+            ]
             self.assertIn("annotation.intake_plan", artifact_types)
             self.assertEqual(len(graph.updated), 1)
 

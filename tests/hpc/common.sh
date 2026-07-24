@@ -322,8 +322,6 @@ write_run_config_stages() {
     # Writes a run-config JSON enabling the given stages.
     # Usage: write_run_config_stages OUTPUT_PATH STAGE1 STAGE2 ...
     local out="$1"; shift
-    local stages_json
-    stages_json=$(printf ',"%s"' "$@" | cut -c2-)
     python3 -c "
 import json, sys
 stages = [$(printf '"%s",' "$@" | sed 's/,$//')]
@@ -332,9 +330,8 @@ rc = {
     'requested_stages': stages,
 }
 
-# Shared parameters
-genome_size_text = '''${GENOME_SIZE_ESTIMATE:-}'''.strip()
-genome_size = int(genome_size_text) if genome_size_text else None
+# Shared runtime hints. Operator-provided genome size belongs to the manifest
+# written above and must not be duplicated in run config.
 platform_to_read_type = {
     'cycloneseq': 'cyclone',
     'ont': 'ont_raw',
@@ -344,8 +341,6 @@ platform_to_read_type = {
 rc['shared_parameters'] = {
     'read_type': platform_to_read_type.get('${PLATFORM}', '${PLATFORM}'),
 }
-if genome_size is not None:
-    rc['shared_parameters']['estimated_genome_size'] = genome_size
 
 # Read QC config
 if 'read_qc' in stages:
@@ -383,32 +378,18 @@ if 'assembly' in stages:
     }
     if assembly_method == 'flye':
         rc['assembly']['flye_parameters'] = {
-            'read_type': '${FLYE_READ_TYPE}',
             'threads': ${ASSEMBLY_THREADS},
         }
-        if genome_size is not None:
-            rc['assembly']['flye_parameters']['estimated_genome_size'] = genome_size
     elif assembly_method == 'nextdenovo':
-        nextdenovo_read_type = {
-            'cycloneseq': 'ont',
-            'ont': 'ont',
-            'clr': 'clr',
-            'pacbio_hifi': 'hifi',
-        }.get('${PLATFORM}', '${PLATFORM}')
         rc['assembly']['nextdenovo_parameters'] = {
-            'read_type': nextdenovo_read_type,
             'threads': ${ASSEMBLY_THREADS},
         }
-        if genome_size is not None:
-            rc['assembly']['nextdenovo_parameters']['genome_size'] = genome_size
     elif assembly_method == 'hifiasm':
         rc['assembly']['hifiasm_parameters'] = {
-            'read_type': 'hifi',
             'threads': ${ASSEMBLY_THREADS},
         }
     elif assembly_method == 'hifiasm_ont':
         rc['assembly']['hifiasm_ont_parameters'] = {
-            'read_type': 'ont',
             'threads': ${ASSEMBLY_THREADS},
         }
 
@@ -439,7 +420,7 @@ json.dump(rc, open(sys.argv[1], 'w'), indent=2)
 }
 
 write_genome_survey_run_config() {
-    # Deliberately omits shared_parameters.estimated_genome_size so this smoke
+    # Its paired manifest deliberately omits genome_size_estimate so this smoke
     # validates the measured genome-size path without an operator override.
     local out="$1"
     python3 - "$out" <<'PY'
@@ -664,21 +645,23 @@ latest_hic_scaffold() {
 #  Load config
 # -------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/hpc_env.sh" ]]; then
-    source "${SCRIPT_DIR}/hpc_env.sh"
-elif [[ -f "${SCRIPT_DIR}/hpc_env.sh.example" ]]; then
-    echo "ERROR: ${SCRIPT_DIR}/hpc_env.sh not found."
-    echo "  Copy the example and edit it:"
-    echo "    cp hpc_env.sh.example hpc_env.sh && vim hpc_env.sh"
-    exit 2
-else
-    echo "ERROR: Cannot find hpc_env.sh or hpc_env.sh.example"
-    exit 2
+if [[ "${GENE_AGENT_HPC_SKIP_CONFIG:-false}" != "true" ]]; then
+    if [[ -f "${SCRIPT_DIR}/hpc_env.sh" ]]; then
+        source "${SCRIPT_DIR}/hpc_env.sh"
+    elif [[ -f "${SCRIPT_DIR}/hpc_env.sh.example" ]]; then
+        echo "ERROR: ${SCRIPT_DIR}/hpc_env.sh not found."
+        echo "  Copy the example and edit it:"
+        echo "    cp hpc_env.sh.example hpc_env.sh && vim hpc_env.sh"
+        exit 2
+    else
+        echo "ERROR: Cannot find hpc_env.sh or hpc_env.sh.example"
+        exit 2
+    fi
+
+    export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
+    export GENE_AGENT_CHECKPOINTER="${CHECKPOINTER}"
+
+    ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
+    [[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
+    export GENE_AGENT_ENVS_CONFIG="$ENV_CONFIG"
 fi
-
-export GENE_AGENT_DATA_ROOT="${TEST_DATA_ROOT}"
-export GENE_AGENT_CHECKPOINTER="${CHECKPOINTER}"
-
-ENV_CONFIG="${PROJECT_ROOT}/config/envs.yaml"
-[[ -f "${PROJECT_ROOT}/config/envs.local.yaml" ]] && ENV_CONFIG="${PROJECT_ROOT}/config/envs.local.yaml"
-export GENE_AGENT_ENVS_CONFIG="$ENV_CONFIG"

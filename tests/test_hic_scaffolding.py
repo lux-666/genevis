@@ -16,6 +16,7 @@ from app.execution.lifecycle import run_method_attempts
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.artifacts import (
+    ArtifactMeta,
     ArtifactRef,
     ParameterAttempt,
     ParameterRecommendationCursor,
@@ -39,7 +40,9 @@ from app.stages.hic_scaffolding.parameters.workflow import (
     apply_autohic_parameter_approval_decision,
     recommend_autohic_parameters,
 )
+from app.storage.artifacts import publish_artifact_record
 from app.storage.ledger import Ledger
+from app.storage.paths import SessionPaths
 from app.workflow import next_stage_name
 from tests.data_v2 import v2_run_dir
 
@@ -62,13 +65,28 @@ class HiCScaffoldingDescriptorTests(unittest.TestCase):
 
         self.assertEqual(registry.by_stage["hic_scaffolding"], [AUTOHIC_METHOD])
         self.assertEqual(registry.methods[AUTOHIC_METHOD].parameter_catalog, "autohic")
+        self.assertEqual(
+            registry.methods[AUTOHIC_METHOD].planner.required_parameters,
+            [],
+        )
+        self.assertEqual(
+            registry.methods[AUTOHIC_METHOD].planner.parameter_defaults,
+            {},
+        )
         self.assertFalse(any("yahs" in method.lower() for method in registry.methods))
         catalog = load_autohic_parameter_catalog()
+        self.assertEqual(catalog.catalog_id, "autohic")
+        self.assertEqual(catalog.method_id, AUTOHIC_METHOD)
+        threads = catalog.parameters["threads"]
+        self.assertIsNotNone(threads.layers.l0)
+        self.assertIsNone(threads.layers.l2)
+        self.assertEqual(threads.layers.l0.binding, "hic_threads")
+        self.assertEqual(threads.layers.l0.materialized_default, 10)
         self.assertEqual(
             {
                 name
                 for name, specification in catalog.parameters.items()
-                if specification.level == 2
+                if specification.layers.l2 is not None
             },
             {
                 "restriction_enzyme",
@@ -199,9 +217,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         root = Path(tmpdir)
         autohic_root = root / "AutoHiC"
         (autohic_root / "src" / "common").mkdir(parents=True, exist_ok=True)
-        (autohic_root / "src" / "models" / "cfgs").mkdir(
-            parents=True, exist_ok=True
-        )
+        (autohic_root / "src" / "models" / "cfgs").mkdir(parents=True, exist_ok=True)
         (autohic_root / "src" / "common" / "run.sh").write_text(
             "# fake pipeline\n", encoding="utf-8"
         )
@@ -212,12 +228,14 @@ class HiCScaffoldingStageTests(unittest.TestCase):
         entry.write_text(
             "import pathlib, sys\n"
             "cfg_path = pathlib.Path(sys.argv[sys.argv.index('-c') + 1])\n"
-            "cfg = dict(line.strip().split('=', 1) for line in cfg_path.read_text().splitlines() if line.strip())\n"
+            "cfg = dict(line.strip().split('=', 1) for line in "
+            "cfg_path.read_text().splitlines() if line.strip())\n"
             "if " + repr(fail) + ":\n"
             "    print('fake AutoHiC failed', file=sys.stderr)\n"
             "    raise SystemExit(17)\n"
             "assert pathlib.Path(cfg['REFERENCE_GENOME']).is_file()\n"
-            "fastqs = sorted(path.name for path in (pathlib.Path(cfg['FASTQ_DIR']) / 'fastq').iterdir())\n"
+            "fastqs = sorted(path.name for path in "
+            "(pathlib.Path(cfg['FASTQ_DIR']) / 'fastq').iterdir())\n"
             "assert fastqs == ['hic_001_R1.fastq.gz', 'hic_001_R2.fastq.gz']\n"
             "assert pathlib.Path(cfg['ERROR_PRETRAINED_MODEL']).is_file()\n"
             "assert pathlib.Path(cfg['CHR_PRETRAINED_MODEL']).is_file()\n"
@@ -263,16 +281,23 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             "packages:\n"
             "  autohic:\n"
             f"    install_root: {autohic_root}\n"
-            "    canary_paths: [autohic.py, src/common/run.sh, src/models/cfgs/error_model.py]\n"
+            "    canary_paths: [autohic.py, src/common/run.sh, "
+            "src/models/cfgs/error_model.py]\n"
             "    models:\n"
             f"      error: {error_model}\n"
             f"      chromosome: {chromosome_model}\n"
             "  juicer:\n"
             f"    install_root: {juicer_root}\n"
-            "    canary_paths: [CPU/juicer.sh, CPU/common/chimeric_blacklist.awk, misc/generate_site_positions.py, scripts/common/juicer_tools.jar]\n"
+            "    canary_paths: [CPU/juicer.sh, "
+            "CPU/common/chimeric_blacklist.awk, "
+            "misc/generate_site_positions.py, "
+            "scripts/common/juicer_tools.jar]\n"
             "  three_d_dna:\n"
             f"    install_root: {three_d_dna_root}\n"
-            "    canary_paths: [run-asm-pipeline.sh, run-asm-pipeline-post-review.sh, edit/apply-edits-prep-for-next-round.sh, visualize/run-assembly-visualizer.sh]\n"
+            "    canary_paths: [run-asm-pipeline.sh, "
+            "run-asm-pipeline-post-review.sh, "
+            "edit/apply-edits-prep-for-next-round.sh, "
+            "visualize/run-assembly-visualizer.sh]\n"
             "methods:\n"
             f"  {AUTOHIC_METHOD}:\n"
             "    conda_env: base\n"
@@ -479,7 +504,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertIn('"library_protocols"', rendered)
             request_dto = json.loads(persisted["messages"][1]["content"])
             self.assertEqual(
-                request_dto["input_facts"]["provided_restriction_enzyme"],
+                request_dto["autohic_context"]["provided_restriction_enzyme"],
                 "HindIII",
             )
             self.assertEqual(
@@ -504,10 +529,94 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, rendered)
 
-            profile_path = request_path.with_name("input_profile.json")
-            full_profile = json.loads(profile_path.read_text(encoding="utf-8"))
-            self.assertNotIn("session_id", full_profile)
-            self.assertIn("arbitrary_raw_metadata", json.dumps(full_profile))
+            snapshot_path = request_path.with_name("input_snapshot.json")
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["schema_version"], 3)
+            self.assertEqual(
+                snapshot["stage_context"]["provided_restriction_enzyme"],
+                "HindIII",
+            )
+            self.assertNotIn("session_id", snapshot)
+            self.assertNotIn("arbitrary_raw_metadata", json.dumps(snapshot))
+
+    def test_initial_snapshot_keeps_registry_and_pre_hic_assembly_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            paths = SessionPaths.from_run_dir(state["data_dir"])
+
+            assembly_source = paths.work_path(
+                "assembly_review", "pre_hic_assembly.fasta"
+            )
+            assembly_source.parent.mkdir(parents=True, exist_ok=True)
+            assembly_source.write_bytes(assembly.read_bytes())
+            published_assembly = publish_artifact_record(
+                state["data_dir"],
+                state["session_id"],
+                ArtifactMeta.from_file(
+                    assembly_source,
+                    stage="assembly_review",
+                    method_name="test.final_assembly",
+                    artifact_type="assembly_review.final_assembly",
+                ),
+            )
+
+            registry_source = paths.work_path("inventory", "registry.json")
+            registry_source.parent.mkdir(parents=True, exist_ok=True)
+            registry_source.write_text(
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "assets": [
+                            {
+                                "asset_id": "s1:assembly_fasta_registered:adopted",
+                                "asset_type": "assembly_fasta_registered",
+                                "path": str(published_assembly.path),
+                            },
+                            *[
+                                {
+                                    "asset_id": f"s1:hic_reads_registered:{read.name}",
+                                    "asset_type": "hic_reads_registered",
+                                    "path": str(read),
+                                    "metadata": {"library_protocol": "in_situ_hic"},
+                                }
+                                for read in reads
+                            ],
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            published_registry = publish_artifact_record(
+                state["data_dir"],
+                state["session_id"],
+                ArtifactMeta.from_file(
+                    registry_source,
+                    stage="inventory",
+                    method_name="inventory.register_assets",
+                    artifact_type="asset_registry",
+                ),
+            )
+            state["asset_registry_ref"] = str(published_registry.path)
+
+            result = self._run_to_parameter_gate(state)
+
+            snapshot_path = (
+                Path(result["data_dir"])
+                / "artifacts"
+                / "hic_scaffolding"
+                / "parameter_recommendations"
+                / "000"
+                / "input_snapshot.json"
+            )
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot["dependency_refs"]["stage_input_refs"],
+                [
+                    published_registry.ref.model_dump(mode="json"),
+                    published_assembly.ref.model_dump(mode="json"),
+                ],
+            )
 
     def test_invalid_llm_shape_fails_without_an_approval_gate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -672,7 +781,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(hic["status"], "autohic_frozen")
             attempt = ParameterAttempt.model_validate(hic["parameter_attempts"][0])
             replay_attempt = ParameterAttempt.model_validate(
-                replay_update["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][0]
+                replay_update["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][
+                    0
+                ]
             )
             frozen_cursor = attempt.frozen_attempt_ref
             replay_cursor = replay_attempt.frozen_attempt_ref
@@ -702,9 +813,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
 
             command = json.loads(
-                (Path(frozen_state["data_dir"]) / attempt.command_ref.path_ref).read_text(
-                    encoding="utf-8"
-                )
+                (
+                    Path(frozen_state["data_dir"]) / attempt.command_ref.path_ref
+                ).read_text(encoding="utf-8")
             )
             self.assertEqual(
                 command["frozen_parameters_ref"]["path_ref"],
@@ -894,9 +1005,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertNotIn("output_paths", execution_record["result"])
             artifact_types = {
                 json.loads(line)["artifact_type"]
-                for line in (
-                    Path(result["data_dir"]) / "artifacts" / "index.jsonl"
-                )
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
                 .read_text(encoding="utf-8")
                 .splitlines()
             }
@@ -921,9 +1030,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 next_stage_name("hic_scaffolding"),
             )
             self.assertEqual(
-                adopted["stage_outputs"]["hic_scaffolding"][
-                    "output_assembly_ref"
-                ],
+                adopted["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
                 candidate["scaffold_fasta"],
             )
             decision_ref = adopted["stage_outputs"]["hic_scaffolding"][
@@ -967,9 +1074,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(
-                kept["stage_outputs"]["hic_scaffolding"][
-                    "output_assembly_ref"
-                ],
+                kept["stage_outputs"]["hic_scaffolding"]["output_assembly_ref"],
                 str(assembly),
             )
 
@@ -995,6 +1100,30 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             self.assertEqual(hic["status"], "blocked_missing_requirements")
             self.assertIn("chromosome", hic["reason"])
             self.assertNotIn("method_candidates", hic)
+
+    def test_missing_python_command_after_approval_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, _, _ = self._inputs(tmpdir)
+            state = self._configured_state(tmpdir, assembly, reads)
+            del state["stage_outputs"]["hic_scaffolding"]["autohic_parameters"][
+                "python_command"
+            ]
+            approved = self._approve_parameters(self._run_to_parameter_gate(state))
+
+            result = freeze_autohic_attempt(approved)
+
+            hic = result["stage_outputs"]["hic_scaffolding"]
+            self.assertEqual(hic["status"], "blocked_missing_requirements")
+            self.assertEqual(
+                hic["invalid_params"],
+                [
+                    {
+                        "param": "autohic_parameters.python_command",
+                        "value": "",
+                        "reason": "must be non-empty",
+                    }
+                ],
+            )
 
     def test_autohic_execution_failure_is_terminal_and_not_an_adoption_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1055,9 +1184,134 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     / attempt["frozen_parameters_ref"]["path_ref"]
                 ).read_text(encoding="utf-8")
             )
-            self.assertEqual(frozen["approved_sparse_parameters"], {})
-            self.assertEqual(frozen["provided_facts"]["restriction_enzyme"], "HindIII")
+            self.assertTrue(
+                {
+                    "l0_executor",
+                    "l1_facts",
+                    "l2_approved",
+                    "effective_parameters",
+                    "effective_source_by_parameter",
+                    "applications",
+                }.issubset(frozen)
+            )
+            self.assertEqual(frozen["l2_approved"], {})
+            self.assertEqual(frozen["l1_facts"]["restriction_enzyme"], "HindIII")
+            self.assertEqual(frozen["l0_executor"]["number_of_edit_rounds"], 2)
+            self.assertEqual(
+                frozen["effective_source_by_parameter"]["restriction_enzyme"],
+                "l1",
+            )
+            self.assertEqual(
+                frozen["effective_source_by_parameter"]["number_of_edit_rounds"],
+                "l0",
+            )
             self.assertEqual(frozen["parameters"]["restriction_enzyme"], "HindIII")
+
+    def test_freeze_materializes_catalog_thread_default_when_run_config_omits_threads(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir, error_model, chromosome_model
+            )
+            state = self._configured_state(tmpdir, assembly, reads)
+            del state["stage_outputs"]["hic_scaffolding"]["autohic_parameters"][
+                "threads"
+            ]
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(state, parameters={})
+            )
+
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(approved)
+
+            attempt = result["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][
+                0
+            ]
+            frozen = json.loads(
+                (
+                    Path(result["data_dir"])
+                    / attempt["frozen_parameters_ref"]["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(frozen["l0_executor"]["threads"], 10)
+            self.assertEqual(frozen["parameters"]["threads"], 10)
+            self.assertEqual(
+                frozen["effective_source_by_parameter"]["threads"],
+                "l0",
+            )
+
+    def test_freeze_uses_initial_enzyme_snapshot_after_current_state_mutation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir, error_model, chromosome_model
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads),
+                    parameters={},
+                )
+            )
+            approved["stage_outputs"]["hic_scaffolding"]["autohic_parameters"][
+                "restriction_enzyme"
+            ] = "DpnII"
+
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(approved)
+
+            attempt = result["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][
+                0
+            ]
+            frozen = json.loads(
+                (
+                    Path(result["data_dir"])
+                    / attempt["frozen_parameters_ref"]["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(frozen["l1_facts"]["restriction_enzyme"], "HindIII")
+            self.assertEqual(frozen["parameters"]["restriction_enzyme"], "HindIII")
+
+    def test_freeze_ignores_legacy_adjustable_executor_overlay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            assembly, reads, error_model, chromosome_model = self._inputs(tmpdir)
+            envs_yaml = self._fake_autohic_environment(
+                tmpdir, error_model, chromosome_model
+            )
+            approved = self._approve_parameters(
+                self._run_to_parameter_gate(
+                    self._configured_state(tmpdir, assembly, reads),
+                    parameters={},
+                )
+            )
+            approved["stage_outputs"]["hic_scaffolding"]["autohic_parameters"].update(
+                {
+                    "number_of_edit_rounds": 9,
+                    "translocation_adjust": False,
+                    "error_max_epoch": 19,
+                }
+            )
+
+            with patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}):
+                result = build_stage().invoke(approved)
+
+            attempt = result["stage_outputs"]["hic_scaffolding"]["parameter_attempts"][
+                0
+            ]
+            frozen = json.loads(
+                (
+                    Path(result["data_dir"])
+                    / attempt["frozen_parameters_ref"]["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(frozen["parameters"]["number_of_edit_rounds"], 2)
+            self.assertTrue(frozen["parameters"]["translocation_adjust"])
+            self.assertEqual(frozen["parameters"]["error_max_epoch"], 5)
+            self.assertEqual(
+                frozen["effective_source_by_parameter"]["number_of_edit_rounds"],
+                "l0",
+            )
 
     def test_execution_failure_retry_is_fresh_sparse_mapping_with_history(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1081,9 +1335,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 }
             )
             with (
-                patch.dict(
-                    os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}
-                ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}),
                 patch(
                     "app.llm.parameters.hic.recommender.build_chat_model",
                     return_value=retry_model,
@@ -1092,34 +1344,94 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 retry_blocked = build_stage().invoke(approved)
 
             hic = retry_blocked["stage_outputs"]["hic_scaffolding"]
-            self.assertEqual(retry_blocked["active_interrupt"]["gate_id"], "parameter_approval")
+            self.assertEqual(
+                retry_blocked["active_interrupt"]["gate_id"],
+                "parameter_approval",
+            )
             self.assertEqual(hic["proposed_parameter_attempt_id"], 1)
             self.assertIsNotNone(hic["parameter_attempts"][0]["seal_hash"])
             retry_request = load_review_request(
-                retry_blocked["data_dir"], retry_blocked["active_interrupt"]["request_ref"]
+                retry_blocked["data_dir"],
+                retry_blocked["active_interrupt"]["request_ref"],
             )
             self.assertEqual(
                 retry_request["payload"]["parameters"],
                 {"number_of_edit_rounds": 3},
             )
             model_request = json.loads(retry_model.messages[1]["content"])
-            self.assertEqual(len(model_request["attempt_history"]), 1)
+            retry_context = model_request["autohic_context"]["retry"]
+            history = retry_context["attempt_history"]
+            self.assertEqual(len(history), 1)
             self.assertEqual(
-                model_request["attempt_history"][0]["parameters"],
+                history[0]["recommended_parameters"],
                 {"restriction_enzyme": "MboI"},
             )
             self.assertEqual(
-                model_request["attempt_history"][0]["status"],
+                history[0]["approved_parameters"],
+                {"restriction_enzyme": "MboI"},
+            )
+            self.assertEqual(
+                history[0]["effective_parameters"]["restriction_enzyme"],
+                "MboI",
+            )
+            self.assertEqual(
+                history[0]["effective_sources"]["restriction_enzyme"],
+                "l2",
+            )
+            self.assertEqual(
+                history[0]["status"],
                 "execution_failed",
             )
-            stderr_tail = model_request["attempt_history"][0]["execution"][
-                "stderr_tail"
-            ]
+            stderr_tail = history[0]["execution"]["stderr_tail"]
             self.assertIn("fake AutoHiC failed", stderr_tail)
             self.assertLessEqual(len(stderr_tail.encode("utf-8")), 16 * 1024)
             self.assertLessEqual(len(stderr_tail.splitlines()), 200)
             self.assertNotIn("stderr_ref", json.dumps(model_request))
             self.assertNotIn("path_ref", json.dumps(model_request))
+
+            initial_manifest_ref = hic["parameter_attempts"][0][
+                "recommendation_manifest_ref"
+            ]
+            initial_manifest = json.loads(
+                (
+                    Path(retry_blocked["data_dir"]) / initial_manifest_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            retry_manifest_ref = hic["current_parameter_recommendation"]["manifest_ref"]
+            retry_manifest = json.loads(
+                (
+                    Path(retry_blocked["data_dir"]) / retry_manifest_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            initial_snapshot_ref = initial_manifest["refs"]["input_snapshot_ref"]
+            retry_snapshot_ref = retry_manifest["refs"]["input_snapshot_ref"]
+            initial_snapshot = json.loads(
+                (
+                    Path(retry_blocked["data_dir"]) / initial_snapshot_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            retry_snapshot = json.loads(
+                (
+                    Path(retry_blocked["data_dir"]) / retry_snapshot_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(retry_snapshot["facts"], initial_snapshot["facts"])
+            self.assertEqual(
+                retry_snapshot["dependency_refs"]["fact_source_refs"],
+                initial_snapshot["dependency_refs"]["fact_source_refs"],
+            )
+            self.assertEqual(
+                retry_snapshot["dependency_refs"]["stage_input_refs"],
+                initial_snapshot["dependency_refs"]["stage_input_refs"],
+            )
+            self.assertEqual(
+                retry_snapshot["dependency_refs"]["initial_input_snapshot_ref"],
+                initial_snapshot_ref,
+            )
+            self.assertEqual(
+                retry_snapshot["dependency_refs"]["prior_attempt_manifest_refs"],
+                [hic["parameter_attempts"][0]["attempt_manifest_ref"]],
+            )
 
             retry_approved = self._approve_parameters(retry_blocked)
             self._fake_autohic_environment(
@@ -1137,9 +1449,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     / hic["parameter_attempts"][1]["frozen_parameters_ref"]["path_ref"]
                 ).read_text(encoding="utf-8")
             )
-            self.assertEqual(
-                frozen["approved_sparse_parameters"], {"number_of_edit_rounds": 3}
-            )
+            self.assertEqual(frozen["l2_approved"], {"number_of_edit_rounds": 3})
             self.assertEqual(frozen["parameters"]["restriction_enzyme"], "HindIII")
             self.assertEqual(frozen["parameters"]["number_of_edit_rounds"], 3)
 
@@ -1186,17 +1496,23 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 "app.llm.parameters.hic.recommender.build_chat_model",
                 return_value=retry_model,
             ):
-                retry_blocked = build_stage().invoke(
-                    {**reviewed, **retry_requested}
-                )
+                retry_blocked = build_stage().invoke({**reviewed, **retry_requested})
             request = load_review_request(
                 reviewed["data_dir"], retry_blocked["active_interrupt"]["request_ref"]
             )
             self.assertEqual(request["payload"]["parameters"], {})
-            history = json.loads(retry_model.messages[1]["content"])["attempt_history"]
+            history = json.loads(retry_model.messages[1]["content"])["autohic_context"][
+                "retry"
+            ]["attempt_history"]
             self.assertEqual(history[0]["status"], "review_failed")
-            self.assertEqual(history[0]["parameters"], {"restriction_enzyme": "MboI"})
-            self.assertEqual(history[0]["review"]["decision"], "request_parameter_retry")
+            self.assertEqual(
+                history[0]["recommended_parameters"],
+                {"restriction_enzyme": "MboI"},
+            )
+            self.assertEqual(
+                history[0]["review"]["decision"],
+                "request_parameter_retry",
+            )
 
     def test_attempt_two_receives_ordered_execution_and_review_failure_history(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1220,9 +1536,7 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 }
             )
             with (
-                patch.dict(
-                    os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}
-                ),
+                patch.dict(os.environ, {"GENE_AGENT_ENVS_CONFIG": str(envs_yaml)}),
                 patch(
                     "app.llm.parameters.hic.recommender.build_chat_model",
                     return_value=attempt_one_model,
@@ -1264,15 +1578,21 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                 )
 
             history = json.loads(attempt_two_model.messages[1]["content"])[
-                "attempt_history"
-            ]
+                "autohic_context"
+            ]["retry"]["attempt_history"]
             self.assertEqual([item["attempt_id"] for item in history], [0, 1])
             self.assertEqual(
                 [item["status"] for item in history],
                 ["execution_failed", "review_failed"],
             )
-            self.assertEqual(history[0]["parameters"], {"restriction_enzyme": "MboI"})
-            self.assertEqual(history[1]["parameters"], {"number_of_edit_rounds": 3})
+            self.assertEqual(
+                history[0]["recommended_parameters"],
+                {"restriction_enzyme": "MboI"},
+            )
+            self.assertEqual(
+                history[1]["recommended_parameters"],
+                {"number_of_edit_rounds": 3},
+            )
             self.assertEqual(
                 history[1]["review"]["decision"], "request_parameter_retry"
             )
@@ -1283,6 +1603,29 @@ class HiCScaffoldingStageTests(unittest.TestCase):
             )
             self.assertEqual(
                 retry_request["payload"]["parameters"], {"error_min_len": 200000}
+            )
+            retry_manifest_ref = attempt_two_blocked["stage_outputs"][
+                "hic_scaffolding"
+            ]["current_parameter_recommendation"]["manifest_ref"]
+            retry_manifest = json.loads(
+                (
+                    Path(attempt_two_blocked["data_dir"])
+                    / retry_manifest_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            retry_snapshot_ref = retry_manifest["refs"]["input_snapshot_ref"]
+            retry_snapshot = json.loads(
+                (
+                    Path(attempt_two_blocked["data_dir"])
+                    / retry_snapshot_ref["path_ref"]
+                ).read_text(encoding="utf-8")
+            )
+            attempts = attempt_two_blocked["stage_outputs"]["hic_scaffolding"][
+                "parameter_attempts"
+            ]
+            self.assertEqual(
+                retry_snapshot["dependency_refs"]["prior_attempt_manifest_refs"],
+                [attempt["attempt_manifest_ref"] for attempt in attempts],
             )
 
             attempt_two = self._approve_parameters(attempt_two_blocked)
@@ -1304,11 +1647,9 @@ class HiCScaffoldingStageTests(unittest.TestCase):
                     / hic["parameter_attempts"][2]["frozen_parameters_ref"]["path_ref"]
                 ).read_text(encoding="utf-8")
             )
-            self.assertEqual(
-                frozen["approved_sparse_parameters"], {"error_min_len": 200000}
-            )
-            self.assertNotIn("number_of_edit_rounds", frozen["approved_sparse_parameters"])
-            self.assertNotIn("restriction_enzyme", frozen["approved_sparse_parameters"])
+            self.assertEqual(frozen["l2_approved"], {"error_min_len": 200000})
+            self.assertNotIn("number_of_edit_rounds", frozen["l2_approved"])
+            self.assertNotIn("restriction_enzyme", frozen["l2_approved"])
 
     def test_missing_scaffold_uses_shared_collect_failure_boundary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

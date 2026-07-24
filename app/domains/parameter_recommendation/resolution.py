@@ -7,6 +7,7 @@ a provenance-separated ResolvedParameterSources.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from app.domains.parameter_recommendation.facts import (
@@ -35,7 +36,6 @@ from app.schemas.parameter_recommendation import (
     ResolvedParameterSources,
 )
 
-
 # ---------------------------------------------------------------------------
 # Executor binding registry
 # ---------------------------------------------------------------------------
@@ -59,8 +59,23 @@ def resolve_parameters(
           > implicit tool default (parameter remains absent)
 
     Raises ValueError when a required parameter has no effective value, or
-    when an approved L2 key is not declared as L2-adjustable.
+    when a supplied L0 binding or approved L2 key is not declared by the
+    catalog.
     """
+
+    declared_l0_bindings = {
+        source.binding
+        for spec in catalog.parameters.values()
+        if isinstance((source := spec.layers.l0), RuntimeExecutorSource)
+    }
+    undeclared_l0_bindings = sorted(
+        set(l0_executor_values).difference(declared_l0_bindings)
+    )
+    if undeclared_l0_bindings:
+        raise ValueError(
+            f"supplied L0 executor binding(s) {undeclared_l0_bindings!r} are not "
+            f"declared by catalog {catalog.catalog_id!r}"
+        )
 
     # Validate approved L2 keys are all cataloged as L2.
     for key in approved_l2:
@@ -112,12 +127,30 @@ def resolve_parameters(
 
         # --- Choose effective value by precedence ---
         if l2_candidate[1]:
+            _validate_resolved_catalog_value(
+                name,
+                spec,
+                l2_candidate[0],
+                source="l2",
+            )
             effective[name] = l2_candidate[0]
             source_by[name] = "l2"
         elif l1_candidate[1]:
+            _validate_resolved_catalog_value(
+                name,
+                spec,
+                l1_candidate[0],
+                source="l1",
+            )
             effective[name] = l1_candidate[0]
             source_by[name] = "l1"
         elif l0_candidate[1]:
+            _validate_resolved_catalog_value(
+                name,
+                spec,
+                l0_candidate[0],
+                source="l0",
+            )
             effective[name] = l0_candidate[0]
             source_by[name] = "l0"
 
@@ -136,6 +169,75 @@ def resolve_parameters(
         effective_source_by_parameter=source_by,
         applications=applications,
     )
+
+
+# ---------------------------------------------------------------------------
+# Catalog value validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_resolved_catalog_value(
+    name: str,
+    spec: ParameterSpec,
+    value: Any,
+    *,
+    source: Literal["l0", "l1", "l2"],
+) -> None:
+    """Validate one selected value without coercion or fallback repair."""
+
+    context = f"parameter {name!r} resolved from {source.upper()}"
+    value_type = spec.value_type
+    render_error = (
+        f"{name} cannot be rendered as {value_type}: {value!r} "
+        f"(resolved from {source.upper()})"
+    )
+
+    if value_type == "int":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(render_error)
+    elif value_type == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(render_error)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{context} must be a finite float: {value!r}")
+    elif value_type == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(render_error)
+    elif value_type == "string":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(render_error)
+    elif value_type == "path":
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(render_error)
+    elif value_type == "path_list":
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item.strip() for item in value)
+        ):
+            raise ValueError(render_error)
+
+    if spec.min is not None:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(
+                f"{context} cannot be checked against minimum {spec.min!r}"
+            )
+        if value < spec.min:
+            raise ValueError(f"{context} value {value!r} is below minimum {spec.min!r}")
+
+    if spec.max is not None:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(
+                f"{context} cannot be checked against maximum {spec.max!r}"
+            )
+        if value > spec.max:
+            raise ValueError(f"{context} value {value!r} is above maximum {spec.max!r}")
+
+    if spec.allowed_values is not None and value not in spec.allowed_values:
+        raise ValueError(
+            f"{context} value {value!r} is not in allowed_values "
+            f"{spec.allowed_values!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +262,8 @@ def _resolve_l0_source(
             return source.materialized_default
         if source.required:
             raise ValueError(
-                f"required executor binding {binding!r} is absent for parameter {param_name!r}"
+                f"required executor binding {binding!r} is absent for parameter "
+                f"{param_name!r}"
             )
         return None
     return None
@@ -217,7 +320,10 @@ def render_cli_argv(
             # Capture selector values to resolve choice_options
             if name in resolved.effective_parameters:
                 selector_params[name] = str(resolved.effective_parameters[name])
-        elif isinstance(app, (CliOptionApplication, CliSwitchApplication, ChoiceOptionApplication)):
+        elif isinstance(
+            app,
+            (CliOptionApplication, CliSwitchApplication, ChoiceOptionApplication),
+        ):
             ordered.append((app.order, name, spec))
         elif isinstance(app, PositionalApplication):
             ordered.append((10000 + app.position, name, spec))

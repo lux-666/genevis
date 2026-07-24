@@ -1,88 +1,80 @@
-"""Build AssemblyRecommendationContext from stage state."""
+"""Build the typed Assembly parameter-recommendation context."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, cast
 
-from app.schemas.parameter_recommendation import AssemblyRecommendationContext, NormalizedReadType
+from app.domains.assembly.selection import AssemblySelection
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    RecommendationRetryContext,
+)
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_output
 
+AssemblyContextRoute = Literal["hifi", "ont", "cyclone"]
+AssemblyTargetLevel = Literal["draft", "near_t2t", "strict_t2t"]
 
-_READ_TYPE_MAP: dict[str, NormalizedReadType] = {
-    "hifi": "hifi",
-    "ont": "ont",
-    "pacbio_raw": "pacbio_raw",
-    "nano_raw": "nano_raw",
-    "nano_hq": "nano_hq",
-}
-
-_ASSEMBLY_ROUTE_VALID = frozenset({"hifi", "ont", "cyclone"})
-
-
-def _normalize_read_type(raw: Any) -> NormalizedReadType:
-    if isinstance(raw, str):
-        normalized = _READ_TYPE_MAP.get(raw.lower().strip())
-        if normalized is not None:
-            return normalized
-        # Map common variants to canonical NormalizedReadType values
-        lower = raw.lower().strip()
-        if lower in ("pacbio_hifi", "pacbio-hifi"):
-            return "hifi"
-        if lower in ("ont_raw", "ont-raw", "nano-raw", "nanopore"):
-            return "ont"
-    return "hifi"
-
-
-def _normalize_assembly_route(raw: Any) -> str:
-    if isinstance(raw, str) and raw.lower().strip() in _ASSEMBLY_ROUTE_VALID:
-        return raw.lower().strip()
-    return "hifi"
+_ASSEMBLY_ROUTES = frozenset({"hifi", "ont", "cyclone"})
+_TARGET_LEVELS = frozenset({"draft", "near_t2t", "strict_t2t"})
 
 
 def build_assembly_recommendation_context(
     state: TopLevelState,
     *,
     assembly_out: dict[str, Any] | None = None,
-    task: str = "recommend_initial",
+    retry_context: RecommendationRetryContext | None = None,
 ) -> AssemblyRecommendationContext:
-    """Build AssemblyRecommendationContext from pipeline stage state."""
+    """Build context only from the canonical selection and explicit stage fields."""
 
     if assembly_out is None:
         assembly_out = stage_output(state, "assembly")
 
-    input_profile: dict[str, Any] = dict(assembly_out.get("input_profile") or {})
-
-    # assembly_route
-    raw_route = assembly_out.get("assembly_route") or input_profile.get("recommended_route")
-    assembly_route = _normalize_assembly_route(raw_route)
-
-    # read_type: prefer assembly_selection.read_type, then input_profile, then direct key
-    selection: dict[str, Any] = dict(assembly_out.get("assembly_selection") or {})
-    raw_read_type = (
-        selection.get("read_type")
-        or input_profile.get("read_type")
-        or input_profile.get("primary_read_type")
-        or assembly_out.get("read_type")
-    )
-    read_type = _normalize_read_type(raw_read_type)
-
-    # target_level
-    shared_params: dict[str, Any] = dict(state.get("shared_parameters") or {})
-    raw_target = (
-        shared_params.get("target_level")
-        or input_profile.get("target_level")
-    )
-    valid_target_levels = {"draft", "near_t2t", "strict_t2t"}
-    if isinstance(raw_target, str) and raw_target in valid_target_levels:
-        target_level = raw_target
-    else:
-        target_level = "draft"
+    selection = _require_selection(assembly_out.get("assembly_selection"))
+    assembly_route = _require_route(assembly_out.get("assembly_route"))
+    target_level = _require_target_level(assembly_out.get("target_level"))
 
     return AssemblyRecommendationContext(
         stage="assembly",
-        assembly_route=assembly_route,  # type: ignore[arg-type]
-        read_type=read_type,
-        target_level=target_level,  # type: ignore[arg-type]
-        retry=None,
+        assembly_route=assembly_route,
+        read_type=selection.read_type,
+        target_level=target_level,
+        retry=retry_context,
     )
+
+
+def _require_selection(raw: Any) -> AssemblySelection:
+    if raw is None:
+        raise ValueError("assembly recommendation context requires assembly_selection")
+    try:
+        return AssemblySelection.model_validate(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "assembly recommendation context has invalid assembly_selection"
+        ) from exc
+
+
+def _require_route(raw: Any) -> AssemblyContextRoute:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(
+            "assembly recommendation context requires explicit assembly_route"
+        )
+    route = raw.strip().lower()
+    if route not in _ASSEMBLY_ROUTES:
+        raise ValueError(
+            f"assembly recommendation context has unknown assembly_route {raw!r}"
+        )
+    return cast(AssemblyContextRoute, route)
+
+
+def _require_target_level(raw: Any) -> AssemblyTargetLevel:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(
+            "assembly recommendation context requires explicit target_level"
+        )
+    target_level = raw.strip().lower()
+    if target_level not in _TARGET_LEVELS:
+        raise ValueError(
+            f"assembly recommendation context has unknown target_level {raw!r}"
+        )
+    return cast(AssemblyTargetLevel, target_level)

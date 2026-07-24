@@ -3,52 +3,42 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-import yaml
-
-from app.configuration import descriptors_root, load_descriptor_registry
+from app.configuration import load_descriptor_registry
+from app.domains.parameter_recommendation.catalog import (
+    catalog_id_for_method as _catalog_id_for_method,
+)
+from app.domains.parameter_recommendation.catalog import (
+    load_method_parameter_catalog,
+)
+from app.domains.parameter_recommendation.catalog import (
+    parameter_catalog_path as _parameter_catalog_path,
+)
 from app.schemas.parameter_catalog import MethodParameterCatalog
-
-CATALOG_ROOT = descriptors_root() / "knowledge_packs" / "assembly" / "methods"
 
 
 def catalog_id_for_method(method_id: str) -> str:
-    """Return the catalog directory id for a registry method or catalog id."""
+    """Return the catalog directory ID for one stable registry method ID."""
 
-    if "." not in method_id:
-        return method_id
-    registry = load_descriptor_registry()
-    descriptor = registry.methods.get(method_id)
-    if descriptor is None:
-        raise ValueError(f"Unknown method descriptor: {method_id}")
-    if not descriptor.parameter_catalog:
-        raise ValueError(f"Method descriptor {method_id!r} does not declare parameter_catalog")
-    return descriptor.parameter_catalog
+    return _catalog_id_for_method(method_id)
 
 
 def parameter_catalog_path(method_id: str) -> Path:
-    """Return the params.yaml path for a registry method or catalog id."""
+    """Return the params.yaml path for one stable registry method ID."""
 
-    return CATALOG_ROOT / catalog_id_for_method(method_id) / "params.yaml"
+    return _parameter_catalog_path(method_id)
 
 
 def load_parameter_catalog(method_id: str) -> MethodParameterCatalog:
     """Load and validate a v3 method parameter catalog."""
 
-    path = parameter_catalog_path(method_id)
-    if not path.exists():
-        raise FileNotFoundError(f"Parameter catalog not found: {path}")
-    raw: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    catalog = MethodParameterCatalog.model_validate(raw)
-    expected_id = catalog_id_for_method(method_id)
-    if catalog.method_id != expected_id:
-        raise ValueError(f"Parameter catalog id mismatch: expected {expected_id!r}, found {catalog.method_id!r}")
-    return catalog
+    return load_method_parameter_catalog(method_id)
 
 
 def lint_parameter_catalogs() -> None:
     """Load every checked-in assembly catalog and validate against the v3 schema."""
 
-    for path in sorted(CATALOG_ROOT.glob("*/params.yaml")):
-        load_parameter_catalog(path.parent.name)
+    registry = load_descriptor_registry()
+    for method_id in sorted(registry.by_stage.get("assembly", [])):
+        if registry.methods[method_id].parameter_catalog:
+            load_parameter_catalog(method_id)

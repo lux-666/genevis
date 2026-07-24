@@ -7,6 +7,7 @@
 # library so the full mainline can reach terminal completion in one session.
 
 session_id: e2e-YYYYMMDD-a
+genome_size_estimate: 5000000  # replace with the operator-provided estimate
 
 assets:
   - asset_type: raw_long_reads

@@ -26,11 +26,13 @@ GENOME_SURVEY_KMER_HIST = "genome_survey.kmer_hist"
 GENOME_SURVEY_MODEL_SUMMARY = "genome_survey.model_summary"
 ASSEMBLY_DRAFT_ASSEMBLY = "assembly.draft_assembly"
 ASSEMBLY_CANDIDATE_BUNDLE = "draft_assembly.candidate"
-ASSEMBLY_PARAMETER_INPUT_SNAPSHOT = "assembly.parameter.input_snapshot"
+ASSEMBLY_PARAMETER_INPUT_SNAPSHOT = "assembly.parameter_recommendation.input_snapshot"
 ASSEMBLY_PARAMETER_MODEL_REQUEST = "assembly.parameter.model_request"
 ASSEMBLY_PARAMETER_MODEL_RESPONSE = "assembly.parameter.model_response"
 ASSEMBLY_PARAMETER_BASIS = "assembly.parameter.basis_snapshot"
-ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST = "assembly.parameter.recommendation_manifest"
+ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST = (
+    "assembly.parameter.recommendation_manifest"
+)
 ASSEMBLY_PARAMETER_RETRIEVAL_QUERY = "assembly.parameter.retrieval_query"
 ASSEMBLY_PARAMETER_RETRIEVAL_TRACE = "assembly.parameter.retrieval_trace"
 ASSEMBLY_PARAMETER_EVIDENCE_PAYLOAD = "assembly.parameter.evidence_payload"
@@ -50,8 +52,12 @@ ASSEMBLY_REVIEW_BUSCO_SHORT_SUMMARY = "assembly_review.busco_short_summary"
 ASSEMBLY_REVIEW_BUSCO_SUMMARY = "assembly_review.busco_summary"
 ASSEMBLY_REVIEW_ACTION = "assembly_review.action"
 ASSEMBLY_REVIEW_PACKET = "assembly_review.review_packet"
-ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK = "assembly_review.related_species_evidence_pack"
-ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK = "assembly_review.related_species_statistics_pack"
+ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK = (
+    "assembly_review.related_species_evidence_pack"
+)
+ASSEMBLY_REVIEW_RELATED_SPECIES_STATISTICS_PACK = (
+    "assembly_review.related_species_statistics_pack"
+)
 ASSEMBLY_REVIEW_COMPARATIVE_NOTEBOOK = "assembly_review.comparative_notebook"
 ASSEMBLY_CANDIDATE_COMPARISON = "assembly_review.candidate_comparison"
 HIC_SCAFFOLDED_ASSEMBLY = "hic_scaffolding.chromosome_scaffolded_assembly"
@@ -60,18 +66,20 @@ HIC_QC_REPORT = "hic_scaffolding.qc_report"
 HIC_CONTACT_MAP = "hic_scaffolding.contact_map"
 HIC_ASSEMBLY_FILE = "hic_scaffolding.assembly"
 HIC_HTML_REPORT = "hic_scaffolding.html_report"
-HIC_PARAMETER_INPUT_SNAPSHOT = "hic_scaffolding.parameter.input_snapshot"
+HIC_PARAMETER_INPUT_SNAPSHOT = "hic_scaffolding.parameter_recommendation.input_snapshot"
 HIC_PARAMETER_BASIS = "hic_scaffolding.parameter.basis_snapshot"
 HIC_PARAMETER_MODEL_REQUEST = "hic_scaffolding.parameter.model_request"
 HIC_PARAMETER_MODEL_RESPONSE = "hic_scaffolding.parameter.model_response"
 HIC_PARAMETER_RECOMMENDATION = "hic_scaffolding.parameter.recommendation"
 HIC_PARAMETER_RESPONSE_PARSE = "hic_scaffolding.parameter.response_parse"
-HIC_PARAMETER_RECOMMENDATION_MANIFEST = "hic_scaffolding.parameter.recommendation_manifest"
+HIC_PARAMETER_RECOMMENDATION_MANIFEST = (
+    "hic_scaffolding.parameter.recommendation_manifest"
+)
 HIC_PARAMETER_APPROVAL_DECISION = "hic_scaffolding.parameter_approval.decision"
 HIC_PARAMETER_FROZEN_PARAMETERS = "hic_scaffolding.parameter.frozen_parameters"
 HIC_PARAMETER_ATTEMPT_MANIFEST = "hic_scaffolding.parameter.attempt_manifest"
 HIC_PARAMETER_REVIEW = "hic_scaffolding.parameter.review"
-T2T_PARAMETER_INPUT_SNAPSHOT = "t2t.parameter.input_snapshot"
+T2T_PARAMETER_INPUT_SNAPSHOT = "t2t.parameter_recommendation.input_snapshot"
 T2T_PARAMETER_BASIS = "t2t.parameter.basis_snapshot"
 T2T_PARAMETER_MODEL_REQUEST = "t2t.parameter.model_request"
 T2T_PARAMETER_MODEL_RESPONSE = "t2t.parameter.model_response"
@@ -81,7 +89,6 @@ T2T_PARAMETER_RECOMMENDATION_MANIFEST = "t2t.parameter.recommendation_manifest"
 T2T_PARAMETER_APPROVAL_DECISION = "t2t.parameter_approval.decision"
 T2T_PARAMETER_FROZEN_PARAMETERS = "t2t.parameter.frozen_parameters"
 T2T_MOTIF_INPUT_SNAPSHOT = "t2t.telomere_motif.input_snapshot"
-T2T_MOTIF_INPUT_PROFILE = T2T_MOTIF_INPUT_SNAPSHOT  # compat alias
 T2T_MOTIF_MODEL_REQUEST = "t2t.telomere_motif.model_request"
 T2T_MOTIF_MODEL_RESPONSE = "t2t.telomere_motif.model_response"
 T2T_MOTIF_RESOLUTION = "t2t.telomere_motif.resolution"
@@ -101,6 +108,7 @@ REPEAT_ANNOTATION_BUNDLE = "repeat_annotation.bundle"
 REPEAT_ANNOTATION_GFF3 = "repeat_annotation.gff3"
 REPEAT_SOFTMASKED_GENOME = "repeat_annotation.softmasked_genome"
 REPEAT_HARDMASKED_GENOME = "repeat_annotation.hardmasked_genome"
+
 
 class ArtifactMeta(BaseModel):
     """Metadata stored in state/ledger instead of large file contents."""
@@ -201,7 +209,7 @@ class ParameterRecommendationCursor(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[3]
     recommendation_id: int = Field(ge=0)
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
@@ -230,7 +238,7 @@ class ParameterAttempt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[3]
     attempt_id: int = Field(ge=0)
     method_id: str = Field(min_length=1)
     status: ParameterAttemptStatus
@@ -244,9 +252,9 @@ class ParameterAttempt(BaseModel):
     execution_ref: ArtifactRef | None = None
     review_ref: ArtifactRef | None = None
     attempt_manifest_ref: ArtifactRef | None = None
-    recommendation_contract: Literal[
-        "parameter_recommendation_v1",
-    ] = "parameter_recommendation_v1"
+    recommendation_contract: Literal["parameter_recommendation_v1",] = (
+        "parameter_recommendation_v1"
+    )
     previous_attempt_seal_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
@@ -260,14 +268,23 @@ class ParameterAttempt(BaseModel):
 
         if self.task == "recommend_initial":
             if self.attempt_id != 0 or self.previous_attempt_id is not None:
-                raise ValueError("initial parameter attempt must be attempt 0 without a predecessor")
+                raise ValueError(
+                    "initial parameter attempt must be attempt 0 without a predecessor"
+                )
             if self.previous_attempt_seal_hash is not None:
-                raise ValueError("initial parameter attempt cannot bind a previous seal")
+                raise ValueError(
+                    "initial parameter attempt cannot bind a previous seal"
+                )
         else:
             if self.attempt_id == 0 or self.previous_attempt_id != self.attempt_id - 1:
-                raise ValueError("retry parameter attempt must bind the immediately preceding attempt")
+                raise ValueError(
+                    "retry parameter attempt must bind the immediately "
+                    "preceding attempt"
+                )
             if self.previous_attempt_seal_hash is None:
-                raise ValueError("retry parameter attempt requires previous_attempt_seal_hash")
+                raise ValueError(
+                    "retry parameter attempt requires previous_attempt_seal_hash"
+                )
         if self.status == "recommended" and self.frozen_attempt_ref is not None:
             raise ValueError(
                 "a recommended parameter attempt cannot own frozen runner input"
@@ -280,7 +297,9 @@ class ParameterAttempt(BaseModel):
             self.frozen_attempt_ref is not None
             and not self.frozen_attempt_ref.artifact_type.endswith(".frozen_attempt")
         ):
-            raise ValueError("frozen_attempt_ref must reference frozen-attempt evidence")
+            raise ValueError(
+                "frozen_attempt_ref must reference frozen-attempt evidence"
+            )
         return self
 
 
@@ -296,7 +315,9 @@ class GenomeSurveyResult(BaseModel):
     estimates: dict[str, Any] = Field(default_factory=dict)
     measured_estimates: dict[str, Any] = Field(default_factory=dict)
     provided_overrides: dict[str, Any] = Field(default_factory=dict)
-    estimate_sources: dict[str, Literal["provided", "survey"]] = Field(default_factory=dict)
+    estimate_sources: dict[str, Literal["provided", "survey"]] = Field(
+        default_factory=dict
+    )
     estimate_source_paths: dict[str, str] = Field(default_factory=dict)
     genome_size_prior: int | None = Field(default=None, gt=0)
     genome_size_source: Literal["provided", "survey"] | None = None
@@ -419,7 +440,9 @@ class T2TReviewDecisionArtifact(BaseModel):
 
     session_id: str
     stage: Literal["t2t"] = "t2t"
-    decision: Literal["accept_selected_candidates", "continue_without_patch", "stop_pipeline"]
+    decision: Literal[
+        "accept_selected_candidates", "continue_without_patch", "stop_pipeline"
+    ]
     candidate_ids: list[str] = Field(default_factory=list)
     input_assembly_ref: str
     output_assembly_ref: str
@@ -436,7 +459,7 @@ class T2TFinishingBundle(BaseModel):
     input_assembly_ref: str
     output_assembly_ref: str
     ont_read_refs: list[str] = Field(default_factory=list)
-    mode: Literal["propose_only", "manual_review", "auto_patch"] = "auto_patch"
+    mode: Literal["propose_only", "manual_review", "auto_patch"]
     resolved_telomere_motif: str | None = None
     resolved_telomere_motif_source: str | None = None
     patched_assembly_ref: str | None = None
@@ -498,7 +521,9 @@ class GeneAnnotationPlan(BaseModel):
     long_rna_read_refs: list[str] = Field(default_factory=list)
     protein_evidence_refs: list[str] = Field(default_factory=list)
     lineage_or_species_hints: dict[str, Any] = Field(default_factory=dict)
-    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"]
+    evidence_profile: Literal[
+        "no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence"
+    ]
     candidate_methods: list[str] = Field(default_factory=list)
     helper_methods: list[str] = Field(default_factory=list)
     expected_outputs: dict[str, str] = Field(default_factory=dict)
@@ -521,7 +546,14 @@ class GeneAnnotationBundle(BaseModel):
     predicted_proteins_ref: str
     evidence_report_ref: str | None = None
     repeat_annotation_ref: str | None = None
-    evidence_profile: Literal["no_evidence", "rnaseq", "long_rna", "protein", "mixed_evidence", "provided_annotation"]
+    evidence_profile: Literal[
+        "no_evidence",
+        "rnaseq",
+        "long_rna",
+        "protein",
+        "mixed_evidence",
+        "provided_annotation",
+    ]
     candidate_methods: list[str] = Field(default_factory=list)
     helper_methods: list[str] = Field(default_factory=list)
     review_required: bool = False
@@ -588,7 +620,9 @@ class FunctionDatabaseProvenance(BaseModel):
         if not (self.command and self.command.strip()) and not (
             self.descriptor_version and self.descriptor_version.strip()
         ):
-            raise ValueError("function database provenance requires command or descriptor_version")
+            raise ValueError(
+                "function database provenance requires command or descriptor_version"
+            )
         return self
 
 
@@ -663,7 +697,9 @@ class AssemblyInputProfile(BaseModel):
     recommended_route: Literal["cyclone", "ont", "hifi", "insufficient_data"]
     recommendation_reasoning: str
     uncertainty_notes: list[str] = Field(default_factory=list)
-    profile_source: Literal["manifest", "run_config", "run_config_explicit", "llm_inferred"]
+    profile_source: Literal[
+        "manifest", "run_config", "run_config_explicit", "llm_inferred"
+    ]
     notes: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -702,7 +738,13 @@ class AssemblyT2TReadiness(BaseModel):
 
     session_id: str
     candidate_id: str
-    t2t_verdict: Literal["adopt_draft", "near_t2t", "strict_t2t_candidate", "insufficient", "request_data"]
+    t2t_verdict: Literal[
+        "adopt_draft",
+        "near_t2t",
+        "strict_t2t_candidate",
+        "insufficient",
+        "request_data",
+    ]
     llm_confidence: float
     llm_reasoning: str
     uncertainty_notes: list[str] = Field(default_factory=list)

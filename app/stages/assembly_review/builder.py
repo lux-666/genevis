@@ -9,7 +9,6 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.schemas.state import TopLevelState
-from app.stages.assembly.method_application.flye import build_flye_rerun_graph
 from app.stages.assembly_review.method_application import (
     build_busco_graph,
     build_quast_graph,
@@ -33,7 +32,6 @@ from app.stages.assembly_review.routing import (
     route_after_parameter_quality_gate,
     route_after_plan_metrics,
     route_after_quast,
-    route_after_rerun,
     route_from_evaluation,
 )
 
@@ -43,7 +41,6 @@ def build_stage():
     graph = StateGraph(TopLevelState)
 
     graph.add_node("enter", enter_assembly_review)
-    graph.add_node("flye_rerun", build_flye_rerun_graph())
     graph.add_node("resolve_candidates", resolve_candidates)
     graph.add_node("plan_metrics", plan_review_metrics)
     graph.add_node("quast", build_quast_graph())
@@ -51,7 +48,9 @@ def build_stage():
     graph.add_node("evaluate_rules", evaluate_review_rules)
     graph.add_node("parameter_quality_gate", parameter_quality_gate)
     graph.add_node("related_species_sanity_check", build_related_species_evidence_pack)
-    graph.add_node("related_species_statistics", build_related_species_statistics_and_notebook)
+    graph.add_node(
+        "related_species_statistics", build_related_species_statistics_and_notebook
+    )
     graph.add_node("generate_comparison", generate_candidate_comparison)
     graph.add_node("human_gate", human_review_gate)
     graph.add_node("fail", fail_assembly_review)
@@ -60,11 +59,6 @@ def build_stage():
     graph.add_conditional_edges(
         "enter",
         route_after_enter,
-        {"flye_rerun": "flye_rerun", "resolve_candidates": "resolve_candidates"},
-    )
-    graph.add_conditional_edges(
-        "flye_rerun",
-        route_after_rerun,
         {"resolve_candidates": "resolve_candidates", "fail": "fail"},
     )
     graph.add_edge("resolve_candidates", "plan_metrics")

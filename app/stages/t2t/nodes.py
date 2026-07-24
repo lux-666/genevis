@@ -14,8 +14,8 @@ from typing import Any, Iterable, Iterator
 
 from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.execution.env_dispatch import resolve_method_env
 from app.execution.attempt_owners import ParameterAttemptOwner
+from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
     build_method_graph,
@@ -39,7 +39,6 @@ from app.schemas.artifacts import (
     T2TFinishingBundle,
     T2TReviewDecisionArtifact,
 )
-from app.schemas.shared_parameters import normalize_dna_motif
 from app.schemas.state import TopLevelState
 from app.stages.base import (
     absolute_data_dir,
@@ -51,6 +50,11 @@ from app.stages.base import (
 )
 from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
 from app.stages.resource_specs import assembly_resource_spec
+from app.stages.t2t.parameters.catalog import resolve_t2t_mode
+from app.stages.t2t.parameters.execution import (
+    T2TFrozenExecutionInputs,
+    load_t2t_frozen_execution_inputs,
+)
 from app.storage.artifacts import publish_or_recover_work_artifact
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError
@@ -66,14 +70,6 @@ T2T_ALIGNMENT_LIFECYCLE = MethodExecutionLifecycle(
     ran_status="alignment_ran",
     owner=ParameterAttemptOwner(),
 )
-DEFAULT_THRESHOLDS = {
-    "min_motif_copies": 4,
-    "terminal_window_bp": 10_000,
-    "min_mapq": 20,
-    "max_target_terminal_distance_bp": 1_000,
-    "min_overlap_bp": 500,
-    "min_supporting_reads": 1,
-}
 
 
 def build_t2t_alignment_graph():
@@ -118,6 +114,25 @@ def _fail(state: TopLevelState, reason: str) -> dict:
 
 def enter_t2t(state: TopLevelState) -> dict:
     """Mark T2T finishing as the active stage."""
+    output = _output(state)
+    legacy_fields = sorted(
+        field
+        for field in (
+            "configured_telomere_motif",
+            "legacy_motif_hint",
+            "telomere_motif",
+            "telomere_motif_input_profile_ref",
+        )
+        if field in output
+    )
+    if legacy_fields:
+        return {
+            **_fail(
+                state,
+                f"unsupported legacy T2T motif checkpoint fields: {legacy_fields}",
+            ),
+            "supervision_state": "running_stage",
+        }
     return {"supervision_state": "running_stage"}
 
 
@@ -142,7 +157,10 @@ def block_t2t(state: TopLevelState) -> dict:
 def resolve_t2t_inputs(state: TopLevelState) -> dict:
     """Resolve the current assembly and the complete canonical ONT input list."""
     existing = _output(state)
-    config = _config(existing)
+    try:
+        config = _config(existing)
+    except ValueError as exc:
+        return _fail(state, f"invalid t2t configuration: {exc}")
     assembly = resolve_stage_resource(
         state,
         resource_spec=assembly_resource_spec(),
@@ -152,7 +170,11 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
     if not assembly_ref:
         return _fail(state, "missing final assembly ref for t2t")
     assembly_path = Path(assembly_ref)
-    if not assembly_path.exists() or not assembly_path.is_file() or not _looks_like_fasta(assembly_path):
+    if (
+        not assembly_path.exists()
+        or not assembly_path.is_file()
+        or not _looks_like_fasta(assembly_path)
+    ):
         return _fail(state, f"t2t input assembly is not a valid FASTA: {assembly_ref}")
 
     try:
@@ -171,8 +193,6 @@ def resolve_t2t_inputs(state: TopLevelState) -> dict:
         {
             "status": "resolved",
             "mode": config["mode"],
-            "configured_telomere_motif": config["telomere_motif"],
-            "threshold_defaults": config["thresholds"],
             "chromosome_list_ref": config.get("chromosome_list_ref"),
             "input_assembly_ref": str(assembly_path),
             "source_stage": source_stage,
@@ -194,16 +214,18 @@ def scan_assembly_telomeres(state: TopLevelState) -> dict:
     if out.get("status") != "parameters_ready":
         return {}
     try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        thresholds = execution_inputs.thresholds.model_dump(mode="json")
         rows = list(
             _scan_fasta_ends(
-                Path(out["input_assembly_ref"]),
-                out["resolved_telomere_motif"],
-                out["thresholds"],
+                Path(execution_inputs.input_assembly_ref),
+                execution_inputs.resolved_telomere_motif,
+                thresholds,
             )
         )
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t assembly telomere scan failed: {exc}")
-    scan_source = Path(out["work_dir"]) / "assembly_telomere_scan.tsv"
+    scan_source = Path(execution_inputs.work_dir) / "assembly_telomere_scan.tsv"
     _write_tsv(scan_source, rows, _ASSEMBLY_SCAN_FIELDS)
     scan_path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
@@ -213,15 +235,23 @@ def scan_assembly_telomeres(state: TopLevelState) -> dict:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
     ).path
-    chromosome_names = _load_chromosome_list(out.get("chromosome_list_ref"))
+    chromosome_names = _load_chromosome_list(execution_inputs.chromosome_list_ref)
     warnings = list(out.get("notes") or [])
     if chromosome_names:
         unknown = sorted(chromosome_names.difference({row["sequence"] for row in rows}))
         if unknown:
-            warnings.append(f"chromosome_list_missing_from_assembly:{','.join(unknown)}")
+            warnings.append(
+                f"chromosome_list_missing_from_assembly:{','.join(unknown)}"
+            )
     if len(rows) > 100:
-        warnings.append("assembly_has_more_than_100_sequences; chromosome-level suitability is uncertain")
-    missing_ends = sum(int(row["left_has_signal"] == "false") + int(row["right_has_signal"] == "false") for row in rows)
+        warnings.append(
+            "assembly_has_more_than_100_sequences; chromosome-level suitability "
+            "is uncertain"
+        )
+    missing_ends = sum(
+        int(row["left_has_signal"] == "false") + int(row["right_has_signal"] == "false")
+        for row in rows
+    )
     return _update(
         state,
         {
@@ -239,7 +269,16 @@ def prepare_t2t_reads(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") not in {"resolved", "assembly_scanned"}:
         return {}
-    read_inputs = list(out.get("ont_read_inputs") or [])
+    if out.get("status") == "assembly_scanned":
+        try:
+            execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        except ValueError as exc:
+            return _fail(state, f"t2t frozen execution inputs are invalid: {exc}")
+        read_inputs = [
+            item.model_dump(mode="json") for item in execution_inputs.ont_read_inputs
+        ]
+    else:
+        read_inputs = list(out.get("ont_read_inputs") or [])
     if not read_inputs:
         return _skip_no_reads(state, out, "no_ont_long_reads")
     try:
@@ -261,25 +300,39 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") != "reads_prepared":
         return {}
-    reads_scan_source = Path(out["work_dir"]) / "reads_telomere_scan.tsv"
-    telomeric_tsv_source = Path(out["work_dir"]) / "telomeric_reads.tsv"
-    telomeric_fasta = Path(out["work_dir"]) / "telomeric_reads.fa"
     read_count = 0
     telomeric_read_count = 0
     try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        thresholds = execution_inputs.thresholds.model_dump(mode="json")
+        reads_scan_source = Path(execution_inputs.work_dir) / "reads_telomere_scan.tsv"
+        telomeric_tsv_source = Path(execution_inputs.work_dir) / "telomeric_reads.tsv"
+        telomeric_fasta = Path(execution_inputs.work_dir) / "telomeric_reads.fa"
         with (
             reads_scan_source.open("w", encoding="utf-8", newline="") as reads_handle,
-            telomeric_tsv_source.open("w", encoding="utf-8", newline="") as telomeric_handle,
+            telomeric_tsv_source.open(
+                "w", encoding="utf-8", newline=""
+            ) as telomeric_handle,
             telomeric_fasta.open("w", encoding="utf-8") as fasta_handle,
         ):
-            reads_writer = csv.DictWriter(reads_handle, fieldnames=_READ_SCAN_FIELDS, delimiter="\t", extrasaction="ignore")
-            telomeric_writer = csv.DictWriter(telomeric_handle, fieldnames=_READ_SCAN_FIELDS, delimiter="\t", extrasaction="ignore")
+            reads_writer = csv.DictWriter(
+                reads_handle,
+                fieldnames=_READ_SCAN_FIELDS,
+                delimiter="\t",
+                extrasaction="ignore",
+            )
+            telomeric_writer = csv.DictWriter(
+                telomeric_handle,
+                fieldnames=_READ_SCAN_FIELDS,
+                delimiter="\t",
+                extrasaction="ignore",
+            )
             reads_writer.writeheader()
             telomeric_writer.writeheader()
             seen_read_ids: set[str] = set()
-            for read_input in out.get("ont_read_inputs") or []:
-                asset_id = str(read_input["asset_id"])
-                for source_read_id, sequence in _iter_sequences(Path(read_input["path"])):
+            for read_input in execution_inputs.ont_read_inputs:
+                asset_id = read_input.asset_id
+                for source_read_id, sequence in _iter_sequences(Path(read_input.path)):
                     read_id = f"{asset_id}::{source_read_id}"
                     if read_id in seen_read_ids:
                         raise ValueError(
@@ -288,8 +341,8 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
                     seen_read_ids.add(read_id)
                     left, right = _terminal_signal(
                         sequence,
-                        out["resolved_telomere_motif"],
-                        out["thresholds"],
+                        execution_inputs.resolved_telomere_motif,
+                        thresholds,
                     )
                     row = {
                         "read_id": read_id,
@@ -298,12 +351,19 @@ def scan_read_telomeres(state: TopLevelState) -> dict:
                         "length": str(len(sequence)),
                         "left_motif_copies": str(left),
                         "right_motif_copies": str(right),
-                        "left_has_signal": str(left >= out["thresholds"]["min_motif_copies"]).lower(),
-                        "right_has_signal": str(right >= out["thresholds"]["min_motif_copies"]).lower(),
+                        "left_has_signal": str(
+                            left >= thresholds["min_motif_copies"]
+                        ).lower(),
+                        "right_has_signal": str(
+                            right >= thresholds["min_motif_copies"]
+                        ).lower(),
                     }
                     reads_writer.writerow(row)
                     read_count += 1
-                    if row["left_has_signal"] == "true" or row["right_has_signal"] == "true":
+                    if (
+                        row["left_has_signal"] == "true"
+                        or row["right_has_signal"] == "true"
+                    ):
                         telomeric_writer.writerow(row)
                         _write_fasta_record(fasta_handle, read_id, sequence)
                         telomeric_read_count += 1
@@ -351,8 +411,14 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") != "reads_scanned":
         return {}
+    try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+    except ValueError as exc:
+        return _fail(state, f"t2t frozen execution inputs are invalid: {exc}")
     if not out.get("telomeric_read_count"):
-        candidates_source = Path(out["work_dir"]) / "telomere_extension_candidates.tsv"
+        candidates_source = (
+            Path(execution_inputs.work_dir) / "telomere_extension_candidates.tsv"
+        )
         _write_tsv(candidates_source, [], _CANDIDATE_FIELDS)
         candidates_path = publish_or_recover_work_artifact(
             absolute_data_dir(state),
@@ -384,7 +450,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
     )
     if blocked:
         return _update(state, blocked)
-    work_dir = Path(out["work_dir"])
+    work_dir = Path(execution_inputs.work_dir)
     paf_path = work_dir / "ont_to_assembly.paf"
     script_path = work_dir / "run_minimap2_t2t.sh"
     alignment_reads_ref = out.get("telomeric_reads_fasta_ref")
@@ -392,7 +458,10 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
         return _fail(state, "t2t telomeric read FASTA is missing after read scan")
     script_path.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        f"minimap2 -x map-ont --secondary=no {shlex.quote(out['input_assembly_ref'])} {shlex.quote(str(alignment_reads_ref))} > {shlex.quote(str(paf_path))}\n",
+        f"minimap2 -x map-ont --secondary=no "
+        f"{shlex.quote(execution_inputs.input_assembly_ref)} "
+        f"{shlex.quote(str(alignment_reads_ref))} > "
+        f"{shlex.quote(str(paf_path))}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -414,7 +483,7 @@ def freeze_t2t_alignment(state: TopLevelState) -> dict:
         metadata={
             "parameter_attempt_id": parameter_attempt.attempt_id,
             "paf_path": str(paf_path),
-            "assembly_ref": out["input_assembly_ref"],
+            "assembly_ref": execution_inputs.input_assembly_ref,
             "reads_ref": str(alignment_reads_ref),
         },
     )
@@ -453,7 +522,9 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         out, method_id=T2T_ALIGNMENT_METHOD, label="T2T minimap2"
     )
     if parameter_attempt.frozen_attempt_ref is None:
-        raise DataLayoutError("t2t minimap2 parameter attempt has no frozen attempt ref")
+        raise DataLayoutError(
+            "t2t minimap2 parameter attempt has no frozen attempt ref"
+        )
     frozen_ref_json = json.dumps(
         parameter_attempt.frozen_attempt_ref.model_dump(mode="json"),
         sort_keys=True,
@@ -464,21 +535,30 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         sort_keys=True,
         separators=(",", ":"),
     )
-    candidates_source = Path(out["work_dir"]) / "telomere_extension_candidates.tsv"
     try:
-        assembly_ends = {row["sequence"]: row for row in _read_tsv(Path(out["assembly_telomere_scan_ref"]))}
-        read_signals = {row["read_id"]: row for row in _read_tsv(Path(out["telomeric_reads_ref"]))}
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        thresholds = execution_inputs.thresholds.model_dump(mode="json")
+        candidates_source = (
+            Path(execution_inputs.work_dir) / "telomere_extension_candidates.tsv"
+        )
+        assembly_ends = {
+            row["sequence"]: row
+            for row in _read_tsv(Path(out["assembly_telomere_scan_ref"]))
+        }
+        read_signals = {
+            row["read_id"]: row for row in _read_tsv(Path(out["telomeric_reads_ref"]))
+        }
         read_sequences = dict(_iter_sequences(Path(out["telomeric_reads_fasta_ref"])))
-        allowed = _load_chromosome_list(out.get("chromosome_list_ref"))
+        allowed = _load_chromosome_list(execution_inputs.chromosome_list_ref)
         raw = _candidate_rows(
             paf_artifact.path,
             assembly_ends,
             read_signals,
             read_sequences,
-            out["thresholds"],
-            out["resolved_telomere_motif"],
+            thresholds,
+            execution_inputs.resolved_telomere_motif,
             allowed,
-            out["mode"],
+            execution_inputs.mode,
         )
         for row in raw:
             row["frozen_attempt_ref"] = frozen_ref_json
@@ -501,7 +581,9 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_EXTENSION_CANDIDATES,
         metadata={
-            "frozen_attempt_ref": parameter_attempt.frozen_attempt_ref.model_dump(mode="json"),
+            "frozen_attempt_ref": parameter_attempt.frozen_attempt_ref.model_dump(
+                mode="json"
+            ),
             "execution_ref": execution.execution_ref.model_dump(mode="json"),
             "alignment_paf_ref": paf_artifact.ref.model_dump(mode="json"),
         },
@@ -523,7 +605,9 @@ def build_t2t_candidates(state: TopLevelState) -> dict:
             "alignment_paf_ref": str(paf_artifact.path),
             "alignment_paf_artifact_ref": paf_artifact.ref.model_dump(mode="json"),
             "telomere_extension_candidates_ref": str(candidate_artifact.path),
-            "telomere_extension_candidates_artifact_ref": candidate_artifact.ref.model_dump(mode="json"),
+            "telomere_extension_candidates_artifact_ref": (
+                candidate_artifact.ref.model_dump(mode="json")
+            ),
             "candidate_count": len(raw),
             "selected_patch_count": selected,
             "proposed_candidate_count": proposed,
@@ -536,13 +620,29 @@ def apply_t2t_patches(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") != "candidates_built":
         return {}
-    if out.get("mode") != "auto_patch":
-        return _update(state, {"status": "patch_not_applied", "patch_reason": "no_auto_patch_candidates"})
+    try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+    except ValueError as exc:
+        return _fail(state, f"t2t frozen execution inputs are invalid: {exc}")
+    if execution_inputs.mode != "auto_patch":
+        return _update(
+            state,
+            {"status": "patch_not_applied", "patch_reason": "no_auto_patch_candidates"},
+        )
     materialized = _materialize_t2t_patches(
-        state, out, allowed_decisions={"auto_patch"}
+        state,
+        out,
+        execution_inputs=execution_inputs,
+        allowed_decisions={"auto_patch"},
     )
     if not materialized:
-        return _update(state, {"status": "patch_not_applied", "patch_reason": "selected_read_sequence_unavailable"})
+        return _update(
+            state,
+            {
+                "status": "patch_not_applied",
+                "patch_reason": "selected_read_sequence_unavailable",
+            },
+        )
     if materialized.get("error"):
         return _update(
             state,
@@ -569,16 +669,18 @@ def validate_patched_assembly(state: TopLevelState) -> dict:
     if out.get("status") != "patched":
         return {}
     try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        thresholds = execution_inputs.thresholds.model_dump(mode="json")
         rows = list(
             _scan_fasta_ends(
                 Path(out["patched_assembly_ref"]),
-                out["resolved_telomere_motif"],
-                out["thresholds"],
+                execution_inputs.resolved_telomere_motif,
+                thresholds,
             )
         )
     except (OSError, ValueError) as exc:
         return _fail(state, f"t2t patched assembly validation failed: {exc}")
-    source = Path(out["work_dir"]) / "patched_telomere_scan.tsv"
+    source = Path(execution_inputs.work_dir) / "patched_telomere_scan.tsv"
     _write_tsv(source, rows, _ASSEMBLY_SCAN_FIELDS)
     path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
@@ -588,7 +690,9 @@ def validate_patched_assembly(state: TopLevelState) -> dict:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_ASSEMBLY_TELOMERE_SCAN,
     ).path
-    return _update(state, {"status": "patched_validated", "patched_telomere_scan_ref": str(path)})
+    return _update(
+        state, {"status": "patched_validated", "patched_telomere_scan_ref": str(path)}
+    )
 
 
 def write_t2t_report(state: TopLevelState) -> dict:
@@ -596,21 +700,50 @@ def write_t2t_report(state: TopLevelState) -> dict:
     out = _output(state)
     if out.get("status") == "failed":
         return {}
-    summary_source = Path(out["work_dir"]) / "telomere_status_summary.tsv"
-    scan_ref = out.get("patched_telomere_scan_ref") or out.get("assembly_telomere_scan_ref")
+    report_out = dict(out)
+    execution_inputs = None
+    if out.get("parameter_attempts"):
+        try:
+            execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+        except ValueError as exc:
+            return _fail(state, f"t2t frozen execution inputs are invalid: {exc}")
+        report_out.update(
+            {
+                "resolved_telomere_motif": execution_inputs.resolved_telomere_motif,
+                "resolved_telomere_motif_source": execution_inputs.motif_source,
+                "input_assembly_ref": execution_inputs.input_assembly_ref,
+                "ont_read_refs": [
+                    item.path for item in execution_inputs.ont_read_inputs
+                ],
+                "mode": execution_inputs.mode,
+                "chromosome_list_ref": execution_inputs.chromosome_list_ref,
+                "work_dir": execution_inputs.work_dir,
+                "execution_enabled": execution_inputs.execution_enabled,
+            }
+        )
+    summary_source = Path(report_out["work_dir"]) / "telomere_status_summary.tsv"
+    scan_ref = out.get("patched_telomere_scan_ref") or out.get(
+        "assembly_telomere_scan_ref"
+    )
     rows = _read_tsv(Path(scan_ref)) if scan_ref and Path(scan_ref).exists() else []
     summary = [
         {
             "sequence": row["sequence"],
             "left_telomere": row["left_has_signal"],
             "right_telomere": row["right_has_signal"],
-            "status": "complete" if row["left_has_signal"] == "true" and row["right_has_signal"] == "true" else "missing_signal",
+            "status": "complete"
+            if row["left_has_signal"] == "true" and row["right_has_signal"] == "true"
+            else "missing_signal",
         }
         for row in rows
     ]
-    _write_tsv(summary_source, summary, ["sequence", "left_telomere", "right_telomere", "status"])
-    report_source = Path(out["work_dir"]) / "t2t_finishing_report.md"
-    report_source.write_text(_report_markdown(out, summary), encoding="utf-8")
+    _write_tsv(
+        summary_source,
+        summary,
+        ["sequence", "left_telomere", "right_telomere", "status"],
+    )
+    report_source = Path(report_out["work_dir"]) / "t2t_finishing_report.md"
+    report_source.write_text(_report_markdown(report_out, summary), encoding="utf-8")
     summary_path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
         state["session_id"],
@@ -627,24 +760,32 @@ def write_t2t_report(state: TopLevelState) -> dict:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_FINISHING_REPORT,
     ).path
-    final_status = _final_status(out, summary)
+    final_status = _final_status(report_out, summary)
     artifacts = _register_artifacts(state, out, summary_path, report_path)
-    bundle_source = Path(out["work_dir"]) / "t2t_finishing_bundle.json"
+    bundle_source = Path(report_out["work_dir"]) / "t2t_finishing_bundle.json"
     bundle = T2TFinishingBundle(
         session_id=state["session_id"],
         status=final_status,
-        input_assembly_ref=out["input_assembly_ref"],
-        output_assembly_ref=out.get("output_assembly_ref") or out["input_assembly_ref"],
-        ont_read_refs=list(out.get("ont_read_refs") or []),
-        mode=out.get("mode", "auto_patch"),
-        resolved_telomere_motif=out.get("resolved_telomere_motif"),
-        resolved_telomere_motif_source=out.get("resolved_telomere_motif_source"),
+        input_assembly_ref=report_out["input_assembly_ref"],
+        output_assembly_ref=(
+            out.get("output_assembly_ref") or report_out["input_assembly_ref"]
+        ),
+        ont_read_refs=list(report_out.get("ont_read_refs") or []),
+        mode=report_out["mode"],
+        resolved_telomere_motif=report_out.get("resolved_telomere_motif"),
+        resolved_telomere_motif_source=report_out.get("resolved_telomere_motif_source"),
         patched_assembly_ref=out.get("patched_assembly_ref"),
         artifact_refs={path.name: str(path) for path in artifacts},
         notes=list(out.get("notes") or []),
-        metadata={"source_stage": out.get("source_stage"), "execution_enabled": out.get("execution_enabled")},
+        metadata={
+            "source_stage": out.get("source_stage"),
+            "execution_enabled": report_out.get("execution_enabled"),
+        },
     )
-    bundle_source.write_text(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    bundle_source.write_text(
+        json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     bundle_path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
         state["session_id"],
@@ -653,7 +794,7 @@ def write_t2t_report(state: TopLevelState) -> dict:
         method_name=T2T_CONTRACT_METHOD,
         artifact_type="t2t.bundle",
     ).path
-    final_assembly = out.get("output_assembly_ref") or out["input_assembly_ref"]
+    final_assembly = out.get("output_assembly_ref") or report_out["input_assembly_ref"]
     return _update(
         state,
         {
@@ -687,7 +828,21 @@ def gate_t2t_review(state: TopLevelState) -> dict:
 def commit_t2t(state: TopLevelState) -> dict:
     """Advance to annotation with the patched or original assembly reference."""
     out = _output(state)
-    assembly_ref = out.get("output_assembly_ref") or out.get("input_assembly_ref")
+    input_assembly_ref = out.get("input_assembly_ref")
+    if out.get("parameter_attempts"):
+        try:
+            input_assembly_ref = load_t2t_frozen_execution_inputs(
+                state, output=out
+            ).input_assembly_ref
+        except ValueError as exc:
+            reason = f"t2t frozen execution inputs are invalid: {exc}"
+            return {
+                **_fail(state, reason),
+                "current_stage": "t2t",
+                "supervision_state": "failed_terminal",
+                "last_error": reason,
+            }
+    assembly_ref = out.get("output_assembly_ref") or input_assembly_ref
     update = {
         "current_stage": next_stage_name("t2t"),
         "supervision_state": "running_stage",
@@ -714,16 +869,28 @@ def fail_t2t(state: TopLevelState) -> dict:
     }
 
 
-def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest) -> dict:
+def apply_t2t_review_decision(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> dict:
     """Apply a human T2T review decision to a blocked state."""
     if request.stage != "t2t":
         raise ResumeValidationError("t2t review resume requires stage t2t")
     out = _output(state)
+    try:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
+    except ValueError as exc:
+        raise ResumeValidationError(
+            f"T2T frozen execution inputs are invalid: {exc}"
+        ) from exc
     allowed = {"accept_selected_candidates", "continue_without_patch", "stop_pipeline"}
     if request.decision not in allowed:
-        raise ResumeValidationError(f"unsupported t2t review decision: {request.decision!r}")
+        raise ResumeValidationError(
+            f"unsupported t2t review decision: {request.decision!r}"
+        )
     if request.decision == "accept_selected_candidates" and not request.candidate_ids:
-        raise ResumeValidationError("t2t accept_selected_candidates requires candidate_ids")
+        raise ResumeValidationError(
+            "t2t accept_selected_candidates requires candidate_ids"
+        )
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -736,44 +903,59 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
     if request.decision == "accept_selected_candidates":
         unknown = sorted(set(request.candidate_ids).difference(selectable))
         if unknown:
-            raise ResumeValidationError(f"unknown t2t candidate_ids: {', '.join(unknown)}")
+            raise ResumeValidationError(
+                f"unknown t2t candidate_ids: {', '.join(unknown)}"
+            )
         materialized = _materialize_t2t_patches(
             state,
             out,
+            execution_inputs=execution_inputs,
             selected_candidate_ids=set(request.candidate_ids),
             allowed_decisions={"proposed", "auto_patch"},
         )
         if not materialized:
-            raise ResumeValidationError("t2t selected candidates could not be materialized into a patched assembly")
+            raise ResumeValidationError(
+                "t2t selected candidates could not be materialized into a "
+                "patched assembly"
+            )
         if materialized.get("error"):
             raise ResumeValidationError(
-                f"t2t selected candidates are internally inconsistent: {materialized['error']}"
+                "t2t selected candidates are internally inconsistent: "
+                f"{materialized['error']}"
             )
         output_assembly_ref = materialized["patched_assembly_ref"]
         patched_assembly_ref = materialized["patched_assembly_ref"]
         patch_records_ref = materialized["patch_records_ref"]
         status = "completed"
     else:
-        output_assembly_ref = out["input_assembly_ref"]
+        output_assembly_ref = execution_inputs.input_assembly_ref
         patched_assembly_ref = None
         patch_records_ref = out.get("patch_records_ref")
-        status = "failed_terminal" if request.decision == "stop_pipeline" else "completed"
+        status = (
+            "failed_terminal" if request.decision == "stop_pipeline" else "completed"
+        )
 
     decision_payload = T2TReviewDecisionArtifact(
         session_id=session_id,
         decision=request.decision,
         candidate_ids=list(request.candidate_ids),
-        input_assembly_ref=out["input_assembly_ref"],
+        input_assembly_ref=execution_inputs.input_assembly_ref,
         output_assembly_ref=str(output_assembly_ref),
         patched_assembly_ref=patched_assembly_ref,
         notes=list(request.notes),
         metadata=request.metadata,
     )
     active_interrupt = state.get("active_interrupt") or {}
-    review_request_id = request.review_request_id or active_interrupt.get("review_request_id")
-    review_request_hash = request.review_request_hash or active_interrupt.get("request_hash")
+    review_request_id = request.review_request_id or active_interrupt.get(
+        "review_request_id"
+    )
+    review_request_hash = request.review_request_hash or active_interrupt.get(
+        "request_hash"
+    )
     if not review_request_id or not review_request_hash:
-        raise ResumeValidationError("t2t review decision is missing review request binding")
+        raise ResumeValidationError(
+            "t2t review decision is missing review request binding"
+        )
     decision_ref = persist_review_decision(
         data_dir,
         session_id=session_id,
@@ -819,33 +1001,23 @@ def apply_t2t_review_decision(state: TopLevelState, request: ResumeReviewRequest
             "stage_outputs": outputs,
             "last_error": "t2t stopped by human review decision",
         }
-    updated_state = {**state, "stage_outputs": outputs, "active_interrupt": None, "supervision_state": "running_stage"}
+    updated_state = {
+        **state,
+        "stage_outputs": outputs,
+        "active_interrupt": None,
+        "supervision_state": "running_stage",
+    }
     commit_update = commit_t2t(updated_state)
     return {**commit_update, "active_interrupt": None, "stage_outputs": outputs}
 
 
 def _config(out: dict[str, Any]) -> dict[str, Any]:
-    thresholds = {**DEFAULT_THRESHOLDS, **dict(out.get("thresholds") or {})}
     return {
-        "mode": out.get("mode", "auto_patch"),
-        "telomere_motif": (
-            str(
-                out.get(
-                    "configured_telomere_motif",
-                    out.get("telomere_motif"),
-                )
-            ).upper()
-            if out.get("configured_telomere_motif", out.get("telomere_motif"))
-            is not None
-            else None
-        ),
-        "thresholds": thresholds,
+        "mode": resolve_t2t_mode(out.get("mode")),
         "chromosome_list_ref": out.get("chromosome_list_ref"),
         "assembly_fasta_ref": out.get("assembly_fasta_ref"),
         "ont_read_refs": list(out.get("ont_read_refs") or []),
     }
-
-
 
 
 def _ont_read_inputs(
@@ -887,7 +1059,9 @@ def _ont_read_inputs(
                 raise ValueError(f"ONT registry asset {asset_id!r} has no path")
             selected.append(
                 {
-                    "asset_id": str(asset.get("asset_id") or f"{asset_type}:{index:03d}"),
+                    "asset_id": str(
+                        asset.get("asset_id") or f"{asset_type}:{index:03d}"
+                    ),
                     "path": path,
                 }
             )
@@ -925,18 +1099,27 @@ def _skip_no_reads(state: TopLevelState, out: dict[str, Any], reason: str) -> di
     _write_tsv(telomeric_source, [], _READ_SCAN_FIELDS)
     _write_tsv(candidates_source, [], _CANDIDATE_FIELDS)
     reads_scan = publish_or_recover_work_artifact(
-        absolute_data_dir(state), state["session_id"], reads_source,
-        stage="t2t", method_name=T2T_CONTRACT_METHOD,
+        absolute_data_dir(state),
+        state["session_id"],
+        reads_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_READS_TELOMERE_SCAN,
     ).path
     telomeric_tsv = publish_or_recover_work_artifact(
-        absolute_data_dir(state), state["session_id"], telomeric_source,
-        stage="t2t", method_name=T2T_CONTRACT_METHOD,
+        absolute_data_dir(state),
+        state["session_id"],
+        telomeric_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_TELOMERIC_READS,
     ).path
     candidates = publish_or_recover_work_artifact(
-        absolute_data_dir(state), state["session_id"], candidates_source,
-        stage="t2t", method_name=T2T_CONTRACT_METHOD,
+        absolute_data_dir(state),
+        state["session_id"],
+        candidates_source,
+        stage="t2t",
+        method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_EXTENSION_CANDIDATES,
     ).path
     return _update(
@@ -961,7 +1144,11 @@ def _looks_like_fasta(path: Path) -> bool:
 
 
 def _open_text(path: Path):
-    return gzip.open(path, "rt", encoding="utf-8") if path.suffix == ".gz" else path.open("r", encoding="utf-8")
+    return (
+        gzip.open(path, "rt", encoding="utf-8")
+        if path.suffix == ".gz"
+        else path.open("r", encoding="utf-8")
+    )
 
 
 def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
@@ -1001,7 +1188,9 @@ def _iter_sequences(path: Path) -> Iterator[tuple[str, str]]:
                 raise ValueError("invalid FASTQ header")
 
 
-def _scan_fasta_ends(path: Path, motif: str, thresholds: dict[str, int]) -> Iterable[dict[str, str]]:
+def _scan_fasta_ends(
+    path: Path, motif: str, thresholds: dict[str, int]
+) -> Iterable[dict[str, str]]:
     for name, sequence in _iter_sequences(path):
         left, right = _terminal_signal(sequence, motif, thresholds)
         yield {
@@ -1014,14 +1203,21 @@ def _scan_fasta_ends(path: Path, motif: str, thresholds: dict[str, int]) -> Iter
         }
 
 
-def _terminal_signal(sequence: str, motif: str, thresholds: dict[str, int]) -> tuple[int, int]:
+def _terminal_signal(
+    sequence: str, motif: str, thresholds: dict[str, int]
+) -> tuple[int, int]:
     window = min(len(sequence), int(thresholds["terminal_window_bp"]))
-    return _max_motif_copies(sequence[:window], motif), _max_motif_copies(sequence[-window:], motif)
+    return _max_motif_copies(sequence[:window], motif), _max_motif_copies(
+        sequence[-window:], motif
+    )
 
 
 def _max_motif_copies(sequence: str, motif: str) -> int:
     alternatives = [re.escape(motif), re.escape(_reverse_complement(motif))]
-    match_lengths = [len(match.group(0)) // len(motif) for match in re.finditer(f"(?:{'|'.join(alternatives)})+", sequence)]
+    match_lengths = [
+        len(match.group(0)) // len(motif)
+        for match in re.finditer(f"(?:{'|'.join(alternatives)})+", sequence)
+    ]
     return max(match_lengths, default=0)
 
 
@@ -1044,24 +1240,52 @@ def _candidate_rows(
         signal = read_signals.get(paf.query)
         sequence = read_sequences.get(paf.query)
         target = assembly_ends.get(paf.target)
-        if not signal or not sequence or not target or (allowed_sequences and paf.target not in allowed_sequences):
+        if (
+            not signal
+            or not sequence
+            or not target
+            or (allowed_sequences and paf.target not in allowed_sequences)
+        ):
             continue
         for read_end in ("left", "right"):
             if signal.get(f"{read_end}_has_signal") != "true":
                 continue
-            target_end = read_end if paf.strand == "+" else ("right" if read_end == "left" else "left")
+            target_end = (
+                read_end
+                if paf.strand == "+"
+                else ("right" if read_end == "left" else "left")
+            )
             if target.get(f"{target_end}_has_signal") == "true":
                 continue
-            target_distance = paf.target_start if target_end == "left" else paf.target_length - paf.target_end
-            tail_length = paf.query_start if read_end == "left" else paf.query_length - paf.query_end
-            if paf.mapq < thresholds["min_mapq"] or paf.overlap_bp < thresholds["min_overlap_bp"] or target_distance > thresholds["max_target_terminal_distance_bp"] or tail_length <= 0:
+            target_distance = (
+                paf.target_start
+                if target_end == "left"
+                else paf.target_length - paf.target_end
+            )
+            tail_length = (
+                paf.query_start
+                if read_end == "left"
+                else paf.query_length - paf.query_end
+            )
+            if (
+                paf.mapq < thresholds["min_mapq"]
+                or paf.overlap_bp < thresholds["min_overlap_bp"]
+                or target_distance > thresholds["max_target_terminal_distance_bp"]
+                or tail_length <= 0
+            ):
                 continue
-            oriented_sequence = sequence if paf.strand == "+" else _reverse_complement(sequence)
+            oriented_sequence = (
+                sequence if paf.strand == "+" else _reverse_complement(sequence)
+            )
             oriented_query_start = (
-                paf.query_start if paf.strand == "+" else paf.query_length - paf.query_end
+                paf.query_start
+                if paf.strand == "+"
+                else paf.query_length - paf.query_end
             )
             oriented_query_end = (
-                paf.query_end if paf.strand == "+" else paf.query_length - paf.query_start
+                paf.query_end
+                if paf.strand == "+"
+                else paf.query_length - paf.query_start
             )
             tail = (
                 oriented_sequence[:oriented_query_start]
@@ -1098,10 +1322,16 @@ def _candidate_rows(
             )
     rows: list[dict[str, str]] = []
     for candidates in grouped.values():
-        candidates.sort(key=lambda row: (int(row["mapq"]), int(row["overlap_bp"])), reverse=True)
+        candidates.sort(
+            key=lambda row: (int(row["mapq"]), int(row["overlap_bp"])), reverse=True
+        )
         representative = candidates[0]
         candidate_id = f"{representative['target']}:{representative['target_end']}"
-        supporting = [row for row in candidates if _tails_compatible(representative["tail"], row["tail"])]
+        supporting = [
+            row
+            for row in candidates
+            if _tails_compatible(representative["tail"], row["tail"])
+        ]
         support_ids = list(dict.fromkeys(row["read_id"] for row in supporting))
         accepted = len(support_ids) >= thresholds["min_supporting_reads"]
         for index, row in enumerate(candidates):
@@ -1112,21 +1342,34 @@ def _candidate_rows(
                 reason = "conservative_multi_read_support"
             elif accepted and row in supporting:
                 reason = "supporting_read"
-            rows.append({**{key: value for key, value in row.items() if key != "tail"}, "candidate_id": candidate_id, "supporting_reads": ",".join(support_ids), "decision": decision, "reason": reason})
+            rows.append(
+                {
+                    **{key: value for key, value in row.items() if key != "tail"},
+                    "candidate_id": candidate_id,
+                    "supporting_reads": ",".join(support_ids),
+                    "decision": decision,
+                    "reason": reason,
+                }
+            )
     return rows
 
 
 def _tails_compatible(first: str, second: str) -> bool:
     if not first or not second:
         return False
-    if abs(len(first) - len(second)) > max(100, int(max(len(first), len(second)) * 0.2)):
+    if abs(len(first) - len(second)) > max(
+        100, int(max(len(first), len(second)) * 0.2)
+    ):
         return False
     k = 11
     if min(len(first), len(second)) < k:
         return first == second
     first_kmers = {first[i : i + k] for i in range(len(first) - k + 1)}
     second_kmers = {second[i : i + k] for i in range(len(second) - k + 1)}
-    return len(first_kmers & second_kmers) / min(len(first_kmers), len(second_kmers)) >= 0.2
+    return (
+        len(first_kmers & second_kmers) / min(len(first_kmers), len(second_kmers))
+        >= 0.2
+    )
 
 
 def _iter_paf(path: Path) -> Iterator[PafRecord]:
@@ -1137,7 +1380,8 @@ def _iter_paf(path: Path) -> Iterator[PafRecord]:
             fields = line.rstrip("\r\n").split("\t")
             if len(fields) < 12:
                 raise ValueError(
-                    f"malformed PAF line {line_number}: expected at least 12 tab-delimited fields"
+                    f"malformed PAF line {line_number}: expected at least 12 "
+                    "tab-delimited fields"
                 )
             try:
                 record = PafRecord(
@@ -1170,7 +1414,9 @@ def _iter_paf(path: Path) -> Iterator[PafRecord]:
                 or record.target_end > record.target_length
                 or not 0 <= record.mapq <= 255
             ):
-                raise ValueError(f"malformed PAF line {line_number}: invalid field values")
+                raise ValueError(
+                    f"malformed PAF line {line_number}: invalid field values"
+                )
             yield record
 
 
@@ -1187,7 +1433,9 @@ def _write_patched_fasta(
         left_cut = int(left["cut"]) if left else 0
         right_cut = int(right["cut"]) if right else len(sequence)
         if left_cut < 0 or right_cut > len(sequence) or left_cut > right_cut:
-            raise ValueError(f"invalid T2T patch interval for {name}: {left_cut}>{right_cut}")
+            raise ValueError(
+                f"invalid T2T patch interval for {name}: {left_cut}>{right_cut}"
+            )
         patched = (
             (str(left["tail"]) if left else "")
             + sequence[left_cut:right_cut]
@@ -1211,7 +1459,9 @@ def _write_fasta_record(handle, name: str, sequence: str) -> None:
 
 def _write_tsv(path: Path, rows: Iterable[dict[str, str]], fields: list[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", extrasaction="ignore")
+        writer = csv.DictWriter(
+            handle, fieldnames=fields, delimiter="\t", extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1227,7 +1477,11 @@ def _load_chromosome_list(path_value: str | None) -> set[str] | None:
     path = Path(path_value)
     if not path.exists():
         return None
-    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")}
+    return {
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
 
 
 def _review_candidates(path: Path) -> list[dict[str, Any]]:
@@ -1253,20 +1507,28 @@ def _materialize_t2t_patches(
     state: TopLevelState,
     out: dict[str, Any],
     *,
+    execution_inputs: T2TFrozenExecutionInputs | None = None,
     selected_candidate_ids: set[str] | None = None,
     allowed_decisions: set[str],
 ) -> dict[str, str] | None:
+    if execution_inputs is None:
+        execution_inputs = load_t2t_frozen_execution_inputs(state, output=out)
     candidates = _read_tsv(Path(out["telomere_extension_candidates_ref"]))
     selected = [
         row
         for row in candidates
         if row.get("decision") in allowed_decisions
-        and (selected_candidate_ids is None or row.get("candidate_id") in selected_candidate_ids)
+        and (
+            selected_candidate_ids is None
+            or row.get("candidate_id") in selected_candidate_ids
+        )
     ]
     if not selected:
         return None
     read_sequences = dict(_iter_sequences(Path(out["telomeric_reads_fasta_ref"])))
-    assembly_sequences = dict(_iter_sequences(Path(out["input_assembly_ref"])))
+    assembly_sequences = dict(
+        _iter_sequences(Path(execution_inputs.input_assembly_ref))
+    )
     patches: dict[str, dict[str, Any]] = {}
     records: list[dict[str, str]] = []
     error: str | None = None
@@ -1330,7 +1592,7 @@ def _materialize_t2t_patches(
                     break
     if not patches and not error:
         return None
-    records_source = Path(out["work_dir"]) / "patch_records.tsv"
+    records_source = Path(execution_inputs.work_dir) / "patch_records.tsv"
     if error:
         for record in records:
             record["materialization_status"] = "not_materialized"
@@ -1346,8 +1608,10 @@ def _materialize_t2t_patches(
     ).path
     if error:
         return {"patch_records_ref": str(records_path), "error": error}
-    patched_source = Path(out["work_dir"]) / "patched_assembly.fa"
-    _write_patched_fasta(Path(out["input_assembly_ref"]), patched_source, patches)
+    patched_source = Path(execution_inputs.work_dir) / "patched_assembly.fa"
+    _write_patched_fasta(
+        Path(execution_inputs.input_assembly_ref), patched_source, patches
+    )
     patched_path = publish_or_recover_work_artifact(
         absolute_data_dir(state),
         state["session_id"],
@@ -1356,7 +1620,10 @@ def _materialize_t2t_patches(
         method_name=T2T_CONTRACT_METHOD,
         artifact_type=T2T_PATCHED_ASSEMBLY,
     ).path
-    return {"patched_assembly_ref": str(patched_path), "patch_records_ref": str(records_path)}
+    return {
+        "patched_assembly_ref": str(patched_path),
+        "patch_records_ref": str(records_path),
+    }
 
 
 def _final_status(out: dict[str, Any], summary: list[dict[str, str]]) -> str:
@@ -1389,12 +1656,18 @@ def _block_for_t2t_review(
         gate_id="t2t_review",
         reason="t2t_patch_candidates_require_human_selection",
         candidates=candidates,
-        decisions_allowed=["accept_selected_candidates", "continue_without_patch", "stop_pipeline"],
+        decisions_allowed=[
+            "accept_selected_candidates",
+            "continue_without_patch",
+            "stop_pipeline",
+        ],
         auto_decidable=False,
         report_refs={
             "t2t_finishing_report_ref": str(report_path),
             "telomere_status_summary_ref": str(summary_path),
-            "telomere_extension_candidates_ref": out["telomere_extension_candidates_ref"],
+            "telomere_extension_candidates_ref": out[
+                "telomere_extension_candidates_ref"
+            ],
             "bundle_ref": str(bundle_path),
         },
         notes=list(out.get("notes") or []),
@@ -1445,7 +1718,10 @@ def _report_markdown(out: dict[str, Any], summary: list[dict[str, str]]) -> str:
         "",
         f"- input assembly: `{out.get('input_assembly_ref', '')}`",
         f"- source stage: `{out.get('source_stage', '')}`",
-        f"- ONT reads: `{', '.join(out.get('ont_read_refs') or []) or 'not available'}`",
+        (
+            f"- ONT reads: `"
+            f"{', '.join(out.get('ont_read_refs') or []) or 'not available'}`"
+        ),
         f"- execution enabled: `{out.get('execution_enabled')}`",
         f"- resolved telomere motif: `{out.get('resolved_telomere_motif')}`",
         f"- motif source: `{out.get('resolved_telomere_motif_source')}`",
@@ -1465,7 +1741,9 @@ def _report_markdown(out: dict[str, Any], summary: list[dict[str, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _register_artifacts(state: TopLevelState, out: dict[str, Any], summary_path: Path, report_path: Path) -> list[Path]:
+def _register_artifacts(
+    state: TopLevelState, out: dict[str, Any], summary_path: Path, report_path: Path
+) -> list[Path]:
     candidates = [
         (out.get("alignment_paf_ref"), T2T_READ_ALIGNMENT_PAF),
         (out.get("assembly_telomere_scan_ref"), T2T_ASSEMBLY_TELOMERE_SCAN),
@@ -1485,7 +1763,67 @@ def _register_artifacts(state: TopLevelState, out: dict[str, Any], summary_path:
     return paths
 
 
-_ASSEMBLY_SCAN_FIELDS = ["sequence", "length", "left_motif_copies", "right_motif_copies", "left_has_signal", "right_has_signal"]
-_READ_SCAN_FIELDS = ["read_id", "source_asset_id", "source_read_id", "length", "left_motif_copies", "right_motif_copies", "left_has_signal", "right_has_signal"]
-_CANDIDATE_FIELDS = ["candidate_id", "target", "target_end", "target_start", "target_stop", "junction_coordinate", "target_bases_trimmed", "read_id", "source_asset_id", "source_read_id", "read_end", "strand", "mapq", "overlap_bp", "target_distance_bp", "extension_length", "query_start", "query_end", "oriented_query_start", "oriented_query_end", "supporting_reads", "frozen_attempt_ref", "execution_ref", "alignment_paf_ref", "decision", "reason"]
-_PATCH_RECORD_FIELDS = ["candidate_id", "target", "target_end", "source_read_id", "source_asset_id", "original_read_id", "source_strand", "extension_length", "target_cut_coordinate", "target_bases_removed", "bases_added", "supporting_reads", "mapq", "overlap_bp", "materialization_status", "reason"]
+_ASSEMBLY_SCAN_FIELDS = [
+    "sequence",
+    "length",
+    "left_motif_copies",
+    "right_motif_copies",
+    "left_has_signal",
+    "right_has_signal",
+]
+_READ_SCAN_FIELDS = [
+    "read_id",
+    "source_asset_id",
+    "source_read_id",
+    "length",
+    "left_motif_copies",
+    "right_motif_copies",
+    "left_has_signal",
+    "right_has_signal",
+]
+_CANDIDATE_FIELDS = [
+    "candidate_id",
+    "target",
+    "target_end",
+    "target_start",
+    "target_stop",
+    "junction_coordinate",
+    "target_bases_trimmed",
+    "read_id",
+    "source_asset_id",
+    "source_read_id",
+    "read_end",
+    "strand",
+    "mapq",
+    "overlap_bp",
+    "target_distance_bp",
+    "extension_length",
+    "query_start",
+    "query_end",
+    "oriented_query_start",
+    "oriented_query_end",
+    "supporting_reads",
+    "frozen_attempt_ref",
+    "execution_ref",
+    "alignment_paf_ref",
+    "decision",
+    "reason",
+]
+_PATCH_RECORD_FIELDS = [
+    "candidate_id",
+    "target",
+    "target_end",
+    "source_read_id",
+    "source_asset_id",
+    "original_read_id",
+    "source_strand",
+    "extension_length",
+    "target_cut_coordinate",
+    "target_bases_removed",
+    "bases_added",
+    "supporting_reads",
+    "mapq",
+    "overlap_bp",
+    "materialization_status",
+    "reason",
+]

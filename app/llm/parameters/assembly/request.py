@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm.parameters.assembly.response import (
     PARAMETER_RECOMMENDATION_CONTRACT,
@@ -22,10 +22,7 @@ from app.schemas.parameter_catalog import MethodParameterCatalog
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalRecommendationFacts,
-    QuantityFact,
 )
-from app.schemas.shared_parameters import SpeciesFacts
-
 
 _PARAMETER_SPEC_FIELDS = (
     "value_type",
@@ -99,16 +96,25 @@ class AssemblyParameterRequestDTO(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: Literal[3]
     recommendation_contract: Literal["parameter_recommendation_v1"]
     method_id: str = Field(min_length=1)
     task: ParameterAttemptTask
-    species_facts: SpeciesFacts | None = None
-    observations: list[dict[str, Any]]
+    facts: CanonicalRecommendationFacts
+    assembly_context: AssemblyRecommendationContext
     adjustable_parameters: dict[str, dict[str, Any]]
     method_guidance: list[dict[str, Any]] | None = None
     literature_selection: dict[str, Any] | None = None
     literature_cases: list[dict[str, Any]] | None = None
-    retry_context: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_context(self) -> "AssemblyParameterRequestDTO":
+        has_retry = self.assembly_context.retry is not None
+        if (self.task != "recommend_initial") != has_retry:
+            raise ValueError(
+                "Assembly retry tasks require typed assembly_context.retry"
+            )
+        return self
 
 
 def build_parameter_request_dto(
@@ -119,26 +125,26 @@ def build_parameter_request_dto(
     context: AssemblyRecommendationContext,
     task: ParameterAttemptTask,
     basis_snapshot: Mapping[str, Any],
-    retry_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build only the model-visible parameter recommendation DTO."""
 
     if method_id != catalog.method_id:
         raise ValueError(
-            f"parameter request method {method_id!r} does not match catalog {catalog.method_id!r}"
+            f"parameter request method {method_id!r} does not match "
+            f"catalog {catalog.method_id!r}"
         )
     if basis_snapshot.get("method_id") != catalog.method_id:
         raise ValueError("parameter request basis method does not match the catalog")
 
-    observations = _facts_to_observations(facts)
     adjustable_parameters = _model_adjustable_parameters(catalog)
 
     request: dict[str, Any] = {
+        "schema_version": 3,
         "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
         "method_id": method_id,
         "task": task,
-        "species_facts": _project_canonical_species(facts.species),
-        "observations": _model_observations(observations),
+        "facts": facts,
+        "assembly_context": context,
         "adjustable_parameters": adjustable_parameters,
     }
     _add_visible(
@@ -161,88 +167,9 @@ def build_parameter_request_dto(
         _model_literature_cases(basis_snapshot.get("literature_cases")),
         already_projected=True,
     )
-    if task != "recommend_initial" and retry_context is not None:
-        _add_visible(
-            request,
-            "retry_context",
-            _model_retry_context(retry_context),
-            already_projected=True,
-        )
     return AssemblyParameterRequestDTO.model_validate(request).model_dump(
         mode="json",
         exclude_none=True,
-    )
-
-
-def _facts_to_observations(facts: CanonicalRecommendationFacts) -> list[dict[str, Any]]:
-    """Project CanonicalRecommendationFacts into a flat observation list."""
-    observations: list[dict[str, Any]] = []
-
-    def _add(section: str, name: str, value: Any) -> None:
-        if value is None:
-            return
-        # Unwrap QuantityFact to its scalar value
-        if isinstance(value, QuantityFact):
-            value = value.value
-        observations.append({"id": f"cf_{section}_{name}", "section": section, "name": name, "value": value})
-
-    s = facts.species
-    _add("species", "scientific_name", s.scientific_name)
-    _add("species", "taxon_id", s.taxon_id)
-    _add("species", "clade", s.clade)
-    _add("species", "ploidy", s.ploidy)
-    _add("species", "expected_chromosome_count", s.expected_chromosome_count)
-    _add("species", "supplied_telomere_motif", s.supplied_telomere_motif)
-
-    r = facts.reads
-    _add("reads", "read_type", r.read_type)
-    _add("reads", "read_n50", r.read_n50)
-    _add("reads", "read_count", r.read_count)
-    _add("reads", "total_bases", r.total_bases)
-    _add("reads", "mean_read_length", r.mean_read_length)
-    _add("reads", "q20_fraction", r.q20_fraction)
-    _add("reads", "mean_quality", r.mean_quality)
-
-    g = facts.genome
-    _add("genome", "effective_genome_size", g.effective_genome_size)
-    _add("genome", "measured_genome_size", g.measured_genome_size)
-    _add("genome", "provided_genome_size", g.provided_genome_size)
-    _add("genome", "heterozygosity", g.heterozygosity)
-    _add("genome", "repeat_fraction", g.repeat_fraction)
-    _add("genome", "estimate_confidence", g.estimate_confidence)
-
-    _add("sequencing", "raw_coverage", facts.sequencing.raw_coverage)
-
-    a = facts.asset_presence
-    _add("assets", "has_hifi", a.has_hifi)
-    _add("assets", "has_ont", a.has_ont)
-    _add("assets", "has_hic", a.has_hic)
-    _add("assets", "has_rnaseq", a.has_rnaseq)
-
-    return observations
-
-
-def _project_canonical_species(species: Any) -> SpeciesFacts | None:
-    """Project CanonicalSpeciesFacts to SpeciesFacts, or None if no scientific name."""
-    if species is None or not species.scientific_name:
-        return None
-    taxon_id: int | None = None
-    if species.taxon_id is not None:
-        try:
-            taxon_id = int(species.taxon_id)
-        except (ValueError, TypeError):
-            taxon_id = None
-    ploidy_fact = species.ploidy
-    ploidy_int: int | None = int(ploidy_fact.value) if ploidy_fact is not None else None
-    chrom_fact = species.expected_chromosome_count
-    chrom_int: int | None = int(chrom_fact.value) if chrom_fact is not None else None
-    return SpeciesFacts(
-        scientific_name=species.scientific_name,
-        taxon_id=taxon_id,
-        clade=species.clade,
-        ploidy=ploidy_int,
-        expected_chromosome_count=chrom_int,
-        telomere_motif=species.supplied_telomere_motif,
     )
 
 
@@ -266,32 +193,6 @@ def _model_parameter_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         child = _model_safe_value(value[field])
         if child is not _OMIT:
             projected[field] = child
-    return projected
-
-
-def _model_observations(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        raise ValueError("assembly parameter request observations must be a list")
-    projected: list[dict[str, Any]] = []
-    for index, observation in enumerate(value):
-        if not isinstance(observation, Mapping):
-            raise ValueError(
-                f"assembly parameter request observations[{index}] must be an object"
-            )
-        if not {"id", "section", "name", "value"}.issubset(observation):
-            raise ValueError(
-                f"assembly parameter request observations[{index}] has an invalid shape"
-            )
-        item = _model_mapping_fields(
-            observation,
-            ("id", "section", "group", "name", "value"),
-        )
-        if (
-            item is not _OMIT
-            and {"id", "section", "name", "value"}.issubset(item)
-            and not _mapping_identifies_audit_metadata(item)
-        ):
-            projected.append(item)
     return projected
 
 
@@ -328,30 +229,6 @@ def _model_method_guidance(value: Any) -> Any:
         if card is not _OMIT:
             cards.append(card)
     return cards if cards else _OMIT
-
-
-def _model_retry_context(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return _OMIT
-    projected: dict[str, Any] = {}
-    task = _model_safe_value(value.get("task"))
-    if task is not _OMIT:
-        projected["task"] = task
-    for field in ("previous_attempt", "attempt_history", "assembly_review"):
-        child = _model_safe_value(value.get(field))
-        if child is not _OMIT:
-            projected[field] = child
-    signal_ids = [
-        signal_id
-        for signal_id in (value.get("signal_ids") or [])
-        if isinstance(signal_id, str) and not _is_audit_locator(signal_id)
-    ]
-    if signal_ids:
-        projected["signal_ids"] = signal_ids
-    signals = _model_safe_value(value.get("signals"))
-    if signals is not _OMIT:
-        projected["signals"] = signals
-    return projected if projected else _OMIT
 
 
 def _add_visible(

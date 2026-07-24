@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas.parameter_recommendation import AutoHiCRecommendationContext
+from app.schemas.parameter_recommendation import (
+    AutoHiCRecommendationContext,
+    RecommendationRetryContext,
+)
 from app.schemas.state import TopLevelState
 from app.stages.base import stage_output
 
@@ -13,6 +16,7 @@ def build_autohic_recommendation_context(
     state: TopLevelState,
     *,
     hic_out: dict[str, Any] | None = None,
+    retry: RecommendationRetryContext | None = None,
 ) -> AutoHiCRecommendationContext:
     """Build AutoHiCRecommendationContext from pipeline stage state."""
 
@@ -28,11 +32,16 @@ def build_autohic_recommendation_context(
             if protocol is not None and str(protocol).strip():
                 library_protocols.append(str(protocol).strip())
 
-    provided_restriction_enzyme = hic_out.get("provided_restriction_enzyme") or None
+    run_parameters = hic_out.get("autohic_parameters") or {}
+    provided_restriction_enzyme = (
+        run_parameters.get("restriction_enzyme") or None
+        if isinstance(run_parameters, dict)
+        else None
+    )
 
     return AutoHiCRecommendationContext(
         stage="hic_scaffolding",
         library_protocols=library_protocols,
         provided_restriction_enzyme=provided_restriction_enzyme,
-        retry=None,
+        retry=retry,
     )

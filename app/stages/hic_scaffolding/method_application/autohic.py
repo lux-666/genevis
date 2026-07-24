@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from app.configuration import load_descriptor_registry
+from app.domains.parameter_recommendation.resolution import (
+    render_config_keys,
+    resolve_parameters,
+)
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
@@ -23,6 +27,7 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_FROZEN_PARAMETERS,
     ParameterAttempt,
 )
+from app.schemas.parameter_recommendation import ResolvedParameterSources
 from app.schemas.state import TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.support import (
@@ -38,25 +43,11 @@ from app.stages.hic_scaffolding.parameters.storage import (
     publish_autohic_parameter_file,
     write_autohic_parameter_artifact,
 )
-from app.stages.hic_scaffolding.parameters.workflow import (
-    load_approved_autohic_parameters,
-)
+from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
 
 METHOD = "hic_scaffolding.candidate.autohic"
-_ADJUSTABLE_PARAMETERS = {
-    "restriction_enzyme",
-    "number_of_edit_rounds",
-    "translocation_adjust",
-    "inversion_adjust",
-    "debris_adjust",
-    "error_max_epoch",
-    "error_min_len",
-    "error_max_len",
-    "error_filter_score",
-    "error_filter_iou_score",
-}
 LIFECYCLE = MethodExecutionLifecycle(
     stage="hic_scaffolding",
     name="autohic",
@@ -72,7 +63,11 @@ LIFECYCLE = MethodExecutionLifecycle(
 
 def build_autohic_graph():
     """Build the AutoHiC freeze -> run -> collect lifecycle."""
-    return build_method_graph(LIFECYCLE, freeze_autohic_attempt, collect_autohic_artifacts)
+    return build_method_graph(
+        LIFECYCLE,
+        freeze_autohic_attempt,
+        collect_autohic_artifacts,
+    )
 
 
 def freeze_autohic_attempt(state: TopLevelState) -> dict:
@@ -88,11 +83,16 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
 
     assembly = Path(str(output.get("pre_hic_assembly_ref", "")))
     if not assembly.is_file():
-        return _blocked(state, output, "pre_hic_contig_assembly_not_materialized_for_autohic")
+        return _blocked(
+            state,
+            output,
+            "pre_hic_contig_assembly_not_materialized_for_autohic",
+        )
 
-    parameters, blocked = _parameters(state, output, assembly)
+    parameters, resolved_sources, blocked = _parameters(state, output, assembly)
     if blocked:
         return update_hic_output(state, blocked)
+    assert resolved_sources is not None
 
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
@@ -111,9 +111,16 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         )
 
     package_by_name = {package.name: package for package in packages}
-    missing_packages = [name for name in ("autohic", "juicer", "three_d_dna") if name not in package_by_name]
+    missing_packages = [
+        name
+        for name in ("autohic", "juicer", "three_d_dna")
+        if name not in package_by_name
+    ]
     if missing_packages:
-        return update_hic_output(state, _missing_block("package_tools: " + ", ".join(missing_packages)))
+        return update_hic_output(
+            state,
+            _missing_block("package_tools: " + ", ".join(missing_packages)),
+        )
 
     autohic_root = Path(package_by_name["autohic"].install_root)
     juicer_root = Path(package_by_name["juicer"].install_root)
@@ -149,7 +156,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
             parameter_attempt.attempt_id,
             "frozen_parameters.json",
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "stage": "hic_scaffolding",
                 "method_id": METHOD,
                 "recommendation_manifest_ref": (
@@ -160,11 +167,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
                 "approval_decision_ref": (
                     parameter_attempt.approval_decision_ref.model_dump(mode="json")
                 ),
-                "approved_sparse_parameters": parameters.pop(
-                    "_approved_sparse_parameters"
-                ),
-                "provided_facts": parameters.pop("_provided_facts"),
-                "executor_defaults": parameters.pop("_executor_defaults"),
+                **resolved_sources.model_dump(mode="json"),
                 "parameters": parameters,
             },
             artifact_type=HIC_PARAMETER_FROZEN_PARAMETERS,
@@ -418,132 +421,128 @@ def _parameters(
     state: TopLevelState,
     output: dict[str, Any],
     assembly: Path,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any],
+    ResolvedParameterSources | None,
+    dict[str, Any] | None,
+]:
     raw = dict(output.get("autohic_parameters") or {})
+    l0_executor_values = {"hic_threads": raw["threads"]} if "threads" in raw else {}
     try:
-        approved = load_approved_autohic_parameters(state)
-    except (ValueError, AutoHiCParameterPersistenceError) as exc:
-        return {}, _missing_block(f"approved AutoHiC parameter attempt: {exc}")
-    unknown = sorted(set(approved) - _ADJUSTABLE_PARAMETERS)
-    if unknown:
-        return {}, _parameter_block(
-            "approved_parameters",
-            unknown,
-            "contains AutoHiC parameters that cannot be rendered",
+        parameter_attempt = current_parameter_attempt(
+            output,
+            method_id=METHOD,
+            label=LIFECYCLE.name,
         )
-    enzyme_source = approved.get("restriction_enzyme", raw.get("restriction_enzyme"))
-    enzyme = str(enzyme_source or "").strip()
+        approved_bundle = load_approved_parameter_chain_v3(
+            state,
+            attempt=parameter_attempt,
+            expected_stage="hic_scaffolding",
+            expected_method_id=METHOD,
+        )
+        resolved_sources = resolve_parameters(
+            approved_bundle.chain.catalog,
+            l0_executor_values=l0_executor_values,
+            snapshot=approved_bundle.chain.input_snapshot,
+            approved_l2=approved_bundle.approved_l2,
+        )
+        config_parameters = render_config_keys(
+            resolved_sources,
+            approved_bundle.chain.catalog,
+        )
+    except (ValueError, AutoHiCParameterPersistenceError) as exc:
+        return (
+            {},
+            None,
+            _missing_block(f"approved AutoHiC parameter attempt: {exc}"),
+        )
+
+    enzyme = str(config_parameters.get("restriction_enzyme") or "").strip()
     if not enzyme:
-        return {}, _missing_block("restriction_enzyme from L1 fact or approved L2 mapping")
+        return (
+            {},
+            None,
+            _missing_block("restriction_enzyme from L1 fact or approved L2 mapping"),
+        )
     if any(character in enzyme for character in ("\n", "\r", "=")):
-        return {}, _parameter_block(
-            "restriction_enzyme",
-            enzyme,
-            "cannot contain newline or '=' characters in an AutoHiC config",
+        return (
+            {},
+            None,
+            _parameter_block(
+                "restriction_enzyme",
+                enzyme,
+                "cannot contain newline or '=' characters in an AutoHiC config",
+            ),
         )
 
     reads = [Path(str(path)) for path in output.get("hic_read_paths") or []]
     if len(reads) < 2 or len(reads) % 2:
-        return {}, _missing_block("paired hic_read_paths (R1/R2)")
+        return {}, None, _missing_block("paired hic_read_paths (R1/R2)")
     missing_reads = [str(path) for path in reads if not path.is_file()]
     if missing_reads:
-        return {}, _parameter_block("hic_read_paths", missing_reads, "all paired Hi-C reads must be materialized")
-
-    threads = _positive_int(raw.get("threads", 10))
-    if threads is None:
-        return {}, _parameter_block("autohic_parameters.threads", raw.get("threads"), "must be a positive integer")
-    number_of_edit_rounds = _nonnegative_int(
-        approved.get("number_of_edit_rounds", raw.get("number_of_edit_rounds", 2))
-    )
-    if number_of_edit_rounds is None:
-        return {}, _parameter_block(
-            "autohic_parameters.number_of_edit_rounds",
-            approved.get("number_of_edit_rounds", raw.get("number_of_edit_rounds")),
-            "must be a non-negative integer",
+        return (
+            {},
+            None,
+            _parameter_block(
+                "hic_read_paths",
+                missing_reads,
+                "all paired Hi-C reads must be materialized",
+            ),
         )
-    error_max_epoch = _positive_int(
-        approved.get("error_max_epoch", raw.get("error_max_epoch", 5))
-    )
-    error_min_len = _positive_int(
-        approved.get("error_min_len", raw.get("error_min_len", 15_000))
-    )
-    error_max_len = _positive_int(
-        approved.get("error_max_len", raw.get("error_max_len", 20_000_000))
-    )
-    if error_max_epoch is None or error_min_len is None or error_max_len is None:
-        return {}, _parameter_block("autohic_parameters.error_limits", raw, "epoch and length limits must be positive integers")
+
+    threads = config_parameters["threads"]
+    number_of_edit_rounds = config_parameters["number_of_edit_rounds"]
+    error_max_epoch = config_parameters["error_max_epoch"]
+    error_min_len = config_parameters["error_min_len"]
+    error_max_len = config_parameters["error_max_len"]
     if error_max_len < error_min_len:
-        return {}, _parameter_block("autohic_parameters.error_max_len", error_max_len, "must be >= error_min_len")
-
-    error_filter_score = _probability(
-        approved.get("error_filter_score", raw.get("error_filter_score", 0.9))
-    )
-    error_filter_iou_score = _probability(
-        approved.get(
-            "error_filter_iou_score", raw.get("error_filter_iou_score", 0.8)
-        )
-    )
-    if error_filter_score is None:
-        return {}, _parameter_block(
-            "autohic_parameters.error_filter_score",
-            raw.get("error_filter_score"),
-            "must be a number between 0 and 1",
-        )
-    if error_filter_iou_score is None:
-        return {}, _parameter_block(
-            "autohic_parameters.error_filter_iou_score",
-            raw.get("error_filter_iou_score"),
-            "must be a number between 0 and 1",
+        return (
+            {},
+            None,
+            _parameter_block(
+                "error_max_len",
+                error_max_len,
+                "must be >= error_min_len",
+            ),
         )
 
-    python_command = str(raw.get("python_command") or "python3.9").strip()
+    error_filter_score = config_parameters["error_filter_score"]
+    error_filter_iou_score = config_parameters["error_filter_iou_score"]
+
+    python_command = str(raw.get("python_command") or "").strip()
     if not python_command:
-        return {}, _parameter_block("autohic_parameters.python_command", python_command, "must be non-empty")
+        return (
+            {},
+            None,
+            _parameter_block(
+                "autohic_parameters.python_command",
+                python_command,
+                "must be non-empty",
+            ),
+        )
 
-    boolean_values: dict[str, bool] = {}
-    for name, default in (
-        ("translocation_adjust", True),
-        ("inversion_adjust", True),
-        ("debris_adjust", False),
-    ):
-        value = approved.get(name, raw.get(name, default))
-        if not isinstance(value, bool):
-            return {}, _parameter_block(name, value, "must be a boolean")
-        boolean_values[name] = value
-
-    executor_defaults = {
-        "number_of_edit_rounds": raw.get("number_of_edit_rounds", 2),
-        "translocation_adjust": raw.get("translocation_adjust", True),
-        "inversion_adjust": raw.get("inversion_adjust", True),
-        "debris_adjust": raw.get("debris_adjust", False),
-        "error_max_epoch": raw.get("error_max_epoch", 5),
-        "error_min_len": raw.get("error_min_len", 15_000),
-        "error_max_len": raw.get("error_max_len", 20_000_000),
-        "error_filter_score": raw.get("error_filter_score", 0.9),
-        "error_filter_iou_score": raw.get("error_filter_iou_score", 0.8),
-    }
-
-    return {
-        "species_name": _safe_name(str(output.get("species_name") or assembly.stem)),
-        "hic_read_paths": [str(path.resolve()) for path in reads],
-        "restriction_enzyme": enzyme,
-        "threads": threads,
-        "number_of_edit_rounds": number_of_edit_rounds,
-        "translocation_adjust": boolean_values["translocation_adjust"],
-        "inversion_adjust": boolean_values["inversion_adjust"],
-        "debris_adjust": boolean_values["debris_adjust"],
-        "error_max_epoch": error_max_epoch,
-        "error_min_len": error_min_len,
-        "error_max_len": error_max_len,
-        "error_filter_score": error_filter_score,
-        "error_filter_iou_score": error_filter_iou_score,
-        "python_command": python_command,
-        "_approved_sparse_parameters": dict(approved),
-        "_provided_facts": {
-            "restriction_enzyme": raw.get("restriction_enzyme")
+    return (
+        {
+            "species_name": _safe_name(
+                str(output.get("species_name") or assembly.stem)
+            ),
+            "hic_read_paths": [str(path.resolve()) for path in reads],
+            "restriction_enzyme": enzyme,
+            "threads": threads,
+            "number_of_edit_rounds": number_of_edit_rounds,
+            "translocation_adjust": config_parameters["translocation_adjust"],
+            "inversion_adjust": config_parameters["inversion_adjust"],
+            "debris_adjust": config_parameters["debris_adjust"],
+            "error_max_epoch": error_max_epoch,
+            "error_min_len": error_min_len,
+            "error_max_len": error_max_len,
+            "error_filter_score": error_filter_score,
+            "error_filter_iou_score": error_filter_iou_score,
+            "python_command": python_command,
         },
-        "_executor_defaults": executor_defaults,
-    }, None
+        resolved_sources,
+        None,
+    )
 
 
 def _config_text(
@@ -604,7 +603,10 @@ def _script(
 ) -> str:
     lines = [
         "set -e",
-        f"mkdir -p {shlex.quote(str(reference_dir))} {shlex.quote(str(fastq_dir))} {shlex.quote(str(result_root))}",
+        "mkdir -p "
+        + " ".join(
+            shlex.quote(str(path)) for path in (reference_dir, fastq_dir, result_root)
+        ),
         f"cp {shlex.quote(str(assembly))} {shlex.quote(str(input_assembly))}",
     ]
     for index, read_path in enumerate(hic_read_paths):
@@ -619,7 +621,12 @@ def _script(
             f"cd {shlex.quote(str(autohic_root))}",
             " ".join(
                 shlex.quote(value)
-                for value in [python_command, str(autohic_entry), "-c", str(config_path)]
+                for value in [
+                    python_command,
+                    str(autohic_entry),
+                    "-c",
+                    str(config_path),
+                ]
             ),
             "candidate=''",
             "for value in "
@@ -627,53 +634,49 @@ def _script(
                 shlex.quote(str(path))
                 for path in [
                     top_result / "contigs_autohic.fasta",
-                    top_result / "autohic_results" / "chromosome" / "contigs_autohic.fasta",
-                    top_result / "autohic_results" / "chromosome" / "contigs.FINAL.fasta",
+                    top_result
+                    / "autohic_results"
+                    / "chromosome"
+                    / "contigs_autohic.fasta",
+                    top_result
+                    / "autohic_results"
+                    / "chromosome"
+                    / "contigs.FINAL.fasta",
                 ]
             )
-            + "; do if test -f \"$value\"; then candidate=\"$value\"; break; fi; done",
-            "test -n \"$candidate\"",
+            + '; do if test -f "$value"; then candidate="$value"; break; fi; done',
+            'test -n "$candidate"',
             shell_publish_variable("candidate", scaffold_fasta),
-            f"candidate={shlex.quote(str(top_result / 'autohic_results' / 'chromosome' / 'contigs.final.hic'))}",
-            "test -f \"$candidate\"",
+            "candidate="
+            + shlex.quote(
+                str(top_result / "autohic_results" / "chromosome" / "contigs.final.hic")
+            ),
+            'test -f "$candidate"',
             shell_publish_variable("candidate", contact_map),
-            f"candidate={shlex.quote(str(top_result / 'autohic_results' / 'chromosome' / 'contigs.final.assembly'))}",
-            "test -f \"$candidate\"",
+            "candidate="
+            + shlex.quote(
+                str(
+                    top_result
+                    / "autohic_results"
+                    / "chromosome"
+                    / "contigs.final.assembly"
+                )
+            ),
+            'test -f "$candidate"',
             shell_publish_variable("candidate", assembly_file),
             f"candidate={shlex.quote(str(top_result / 'result.html'))}",
-            "test -f \"$candidate\"",
+            'test -f "$candidate"',
             shell_publish_variable("candidate", html_report),
         ]
     )
     return "\n".join(lines) + "\n"
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        converted = int(value)
-    except (TypeError, ValueError):
-        return None
-    return converted if converted > 0 else None
-
-
-def _nonnegative_int(value: Any) -> int | None:
-    try:
-        converted = int(value)
-    except (TypeError, ValueError):
-        return None
-    return converted if converted >= 0 else None
-
-
-def _probability(value: Any) -> float | None:
-    try:
-        converted = float(value)
-    except (TypeError, ValueError):
-        return None
-    return converted if 0.0 <= converted <= 1.0 else None
-
-
 def _safe_name(value: str) -> str:
-    normalized = "".join(character if character.isalnum() or character in "._-" else "_" for character in value)
+    normalized = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in value
+    )
     return normalized.strip("._-") or "GeneAgent"
 
 

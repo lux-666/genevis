@@ -44,10 +44,17 @@ ASSEMBLY_REVIEW_DECISION_HELP = {
         "Continue downstream despite weak or incomplete evidence; "
         "the next stage is still Hi-C scaffolding."
     ),
-    "purge": "Use an already generated purged assembly as the downstream input; provide its output path and evidence.",
-    "polish": "Use an already generated polished assembly as the downstream input; provide its output path and evidence.",
-    "rerun": "Retry assembly with adjusted parameters; do not continue to Hi-C/T2T yet.",
-    "stop_human_review": "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted.",
+    "purge": (
+        "Use an already generated purged assembly as the downstream input; "
+        "provide its output path and evidence."
+    ),
+    "polish": (
+        "Use an already generated polished assembly as the downstream input; "
+        "provide its output path and evidence."
+    ),
+    "stop_human_review": (
+        "Stop here and leave downstream Hi-C/T2T/annotation stages unstarted."
+    ),
 }
 
 DECISION_LABELS = {
@@ -56,7 +63,6 @@ DECISION_LABELS = {
     "continue_low_confidence": "continue with weak evidence",
     "purge": "use purged assembly",
     "polish": "use polished assembly",
-    "rerun": "rerun assembly",
     "select_cyclone": "use CycloneSEQ route",
     "select_ont": "use ONT route",
     "select_hifi": "use HiFi route",
@@ -84,9 +90,16 @@ DECISION_HELP = {
     "select_cyclone": "use the CycloneSEQ assembly route.",
     "select_ont": "use the ONT assembly route.",
     "select_hifi": "use the HiFi assembly route.",
-    "accept_candidate": "use the reviewed scaffold result and continue to T2T/annotation.",
-    "keep_prior_assembly": "reject the AutoHiC result and continue with the prior contig assembly.",
-    "request_parameter_retry": "seal this AutoHiC attempt and request a fresh sparse parameter recommendation.",
+    "accept_candidate": (
+        "use the reviewed scaffold result and continue to T2T/annotation."
+    ),
+    "keep_prior_assembly": (
+        "reject the AutoHiC result and continue with the prior contig assembly."
+    ),
+    "request_parameter_retry": (
+        "seal this AutoHiC attempt and request a fresh sparse parameter "
+        "recommendation."
+    ),
     "select_method": "choose one available method/result for this gate.",
     "skip": "do not use this stage's result; continue with the previous assembly.",
     "stop_human_review": "stop the workflow here.",
@@ -99,8 +112,14 @@ DECISION_HELP = {
     "request_rerun": "ask for another run before continuing.",
     "stop": "stop the workflow here.",
     "continue": "continue past this gate.",
-    "approve_parameters": "approve this exact, hash-bound parameter recommendation and continue execution.",
-    "reject_parameters": "reject this parameter recommendation and stop the current workflow attempt.",
+    "approve_parameters": (
+        "approve this exact, hash-bound parameter recommendation and continue "
+        "execution."
+    ),
+    "reject_parameters": (
+        "reject this parameter recommendation and stop the current workflow "
+        "attempt."
+    ),
 }
 
 
@@ -190,9 +209,13 @@ def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
                     print(f"    {key}: {candidate[key]}")
 
     interrupt = (summary.get("latest_review_request") or {}).get("payload", {})
-    for key in ("pre_hic_assembly_ref", "output_assembly_ref",
-                "hic_review_bundle_ref",
-                "chromosome_scaffolded_assembly_candidate_ref", "hic_qc_report_ref"):
+    for key in (
+        "pre_hic_assembly_ref",
+        "output_assembly_ref",
+        "hic_review_bundle_ref",
+        "chromosome_scaffolded_assembly_candidate_ref",
+        "hic_qc_report_ref",
+    ):
         val = interrupt.get(key) or requirements.get(key)
         if val:
             print(f"{key}: {val}")
@@ -245,6 +268,13 @@ def prompt_assembly_review_decision(
 ) -> dict[str, Any] | None:
     """Prompt the operator for an assembly_review decision. Returns None on cancel."""
     decisions = requirements.get("decisions_allowed", [])
+    if "rerun" in decisions:
+        print(
+            "error: legacy assembly_review rerun requirements are unsupported; "
+            "parameter retries must use the v3 recommendation and approval workflow",
+            file=sys.stderr,
+        )
+        return None
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
 
@@ -259,7 +289,7 @@ def prompt_assembly_review_decision(
     rejected = []
     metadata: dict[str, Any] = {}
 
-    if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence", "rerun"):
+    if decision in ("accept", "pass", "purge", "polish", "continue_low_confidence"):
         selectable_candidates = list(candidate_ids)
         if decision in {"accept", "pass", "continue_low_confidence"}:
             selectable_candidates = _materialized_assembly_candidates(
@@ -268,13 +298,18 @@ def prompt_assembly_review_decision(
                 data_dir=data_dir,
             )
             if len(selectable_candidates) != len(candidate_ids):
-                skipped = [cid for cid in candidate_ids if cid not in selectable_candidates]
+                skipped = [
+                    cid for cid in candidate_ids if cid not in selectable_candidates
+                ]
                 print("\nunavailable_candidates:")
                 for cid in skipped:
                     ref = candidate_refs.get(cid, "")
                     print(f"  - {cid}: FASTA missing or invalid ({ref})")
             if not selectable_candidates:
-                print("error: no materialized assembly FASTA is available for accept", file=sys.stderr)
+                print(
+                    "error: no materialized assembly FASTA is available for accept",
+                    file=sys.stderr,
+                )
                 return None
             _render_candidate_selection_evidence(
                 requirements,
@@ -314,10 +349,12 @@ def prompt_assembly_review_decision(
             if not candidate_id:
                 return None
 
-        if decision not in ("purge", "polish", "rerun"):
+        if decision not in ("purge", "polish"):
             if not final_assembly_ref:
                 try:
-                    final_assembly_ref = input(f"final_assembly_ref [{candidate_refs.get(candidate_id, '')}]: ").strip()
+                    final_assembly_ref = input(
+                        f"final_assembly_ref [{candidate_refs.get(candidate_id, '')}]: "
+                    ).strip()
                 except (EOFError, KeyboardInterrupt):
                     return None
                 if not final_assembly_ref:
@@ -330,11 +367,6 @@ def prompt_assembly_review_decision(
         if metadata is None:
             return None
         final_assembly_ref = metadata.get("action_output_ref")
-    elif decision == "rerun":
-        metadata = _prompt_rerun_metadata()
-        if metadata is None:
-            return None
-
     notes_raw = _prompt_notes()
 
     result: dict[str, Any] = {
@@ -434,7 +466,9 @@ def _candidate_choice_descriptions(
     return descriptions
 
 
-def _print_candidate_core_reports(requirements: dict[str, Any], candidate_id: str, *, indent: str = "") -> None:
+def _print_candidate_core_reports(
+    requirements: dict[str, Any], candidate_id: str, *, indent: str = ""
+) -> None:
     refs = _candidate_core_report_refs(requirements, candidate_id)
     if not refs:
         return
@@ -443,7 +477,9 @@ def _print_candidate_core_reports(requirements: dict[str, Any], candidate_id: st
         print(f"{indent}  {label}: {ref}")
 
 
-def _candidate_core_report_refs(requirements: dict[str, Any], candidate_id: str) -> list[tuple[str, str]]:
+def _candidate_core_report_refs(
+    requirements: dict[str, Any], candidate_id: str
+) -> list[tuple[str, str]]:
     refs: list[tuple[str, str]] = []
     candidate_reports = requirements.get("candidate_report_refs") or {}
     if isinstance(candidate_reports, dict):
@@ -549,7 +585,9 @@ def prompt_generic_gate_decision(
         result["metadata"] = dict(resume_metadata)
     if candidate_id:
         result["candidate_id"] = candidate_id
-        result["rejected_candidates"] = [candidate for candidate in candidate_ids if candidate != candidate_id]
+        result["rejected_candidates"] = [
+            candidate for candidate in candidate_ids if candidate != candidate_id
+        ]
     if method_name:
         result["method_name"] = method_name
     return result
@@ -575,7 +613,9 @@ def prompt_t2t_review_decision(
         for index, candidate_id in enumerate(candidate_ids, 1):
             print(f"  {index}. {candidate_id}")
         try:
-            raw = input("select candidate(s) [comma-separated numbers or ids]: ").strip()
+            raw = input(
+                "select candidate(s) [comma-separated numbers or ids]: "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             return None
         if not raw:
@@ -599,13 +639,17 @@ def prompt_t2t_review_decision(
     return result
 
 
-def _prompt_choice(label: str, options: list[str], descriptions: dict[str, str] | None = None) -> str | None:
+def _prompt_choice(
+    label: str, options: list[str], descriptions: dict[str, str] | None = None
+) -> str | None:
     if not options:
         return None
     display_label = "action" if label == "decision" else label
     print(f"\n{display_label}:")
     for i, opt in enumerate(options, 1):
-        suffix = f" - {descriptions[opt]}" if descriptions and descriptions.get(opt) else ""
+        suffix = (
+            f" - {descriptions[opt]}" if descriptions and descriptions.get(opt) else ""
+        )
         print(f"  {i}. {_choice_display(opt)}{suffix}")
     invalid_attempts = 0
     while invalid_attempts < _MAX_INVALID_PROMPT_ATTEMPTS:
@@ -665,7 +709,9 @@ def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
     """Collect metadata required for purge/polish decisions."""
     print(f"\n  {decision} requires the path to the already-completed output assembly.")
     try:
-        action_output_ref = input("action_output_ref (path to purged/polished assembly): ").strip()
+        action_output_ref = input(
+            "action_output_ref (path to purged/polished assembly): "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         return None
     if not action_output_ref:
@@ -673,7 +719,9 @@ def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
         return None
 
     try:
-        method_name = input("method_name (tool used, e.g. purge_dups/nextpolish; required): ").strip()
+        method_name = input(
+            "method_name (tool used, e.g. purge_dups/nextpolish; required): "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         return None
     if not method_name:
@@ -681,12 +729,17 @@ def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
         return None
 
     try:
-        evidence = input("evidence_notes (what confirms the action, e.g. 'purge_dups log shows 5% removed'): ").strip()
+        evidence = input(
+            "evidence_notes (what confirms the action, e.g. "
+            "'purge_dups log shows 5% removed'): "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         evidence = ""
 
     if not evidence:
-        print("error: evidence_notes is required for transform actions", file=sys.stderr)
+        print(
+            "error: evidence_notes is required for transform actions", file=sys.stderr
+        )
         return None
 
     metadata: dict[str, Any] = {
@@ -696,40 +749,6 @@ def _prompt_transform_action_metadata(decision: str) -> dict[str, Any] | None:
         "method_name": method_name,
     }
     return metadata
-
-
-def _prompt_rerun_metadata() -> dict[str, Any] | None:
-    """Collect metadata required for rerun decisions."""
-    print("\n  rerun requires adjusted Flye parameters for the new assembly attempt.")
-    try:
-        genome_size = input("estimated_genome_size (e.g. 500m, 2g): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return None
-    if not genome_size:
-        print("error: estimated_genome_size is required for rerun", file=sys.stderr)
-        return None
-
-    try:
-        read_type = input("read_type (e.g. nano-raw, nano-hq, pacbio-hifi): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return None
-    if not read_type:
-        print("error: read_type is required for rerun", file=sys.stderr)
-        return None
-
-    try:
-        threads = input("threads [4]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        threads = ""
-    threads_val = int(threads) if threads.isdigit() else 4
-
-    return {
-        "rerun_parameters": {
-            "estimated_genome_size": genome_size,
-            "read_type": read_type,
-            "threads": threads_val,
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +796,9 @@ def build_decision_brief(
             request_payload,
             data_dir=data_dir,
         )
-        brief["evidence"] = _brief_assembly_evidence(requirements, request_payload, data_dir, summary)
+        brief["evidence"] = _brief_assembly_evidence(
+            requirements, request_payload, data_dir, summary
+        )
     elif stage == "hic_scaffolding":
         brief["candidates"] = _brief_hic_candidates(requirements, request_payload)
         brief["evidence"] = _brief_hic_evidence(requirements, request_payload, summary)
@@ -800,7 +821,11 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     print(f"\nSession:  {brief.get('session_id')}")
     print(f"Stage:    {brief.get('stage')}")
     print(f"State:    {brief.get('supervision_state')}")
-    print(f"Choices:  {', '.join(_choice_display(decision) for decision in brief.get('decisions_allowed', []))}")
+    choices = ", ".join(
+        _choice_display(decision)
+        for decision in brief.get("decisions_allowed", [])
+    )
+    print(f"Choices:  {choices}")
 
     if brief.get("review_request_ref"):
         print(f"Request:  {brief['review_request_ref']}")
@@ -816,7 +841,10 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
         )
         related_gate = runtime_proposal.get("related_parameter_gate") or {}
         if related_gate:
-            print(f"  related parameter gate: {related_gate.get('stage')}/{related_gate.get('gate_id')}")
+            print(
+                f"  related parameter gate: {related_gate.get('stage')}/"
+                f"{related_gate.get('gate_id')}"
+            )
         for note in runtime_proposal.get("parameter_recommendation_notes") or []:
             print(f"  note: {note}")
         if runtime_proposal.get("human_confirmation_required"):
@@ -885,7 +913,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     refs = brief.get("relevant_refs")
     if refs:
         print("\nRelevant refs:")
-        for ref in (refs if isinstance(refs, list) else [refs]):
+        for ref in refs if isinstance(refs, list) else [refs]:
             print(f"  {ref}")
 
     print(f"{'=' * 50}\n")
@@ -927,14 +955,20 @@ def _brief_parameter_approval(
             proposal[key] = source.get(key)
 
     recommendation = _load_ref_payload(source.get("recommendation_ref"), data_dir)
-    parsed = recommendation.get("recommendation") if isinstance(recommendation, dict) else None
+    parsed = (
+        recommendation.get("recommendation")
+        if isinstance(recommendation, dict)
+        else None
+    )
     if isinstance(parsed, dict):
         proposal["recommended_params"] = dict(parsed.get("parameters") or {})
 
     manifest = _load_ref_payload(source.get("recommendation_manifest_ref"), data_dir)
     manifest_refs = manifest.get("refs") if isinstance(manifest, dict) else None
     basis = _load_ref_payload(
-        manifest_refs.get("basis_snapshot_ref") if isinstance(manifest_refs, dict) else None,
+        manifest_refs.get("basis_snapshot_ref")
+        if isinstance(manifest_refs, dict)
+        else None,
         data_dir,
     )
     if isinstance(basis, dict):
@@ -962,7 +996,9 @@ def _load_ref_payload(ref: Any, data_dir: str) -> dict[str, Any] | None:
     candidates = [path]
     if not path.is_absolute():
         root = Path(data_dir)
-        candidates.extend((root / path, root / str(path).removeprefix("data/"), root.parent / path))
+        candidates.extend(
+            (root / path, root / str(path).removeprefix("data/"), root.parent / path)
+        )
     resolved = next((candidate for candidate in candidates if candidate.exists()), None)
     if resolved is None:
         return None
@@ -985,7 +1021,9 @@ def _brief_assembly_candidates(
     candidate_ids = requirements.get("candidate_ids") or []
     candidate_refs = requirements.get("candidate_final_assembly_refs") or {}
     payload_candidates = (request_payload or {}).get("candidates") or []
-    payload_map = {c.get("candidate_id"): c for c in payload_candidates if isinstance(c, dict)}
+    payload_map = {
+        c.get("candidate_id"): c for c in payload_candidates if isinstance(c, dict)
+    }
 
     result = []
     for cid in candidate_ids:
@@ -1028,7 +1066,10 @@ def _brief_assembly_evidence(
     notes = payload.get("notes") or []
     signals = payload.get("signals") or []
     if notes or signals:
-        evidence["notes"] = [*notes, *[s if isinstance(s, str) else str(s) for s in signals]]
+        evidence["notes"] = [
+            *notes,
+            *[s if isinstance(s, str) else str(s) for s in signals],
+        ]
 
     return evidence
 
@@ -1039,7 +1080,9 @@ def _brief_hic_candidates(
 ) -> list[dict[str, Any]]:
     methods = requirements.get("candidate_methods") or []
     payload_candidates = (request_payload or {}).get("candidates") or []
-    payload_map = {c.get("method_name"): c for c in payload_candidates if isinstance(c, dict)}
+    payload_map = {
+        c.get("method_name"): c for c in payload_candidates if isinstance(c, dict)
+    }
 
     result = []
     for method in methods:
@@ -1084,7 +1127,14 @@ def _brief_generic_candidates(
     result: list[dict[str, Any]] = []
     for cid in requirements.get("candidate_ids") or []:
         entry: dict[str, Any] = {"id": cid}
-        match = next((c for c in candidates if isinstance(c, dict) and c.get("candidate_id") == cid), {})
+        match = next(
+            (
+                c
+                for c in candidates
+                if isinstance(c, dict) and c.get("candidate_id") == cid
+            ),
+            {},
+        )
         if isinstance(match, dict):
             entry["status"] = match.get("status")
             if match.get("method_name"):
@@ -1129,7 +1179,9 @@ def collect_gate_decision(
     from app.control.lifecycle import inspect_session
     from app.review.base import ResumeReviewRequest
 
-    summary = _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(session_id, data_dir)
+    summary = _checkpoint_blocked_summary(session_id, data_dir) or inspect_session(
+        session_id, data_dir
+    )
     if summary.get("error"):
         print(f"error: {summary['error']}", file=sys.stderr)
         return None
@@ -1173,7 +1225,9 @@ def collect_gate_decision(
     raw_decision["session_id"] = session_id
     if requirements.get("review_request_id"):
         raw_decision["review_request_id"] = requirements["review_request_id"]
-    request_hash = requirements.get("review_request_hash") or requirements.get("request_hash")
+    request_hash = requirements.get("review_request_hash") or requirements.get(
+        "request_hash"
+    )
     if request_hash:
         raw_decision["review_request_hash"] = request_hash
     try:
@@ -1185,7 +1239,9 @@ def collect_gate_decision(
     return request, raw_decision
 
 
-def _checkpoint_blocked_summary(session_id: str, data_dir: str) -> dict[str, Any] | None:
+def _checkpoint_blocked_summary(
+    session_id: str, data_dir: str
+) -> dict[str, Any] | None:
     """Return a blocked-state summary from sqlite checkpoint state, if present."""
     try:
         from app.control.lifecycle import build_result_next_action, inspect_state
@@ -1217,7 +1273,12 @@ def _checkpoint_blocked_summary(session_id: str, data_dir: str) -> dict[str, Any
         summary["latest_review_request_artifact"] = {"file_path": request_ref}
     summary["latest_review_request"] = {"payload": active_interrupt}
     summary["next_action"] = build_result_next_action(
-        {**state, "session_id": session_id, "data_dir": data_dir, "checkpoint_persistence": "sqlite"}
+        {
+            **state,
+            "session_id": session_id,
+            "data_dir": data_dir,
+            "checkpoint_persistence": "sqlite",
+        }
     )
     return summary
 
@@ -1278,7 +1339,9 @@ def run_interactive_review(
     request, raw_decision = result
 
     if dry_run:
-        decision_path = persist_decision_artifact(raw_decision, request.stage, session_id, data_dir)
+        decision_path = persist_decision_artifact(
+            raw_decision, request.stage, session_id, data_dir
+        )
         print(f"decision_artifact: {decision_path}")
         print("dry_run: decision validated and written; skipping resume")
         return 0
@@ -1315,10 +1378,7 @@ def run_interactive_review(
     if transaction.decision_artifact_path is not None:
         print(f"decision_artifact: {transaction.decision_artifact_path}")
     if transaction.annotation_intake_artifact_ref is not None:
-        print(
-            "annotation_intake_plan: "
-            f"{transaction.annotation_intake_artifact_ref}"
-        )
+        print(f"annotation_intake_plan: {transaction.annotation_intake_artifact_ref}")
 
     print(f"\nsession_id:        {session_id}")
     print(f"current_stage:     {final.get('current_stage', 'unknown')}")

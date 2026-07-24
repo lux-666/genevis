@@ -2,43 +2,19 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
-import yaml
-
+from app.domains.parameter_recommendation.catalog import load_method_parameter_catalog
 from app.schemas.parameter_catalog import MethodParameterCatalog
 
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
-AUTOHIC_PARAMETER_CATALOG = (
-    _PROJECT_ROOT
-    / "descriptors"
-    / "knowledge_packs"
-    / "hic_scaffolding"
-    / "methods"
-    / "autohic"
-    / "params.yaml"
-)
+AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 
 
 def load_autohic_parameter_catalog() -> MethodParameterCatalog:
     """Return the validated sparse AutoHiC recommendation catalog."""
 
-    if not AUTOHIC_PARAMETER_CATALOG.is_file():
-        raise FileNotFoundError(
-            f"AutoHiC parameter catalog not found: {AUTOHIC_PARAMETER_CATALOG}"
-        )
-    raw: Any = yaml.safe_load(
-        AUTOHIC_PARAMETER_CATALOG.read_text(encoding="utf-8")
-    ) or {}
-    catalog = MethodParameterCatalog.model_validate(raw)
-    if catalog.method_id != "hic_scaffolding.candidate.autohic":
-        raise ValueError(
-            "AutoHiC parameter catalog method_id must be 'hic_scaffolding.candidate.autohic'"
-        )
+    catalog = load_method_parameter_catalog(AUTOHIC_METHOD)
     adjustable = {
-        name for name, specification in catalog.parameters.items()
+        name
+        for name, specification in catalog.parameters.items()
         if specification.layers.l2 is not None
     }
     expected = {

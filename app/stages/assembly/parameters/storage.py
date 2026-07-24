@@ -10,16 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from app.schemas.artifacts import (
-    ASSEMBLY_PARAMETER_BASIS,
-    ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
-    ASSEMBLY_PARAMETER_MODEL_REQUEST,
-    ASSEMBLY_PARAMETER_MODEL_RESPONSE,
-    ASSEMBLY_PARAMETER_RECOMMENDATION,
-    ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
-    ASSEMBLY_PARAMETER_RESPONSE_PARSE,
-    ArtifactRef,
-)
+from app.schemas.artifacts import ArtifactRef
 from app.schemas.state import TopLevelState
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
@@ -31,16 +22,6 @@ from app.storage.parameter_evidence import (
 
 class ParameterPersistenceError(ValueError):
     """Raised when immutable parameter evidence is missing or inconsistent."""
-
-
-_RECOMMENDATION_REF_TYPES = {
-    "input_profile_ref": ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
-    "basis_snapshot_ref": ASSEMBLY_PARAMETER_BASIS,
-    "model_request_ref": ASSEMBLY_PARAMETER_MODEL_REQUEST,
-    "model_response_ref": ASSEMBLY_PARAMETER_MODEL_RESPONSE,
-    "recommendation_ref": ASSEMBLY_PARAMETER_RECOMMENDATION,
-    "response_parse_ref": ASSEMBLY_PARAMETER_RESPONSE_PARSE,
-}
 
 
 def write_recommendation_json_artifact(
@@ -127,37 +108,6 @@ def recover_recommendation_json_artifact(
         )
     except ParameterEvidenceError as exc:
         raise ParameterPersistenceError(str(exc)) from exc
-
-
-def load_recommendation_bundle(
-    state: TopLevelState,
-    manifest_ref: ArtifactRef | dict[str, Any],
-) -> dict[str, Any]:
-    """Load the verified immutable facts bound by a recommendation manifest."""
-
-    manifest = read_json_artifact(
-        state,
-        manifest_ref,
-        expected_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
-    )
-    if manifest.get("schema_version") not in {2, 3}:
-        raise ParameterPersistenceError("unsupported recommendation manifest schema")
-    refs = manifest.get("refs")
-    if not isinstance(refs, dict):
-        raise ParameterPersistenceError("recommendation manifest has no refs mapping")
-    bundle: dict[str, Any] = {"manifest": manifest}
-    for field, artifact_type in _RECOMMENDATION_REF_TYPES.items():
-        ref = refs.get(field)
-        if ref is None:
-            raise ParameterPersistenceError(
-                f"recommendation manifest is missing {field}"
-            )
-        bundle[field.removesuffix("_ref")] = read_json_artifact(
-            state,
-            ref,
-            expected_type=artifact_type,
-        )
-    return bundle
 
 
 def _write_json_artifact(

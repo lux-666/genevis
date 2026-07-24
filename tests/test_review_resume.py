@@ -63,7 +63,10 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(summary["supervision_state"], "blocked_human")
         self.assertEqual(summary["decision_requirements"]["stage"], "assembly_review")
         self.assertIn("accept", summary["decision_requirements"]["decisions_allowed"])
-        self.assertIn("review_request_artifact_ref", summary["latest_artifact_refs"]["assembly_review"])
+        self.assertIn(
+            "review_request_artifact_ref",
+            summary["latest_artifact_refs"]["assembly_review"],
+        )
 
     def test_resume_assembly_review_accept_advances_to_hic(self):
         state = _assembly_blocked_state()
@@ -87,18 +90,28 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(ar_out["status"], "completed")
         self.assertEqual(ar_out["selected_candidate_id"], "flye")
         self.assertEqual(ar_out["action_type"], "pass")
-        self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(
+            ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+        )
         self.assertEqual(
             update["resource_refs"]["assembly"]["paths"],
             ["work/assembly/flye/draft.fasta"],
         )
-        self.assertTrue(_artifact_path(state, ar_out["review_decision_artifact_ref"]).exists())
-        self.assertTrue(_artifact_path(state, ar_out["assembly_review_action_artifact_ref"]).exists())
+        self.assertTrue(
+            _artifact_path(state, ar_out["review_decision_artifact_ref"]).exists()
+        )
+        self.assertTrue(
+            _artifact_path(
+                state, ar_out["assembly_review_action_artifact_ref"]
+            ).exists()
+        )
         events = _read_events(state)
         self.assertEqual(events[-1]["event_type"], "review_decision")
         self.assertEqual(events[-1]["candidate_id"], "flye")
         decision_record = json.loads(
-            _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(encoding="utf-8")
+            _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(
+                encoding="utf-8"
+            )
         )
         self.assertEqual(decision_record["decision"]["metadata"]["action_type"], "pass")
 
@@ -234,17 +247,29 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(update["current_stage"], "hic_scaffolding")
         self.assertEqual(ar_out["action_type"], "purge")
         self.assertEqual(ar_out["action_execution_mode"], "external")
-        self.assertEqual(ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(
+            ar_out["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+        )
         self.assertEqual(ar_out["purged_assembly"], str(purged))
         self.assertEqual(update["resource_refs"]["assembly"]["paths"], [str(purged)])
-        action = json.loads(_artifact_path(state, ar_out["assembly_review_action_artifact_ref"]).read_text(encoding="utf-8"))
+        action = json.loads(
+            _artifact_path(
+                state, ar_out["assembly_review_action_artifact_ref"]
+            ).read_text(encoding="utf-8")
+        )
         self.assertEqual(action["action_type"], "purge")
-        self.assertEqual(action["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta")
+        self.assertEqual(
+            action["pre_action_assembly_ref"], "work/assembly/flye/draft.fasta"
+        )
         self.assertEqual(action["output_assembly_ref"], str(purged))
         decision_record = json.loads(
-            _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(encoding="utf-8")
+            _artifact_path(state, ar_out["review_decision_artifact_ref"]).read_text(
+                encoding="utf-8"
+            )
         )
-        self.assertEqual(decision_record["decision"]["metadata"]["action_type"], "purge")
+        self.assertEqual(
+            decision_record["decision"]["metadata"]["action_type"], "purge"
+        )
         self.assertEqual(
             decision_record["decision"]["metadata"]["post_action_assembly_ref"],
             purged.relative_to(Path(state["data_dir"])).as_posix(),
@@ -257,7 +282,10 @@ class ReviewResumeTests(unittest.TestCase):
             stage="assembly_review",
             decision="polish",
             candidate_id="flye",
-            metadata={"human_approved_action": True, "evidence_notes": ["reviewed polishing report"]},
+            metadata={
+                "human_approved_action": True,
+                "evidence_notes": ["reviewed polishing report"],
+            },
             **_review_binding(state),
         )
 
@@ -276,7 +304,10 @@ class ReviewResumeTests(unittest.TestCase):
             final_assembly_ref=str(polished),
             method_name="pilon_shortread",
             notes=["human approved polish"],
-            metadata={"human_approved_action": True, "evidence_notes": ["polish requested"]},
+            metadata={
+                "human_approved_action": True,
+                "evidence_notes": ["polish requested"],
+            },
             **_review_binding(state),
         )
 
@@ -358,7 +389,7 @@ class ReviewResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ResumeValidationError, "unknown"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_rerun_without_parameters(self):
+    def test_resume_assembly_rejects_legacy_rerun_decision(self):
         state = _assembly_blocked_state()
         request = ResumeReviewRequest(
             session_id="s1",
@@ -367,21 +398,27 @@ class ReviewResumeTests(unittest.TestCase):
             **_review_binding(state),
         )
 
-        with self.assertRaises(ResumeValidationError):
+        with self.assertRaisesRegex(ResumeValidationError, "not allowed"):
             resume_review_state(state, request)
 
-    def test_resume_assembly_rejects_rerun_unknown_candidate(self):
+    def test_resume_assembly_rejects_legacy_rerun_with_complete_metadata(self):
         state = _assembly_blocked_state()
         request = ResumeReviewRequest(
             session_id="s1",
             stage="assembly_review",
             decision="rerun",
-            candidate_id="unknown",
-            metadata={"rerun_parameters": {"read_type": "nano-raw", "estimated_genome_size": 100, "threads": 1}},
+            candidate_id="flye",
+            metadata={
+                "rerun_parameters": {
+                    "read_type": "nano-raw",
+                    "estimated_genome_size": 100,
+                    "threads": 1,
+                }
+            },
             **_review_binding(state),
         )
 
-        with self.assertRaisesRegex(ResumeValidationError, "unknown"):
+        with self.assertRaisesRegex(ResumeValidationError, "not allowed"):
             resume_review_state(state, request)
 
     def test_resume_assembly_stop_records_failed_terminal(self):
@@ -398,7 +435,14 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["supervision_state"], "failed_terminal")
         self.assertIn("stopped", update["last_error"])
-        self.assertTrue(_artifact_path(state, update["stage_outputs"]["assembly_review"]["review_decision_artifact_ref"]).exists())
+        self.assertTrue(
+            _artifact_path(
+                state,
+                update["stage_outputs"]["assembly_review"][
+                    "review_decision_artifact_ref"
+                ],
+            ).exists()
+        )
 
     def test_resume_rejects_stage_mismatch(self):
         state = _assembly_blocked_state()
@@ -430,7 +474,7 @@ class ReviewResumeTests(unittest.TestCase):
             {"stage": "hic_scaffolding", "gate_id": "parameter_approval"},
         )
 
-    def test_assembly_review_runtime_proposal_points_rerun_to_parameter_gate(self):
+    def test_assembly_review_runtime_proposal_points_retry_to_v3_parameter_gate(self):
         summary = inspect_state(_assembly_blocked_state())
 
         proposal = summary["decision_requirements"]["runtime_proposal"]
@@ -440,14 +484,19 @@ class ReviewResumeTests(unittest.TestCase):
             proposal["related_parameter_gate"],
             {"stage": "assembly", "gate_id": "parameter_approval"},
         )
+        notes = proposal["parameter_recommendation_notes"]
+        self.assertTrue(any("canonical v3" in note for note in notes))
         self.assertTrue(
-            any(
-                "shared Flye lifecycle" in note
-                for note in proposal["parameter_recommendation_notes"]
-            )
+            any("metadata.rerun_parameters are unsupported" in note for note in notes)
+        )
+        self.assertNotIn(
+            "rerun",
+            summary["decision_requirements"]["decisions_allowed"],
         )
         template = build_resume_decision_template(summary)
-        self.assertEqual(template["metadata"]["template_guidance"]["runtime_proposal"], proposal)
+        self.assertEqual(
+            template["metadata"]["template_guidance"]["runtime_proposal"], proposal
+        )
 
     def test_inspect_hic_uses_interrupt_decisions_allowed(self):
         state = _hic_blocked_state(decisions_allowed=["keep_prior_assembly"])
@@ -474,9 +523,13 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertIsNone(update["active_interrupt"])
         self.assertEqual(update["current_stage"], "t2t")
         hic_out = update["stage_outputs"]["hic_scaffolding"]
-        self.assertEqual(hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic")
+        self.assertEqual(
+            hic_out["selected_method_name"], "hic_scaffolding.candidate.autohic"
+        )
         self.assertTrue(hic_out["output_assembly_ref"].endswith("autohic.fasta"))
-        self.assertTrue(_artifact_path(state, hic_out["review_decision_artifact_ref"]).exists())
+        self.assertTrue(
+            _artifact_path(state, hic_out["review_decision_artifact_ref"]).exists()
+        )
 
     def test_resume_hic_honors_interrupt_decisions_allowed(self):
         state = _hic_blocked_state(decisions_allowed=["keep_prior_assembly"])
@@ -522,9 +575,14 @@ class ReviewResumeTests(unittest.TestCase):
                 "work/hic_scaffolding/pre_hic.fasta"
             )
         )
-        self.assertTrue(_artifact_path(state, hic_out["review_decision_artifact_ref"]).exists())
+        self.assertTrue(
+            _artifact_path(state, hic_out["review_decision_artifact_ref"]).exists()
+        )
         artifact_index = Path(state["data_dir"]) / "artifacts" / "index.jsonl"
-        artifact_types = [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+        artifact_types = [
+            json.loads(line)["artifact_type"]
+            for line in artifact_index.read_text(encoding="utf-8").splitlines()
+        ]
         self.assertNotIn("hic_scaffolding.skip", artifact_types)
         self.assertIn("hic_scaffolding.adoption_review.decision", artifact_types)
 
@@ -548,7 +606,9 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(update["supervision_state"], "failed_terminal")
         self.assertIn("timeout", update["last_error"])
         ar_out = update["stage_outputs"]["assembly_review"]
-        self.assertTrue(_artifact_path(state, ar_out["review_decision_artifact_ref"]).exists())
+        self.assertTrue(
+            _artifact_path(state, ar_out["review_decision_artifact_ref"]).exists()
+        )
         self.assertEqual(ar_out["decision"], "stop_human_review")
 
     def test_resume_request_rejects_extra_fields(self):
@@ -581,8 +641,13 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertEqual(summary["checkpoint_persistence"], "memory_only")
         self.assertFalse(summary["durable_resume_available"])
-        self.assertEqual(summary["latest_review_request"]["event_type"], "review_requested")
-        self.assertEqual(summary["latest_unresolved_review_request"]["event_type"], "review_requested")
+        self.assertEqual(
+            summary["latest_review_request"]["event_type"], "review_requested"
+        )
+        self.assertEqual(
+            summary["latest_unresolved_review_request"]["event_type"],
+            "review_requested",
+        )
         self.assertEqual(summary["supervision_state"], "blocked_human")
 
     def test_inspect_session_exposes_decision_requirements_from_artifact(self):
@@ -598,12 +663,27 @@ class ReviewResumeTests(unittest.TestCase):
         self.assertEqual(requirements["stage"], "assembly_review")
         self.assertEqual(
             sorted(requirements["decisions_allowed"]),
-            sorted(["pass", "accept", "purge", "polish", "rerun", "continue_low_confidence", "stop_human_review"]),
+            sorted(
+                [
+                    "pass",
+                    "accept",
+                    "purge",
+                    "polish",
+                    "continue_low_confidence",
+                    "stop_human_review",
+                ]
+            ),
         )
         self.assertEqual(sorted(requirements["candidate_ids"]), ["canu", "flye"])
         self.assertTrue(requirements["requires_structured_resume"])
-        self.assertEqual(requirements["report_refs"]["assembly_review_report"], "reports/assembly_review.md")
-        self.assertEqual(requirements["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
+        self.assertEqual(
+            requirements["report_refs"]["assembly_review_report"],
+            "reports/assembly_review.md",
+        )
+        self.assertEqual(
+            requirements["candidate_comparison_context"]["candidate_comparison_ref"],
+            "candidate_comparison.json",
+        )
 
     def test_resume_decision_template_includes_report_guidance(self):
         state = _assembly_blocked_state()
@@ -613,8 +693,14 @@ class ReviewResumeTests(unittest.TestCase):
 
         self.assertEqual(template["gate_id"], "assembly_review")
         guidance = template["metadata"]["template_guidance"]
-        self.assertEqual(guidance["report_refs"]["assembly_review_report"], "reports/assembly_review.md")
-        self.assertEqual(guidance["candidate_comparison_context"]["candidate_comparison_ref"], "candidate_comparison.json")
+        self.assertEqual(
+            guidance["report_refs"]["assembly_review_report"],
+            "reports/assembly_review.md",
+        )
+        self.assertEqual(
+            guidance["candidate_comparison_context"]["candidate_comparison_ref"],
+            "candidate_comparison.json",
+        )
         self.assertEqual(sorted(guidance["candidate_ids"]), ["canu", "flye"])
 
     def test_parameter_approval_template_copies_exact_resume_bindings(self):
@@ -701,7 +787,9 @@ class ReviewResumeTests(unittest.TestCase):
             summary["decision_requirements"]["parameter_diff"],
             payload["parameter_diff"],
         )
-        self.assertEqual(summary["decision_requirements"]["evidence_refs"], payload["evidence_refs"])
+        self.assertEqual(
+            summary["decision_requirements"]["evidence_refs"], payload["evidence_refs"]
+        )
 
     def test_decision_requirements_loads_verified_v2_artifact_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,13 +847,19 @@ class ReviewResumeTests(unittest.TestCase):
         from app.storage.ledger import Ledger
 
         ledger = Ledger(state["data_dir"])
-        ledger.record_review_decision("s1", "assembly_review", decision="accept", candidate_id="flye")
-        ledger.record_review_requested("s1", "hic_scaffolding", reason="hic_scaffolding_human_decision_required")
+        ledger.record_review_decision(
+            "s1", "assembly_review", decision="accept", candidate_id="flye"
+        )
+        ledger.record_review_requested(
+            "s1", "hic_scaffolding", reason="hic_scaffolding_human_decision_required"
+        )
 
         summary = inspect_session("s1", state["data_dir"])
 
         self.assertEqual(summary["supervision_state"], "blocked_human")
-        self.assertEqual(summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding")
+        self.assertEqual(
+            summary["latest_unresolved_review_request"]["stage"], "hic_scaffolding"
+        )
 
     def test_inspect_session_does_not_treat_operator_report_as_lifecycle_truth(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -935,7 +1029,13 @@ class LoadResumeReviewRequestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decision.json"
             path.write_text(
-                json.dumps({"session_id": "s1", "stage": "assembly_review", "decision": "approve"}),
+                json.dumps(
+                    {
+                        "session_id": "s1",
+                        "stage": "assembly_review",
+                        "decision": "approve",
+                    }
+                ),
                 encoding="utf-8",
             )
             request = load_resume_review_request(path)
@@ -973,14 +1073,29 @@ def _assembly_blocked_state(
         "gate_id": "assembly_review",
         "reason": "assembly_review_human_decision_required",
         "candidates": [
-            {"candidate_id": "flye", "method_name": "assembly.candidate.flye", "final_assembly_ref": "work/assembly/flye/draft.fasta"},
-            {"candidate_id": "canu", "method_name": "assembly.candidate.canu", "final_assembly_ref": "work/assembly/canu/draft.fasta"},
+            {
+                "candidate_id": "flye",
+                "method_name": "assembly.candidate.flye",
+                "final_assembly_ref": "work/assembly/flye/draft.fasta",
+            },
+            {
+                "candidate_id": "canu",
+                "method_name": "assembly.candidate.canu",
+                "final_assembly_ref": "work/assembly/canu/draft.fasta",
+            },
         ],
         "signals": [],
         "decisions_allowed": (
             decisions_allowed
             if decisions_allowed is not None
-            else ["pass", "accept", "purge", "polish", "rerun", "continue_low_confidence", "stop_human_review"]
+            else [
+                "pass",
+                "accept",
+                "purge",
+                "polish",
+                "continue_low_confidence",
+                "stop_human_review",
+            ]
         ),
         "notes": [],
         "report_refs": {
@@ -998,6 +1113,7 @@ def _assembly_blocked_state(
         },
     }
     from app.storage.ledger import Ledger
+
     state = {
         "session_id": session_id,
         "thread_id": session_id,

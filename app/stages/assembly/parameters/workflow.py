@@ -1,4 +1,4 @@
-"""Data-v2 parameter recommendation, approval, retry, and attempt cursors.
+"""Strict v3 Assembly recommendation, approval, retry, and attempt cursors.
 
 Recommendation semantics stay in the existing domain modules.  This module
 only separates immutable evidence from the bounded state required to resume
@@ -8,12 +8,14 @@ the assembly parameter loop.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
+from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
     load_execution_evidence,
     read_execution_stderr_tail,
@@ -48,6 +50,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_APPROVAL_DECISION,
     ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
     ASSEMBLY_PARAMETER_BASIS,
+    ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
     ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
     ASSEMBLY_PARAMETER_MODEL_REQUEST,
     ASSEMBLY_PARAMETER_MODEL_RESPONSE,
@@ -59,20 +62,25 @@ from app.schemas.artifacts import (
     ParameterAttempt,
     ParameterRecommendationCursor,
 )
-from app.schemas.parameter_catalog import MethodParameterCatalog
+from app.schemas.parameter_recommendation import (
+    AssemblyRecommendationContext,
+    AssemblyReviewEvidence,
+    ExecutionFailureTrigger,
+    ParameterAttemptEvidenceV3,
+    ParameterExecutionEvidence,
+    ParameterRecommendationManifestV3,
+    RecommendationDependencyRefs,
+    RecommendationInputSnapshotV3,
+    RecommendationRetryContext,
+    ResolvedParameterSources,
+    ReviewFailureTrigger,
+)
 from app.schemas.state import TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
-from app.domains.parameter_recommendation.facts import build_canonical_facts
-from app.schemas.parameter_recommendation import (
-    AssemblyRecommendationContext,
-    RecommendationDependencyRefs,
-    RecommendationInputSnapshotV3,
-)
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
 from app.stages.assembly.parameters.storage import (
     ParameterPersistenceError,
-    load_recommendation_bundle,
     read_json_artifact,
     recover_recommendation_json_artifact,
     write_attempt_json_artifact,
@@ -80,6 +88,14 @@ from app.stages.assembly.parameters.storage import (
 )
 from app.stages.base import absolute_data_dir, stage_output, update_stage_output
 from app.storage.ledger import Ledger
+from app.storage.parameter_evidence import (
+    ParameterEvidenceError,
+    ParameterRecommendationChainV3,
+    build_recommendation_dependency_refs,
+    canonical_parameter_dependency,
+    load_approved_parameter_chain_v3,
+    load_parameter_recommendation_chain_v3,
+)
 
 
 def recommend_assembly_parameters(state: TopLevelState) -> dict:
@@ -97,60 +113,26 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     if method_name is None:
         return {}
     task = _parameter_prompt_task(assembly_out)
-    attempts_before = _validate_parameter_attempt_chain(
-        state,
-        assembly_out.get("parameter_attempts") or [],
-    )
-    initial_attempt = attempts_before[0] if attempts_before else None
-
     try:
-        if task == "recommend_initial":
-            catalog = load_parameter_catalog(method_name)
-            basis_snapshot: dict[str, Any] | None = None
-            basis_ref: ArtifactRef | None = None
-        else:
-            if initial_attempt is None:
-                return _retry_transition_failure(state, "missing_initial_attempt")
-            initial_bundle = load_recommendation_bundle(
-                state,
-                initial_attempt["recommendation_manifest_ref"],
-            )
-            basis_snapshot = dict(initial_bundle["basis_snapshot"])
-            catalog = MethodParameterCatalog.model_validate(
-                basis_snapshot["catalog_snapshot"]
-            )
-            if catalog.method_id != method_name.rsplit(".", 1)[-1]:
-                return _retry_transition_failure(state, "policy_snapshot_hash_mismatch")
-            basis_ref = ArtifactRef.model_validate(
-                initial_bundle["manifest"]["refs"]["basis_snapshot_ref"]
-            )
-    except (KeyError, FileNotFoundError, ValueError, ParameterPersistenceError) as exc:
-        reason = (
-            "policy_snapshot_mismatch"
-            if task != "recommend_initial"
-            else f"Assembly parameter catalog is not usable: {exc}"
-        )
-        return (
-            _fail_update(state, reason)
-            if task == "recommend_initial"
-            else _retry_transition_failure(state, reason)
-        )
-
-    l2_keys = [key for key, spec in catalog.parameters.items() if spec.layers.l2 is not None]
-    if not l2_keys:
-        return _fail_update(
+        attempts_before = _validate_parameter_attempt_chain(
             state,
-            f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}",
+            assembly_out.get("parameter_attempts") or [],
         )
-
+    except (ParameterPersistenceError, ValueError) as exc:
+        return _fail_update(state, f"Assembly parameter inputs failed: {exc}")
     recommendation_id = int(
         assembly_out.get("proposed_parameter_attempt_id")
         if assembly_out.get("proposed_parameter_attempt_id") is not None
         else assembly_out.get("current_parameter_attempt_id") or len(attempts_before)
     )
     previous_attempt = _previous_parameter_attempt(assembly_out, recommendation_id)
-    hydrated_previous: dict[str, Any] = {}
-    hydrated_history: list[dict[str, Any]] = []
+    initial_attempt = (
+        ParameterAttempt.model_validate(attempts_before[0]) if attempts_before else None
+    )
+    retry_context: RecommendationRetryContext | None = None
+    basis_ref: ArtifactRef | None = None
+    basis_snapshot: dict[str, Any] | None = None
+
     if task != "recommend_initial":
         if (
             not previous_attempt
@@ -170,8 +152,49 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             return _retry_transition_failure(
                 state, "previous_attempt_seal_hash_mismatch"
             )
-        try:
-            hydrated_history = [
+
+    try:
+        if task == "recommend_initial":
+            catalog = load_parameter_catalog(method_name)
+            stage_outputs = state.get("stage_outputs") or {}
+            shared = state.get("shared_parameters")
+            if shared is None:
+                shared = {}
+            if hasattr(shared, "model_dump"):
+                shared = shared.model_dump(mode="json", exclude_none=True)
+            facts = build_canonical_facts(
+                shared_parameters=shared,
+                read_qc_output=stage_outputs.get("read_qc"),
+                genome_survey_result=stage_outputs.get("genome_survey"),
+                asset_flags={
+                    "has_hifi": bool(assembly_out.get("hifi_reads_ref")),
+                    "has_ont": bool(assembly_out.get("ont_reads_ref")),
+                    "has_hic": bool(assembly_out.get("hic_reads_ref")),
+                },
+            )
+            context = build_assembly_recommendation_context(
+                state,
+                assembly_out=assembly_out,
+                retry_context=None,
+            )
+            dependency_refs = _initial_assembly_dependency_refs(
+                state,
+                assembly_out,
+            )
+        else:
+            if initial_attempt is None:
+                return _retry_transition_failure(state, "missing_initial_attempt")
+            initial_chain = load_parameter_recommendation_chain_v3(
+                state,
+                manifest_ref=initial_attempt.recommendation_manifest_ref,
+                expected_stage="assembly",
+                expected_method_id=method_name,
+            )
+            catalog = initial_chain.catalog
+            basis_snapshot = dict(initial_chain.basis_snapshot)
+            basis_ref = initial_chain.manifest.refs.basis_snapshot_ref
+            facts = initial_chain.input_snapshot.facts
+            hydrated_history = tuple(
                 hydrate_parameter_attempt(
                     state,
                     attempt,
@@ -181,41 +204,51 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                     ),
                 )
                 for index, attempt in enumerate(attempts_before)
-            ]
-            hydrated_previous = hydrated_history[-1]
-        except ParameterPersistenceError as exc:
-            return _retry_transition_failure(state, str(exc))
+            )
+            retry_context = _assembly_retry_context(task, hydrated_history)
+            initial_context = initial_chain.input_snapshot.stage_context
+            if not isinstance(initial_context, AssemblyRecommendationContext):
+                raise ValueError("initial Assembly snapshot has wrong stage context")
+            context = initial_context.model_copy(update={"retry": retry_context})
+            dependency_refs = _retry_assembly_dependency_refs(
+                state,
+                initial_chain=initial_chain,
+                attempts_before=attempts_before,
+            )
 
-    stage_outputs = state.get("stage_outputs") or {}
-    shared = state.get("shared_parameters") or {}
-    if hasattr(shared, "model_dump"):
-        shared = shared.model_dump(mode="json", exclude_none=True)
-    input_profile = dict(assembly_out.get("input_profile") or {})
-    facts = build_canonical_facts(
-        shared_parameters=shared if isinstance(shared, dict) else {},
-        read_qc_output=stage_outputs.get("read_qc") or {},
-        genome_survey_result=stage_outputs.get("genome_survey") or {},
-        asset_flags={
-            "has_hifi": input_profile.get("has_hifi") or bool(assembly_out.get("hifi_reads_ref")),
-            "has_ont": input_profile.get("has_ont") or bool(assembly_out.get("ont_reads_ref")),
-            "has_hic": input_profile.get("has_hic") or bool(assembly_out.get("hic_reads_ref")),
-            "has_rnaseq": bool(input_profile.get("has_rnaseq")),
-        },
-    )
-    context: AssemblyRecommendationContext = build_assembly_recommendation_context(
-        state,
-        assembly_out=assembly_out,
-        task=task,
-    )
-    retry_context: dict | None = None
-    if task != "recommend_initial":
-        retry_context = {
-            "task": task,
-            "previous_attempt": hydrated_previous,
-            "attempt_history": hydrated_history,
-        }
-        if task == "retry_after_review_failure":
-            retry_context["assembly_review"] = hydrated_previous.get("review_failure")
+        if not any(spec.layers.l2 is not None for spec in catalog.parameters.values()):
+            raise ValueError(
+                f"Assembly parameter catalog has no L2 parameters: {catalog.method_id}"
+            )
+    except (
+        FileNotFoundError,
+        KeyError,
+        ParameterEvidenceError,
+        ParameterPersistenceError,
+        ValueError,
+    ) as exc:
+        return _fail_update(state, f"Assembly parameter inputs failed: {exc}")
+
+    try:
+        input_snapshot = RecommendationInputSnapshotV3(
+            schema_version=3,
+            method_id=catalog.method_id,
+            task=task,
+            facts=facts,
+            stage_context=context,
+            dependency_refs=dependency_refs,
+        )
+        input_snapshot_ref = write_recommendation_json_artifact(
+            state,
+            recommendation_id,
+            "input_snapshot.json",
+            input_snapshot.model_dump(mode="json"),
+            artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
+            method_name="assembly.parameter_recommender",
+        )
+    except (OSError, ValueError, ParameterPersistenceError) as exc:
+        return _fail_update(state, f"Assembly input snapshot persistence failed: {exc}")
+
     try:
         if task == "recommend_initial":
             basis_snapshot = build_parameter_basis_snapshot(
@@ -224,35 +257,6 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 facts=facts,
                 context=context,
             )
-        assert basis_snapshot is not None
-        request_dto = build_parameter_request_dto(
-            method_id=catalog.method_id,
-            catalog=catalog,
-            facts=facts,
-            context=context,
-            task=task,
-            basis_snapshot=basis_snapshot,
-            retry_context=retry_context,
-        )
-    except Exception as exc:
-        return _fail_update(state, f"Assembly parameter request failed: {exc}")
-
-    try:
-        input_profile_ref = write_recommendation_json_artifact(
-            state,
-            recommendation_id,
-            "input_profile.json",
-            RecommendationInputSnapshotV3(
-                method_id=catalog.method_id,
-                task=task,
-                facts=facts,
-                stage_context=context,
-                dependency_refs=RecommendationDependencyRefs(),
-            ).model_dump(mode="json"),
-            artifact_type=ASSEMBLY_PARAMETER_INPUT_SNAPSHOT,
-            method_name="assembly.parameter_recommender",
-        )
-        if task == "recommend_initial":
             basis_ref = write_recommendation_json_artifact(
                 state,
                 recommendation_id,
@@ -261,7 +265,17 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 artifact_type=ASSEMBLY_PARAMETER_BASIS,
                 method_name="assembly.parameter_recommender",
             )
-        assert basis_ref is not None
+        if basis_ref is None or basis_snapshot is None:
+            raise ValueError("Assembly recommendation basis is missing")
+
+        request_dto = build_parameter_request_dto(
+            method_id=catalog.method_id,
+            catalog=catalog,
+            facts=facts,
+            context=context,
+            task=task,
+            basis_snapshot=basis_snapshot,
+        )
 
         messages = render_assembly_parameter_messages(request_dto)
         model_request_ref = write_recommendation_json_artifact(
@@ -274,13 +288,19 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
                 "prompt_template_sha256": parameter_prompt_bundle_hash(
                     catalog.method_id
                 ),
-                "parameter_request_schema_version": 2,
+                "parameter_request_schema_version": 3,
                 "messages": messages,
             },
             artifact_type=ASSEMBLY_PARAMETER_MODEL_REQUEST,
             method_name="assembly.parameter_recommender",
         )
-    except (OSError, ValueError, ParameterPersistenceError) as exc:
+    except (
+        FileNotFoundError,
+        KeyError,
+        OSError,
+        ParameterPersistenceError,
+        ValueError,
+    ) as exc:
         return _fail_update(
             state, f"Assembly parameter request persistence failed: {exc}"
         )
@@ -378,39 +398,37 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     previous_manifest_ref = (
         previous_attempt.get("attempt_manifest_ref") if previous_attempt else None
     )
-    manifest_payload = {
-        "schema_version": 2,
-        "recommendation_contract": PARAMETER_RECOMMENDATION_CONTRACT,
-        "stage": "assembly",
-        "method_id": method_name,
-        "task": task,
-        "recommendation_id": recommendation_id,
-        "status": cursor_status,
-        "previous_attempt_id": (
-            previous_attempt.get("attempt_id") if previous_attempt else None
-        ),
-        "previous_attempt_manifest_ref": previous_manifest_ref,
-        "previous_attempt_seal_hash": (
-            previous_attempt.get("seal_hash") if previous_attempt else None
-        ),
-        "refs": {
-            "input_profile_ref": input_profile_ref.model_dump(mode="json"),
-            "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
-            "model_request_ref": model_request_ref.model_dump(mode="json"),
-            "model_response_ref": model_response_ref.model_dump(mode="json"),
-            "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-            "response_parse_ref": response_parse_ref.model_dump(mode="json"),
-        },
-        "summary": {
-            "response_parsed": bool(decision.valid),
-        },
-    }
     try:
+        manifest = ParameterRecommendationManifestV3(
+            schema_version=3,
+            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+            stage="assembly",
+            method_id=catalog.method_id,
+            task=task,
+            recommendation_id=recommendation_id,
+            status=cursor_status,
+            previous_attempt_id=(
+                previous_attempt.get("attempt_id") if previous_attempt else None
+            ),
+            previous_attempt_manifest_ref=previous_manifest_ref,
+            previous_attempt_seal_hash=(
+                previous_attempt.get("seal_hash") if previous_attempt else None
+            ),
+            refs={
+                "input_snapshot_ref": input_snapshot_ref.model_dump(mode="json"),
+                "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
+                "model_request_ref": model_request_ref.model_dump(mode="json"),
+                "model_response_ref": model_response_ref.model_dump(mode="json"),
+                "recommendation_ref": recommendation_ref.model_dump(mode="json"),
+                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
+            },
+            summary={"response_parsed": bool(decision.valid)},
+        )
         manifest_ref = write_recommendation_json_artifact(
             state,
             recommendation_id,
             "recommendation_manifest.json",
-            manifest_payload,
+            manifest.model_dump(mode="json"),
             artifact_type=ASSEMBLY_PARAMETER_RECOMMENDATION_MANIFEST,
             method_name="assembly.parameter_recommender",
         )
@@ -418,8 +436,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         return _fail_update(state, f"Assembly recommendation manifest failed: {exc}")
 
     cursor = ParameterRecommendationCursor(
+        schema_version=3,
         recommendation_id=recommendation_id,
-        method_id=method_name,
+        method_id=catalog.method_id,
         task=task,
         status=cursor_status,
         previous_attempt_id=(
@@ -584,8 +603,13 @@ def apply_parameter_approval_decision(
     manifest_ref_value = payload.get("recommendation_manifest_ref")
     try:
         manifest_ref = ArtifactRef.model_validate(manifest_ref_value)
-        bundle = load_recommendation_bundle(state, manifest_ref)
-    except (ValueError, ParameterPersistenceError) as exc:
+        chain = load_parameter_recommendation_chain_v3(
+            state,
+            manifest_ref=manifest_ref,
+            expected_stage="assembly",
+            expected_method_id=cursor.method_id,
+        )
+    except (ValueError, ParameterEvidenceError) as exc:
         raise ResumeValidationError(
             "parameter recommendation manifest is invalid"
         ) from exc
@@ -596,6 +620,24 @@ def apply_parameter_approval_decision(
     ):
         raise ResumeValidationError(
             "parameter recommendation manifest binding mismatch"
+        )
+    manifest = chain.manifest
+    if (
+        manifest.status != "pending_approval"
+        or manifest.recommendation_id != cursor.recommendation_id
+        or manifest.task != cursor.task
+        or manifest.previous_attempt_id != cursor.previous_attempt_id
+        or manifest.previous_attempt_seal_hash != cursor.previous_attempt_seal_hash
+    ):
+        raise ResumeValidationError(
+            "parameter recommendation cursor does not match its manifest"
+        )
+    recommendation = chain.recommendation.get("recommendation")
+    if not isinstance(recommendation, dict) or not isinstance(
+        recommendation.get("parameters"), dict
+    ):
+        raise ResumeValidationError(
+            "parameter recommendation has no parameters mapping"
         )
 
     attempts = _validate_parameter_attempt_chain(
@@ -618,6 +660,15 @@ def apply_parameter_approval_decision(
             raise ResumeValidationError("parameter approval attempt chain head changed")
         if cursor.previous_attempt_seal_hash != attempts[-1].get("seal_hash"):
             raise ResumeValidationError("parameter retry previous attempt seal changed")
+        predecessor_manifest_ref = attempts[-1].get("attempt_manifest_ref")
+        if (
+            predecessor_manifest_ref is None
+            or manifest.previous_attempt_manifest_ref
+            != ArtifactRef.model_validate(predecessor_manifest_ref)
+        ):
+            raise ResumeValidationError(
+                "parameter retry previous attempt manifest changed"
+            )
 
     try:
         decision_ref = persist_review_decision(
@@ -682,8 +733,8 @@ def apply_parameter_approval_decision(
             "stage_outputs": outputs,
         }
 
-    manifest = bundle["manifest"]
     attempt = ParameterAttempt(
+        schema_version=3,
         attempt_id=attempt_id,
         method_id=cursor.method_id,
         status="recommended",
@@ -691,9 +742,7 @@ def apply_parameter_approval_decision(
         previous_attempt_id=previous_id,
         recommendation_manifest_ref=manifest_ref,
         approval_decision_ref=decision_ref,
-        recommendation_contract=str(
-            manifest.get("recommendation_contract") or PARAMETER_RECOMMENDATION_CONTRACT
-        ),
+        recommendation_contract=manifest.recommendation_contract,
         previous_attempt_seal_hash=cursor.previous_attempt_seal_hash,
     ).model_dump(mode="json")
     attempts.append(attempt)
@@ -887,55 +936,283 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     )
 
 
+def _assembly_retry_context(
+    task: str,
+    attempt_history: tuple[ParameterAttemptEvidenceV3, ...],
+) -> RecommendationRetryContext:
+    if not attempt_history:
+        raise ValueError("Assembly retry requires sealed predecessor evidence")
+    latest = attempt_history[-1]
+    if task == "retry_after_execution_failure":
+        execution = latest.execution
+        if execution is None:
+            raise ValueError("Assembly execution retry has no execution evidence")
+        trigger = ExecutionFailureTrigger(
+            status=execution.status,
+            return_code=execution.return_code,
+            failure_class=execution.failure_class,
+            status_detail=execution.status_detail,
+        )
+    elif task == "retry_after_review_failure":
+        review = latest.review
+        if not isinstance(review, AssemblyReviewEvidence):
+            raise ValueError("Assembly review retry has no Assembly review evidence")
+        trigger = ReviewFailureTrigger(review=review)
+    else:
+        raise ValueError(f"unsupported Assembly parameter task: {task!r}")
+    return RecommendationRetryContext(
+        trigger=trigger,
+        attempt_history=attempt_history,
+    )
+
+
+def _initial_assembly_dependency_refs(
+    state: TopLevelState,
+    assembly_out: dict[str, Any],
+) -> RecommendationDependencyRefs:
+    stage_outputs = state.get("stage_outputs") or {}
+    read_qc = stage_outputs.get("read_qc") or {}
+    genome_survey = stage_outputs.get("genome_survey") or {}
+    fact_sources = {
+        role: value
+        for role, value in {
+            "read_qc_summary": canonical_parameter_dependency(
+                state, read_qc.get("summary_artifact_ref")
+            ),
+            "genome_survey_result": canonical_parameter_dependency(
+                state, genome_survey.get("result_artifact_ref")
+            ),
+        }.items()
+        if value is not None
+    }
+
+    registry_ref = canonical_parameter_dependency(
+        state, state.get("asset_registry_ref")
+    )
+    if registry_ref is not None:
+        stage_inputs = {"asset_registry": registry_ref}
+    else:
+        raw_inputs = assembly_out.get("input_ref")
+        if not isinstance(raw_inputs, list):
+            raw_inputs = [raw_inputs or assembly_out.get("primary_long_reads_ref")]
+        stage_inputs = {
+            f"assembly_input_{index:06d}": dependency
+            for index, value in enumerate(raw_inputs)
+            if (dependency := canonical_parameter_dependency(state, value)) is not None
+        }
+    return build_recommendation_dependency_refs(
+        state,
+        fact_source_paths=fact_sources,
+        stage_input_paths=stage_inputs,
+    )
+
+
+def _retry_assembly_dependency_refs(
+    state: TopLevelState,
+    *,
+    initial_chain: ParameterRecommendationChainV3,
+    attempts_before: list[dict[str, Any]],
+) -> RecommendationDependencyRefs:
+    prior_manifest_refs: list[ArtifactRef] = []
+    for raw_attempt in attempts_before:
+        attempt = ParameterAttempt.model_validate(raw_attempt)
+        if attempt.seal_hash is None or attempt.attempt_manifest_ref is None:
+            raise ValueError("Assembly retry history contains an unsealed attempt")
+        prior_manifest_refs.append(attempt.attempt_manifest_ref)
+
+    initial_refs = initial_chain.input_snapshot.dependency_refs
+    return build_recommendation_dependency_refs(
+        state,
+        fact_source_paths=initial_refs.fact_source_refs,
+        stage_input_paths={
+            f"stage_input_{index:06d}": ref
+            for index, ref in enumerate(initial_refs.stage_input_refs)
+        },
+        initial_input_snapshot_ref=initial_chain.manifest.refs.input_snapshot_ref,
+        prior_attempt_manifest_refs=prior_manifest_refs,
+    )
+
+
 def hydrate_parameter_attempt(
     state: TopLevelState,
     attempt_value: ParameterAttempt | dict[str, Any],
     *,
     include_execution_log: bool = False,
-) -> dict[str, Any]:
-    """Rehydrate domain inputs transiently without placing them in checkpoint state."""
+) -> ParameterAttemptEvidenceV3:
+    """Build bounded retry evidence from one approved immutable v3 attempt."""
 
     attempt = (
         attempt_value
         if isinstance(attempt_value, ParameterAttempt)
         else ParameterAttempt.model_validate(attempt_value)
     )
-    bundle = load_recommendation_bundle(state, attempt.recommendation_manifest_ref)
-    recommendation = dict(bundle["recommendation"].get("recommendation") or {})
-    basis = dict(bundle["basis_snapshot"])
-    hydrated: dict[str, Any] = {
-        **attempt.model_dump(mode="json"),
-        "catalog_snapshot": basis.get("catalog_snapshot"),
-        "parameters": dict(recommendation.get("parameters") or {}),
-        "recommended_params": dict(recommendation.get("parameters") or {}),
-        "selected_case_ids": list(recommendation.get("used_literature_case_ids") or []),
-    }
-    if attempt.command_ref is not None:
-        command = read_json_artifact(state, attempt.command_ref)
-        hydrated.update(
+    approved_bundle = load_approved_parameter_chain_v3(
+        state,
+        attempt=attempt,
+        expected_stage="assembly",
+        expected_method_id=attempt.method_id,
+    )
+    recommended_parameters = approved_bundle.approved_l2
+
+    if attempt.frozen_parameters_ref is None:
+        raise ValueError("sealed Assembly retry history has no frozen parameters")
+    frozen = read_json_artifact(
+        state,
+        attempt.frozen_parameters_ref,
+        expected_type=ASSEMBLY_PARAMETER_FROZEN_PARAMETERS,
+    )
+    try:
+        frozen_manifest_ref = ArtifactRef.model_validate(
+            frozen.get("recommendation_manifest_ref")
+        )
+        frozen_approval_ref = ArtifactRef.model_validate(
+            frozen.get("approval_decision_ref")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Assembly frozen parameter evidence has invalid chain refs"
+        ) from exc
+    if (
+        frozen.get("schema_version") != 3
+        or frozen.get("stage") != "assembly"
+        or frozen.get("attempt_id") != attempt.attempt_id
+        or frozen.get("method_id") != attempt.method_id
+        or frozen_manifest_ref != attempt.recommendation_manifest_ref
+        or frozen_approval_ref != attempt.approval_decision_ref
+    ):
+        raise ValueError(
+            "Assembly frozen parameter evidence is not bound to the attempt"
+        )
+    try:
+        resolved = ResolvedParameterSources.model_validate(
             {
-                "argv": list(command.get("argv") or []),
-                "parameter_sources": dict(command.get("parameter_sources") or {}),
-                "rendered_parameters": dict(command.get("rendered_parameters") or {}),
+                key: frozen[key]
+                for key in (
+                    "l0_executor",
+                    "l1_facts",
+                    "l2_approved",
+                    "effective_parameters",
+                    "effective_source_by_parameter",
+                    "applications",
+                )
             }
         )
+    except (KeyError, ValueError) as exc:
+        raise ValueError("Assembly frozen parameter sources are invalid") from exc
+    if resolved.l2_approved != recommended_parameters:
+        raise ValueError(
+            "Assembly frozen approved parameters do not match the recommendation"
+        )
+
+    execution: ParameterExecutionEvidence | None = None
     if attempt.execution_ref is not None:
-        execution = load_execution_evidence(
+        execution_record = load_execution_evidence(
             state,
             attempt.execution_ref,
             expected_stage="assembly",
             expected_method_name=attempt.method_id,
         )
-        hydrated["execution_result"] = execution.model_dump(mode="json")
-        if include_execution_log and not execution.success:
-            stderr_tail = read_execution_stderr_tail(state, execution)
+        stderr_tail: str | None = None
+        if include_execution_log and not execution_record.success:
+            stderr_tail = read_execution_stderr_tail(state, execution_record)
             if stderr_tail:
-                hydrated["stderr_tail"] = stderr_tail
+                stderr_tail = stderr_tail[-4000:]
+        detail = execution_record.status_detail or execution_record.error or None
+        execution = ParameterExecutionEvidence(
+            status=execution_record.status,
+            return_code=execution_record.return_code,
+            failure_class=(
+                str(execution_record.status) if not execution_record.success else None
+            ),
+            status_detail=detail[:500] if detail else None,
+            resource_metrics=[],
+            stderr_tail=stderr_tail,
+        )
+
+    review: AssemblyReviewEvidence | None = None
     if attempt.review_ref is not None:
-        review = read_json_artifact(state, attempt.review_ref)
-        hydrated["review_failure"] = dict(review.get("diagnosis") or {})
-        hydrated["review_outcome"] = dict(review.get("diagnosis") or {})
-    return hydrated
+        review_record = read_json_artifact(
+            state,
+            attempt.review_ref,
+            expected_type=ASSEMBLY_PARAMETER_REVIEW,
+        )
+        if (
+            review_record.get("schema_version") != 2
+            or review_record.get("attempt_id") != attempt.attempt_id
+        ):
+            raise ValueError("Assembly review evidence is not bound to the attempt")
+        diagnosis = review_record.get("diagnosis")
+        metrics = review_record.get("review_metrics")
+        if not isinstance(diagnosis, dict) or not isinstance(metrics, dict):
+            raise ValueError("Assembly review evidence is malformed")
+        review = _assembly_review_evidence(diagnosis, metrics)
+
+    return ParameterAttemptEvidenceV3(
+        attempt_id=attempt.attempt_id,
+        task=attempt.task,
+        status=attempt.status,
+        recommended_parameters=recommended_parameters,
+        approved_parameters=recommended_parameters,
+        effective_parameters=resolved.effective_parameters,
+        effective_sources=resolved.effective_source_by_parameter,
+        execution=execution,
+        review=review,
+    )
+
+
+def _assembly_review_evidence(
+    diagnosis: dict[str, Any],
+    metrics: dict[str, Any],
+) -> AssemblyReviewEvidence:
+    quast_source = metrics.get("quast_metrics")
+    quast_metrics: dict[str, float] = {}
+    if isinstance(quast_source, dict):
+        for key in (
+            "gc_percent",
+            "l50",
+            "misassemblies",
+            "num_contigs",
+            "total_length",
+        ):
+            value = _float_or_none(quast_source.get(key))
+            if value is not None:
+                quast_metrics[key] = value
+
+    return AssemblyReviewEvidence(
+        failure_mode=(
+            str(diagnosis["failure_mode"])[:120]
+            if diagnosis.get("failure_mode") is not None
+            else None
+        ),
+        assembly_size=_float_or_none(
+            _first_metric(metrics, "assembly_size", "assembly_size_bp", "total_length")
+        ),
+        assembly_size_ratio=_float_or_none(metrics.get("assembly_size_ratio")),
+        contig_count=_int_or_none(
+            _first_metric(metrics, "contig_count", "num_contigs")
+        ),
+        contig_n50=_float_or_none(
+            _first_metric(metrics, "contig_n50", "n50", "n50_bp")
+        ),
+        contig_n90=_float_or_none(_first_metric(metrics, "contig_n90", "n90")),
+        largest_contig=_float_or_none(metrics.get("largest_contig")),
+        busco_complete=_float_or_none(
+            _first_metric(metrics, "busco_complete", "busco_complete_ratio")
+        ),
+        busco_single=_float_or_none(
+            _first_metric(metrics, "busco_single", "busco_single_ratio")
+        ),
+        busco_duplicate=_float_or_none(
+            _first_metric(metrics, "busco_duplicate", "busco_duplicate_ratio")
+        ),
+        busco_fragmented=_float_or_none(
+            _first_metric(metrics, "busco_fragmented", "busco_fragmented_ratio")
+        ),
+        busco_missing=_float_or_none(
+            _first_metric(metrics, "busco_missing", "busco_missing_ratio")
+        ),
+        quast_metrics=quast_metrics or None,
+    )
 
 
 def _seal_parameter_attempt(
@@ -966,7 +1243,14 @@ def _seal_parameter_attempt(
             value["attempt_manifest_ref"],
             expected_type=ASSEMBLY_PARAMETER_ATTEMPT_MANIFEST,
         )
-        if manifest.get("seal_hash") != digest:
+        expected_manifest = {
+            "schema_version": 3,
+            "stage": "assembly",
+            **semantic,
+            "sealed_at": value.get("sealed_at"),
+            "seal_hash": digest,
+        }
+        if manifest != expected_manifest:
             raise ValueError("parameter attempt manifest seal mismatch")
         return value
 
@@ -976,21 +1260,9 @@ def _seal_parameter_attempt(
         int(value["attempt_id"]),
         "attempt_manifest.json",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "stage": "assembly",
-            "method_id": value["method_id"],
-            "attempt_id": value["attempt_id"],
-            "status": value["status"],
-            "task": value["task"],
-            "previous_attempt_id": value.get("previous_attempt_id"),
-            "recommendation_manifest_ref": value["recommendation_manifest_ref"],
-            "approval_decision_ref": value["approval_decision_ref"],
-            "frozen_parameters_ref": value.get("frozen_parameters_ref"),
-            "command_ref": value.get("command_ref"),
-            "frozen_attempt_ref": value.get("frozen_attempt_ref"),
-            "execution_ref": value.get("execution_ref"),
-            "review_ref": value.get("review_ref"),
-            "previous_attempt_seal_hash": value.get("previous_attempt_seal_hash"),
+            **semantic,
             "sealed_at": sealed_at,
             "seal_hash": digest,
         },
@@ -1017,6 +1289,8 @@ def _validate_parameter_attempt_chain(
     for item in raw_attempts:
         if not isinstance(item, dict):
             raise ValueError("parameter attempt chain contains a non-mapping entry")
+        if item.get("schema_version") != 3:
+            raise ValueError("unsupported_parameter_recommendation_schema")
         value = ParameterAttempt.model_validate(item).model_dump(mode="json")
         if value.get("seal_hash"):
             value = _seal_parameter_attempt(state, value)
@@ -1234,9 +1508,20 @@ def _first_metric(metrics: dict[str, Any], *keys: str) -> Any:
 
 def _float_or_none(value: Any) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _ratio(value: float | None) -> float | None:
