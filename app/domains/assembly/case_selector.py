@@ -8,6 +8,7 @@ from typing import Any
 from app.domains.assembly.evidence_case import validate_hifiasm_evidence_cases
 from app.domains.assembly.numeric_case_retriever import HifiasmNumericCaseRetriever
 from app.domains.assembly.retrieval_query import build_hifiasm_retrieval_query
+from app.schemas.artifacts import ParameterAttemptTask
 from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     CanonicalRecommendationFacts,
@@ -25,7 +26,7 @@ def select_evidence_cases(
     cases: list[dict[str, Any]],
     *,
     method_id: str,
-    task: str,
+    task: ParameterAttemptTask,
     facts: CanonicalRecommendationFacts,
     context: AssemblyRecommendationContext,
     min_cases: int = 0,
@@ -42,7 +43,9 @@ def select_evidence_cases(
 
     del min_cases
     if task in _RETRY_TASKS:
-        raise ValueError("retry inherits attempt 0 literature cards without reselection")
+        raise ValueError(
+            "retry inherits attempt 0 literature cards without reselection"
+        )
     if task != "recommend_initial":
         raise ValueError(f"unsupported assembly parameter task: {task!r}")
 

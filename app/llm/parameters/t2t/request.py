@@ -13,8 +13,10 @@ from app.schemas.parameter_recommendation import (
     T2TRecommendationContext,
 )
 
-T2T_METHOD = "t2t.alignment.minimap2"
-PARAMETER_RECOMMENDATION_CONTRACT = "parameter_recommendation_v1"
+T2T_METHOD: Literal["t2t.alignment.minimap2"] = "t2t.alignment.minimap2"
+PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
+    "parameter_recommendation_v1"
+)
 
 
 class T2TParameterRequest(BaseModel):

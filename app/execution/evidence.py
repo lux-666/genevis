@@ -11,14 +11,14 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult, ExecutionStatus
 from app.storage.artifacts import (
     artifact_ref_for_path,
     publish_artifact_record,
     resolve_artifact_ref,
 )
-from app.schemas.execution import ExecutionResult, ExecutionStatus
-from app.schemas.artifacts import ArtifactMeta, ArtifactRef
-from app.schemas.descriptors import FrozenAttemptSpec
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 
@@ -204,19 +204,14 @@ def load_frozen_attempt(
     attempt = FrozenAttemptSpec.model_validate(payload.get("attempt"))
     if attempt.attempt_id != payload.get("attempt_id"):
         raise DataLayoutError("attempt evidence identity mismatch")
-    if payload.get("stage") != expected_stage or payload.get(
-        "method_name"
-    ) != attempt.method_name:
-        raise DataLayoutError("attempt evidence identity mismatch")
     if (
-        attempt.session_id != state.get("session_id")
-        or attempt.stage != expected_stage
+        payload.get("stage") != expected_stage
+        or payload.get("method_name") != attempt.method_name
     ):
         raise DataLayoutError("attempt evidence identity mismatch")
-    if (
-        expected_method_name is not None
-        and attempt.method_name != expected_method_name
-    ):
+    if attempt.session_id != state.get("session_id") or attempt.stage != expected_stage:
+        raise DataLayoutError("attempt evidence identity mismatch")
+    if expected_method_name is not None and attempt.method_name != expected_method_name:
         raise DataLayoutError("attempt evidence has the wrong method identity")
     _require_retained_attempt_work(attempt)
     return attempt

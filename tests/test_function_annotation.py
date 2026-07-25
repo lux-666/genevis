@@ -7,11 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.ledger import Ledger
 from app.schemas.descriptors import DescriptorRegistry
-from app.schemas.state import initial_state
 from app.schemas.resource_ref import ResourceRef
+from app.schemas.state import initial_state
 from app.stages.function_annotation.builder import build_stage
+from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
 
@@ -70,7 +70,9 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             },
         ).to_dict()
         if provenance is not None:
-            state["stage_outputs"]["function_annotation"] = {"database_provenance": provenance}
+            state["stage_outputs"]["function_annotation"] = {
+                "database_provenance": provenance
+            }
         return state
 
     def _provenance(self, proteins_ref: str) -> list[dict]:
@@ -213,7 +215,9 @@ class FunctionAnnotationStageTests(unittest.TestCase):
 
             self.assertEqual(result["supervision_state"], "completed")
             function = result["stage_outputs"]["function_annotation"]
-            self.assertEqual(function["database_provenance"][0]["input_proteins_ref"], proteins_ref)
+            self.assertEqual(
+                function["database_provenance"][0]["input_proteins_ref"], proteins_ref
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins_ref = str(Path(tmpdir) / "proteins.fa")
@@ -231,7 +235,9 @@ class FunctionAnnotationStageTests(unittest.TestCase):
     def test_valid_provenance_commits_and_marks_workflow_done(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             proteins_ref = str(Path(tmpdir) / "proteins.fa")
-            result = build_stage().invoke(self._protein_state(tmpdir, provenance=self._provenance(proteins_ref)))
+            result = build_stage().invoke(
+                self._protein_state(tmpdir, provenance=self._provenance(proteins_ref))
+            )
 
             self.assertEqual(result["current_stage"], "done")
             self.assertEqual(result["supervision_state"], "completed")
@@ -247,12 +253,21 @@ class FunctionAnnotationStageTests(unittest.TestCase):
             self.assertTrue(Path(function["plan_artifact_ref"]).exists())
             self.assertTrue(Path(function["bundle_artifact_ref"]).exists())
             self.assertEqual(len(function["database_provenance"]), 1)
-            plan = json.loads(Path(function["plan_artifact_ref"]).read_text(encoding="utf-8"))
+            plan = json.loads(
+                Path(function["plan_artifact_ref"]).read_text(encoding="utf-8")
+            )
             self.assertFalse(plan["metadata"]["execution_enabled"])
             self.assertFalse(plan["metadata"]["database_download_enabled"])
-            bundle = json.loads(Path(function["bundle_artifact_ref"]).read_text(encoding="utf-8"))
-            self.assertEqual(bundle["database_provenance"][0]["input_proteins_ref"], proteins_ref)
-            self.assertEqual(bundle["database_provenance"][0]["database_source_ref"], "/db/uniprot/2026_02.dmnd")
+            bundle = json.loads(
+                Path(function["bundle_artifact_ref"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                bundle["database_provenance"][0]["input_proteins_ref"], proteins_ref
+            )
+            self.assertEqual(
+                bundle["database_provenance"][0]["database_source_ref"],
+                "/db/uniprot/2026_02.dmnd",
+            )
             self.assertIsNone(bundle["diamond_hits_ref"])
             self.assertIsNone(bundle["gene_function_tsv_ref"])
             self.assertIsNone(bundle["go_annotation_table_ref"])

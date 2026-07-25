@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from app.schemas.artifacts import ArtifactRef
@@ -45,7 +46,7 @@ def write_t2t_parameter_artifact(
 
 def read_t2t_parameter_artifact(
     state: TopLevelState,
-    value: ArtifactRef | dict[str, Any],
+    value: ArtifactRef | Mapping[str, object],
     *,
     expected_type: str | None = None,
 ) -> dict[str, Any]:

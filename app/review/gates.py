@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 
-DecisionApplier = Callable[[TopLevelState, Any], dict[str, Any]]
-TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], dict[str, Any]]
+DecisionApplier = Callable[[TopLevelState, Any], StateUpdate]
+TimeoutApplier = Callable[[TopLevelState, Any, dict[str, Any]], StateUpdate]
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class ReviewGateDeclaration:
             raise TypeError(
                 f"review gate applier is not callable: {self.decision_applier}"
             )
-        return applier
+        return cast(DecisionApplier, applier)
 
     def load_timeout_applier(self) -> TimeoutApplier | None:
         if not self.timeout_applier:
@@ -60,7 +60,7 @@ class ReviewGateDeclaration:
             raise TypeError(
                 f"review gate timeout applier is not callable: {self.timeout_applier}"
             )
-        return applier
+        return cast(TimeoutApplier, applier)
 
 
 _DECLARATIONS: dict[tuple[str, str], ReviewGateDeclaration] = {}
@@ -141,18 +141,18 @@ def review_prompt_bundle(stage: str, gate_id: str | None = None) -> str | None:
     return get_review_gate(stage, gate_id).prompt_bundle
 
 
-def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, Any]:
+def apply_review_gate_decision(
+    state: TopLevelState,
+    request: Any,
+) -> StateUpdate:
     gate_id = getattr(request, "gate_id", None)
-    active_interrupt = state.get("active_interrupt") or {}
-    if (
-        isinstance(active_interrupt, dict)
-        and active_interrupt.get("gate_id") == "parameter_approval"
-    ):
+    active_interrupt = state.get("active_interrupt")
+    if active_interrupt and active_interrupt.get("gate_id") == "parameter_approval":
         if gate_id != "parameter_approval":
             raise ValueError(
                 "parameter approval resume requires explicit gate_id=parameter_approval"
             )
-    elif isinstance(active_interrupt, dict):
+    elif active_interrupt:
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
     return gate.load_decision_applier()(state, request)
@@ -160,10 +160,10 @@ def apply_review_gate_decision(state: TopLevelState, request: Any) -> dict[str, 
 
 def apply_review_gate_timeout(
     state: TopLevelState, request: Any, timeout: dict[str, Any]
-) -> dict[str, Any] | None:
+) -> StateUpdate | None:
     gate_id = getattr(request, "gate_id", None)
-    active_interrupt = state.get("active_interrupt") or {}
-    if isinstance(active_interrupt, dict):
+    active_interrupt = state.get("active_interrupt")
+    if active_interrupt:
         gate_id = active_interrupt.get("gate_id") or gate_id
     gate = get_review_gate(request.stage, gate_id)
     applier = gate.load_timeout_applier()

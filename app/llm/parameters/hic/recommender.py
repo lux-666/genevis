@@ -143,7 +143,9 @@ def _normalize_direct_recommendation(response: dict[str, Any]) -> dict[str, Any]
     parameters = response.get("parameters")
     if not isinstance(parameters, dict):
         raise ValueError("AutoHiC response requires a parameters object")
-    wrapped = sorted(name for name, value in parameters.items() if isinstance(value, dict))
+    wrapped = sorted(
+        name for name, value in parameters.items() if isinstance(value, dict)
+    )
     if wrapped:
         raise ValueError(
             "parameter values must be direct JSON values, not wrapper objects: "

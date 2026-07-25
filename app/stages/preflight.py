@@ -115,29 +115,37 @@ def check_stage_prerequisites(
         override = req.get("override")
 
         # First check if any upstream stage in this plan will produce this resource
-        found_in_plan = _check_planned_resource(spec, planned_resources, stages_processed, stage)
+        found_in_plan = _check_planned_resource(
+            spec, planned_resources, stages_processed, stage
+        )
 
         if found_in_plan:
             # This resource will be produced by an upstream stage in the plan
             continue
 
         # Otherwise check current state
-        resolution = resolve_stage_resource(state, resource_spec=spec, override=override)
+        resolution = resolve_stage_resource(
+            state, resource_spec=spec, override=override
+        )
 
         if not resolution.found:
             if spec.required or _is_contextually_required(state, stage, spec):
-                missing_resources.append(ResourceCheck(
-                    resource_name=req["name"],
-                    spec=spec,
-                    found=False,
-                    source=None,
-                    message=(
-                        f"Required {req['name']} not found. Searched: "
-                        f"resource_refs.{spec.resource_type}, asset_registry."
-                    ),
-                ))
+                missing_resources.append(
+                    ResourceCheck(
+                        resource_name=req["name"],
+                        spec=spec,
+                        found=False,
+                        source=None,
+                        message=(
+                            f"Required {req['name']} not found. Searched: "
+                            f"resource_refs.{spec.resource_type}, asset_registry."
+                        ),
+                    )
+                )
             else:
-                warnings.append(f"Optional {req['name']} not found (will use fallback).")
+                warnings.append(
+                    f"Optional {req['name']} not found (will use fallback)."
+                )
 
     can_run = len(missing_resources) == 0
     suggestions = []
@@ -171,8 +179,9 @@ def validate_execution_plan(
     Returns:
         PlanValidation with overall status, per-stage checks, suggestions
     """
-    from app.workflow import STAGE_ORDER
     import copy
+
+    from app.workflow import STAGE_ORDER
 
     # Build a simulated state that accumulates resources from planned stages
     simulated_state = copy.deepcopy(state)
@@ -187,7 +196,9 @@ def validate_execution_plan(
         if stage not in requested_stages:
             continue
 
-        check = check_stage_prerequisites(simulated_state, stage, produced_resources, stages_processed)
+        check = check_stage_prerequisites(
+            simulated_state, stage, produced_resources, stages_processed
+        )
         checks[stage] = check
 
         if not check.can_run and first_blocker is None:
@@ -238,9 +249,7 @@ def _generate_suggestions(stage: str, missing: list[ResourceCheck]) -> list[str]
                 "or add upstream stages: assembly → assembly_review"
             )
         elif res.resource_name == "reads" or res.resource_name == "raw reads":
-            suggestions.append(
-                "Provide 'raw_long_reads' asset in manifest"
-            )
+            suggestions.append("Provide 'raw_long_reads' asset in manifest")
         elif res.resource_name == "clean reads":
             suggestions.append(
                 "Provide 'clean_long_reads' asset in manifest, "
@@ -248,18 +257,22 @@ def _generate_suggestions(stage: str, missing: list[ResourceCheck]) -> list[str]
             )
         elif res.resource_name == "masked assembly":
             suggestions.append(
-                "Add upstream stage 'repeat_annotation' to produce a softmasked genome, "
+                "Add upstream stage 'repeat_annotation' to produce a "
+                "softmasked genome, "
                 "or provide an explicit repeat_annotation skip/fallback reason."
             )
         elif res.resource_name == "predicted proteins":
             suggestions.append(
-                "Add upstream stage 'gene_annotation' to produce predicted proteins before function_annotation."
+                "Add upstream stage 'gene_annotation' to produce predicted "
+                "proteins before function_annotation."
             )
 
     return suggestions
 
 
-def _is_contextually_required(state: TopLevelState, stage: str, spec: ResourceSpec) -> bool:
+def _is_contextually_required(
+    state: TopLevelState, stage: str, spec: ResourceSpec
+) -> bool:
     """Return whether an optional resource is required by this stage context."""
     if stage == "gene_annotation" and spec.resource_type == "masked_assembly":
         return not _has_unmasked_fallback_reason(state)
@@ -278,7 +291,9 @@ def _has_unmasked_fallback_reason(state: TopLevelState) -> bool:
     return bool((state.get("skip_reasons") or {}).get("repeat_annotation"))
 
 
-def _build_summary(valid: bool, first_blocker: str | None, checks: dict[str, StageCheck]) -> str:
+def _build_summary(
+    valid: bool, first_blocker: str | None, checks: dict[str, StageCheck]
+) -> str:
     """Build human-readable summary."""
     if valid:
         return f"✓ All {len(checks)} requested stages can run."
@@ -291,7 +306,9 @@ def _build_summary(valid: bool, first_blocker: str | None, checks: dict[str, Sta
     return "✗ Execution plan validation failed."
 
 
-def _build_overall_suggestions(checks: dict[str, StageCheck], first_blocker: str | None) -> list[str]:
+def _build_overall_suggestions(
+    checks: dict[str, StageCheck], first_blocker: str | None
+) -> list[str]:
     """Build overall suggestions for the plan."""
     if not first_blocker:
         return []
@@ -330,7 +347,8 @@ def _check_planned_resource(
 
     Args:
         spec: The resource specification to check
-        planned_resources: {stage_name: [output_key, ...]} from _collect_planned_resources
+        planned_resources: {stage_name: [output_key, ...]} from \
+_collect_planned_resources
         stages_processed: Set of stages already checked/processed (upstream of current)
         current_stage: The stage we're currently checking (to avoid circular deps)
 

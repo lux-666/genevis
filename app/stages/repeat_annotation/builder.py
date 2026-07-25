@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.repeat_annotation.nodes import (
@@ -25,7 +26,12 @@ from app.stages.repeat_annotation.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the repeat annotation planning subgraph."""
     graph = StateGraph(TopLevelState)
 

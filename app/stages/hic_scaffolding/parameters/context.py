@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from app.schemas.parameter_recommendation import (
     AutoHiCRecommendationContext,
     RecommendationRetryContext,
 )
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_output
+from app.stages.hic_scaffolding.state import (
+    HiCScaffoldingCursor,
+    hic_scaffolding_output,
+)
 
 
 def build_autohic_recommendation_context(
     state: TopLevelState,
     *,
-    hic_out: dict[str, Any] | None = None,
+    hic_out: HiCScaffoldingCursor | None = None,
     retry: RecommendationRetryContext | None = None,
 ) -> AutoHiCRecommendationContext:
     """Build AutoHiCRecommendationContext from pipeline stage state."""
 
     if hic_out is None:
-        hic_out = stage_output(state, "hic_scaffolding")
+        hic_out = hic_scaffolding_output(state)
 
     # library_protocols: list of dicts, extract each .get("library_protocol")
-    raw_metadata: list[dict[str, Any]] = list(hic_out.get("hic_library_metadata") or [])
+    raw_metadata = hic_out.get("hic_library_metadata") or []
     library_protocols: list[str] = []
     for entry in raw_metadata:
         if isinstance(entry, dict):
@@ -41,7 +42,7 @@ def build_autohic_recommendation_context(
 
     return AutoHiCRecommendationContext(
         stage="hic_scaffolding",
-        library_protocols=library_protocols,
+        library_protocols=tuple(library_protocols),
         provided_restriction_enzyme=provided_restriction_enzyme,
         retry=retry,
     )

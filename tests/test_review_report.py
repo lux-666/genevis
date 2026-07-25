@@ -7,11 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.ledger import Ledger
-from app.control.lifecycle import ResumeValidationError, inspect_state, resume_review_state
+from app.control.lifecycle import (
+    ResumeValidationError,
+    inspect_state,
+    resume_review_state,
+)
+from app.reports.review_report import write_final_review_report, write_operator_report
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import persist_review_request
-from app.reports.review_report import write_final_review_report, write_operator_report
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths, ensure_run_layout
 
 
@@ -128,7 +132,7 @@ class ReviewReportTests(unittest.TestCase):
                 decision="accept",
             )
             paths.resolve_ref(persisted.request_ref.path_ref).write_text(
-                "{\"tampered\": true}",
+                '{"tampered": true}',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ResumeValidationError, "integrity mismatch"):
@@ -172,14 +176,18 @@ class ReviewReportTests(unittest.TestCase):
             report_ref = write_final_review_report(paths.run_dir, "s1")
             report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
 
-            self.assertEqual(Path(report_ref), paths.report_path("session_summary.json"))
+            self.assertEqual(
+                Path(report_ref), paths.report_path("session_summary.json")
+            )
             self.assertEqual(report["report_type"], "session_summary")
             self.assertEqual(
                 report["pending_human_confirmations"][0]["review_request_id"],
                 persisted.review_request_id,
             )
             self.assertEqual(report["decisions_by_origin"]["llm_provisional"], 1)
-            self.assertEqual(report["decisions"][0]["review_request_id"], "assembly_001")
+            self.assertEqual(
+                report["decisions"][0]["review_request_id"], "assembly_001"
+            )
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
             self.assertEqual(paths.artifact_index_path.read_bytes(), before_index)
 
@@ -201,7 +209,10 @@ class ReviewReportTests(unittest.TestCase):
                     "current_stage": "function_annotation",
                     "supervision_state": "failed_terminal",
                     "last_error": "missing database_provenance for function_annotation",
-                    "route_trace": ["gene_annotation_stage", "function_annotation_stage"],
+                    "route_trace": [
+                        "gene_annotation_stage",
+                        "function_annotation_stage",
+                    ],
                 },
             )
 
@@ -213,7 +224,9 @@ class ReviewReportTests(unittest.TestCase):
                 report["route_trace_tail"],
                 ["gene_annotation_stage", "function_annotation_stage"],
             )
-            self.assertIn("database_source_ref", report["next_action"]["required_fields"])
+            self.assertIn(
+                "database_source_ref", report["next_action"]["required_fields"]
+            )
             self.assertEqual(len(ledger.read_event_rows("s1")), before_events)
             self.assertFalse(paths.artifact_index_path.exists())
 
@@ -244,7 +257,9 @@ class ReviewReportTests(unittest.TestCase):
 
             report = json.loads(Path(report_ref).read_text(encoding="utf-8"))
             interrupt = report["active_interrupt"]
-            self.assertEqual(interrupt["review_request_id"], persisted.review_request_id)
+            self.assertEqual(
+                interrupt["review_request_id"], persisted.review_request_id
+            )
             self.assertNotIn("candidates", interrupt)
             self.assertEqual(
                 interrupt["request_ref"],

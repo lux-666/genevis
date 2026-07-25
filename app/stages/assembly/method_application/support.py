@@ -20,7 +20,7 @@ from app.domains.assembly.constants import (
     HIFIASM_ONT_METHOD,
     NEXTDENOVO_METHOD,
 )
-from app.domains.assembly.selection import method_read_type
+from app.domains.assembly.selection import NormalizedReadType, method_read_type
 from app.execution.attempt_owners import MethodExecution
 from app.execution.lifecycle import MethodExecutionLifecycle, freeze_method_attempts
 from app.execution.method_runner import build_frozen_attempt
@@ -41,15 +41,18 @@ from app.schemas.parameter_recommendation import (
     AssemblyRecommendationContext,
     ResolvedParameterSources,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.parameters.storage import (
     write_attempt_json_artifact,
+)
+from app.stages.assembly.state import (
+    AssemblyStageCursor,
+    assembly_stage_output,
+    update_assembly_stage_output,
 )
 from app.stages.base import (
     absolute_data_dir,
     ordered_unique,
-    stage_output,
-    update_stage_output,
 )
 from app.storage.artifacts import (
     publish_artifact_record,
@@ -99,7 +102,7 @@ class AssemblyExecutionContractParameterError(ValueError):
         self.method_id = method_id
         self.invalid = invalid
 
-    def stage_update(self) -> dict[str, Any]:
+    def stage_update(self) -> AssemblyStageCursor:
         return blocked_parameters(
             self.parameter_key,
             self.method_id,
@@ -151,7 +154,7 @@ class AssemblyExecutionContract(BaseModel):
 
 
 def build_assembly_execution_contract(
-    output: dict[str, Any],
+    output: AssemblyStageCursor,
     *,
     method_id: str,
 ) -> AssemblyExecutionContract:
@@ -196,7 +199,7 @@ def build_assembly_execution_contract(
 
 
 def load_assembly_execution_contract(
-    output: dict[str, Any],
+    output: AssemblyStageCursor,
     *,
     method_id: str,
 ) -> AssemblyExecutionContract:
@@ -214,10 +217,9 @@ def load_assembly_execution_contract(
     return contract
 
 
-def fail_update(state: TopLevelState, reason: str) -> dict:
-    return update_stage_output(
+def fail_update(state: TopLevelState, reason: str) -> StateUpdate:
+    return update_assembly_stage_output(
         state,
-        "assembly",
         {"status": "failed", "reason": reason},
     )
 
@@ -237,7 +239,7 @@ def freeze_parameterized_attempt(
     frozen_parameters_payload: dict[str, Any],
     frozen_attempt_metadata: dict[str, Any],
     stage_updates: dict[str, Any],
-) -> dict:
+) -> StateUpdate:
     """Persist and attach one human-approved Assembly execution attempt."""
 
     if (
@@ -323,7 +325,7 @@ def freeze_parameterized_attempt(
 
 def load_current_approved_recommendation(
     state: TopLevelState,
-    output: dict[str, Any],
+    output: AssemblyStageCursor,
     *,
     method_id: str,
     label: str,
@@ -366,7 +368,9 @@ def approved_method_read_type(
     return mapped
 
 
-def approved_assembly_read_type(bundle: ApprovedParameterBundleV3) -> str:
+def approved_assembly_read_type(
+    bundle: ApprovedParameterBundleV3,
+) -> NormalizedReadType:
     """Return the canonical read type persisted in an Assembly snapshot."""
 
     context = bundle.chain.input_snapshot.stage_context
@@ -384,9 +388,9 @@ def collect_method_artifacts(
     extra_artifacts: list[tuple[Path, str]],
     bundle_logs: dict[str, str],
     bundle_metadata: dict[str, Any],
-) -> dict:
+) -> StateUpdate:
     """Register standard artifacts and materialize the selected candidate bundle."""
-    output = stage_output(state, "assembly")
+    output = assembly_stage_output(state)
     if output.get("status") != lifecycle.ran_status:
         return {}
 
@@ -444,9 +448,8 @@ def collect_method_artifacts(
 
     bundle_path = _candidate_bundle_path(output, lifecycle.method_name)
     if bundle_path is None:
-        return update_stage_output(
+        return update_assembly_stage_output(
             state,
-            "assembly",
             {
                 "status": "failed",
                 "reason": f"missing {lifecycle.name} candidate bundle ref",
@@ -530,9 +533,8 @@ def collect_method_artifacts(
         "draft_assembly_ref": str(draft_assembly),
         "candidate_ref": str(executed_bundle_path),
     }
-    return update_stage_output(
+    return update_assembly_stage_output(
         state,
-        "assembly",
         {
             "status": "draft_ready",
             "draft_assembly_ref": str(draft_assembly),
@@ -584,7 +586,7 @@ def blocked_parameters(
     method_name: str,
     missing: list[str],
     invalid: list[dict[str, Any]],
-) -> dict[str, Any]:
+) -> AssemblyStageCursor:
     """Create the shared blocked-param state payload."""
     details = []
     if missing:
@@ -600,7 +602,9 @@ def blocked_parameters(
     }
 
 
-def _candidate_bundle_path(output: dict[str, Any], method_name: str) -> Path | None:
+def _candidate_bundle_path(
+    output: AssemblyStageCursor, method_name: str
+) -> Path | None:
     for ref in output.get("selected_candidate_refs") or []:
         path = Path(ref)
         if (

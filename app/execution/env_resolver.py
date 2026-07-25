@@ -15,11 +15,10 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-
 
 DEFAULT_CONFIG_PATH = Path("config/envs.yaml")
 
@@ -35,6 +34,7 @@ def active_config_path() -> Path:
     if override:
         return Path(override)
     return DEFAULT_CONFIG_PATH
+
 
 PreflightStatus = Literal["ok", "blocked_env", "missing_tool"]
 
@@ -59,7 +59,9 @@ class EnvSpec(BaseModel):
 
     def conda_run_prefix(self) -> list[str]:
         """Return the `conda run -n NAME` / `-p PATH` argv prefix."""
-        target = ["-p", self.conda_prefix] if self.conda_prefix else ["-n", self.conda_env]
+        target = (
+            ["-p", self.conda_prefix] if self.conda_prefix else ["-n", self.conda_env]
+        )
         return [self.conda_bin, "run", "--live-stream", "--no-capture-output", *target]
 
     def display_target(self) -> str:
@@ -144,7 +146,10 @@ def package_preflight(package: PackageSpec) -> PackagePreflightResult:
             package=package.name,
             install_root=package.install_root,
             missing_paths=["<install_root>"],
-            detail=f"install_root does not exist or is not a directory: {package.install_root}",
+            detail=(
+                "install_root does not exist or is not a directory: "
+                f"{package.install_root}"
+            ),
         )
     for rel in package.canary_paths:
         if not package.resolved_canary(rel).is_file():
@@ -164,17 +169,20 @@ def package_preflight(package: PackageSpec) -> PackagePreflightResult:
     )
 
 
-def _load_raw(config_path: Path) -> dict:
+ConfigMapping = dict[str, Any]
+
+
+def _load_raw(config_path: Path) -> ConfigMapping:
     if not config_path.exists():
         raise FileNotFoundError(f"env config missing: {config_path}")
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"env config must be a mapping: {config_path}")
-    return raw
+    return cast(ConfigMapping, raw)
 
 
-def _entry(raw: dict, keys: tuple[str, ...]) -> dict | None:
+def _entry(raw: ConfigMapping, keys: tuple[str, ...]) -> ConfigMapping | None:
     node: object = raw
     for key in keys:
         if not isinstance(node, dict):
@@ -182,29 +190,40 @@ def _entry(raw: dict, keys: tuple[str, ...]) -> dict | None:
         node = node.get(key)
         if node is None:
             return None
-    return node if isinstance(node, dict) else None
+    return cast(ConfigMapping, node) if isinstance(node, dict) else None
 
 
 class EnvResolver:
     """Resolve conda environments for stages and methods from the active config."""
 
     def __init__(self, config_path: Path | str | None = None) -> None:
-        self.config_path = Path(config_path) if config_path is not None else active_config_path()
+        self.config_path = (
+            Path(config_path) if config_path is not None else active_config_path()
+        )
         self._raw = _load_raw(self.config_path)
         default_section = self._raw.get("default") or {}
         self.conda_bin: str = str(default_section.get("conda_bin") or "conda")
         fallback_env = default_section.get("fallback_env")
         fallback_prefix = default_section.get("fallback_prefix")
         if not fallback_env and not fallback_prefix:
-            raise ValueError("config/envs.yaml default must set fallback_env or fallback_prefix")
+            raise ValueError(
+                "config/envs.yaml default must set fallback_env or fallback_prefix"
+            )
         if fallback_env and fallback_prefix:
-            raise ValueError("default.fallback_env and default.fallback_prefix are mutually exclusive")
+            raise ValueError(
+                "default.fallback_env and default.fallback_prefix are mutually "
+                "exclusive"
+            )
         self._fallback_env: str | None = str(fallback_env) if fallback_env else None
-        self._fallback_prefix: str | None = str(fallback_prefix) if fallback_prefix else None
-        self.packages: dict[str, PackageSpec] = self._load_packages(self._raw.get("packages") or {})
+        self._fallback_prefix: str | None = (
+            str(fallback_prefix) if fallback_prefix else None
+        )
+        self.packages: dict[str, PackageSpec] = self._load_packages(
+            self._raw.get("packages") or {}
+        )
 
     @staticmethod
-    def _load_packages(raw: dict) -> dict[str, PackageSpec]:
+    def _load_packages(raw: ConfigMapping) -> dict[str, PackageSpec]:
         packages: dict[str, PackageSpec] = {}
         for name, entry in raw.items():
             if not isinstance(entry, dict):
@@ -220,9 +239,13 @@ class EnvResolver:
                 install_root=str(install_root),
                 canary_paths=list(entry.get("canary_paths") or []),
                 entrypoints=list(entry.get("entrypoints") or []),
-                models={str(model_name): str(path) for model_name, path in models.items()},
+                models={
+                    str(model_name): str(path) for model_name, path in models.items()
+                },
                 conform_on_bootstrap=bool(entry.get("conform_on_bootstrap", False)),
-                jar_root_ref=str(entry["jar_root_ref"]) if entry.get("jar_root_ref") else None,
+                jar_root_ref=str(entry["jar_root_ref"])
+                if entry.get("jar_root_ref")
+                else None,
             )
         return packages
 
@@ -242,7 +265,12 @@ class EnvResolver:
             source="default",
         )
 
-    def _build_spec(self, entry: dict, *, source: Literal["method", "stage", "default"]) -> EnvSpec:
+    def _build_spec(
+        self,
+        entry: ConfigMapping,
+        *,
+        source: Literal["method", "stage", "default"],
+    ) -> EnvSpec:
         conda_env = entry.get("conda_env")
         conda_prefix = entry.get("conda_prefix")
         if not conda_env and not conda_prefix:
@@ -260,7 +288,7 @@ class EnvResolver:
         )
 
     def packages_for_spec(self, spec: EnvSpec) -> list[PackageSpec]:
-        """Return the PackageSpecs referenced by a resolved method spec's package_tools."""
+        "Return the PackageSpecs referenced by a resolved method spec's package_tools."
         missing = [name for name in spec.package_tools if name not in self.packages]
         if missing:
             raise ValueError(

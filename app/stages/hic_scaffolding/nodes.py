@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
-from app.storage.ledger import Ledger
+from app.configuration import load_descriptor_registry
 from app.control.lifecycle import ResumeValidationError
-from app.workflow import next_stage_name
 from app.review.base import ResumeReviewRequest, ReviewPayload
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -16,11 +15,8 @@ from app.review.persistence import (
     persist_review_request,
 )
 from app.schemas.artifacts import ArtifactRef, HiCScaffoldDecisionArtifact
-from app.configuration import load_descriptor_registry
-from app.schemas.state import TopLevelState
+from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, append_route_trace
-from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
-from app.stages.resource_specs import HIC_READS_SPEC, assembly_resource_spec
 from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
 )
@@ -30,18 +26,23 @@ from app.stages.hic_scaffolding.method_application.support import (
 from app.stages.hic_scaffolding.parameters.workflow import (
     prepare_autohic_review_retry,
 )
+from app.stages.hic_scaffolding.state import HIC_SCAFFOLDING_CURSOR_ADAPTER
+from app.stages.resource_resolution import resolve_stage_resource, update_resource_ref
+from app.stages.resource_specs import HIC_READS_SPEC, assembly_resource_spec
+from app.storage.ledger import Ledger
+from app.workflow import next_stage_name
 
 AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
 HIC_CONTRACT_METHOD = "hic_scaffolding.contract"
 
 
-def enter_hic_scaffolding(state: TopLevelState) -> dict:
+def enter_hic_scaffolding(state: TopLevelState) -> StateUpdate:
     """Mark the selected Hi-C stage as running."""
 
     return {"supervision_state": "running_stage"}
 
 
-def resolve_hic_inputs(state: TopLevelState) -> dict:
+def resolve_hic_inputs(state: TopLevelState) -> StateUpdate:
     """Resolve and validate everything required before recommending parameters."""
 
     assembly = resolve_stage_resource(
@@ -89,10 +90,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
     if existing.get("execution_mode") != "local":
         missing.append("hic_scaffolding local execution")
     try:
-        descriptor_present = (
-            AUTOHIC_METHOD
-            in load_descriptor_registry().methods
-        )
+        descriptor_present = AUTOHIC_METHOD in load_descriptor_registry().methods
     except (OSError, ValueError):
         descriptor_present = False
     if not descriptor_present:
@@ -119,7 +117,7 @@ def resolve_hic_inputs(state: TopLevelState) -> dict:
     )
 
 
-def prepare_autohic_adoption_review(state: TopLevelState) -> dict:
+def prepare_autohic_adoption_review(state: TopLevelState) -> StateUpdate:
     """Open the separate final gate that adopts or rejects the AutoHiC result."""
 
     hic_out = _hic_output(state)
@@ -197,7 +195,7 @@ def prepare_autohic_adoption_review(state: TopLevelState) -> dict:
     )
 
 
-def block_hic_scaffolding(state: TopLevelState) -> dict:
+def block_hic_scaffolding(state: TopLevelState) -> StateUpdate:
     """Surface an already-persisted parameter or adoption review interrupt."""
 
     hic_out = _hic_output(state)
@@ -218,11 +216,11 @@ def block_hic_scaffolding(state: TopLevelState) -> dict:
     return {
         "current_stage": "hic_scaffolding",
         "supervision_state": "blocked_human",
-        "active_interrupt": interrupt,
+        "active_interrupt": cast(ActiveInterrupt, interrupt),
     }
 
 
-def block_hic_requirements(state: TopLevelState) -> dict:
+def block_hic_requirements(state: TopLevelState) -> StateUpdate:
     """Stop the selected stage with a distinct missing-requirements outcome."""
 
     hic_out = _hic_output(state)
@@ -237,7 +235,7 @@ def block_hic_requirements(state: TopLevelState) -> dict:
 def apply_hic_scaffolding_resume_decision(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> dict:
+) -> StateUpdate:
     """Apply the final human adoption decision for one completed AutoHiC run."""
 
     if request.stage != "hic_scaffolding" or request.gate_id != "hic_scaffolding":
@@ -320,9 +318,18 @@ def apply_hic_scaffolding_resume_decision(
             if candidate.get(key)
         },
     }
+    decision = cast(
+        Literal[
+            "accept_candidate",
+            "keep_prior_assembly",
+            "request_parameter_retry",
+            "stop_human_review",
+        ],
+        request.decision,
+    )
     artifact_payload = HiCScaffoldDecisionArtifact(
         session_id=state["session_id"],
-        decision=request.decision,
+        decision=decision,
         method_name=AUTOHIC_METHOD,
         pre_hic_assembly_ref=str(pre_hic_assembly_ref),
         output_assembly_ref=final_assembly,
@@ -364,61 +371,67 @@ def apply_hic_scaffolding_resume_decision(
     if request.decision == "request_parameter_retry":
         retry_update = prepare_autohic_review_retry(state, decision_ref)
         outputs = dict(retry_update.get("stage_outputs") or {})
-        retry_out = dict(outputs.get("hic_scaffolding") or {})
-        retry_out.update(
+        retry_out = HIC_SCAFFOLDING_CURSOR_ADAPTER.validate_python(
+            outputs.get("hic_scaffolding") or {}
+        )
+        stage_update = _update_hic_output(
+            state,
             {
+                **retry_out,
                 "active_interrupt": None,
                 "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-            }
+            },
         )
-        outputs["hic_scaffolding"] = retry_out
-        return {
+        retry_exhausted = (
+            retry_out.get("status") == "review_parameter_retries_exhausted"
+        )
+        result: StateUpdate = {
             "current_stage": "hic_scaffolding",
             "supervision_state": (
-                "failed_terminal"
-                if retry_out.get("status") == "review_parameter_retries_exhausted"
-                else "running_stage"
+                "failed_terminal" if retry_exhausted else "running_stage"
             ),
             "active_interrupt": None,
-            "stage_outputs": outputs,
-            **(
-                {"last_error": retry_out.get("reason")}
-                if retry_out.get("status") == "review_parameter_retries_exhausted"
-                else {}
-            ),
+            **stage_update,
         }
+        if retry_exhausted:
+            result["last_error"] = retry_out.get(
+                "reason",
+                "AutoHiC review retry budget exhausted",
+            )
+        return result
 
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["hic_scaffolding"] = {
-        **hic_out,
-        "status": (
-            "failed_terminal"
-            if request.decision == "stop_human_review"
-            else "completed"
-        ),
-        "decision": request.decision,
-        "selected_method_name": AUTOHIC_METHOD,
-        "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
-        "output_assembly_ref": final_assembly,
-        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-        "notes": list(request.notes),
-        "decided_by": request.decided_by,
-        "rationale_artifact_ref": request.rationale_artifact_ref,
-        "active_interrupt": None,
-    }
+    stage_update = _update_hic_output(
+        state,
+        {
+            "status": (
+                "failed_terminal"
+                if request.decision == "stop_human_review"
+                else "completed"
+            ),
+            "decision": request.decision,
+            "selected_method_name": AUTOHIC_METHOD,
+            "pre_hic_assembly_ref": str(pre_hic_assembly_ref),
+            "output_assembly_ref": final_assembly,
+            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+            "notes": list(request.notes),
+            "decided_by": request.decided_by,
+            "rationale_artifact_ref": request.rationale_artifact_ref,
+            "active_interrupt": None,
+        },
+    )
     if request.decision == "stop_human_review":
         return {
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
-            "stage_outputs": outputs,
+            **stage_update,
             "last_error": "hic_scaffolding stopped by human review decision",
         }
     return {
         "current_stage": next_stage_name("hic_scaffolding"),
         "supervision_state": "running_stage",
         "active_interrupt": None,
-        "stage_outputs": outputs,
+        **stage_update,
         "route_trace": append_route_trace(state, "hic_scaffolding_stage"),
         "resource_refs": update_resource_ref(
             state,
@@ -433,7 +446,7 @@ def apply_hic_scaffolding_resume_decision(
     }
 
 
-def fail_hic_scaffolding(state: TopLevelState) -> dict:
+def fail_hic_scaffolding(state: TopLevelState) -> StateUpdate:
     """Stop after recommendation, execution, or adoption preparation fails."""
 
     hic_out = _hic_output(state)
@@ -450,7 +463,7 @@ def _fail_update(
     reason: str,
     *,
     failure_kind: str,
-) -> dict:
+) -> StateUpdate:
     return _update_hic_output(
         state,
         {"status": "failed", "failure_kind": failure_kind, "reason": reason},
@@ -473,7 +486,9 @@ def _hic_assets(state: TopLevelState) -> list[dict[str, Any]]:
     asset_ids = list(metadata.get("asset_ids") or [])
     return [
         {
-            "asset_id": asset_ids[index] if index < len(asset_ids) else f"hic_reads:{index}",
+            "asset_id": asset_ids[index]
+            if index < len(asset_ids)
+            else f"hic_reads:{index}",
             "asset_type": "hic_reads",
             "path": path,
             "metadata": metadata,

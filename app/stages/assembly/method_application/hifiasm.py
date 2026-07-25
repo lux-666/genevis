@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import shlex
+from typing import cast
 
 from app.configuration import load_descriptor_registry
 from app.domains.assembly.constants import HIFIASM_METHOD
-from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_paths
+from app.domains.read_inputs import (
+    AssemblyInputError,
+    AssemblyReadInputType,
+    resolve_assembly_read_paths,
+)
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
+    CompiledMethodGraph,
     MethodExecutionLifecycle,
     build_method_graph,
     load_method_executions,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
     parameter_sources_payload,
@@ -29,7 +35,12 @@ from app.stages.assembly.method_application.support import (
     load_assembly_execution_contract,
     load_current_approved_recommendation,
 )
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.assembly.state import (
+    assembly_stage_output,
+    update_assembly_stage_output,
+    validated_assembly_stage_payload,
+)
+from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
 
 LIFECYCLE = MethodExecutionLifecycle(
@@ -42,15 +53,15 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_hifiasm_graph():
+def build_hifiasm_graph() -> CompiledMethodGraph:
     return build_method_graph(
         LIFECYCLE, freeze_hifiasm_attempt, collect_hifiasm_artifacts
     )
 
 
-def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
+def freeze_hifiasm_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze a local hifiasm attempt for the selected primary candidate."""
-    output = stage_output(state, "assembly")
+    output = assembly_stage_output(state)
     if output.get("status") != "hifiasm_execution_planned":
         return {}
     if HIFIASM_METHOD not in load_descriptor_registry().methods:
@@ -58,7 +69,8 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
 
     try:
         read_paths = resolve_assembly_read_paths(
-            output.get("input_ref"), output.get("input_type")
+            output.get("input_ref"),
+            cast(AssemblyReadInputType | None, output.get("input_type")),
         )
     except AssemblyInputError as exc:
         return fail_update(state, f"Hifiasm local execution {exc}")
@@ -80,7 +92,9 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if env_blocked is not None:
-        return update_stage_output(state, "assembly", env_blocked)
+        return update_assembly_stage_output(
+            state, validated_assembly_stage_payload(env_blocked)
+        )
 
     approved_bundle, recommendation_error = load_current_approved_recommendation(
         state,
@@ -183,7 +197,7 @@ def freeze_hifiasm_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_hifiasm_artifacts(state: TopLevelState) -> dict:
+def collect_hifiasm_artifacts(state: TopLevelState) -> StateUpdate:
     [execution] = load_method_executions(state, LIFECYCLE)
     attempt = execution.attempt
     metadata = dict(attempt.metadata or {})

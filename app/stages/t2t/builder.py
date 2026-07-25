@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.t2t.nodes import (
@@ -42,7 +43,12 @@ from app.stages.t2t.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the scan -> evidence -> optional patch T2T subgraph."""
     graph = StateGraph(TopLevelState)
     graph.add_node("enter", enter_t2t)

@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.ledger import (
     LEDGER_SCHEMA_VERSION,
     SUMMARY_MAX_BYTES,
     Ledger,
     LedgerConflictError,
 )
-from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
 
@@ -227,27 +227,25 @@ class LedgerV2Tests(unittest.TestCase):
             row_refs = ledger.read_event_rows("s1")[-1]["refs"]
             by_role = {ref["role"]: ref for ref in row_refs}
             self.assertEqual(
-                by_role[
-                    "terminal.completed.stage_outputs.read_qc.input_asset_ref"
-                ]["value"],
+                by_role["terminal.completed.stage_outputs.read_qc.input_asset_ref"][
+                    "value"
+                ],
                 "s1:raw_long_reads:reads.fastq",
             )
             self.assertNotIn(
                 "path_ref",
-                by_role[
-                    "terminal.completed.stage_outputs.read_qc.input_asset_ref"
-                ],
+                by_role["terminal.completed.stage_outputs.read_qc.input_asset_ref"],
             )
             self.assertEqual(
-                by_role[
-                    "terminal.completed.stage_outputs.read_qc.input_asset_refs.0"
-                ]["value"],
+                by_role["terminal.completed.stage_outputs.read_qc.input_asset_refs.0"][
+                    "value"
+                ],
                 "s1:raw_long_reads:reads.fastq",
             )
             self.assertEqual(
-                by_role[
-                    "terminal.completed.stage_outputs.read_qc.input_asset_refs.1"
-                ]["value"],
+                by_role["terminal.completed.stage_outputs.read_qc.input_asset_refs.1"][
+                    "value"
+                ],
                 "s1:raw_long_reads:reads-2.fastq",
             )
             self.assertEqual(

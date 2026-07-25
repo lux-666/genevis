@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
+
+from pydantic import TypeAdapter
 
 from app.schemas.limits import ROUTE_TRACE_LIMIT
 from app.schemas.state import (
@@ -12,6 +15,7 @@ from app.schemas.state import (
     DomainStage,
     JsonValue,
     StageCursor,
+    StateUpdate,
     TopLevelState,
     validate_stage_outputs,
 )
@@ -87,7 +91,7 @@ def stage_output(state: TopLevelState, stage_name: str) -> StageCursor:
 
 def update_stage_output(
     state: TopLevelState, stage_name: str, payload: dict[str, JsonValue]
-) -> dict[str, object]:
+) -> StateUpdate:
     """Merge payload into a stage's output slot and return the state delta."""
     outputs = dict(state.get("stage_outputs") or {})
     outputs[cast(DomainStage, stage_name)] = {
@@ -95,6 +99,42 @@ def update_stage_output(
         **payload,
     }
     return {"stage_outputs": validate_stage_outputs(outputs)}
+
+
+_ValidatedCursorT = TypeVar("_ValidatedCursorT")
+
+
+def validated_stage_output(
+    state: TopLevelState,
+    stage_name: str,
+    adapter: TypeAdapter[_ValidatedCursorT],
+) -> _ValidatedCursorT:
+    """Validate and narrow one generic JSON cursor at its stage boundary."""
+
+    return adapter.validate_python(stage_output(state, stage_name))
+
+
+def update_validated_stage_output(
+    state: TopLevelState,
+    stage_name: str,
+    payload: Mapping[str, object],
+    adapter: TypeAdapter[_ValidatedCursorT],
+) -> StateUpdate:
+    """Merge and validate a typed stage cursor before checkpoint serialization."""
+
+    merged: dict[str, object] = {
+        **stage_output(state, stage_name),
+        **payload,
+    }
+    validated = adapter.validate_python(merged)
+    serialized = adapter.dump_python(validated, mode="json")
+    if not isinstance(serialized, dict):
+        raise TypeError(f"{stage_name} stage cursor must serialize to a JSON object")
+    return update_stage_output(
+        state,
+        stage_name,
+        cast(dict[str, JsonValue], serialized),
+    )
 
 
 def append_route_trace(state: TopLevelState, *items: str) -> list[str]:

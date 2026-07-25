@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-
 DEFAULT_DATA_ROOT = "data"
 
 

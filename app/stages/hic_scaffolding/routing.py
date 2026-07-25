@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
-
+from app.stages.hic_scaffolding.state import (
+    HiCScaffoldingCursor,
+    hic_scaffolding_output,
+)
+from app.workflow import is_terminal_failure
 
 _REQUIREMENT_STATUSES = {
     "blocked_missing_requirements",
@@ -14,8 +17,8 @@ _REQUIREMENT_STATUSES = {
 }
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("hic_scaffolding") or {}
+def _output(state: TopLevelState) -> HiCScaffoldingCursor:
+    return hic_scaffolding_output(state)
 
 
 def route_after_enter(state: TopLevelState) -> str:

@@ -5,11 +5,16 @@ Decides whether inventory succeeds, fails, or requires human review.
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
+from typing import Literal
+
 from app.schemas.state import TopLevelState
+from app.stages.inventory.state import read_inventory_stage_output
+from app.workflow import is_terminal_failure
 
 
-def route_from_inventory(state: TopLevelState) -> str:
+def route_from_inventory(
+    state: TopLevelState,
+) -> Literal["register", "review", "fail"]:
     """Return the next node after inventory validation.
 
     Routes:
@@ -17,7 +22,7 @@ def route_from_inventory(state: TopLevelState) -> str:
     - "review"    : ambiguous assets or warnings that need human decision
     - "fail"      : validation errors
     """
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    inventory_out = read_inventory_stage_output(state)
     status = inventory_out.get("status")
 
     if is_terminal_failure(status):

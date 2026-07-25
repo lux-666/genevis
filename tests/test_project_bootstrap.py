@@ -49,7 +49,9 @@ class ProjectBootstrapTests(unittest.TestCase):
                     contextlib.redirect_stdout(stdout),
                     contextlib.redirect_stderr(stderr),
                 ):
-                    code = _run_bootstrap(argparse.Namespace(config=str(config_path), apply=True))
+                    code = _run_bootstrap(
+                        argparse.Namespace(config=str(config_path), apply=True)
+                    )
 
                 self.assertEqual(code, 0, stderr.getvalue())
                 self.assertTrue(config_path.is_file())
@@ -70,10 +72,15 @@ class ProjectBootstrapTests(unittest.TestCase):
 
                 dotenv_path = root / ".env"
                 self.assertEqual(stat.S_IMODE(dotenv_path.stat().st_mode), 0o600)
-                self.assertIn("GENE_AGENT_LLM_API_KEY=sk-bootstrap-secret", dotenv_path.read_text(encoding="utf-8"))
+                self.assertIn(
+                    "GENE_AGENT_LLM_API_KEY=sk-bootstrap-secret",
+                    dotenv_path.read_text(encoding="utf-8"),
+                )
                 self.assertNotIn("sk-bootstrap-secret", stdout.getvalue())
                 self.assertIn("<redacted>", stdout.getvalue())
-                self.assertEqual(os.environ["GENE_AGENT_LLM_API_KEY"], "sk-bootstrap-secret")
+                self.assertEqual(
+                    os.environ["GENE_AGENT_LLM_API_KEY"], "sk-bootstrap-secret"
+                )
             finally:
                 if previous_key is None:
                     os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
@@ -84,11 +91,18 @@ class ProjectBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config" / "envs.yaml"
             config_path.parent.mkdir()
-            config_path.write_text("default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8")
+            config_path.write_text(
+                "default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8"
+            )
             before = config_path.read_bytes()
 
-            with patch("builtins.input", side_effect=AssertionError("valid config must not prompt")):
-                code = _run_bootstrap(argparse.Namespace(config=str(config_path), apply=True))
+            with patch(
+                "builtins.input",
+                side_effect=AssertionError("valid config must not prompt"),
+            ):
+                code = _run_bootstrap(
+                    argparse.Namespace(config=str(config_path), apply=True)
+                )
 
             self.assertEqual(code, 0)
             self.assertEqual(config_path.read_bytes(), before)
@@ -98,7 +112,9 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
-            config_path.write_text("default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8")
+            config_path.write_text(
+                "default:\n  fallback_env: tools\npackages: {}\n", encoding="utf-8"
+            )
             previous_key = os.environ.pop("GENE_AGENT_LLM_API_KEY", None)
             try:
                 # no AutoHiC package setup, create .env, no URL/model overrides
@@ -107,7 +123,9 @@ class ProjectBootstrapTests(unittest.TestCase):
                     patch("builtins.input", side_effect=["n", "y", "", ""]),
                     patch("getpass.getpass", return_value="sk-existing-project"),
                 ):
-                    code = _run_bootstrap(argparse.Namespace(config=str(config_path), apply=True))
+                    code = _run_bootstrap(
+                        argparse.Namespace(config=str(config_path), apply=True)
+                    )
 
                 self.assertEqual(code, 0)
                 self.assertEqual(
@@ -125,7 +143,8 @@ class ProjectBootstrapTests(unittest.TestCase):
             config_path = Path(tmp) / "config" / "envs.yaml"
             config_path.parent.mkdir()
             config_path.write_text(
-                "default:\n  conda_bin: micromamba\n  fallback_env: existing\ncustom:\n  keep: value\n",
+                "default:\n  conda_bin: micromamba\n"
+                "  fallback_env: existing\ncustom:\n  keep: value\n",
                 encoding="utf-8",
             )
 
@@ -144,9 +163,13 @@ class ProjectBootstrapTests(unittest.TestCase):
             root = Path(tmp)
             config_path = root / "config" / "envs.yaml"
             config_path.parent.mkdir()
-            config_path.write_text("default:\n  fallback_env: tools\n", encoding="utf-8")
+            config_path.write_text(
+                "default:\n  fallback_env: tools\n", encoding="utf-8"
+            )
             dotenv_path = root / ".env"
-            dotenv_path.write_text("GENE_AGENT_LLM_API_KEY=old\nKEEP=yes\n", encoding="utf-8")
+            dotenv_path.write_text(
+                "GENE_AGENT_LLM_API_KEY=old\nKEEP=yes\n", encoding="utf-8"
+            )
 
             preserved = build_project_bootstrap_plan(
                 config_path,
@@ -202,7 +225,9 @@ class ProjectBootstrapTests(unittest.TestCase):
             resolver = apply_project_bootstrap_plan(plan)
             autohic = resolver.packages["autohic"]
             self.assertEqual(autohic.model_path("error"), model_dir / "error.pth")
-            self.assertEqual(autohic.model_path("chromosome"), model_dir / "chromosome.pth")
+            self.assertEqual(
+                autohic.model_path("chromosome"), model_dir / "chromosome.pth"
+            )
             self.assertEqual(verify_envs_yaml(config_path), [])
 
     def test_custom_config_keeps_dotenv_next_to_custom_file(self):

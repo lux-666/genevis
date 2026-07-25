@@ -98,7 +98,9 @@ def make_assembly_decision(
         )
 
 
-def _validate_route_selection(parsed: dict[str, Any], allowed_actions: list[str]) -> None:
+def _validate_route_selection(
+    parsed: dict[str, Any], allowed_actions: list[str]
+) -> None:
     recommended = parsed.get("recommended_route")
     if recommended not in set(allowed_actions):
         raise ValueError(f"recommended_route {recommended!r} not in allowed actions")

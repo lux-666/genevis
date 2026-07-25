@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.execution.env_resolver import EnvResolver, PackagePreflightResult, PackageSpec, package_preflight
+from app.execution.env_resolver import (
+    EnvResolver,
+    PackagePreflightResult,
+    PackageSpec,
+    package_preflight,
+)
 
 
 @dataclass
@@ -45,7 +50,7 @@ def conform_juicer(
     is a no-op.
     """
     juicer_root = Path(juicer_spec.install_root)
-    actions = []
+    actions: list[str] = []
 
     # Step 1: scripts -> CPU symlink
     scripts_dir = juicer_root / "scripts"
@@ -63,24 +68,29 @@ def conform_juicer(
         if scripts_dir.is_symlink():
             target = scripts_dir.resolve()
             if target == cpu_dir.resolve():
-                actions.append(f"scripts -> CPU symlink already exists")
+                actions.append("scripts -> CPU symlink already exists")
             else:
                 return ConformanceResult(
                     package_name="juicer",
                     status="error",
                     actions_taken=actions,
-                    detail=f"scripts/ exists but points to {target}, expected {cpu_dir}",
+                    detail=(
+                        f"scripts/ exists but points to {target}, expected {cpu_dir}"
+                    ),
                 )
         else:
             return ConformanceResult(
                 package_name="juicer",
                 status="error",
                 actions_taken=actions,
-                detail=f"scripts/ exists as a real directory, not a symlink. Please remove or rename it.",
+                detail=(
+                    "scripts/ exists as a real directory, not a symlink. Please "
+                    "remove or rename it."
+                ),
             )
     else:
         scripts_dir.symlink_to("CPU", target_is_directory=True)
-        actions.append(f"Created symlink: scripts -> CPU")
+        actions.append("Created symlink: scripts -> CPU")
 
     # Step 2: jar symlink (if jar_root_ref is provided)
     if juicer_tools_spec:
@@ -108,19 +118,24 @@ def conform_juicer(
             if jar_target.is_symlink():
                 target = jar_target.resolve()
                 if target == jar_source.resolve():
-                    actions.append(f"juicer_tools.jar symlink already exists")
+                    actions.append("juicer_tools.jar symlink already exists")
                 else:
                     return ConformanceResult(
                         package_name="juicer",
                         status="error",
                         actions_taken=actions,
-                        detail=f"juicer_tools.jar exists but points to {target}, expected {jar_source}",
+                        detail=(
+                            f"juicer_tools.jar exists but points to {target}, "
+                            f"expected {jar_source}"
+                        ),
                     )
             else:
-                actions.append(f"juicer_tools.jar already exists (real file)")
+                actions.append("juicer_tools.jar already exists (real file)")
         else:
             jar_target.symlink_to(jar_source)
-            actions.append(f"Created symlink: scripts/common/juicer_tools.jar -> {jar_source}")
+            actions.append(
+                f"Created symlink: scripts/common/juicer_tools.jar -> {jar_source}"
+            )
 
     return ConformanceResult(
         package_name="juicer",
@@ -172,15 +187,22 @@ def verify_envs_yaml(config_path: Path) -> list[str]:
     elif fallback_env and "your_tool_env" in str(fallback_env):
         issues.append(f"default.fallback_env is still a placeholder: {fallback_env}")
     elif fallback_prefix and "/path/to/" in str(fallback_prefix):
-        issues.append(f"default.fallback_prefix is still a placeholder: {fallback_prefix}")
+        issues.append(
+            f"default.fallback_prefix is still a placeholder: {fallback_prefix}"
+        )
 
     # Check package install_root paths
     for package_name, package_spec in resolver.packages.items():
         install_root = package_spec.install_root
         if "/path/to/" in install_root:
-            issues.append(f"packages.{package_name}.install_root is still a placeholder: {install_root}")
+            issues.append(
+                f"packages.{package_name}.install_root is still a placeholder: "
+                f"{install_root}"
+            )
         elif not Path(install_root).exists():
-            issues.append(f"packages.{package_name}.install_root does not exist: {install_root}")
+            issues.append(
+                f"packages.{package_name}.install_root does not exist: {install_root}"
+            )
 
     autohic = resolver.packages.get("autohic")
     if autohic is not None:

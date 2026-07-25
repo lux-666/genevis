@@ -51,7 +51,9 @@ class MethodExecutionAttempt(BaseModel):
     @model_validator(mode="after")
     def validate_refs_for_status(self) -> "MethodExecutionAttempt":
         if not self.frozen_attempt_ref.artifact_type.endswith(".frozen_attempt"):
-            raise ValueError("frozen_attempt_ref must reference frozen-attempt evidence")
+            raise ValueError(
+                "frozen_attempt_ref must reference frozen-attempt evidence"
+            )
         if self.status == "frozen" and self.execution_ref is not None:
             raise ValueError("a frozen method attempt cannot own execution evidence")
         if self.status != "frozen" and self.execution_ref is None:

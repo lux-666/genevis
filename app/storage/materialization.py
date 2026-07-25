@@ -39,7 +39,9 @@ def _materialize_manifest(source: Path, destination: Path) -> None:
     try:
         payload = yaml.safe_load(source.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise RunMaterializationError(f"manifest could not be read: {source}: {exc}") from exc
+        raise RunMaterializationError(
+            f"manifest could not be read: {source}: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
         raise RunMaterializationError("manifest root must be a mapping")
 
@@ -132,7 +134,9 @@ def _normalize_run_config_path(
             f"run config {'.'.join(field_path)} must be a non-empty path"
         )
     path = Path(value).expanduser()
-    parent[key] = str(path if path.is_absolute() else (source_dir / path).resolve(strict=False))
+    parent[key] = str(
+        path if path.is_absolute() else (source_dir / path).resolve(strict=False)
+    )
 
 
 def _normalize_run_config_path_list(
@@ -163,6 +167,10 @@ def _normalize_run_config_path_list(
             )
         path = Path(value).expanduser()
         normalized.append(
-            str(path if path.is_absolute() else (source_dir / path).resolve(strict=False))
+            str(
+                path
+                if path.is_absolute()
+                else (source_dir / path).resolve(strict=False)
+            )
         )
     parent[key] = normalized

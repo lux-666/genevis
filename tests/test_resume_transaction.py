@@ -49,9 +49,14 @@ class ResumeTransactionTests(unittest.TestCase):
         state = {
             "session_id": "s1",
             "data_dir": str(run_dir),
+            "control_state": "running",
             "current_stage": "assembly_review",
             "supervision_state": "blocked_human",
+            "input_manifest_ref": "control/manifest.yaml",
+            "review_notes": [],
             "route_trace": [],
+            "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+            "skip_reasons": {},
         }
         request = ResumeReviewRequest(
             session_id="s1",
@@ -66,11 +71,12 @@ class ResumeTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request = self._setup(tmpdir)
             graph = _Graph(state)
-            with patch(
-                "app.control.resume_transaction.validate_resume_review_state"
-            ), patch(
-                "app.control.resume_transaction.resume_review_state",
-                return_value={"supervision_state": "running_stage"},
+            with (
+                patch("app.control.resume_transaction.validate_resume_review_state"),
+                patch(
+                    "app.control.resume_transaction.resume_review_state",
+                    return_value={"supervision_state": "running_stage"},
+                ),
             ):
                 result = execute_resume_transaction(
                     graph=graph,
@@ -86,8 +92,12 @@ class ResumeTransactionTests(unittest.TestCase):
             self.assertEqual(len(graph.updates), 1)
             self.assertEqual(graph.invocations, 1)
             events = Ledger(run_dir).read_events("s1")
-            started = [event for event in events if event["event_type"] == "resume_started"]
-            completed = [event for event in events if event["event_type"] == "resume_completed"]
+            started = [
+                event for event in events if event["event_type"] == "resume_started"
+            ]
+            completed = [
+                event for event in events if event["event_type"] == "resume_completed"
+            ]
             self.assertEqual(len(started), 1)
             self.assertEqual(len(completed), 1)
             self.assertEqual(started[0]["source"], "test")
@@ -99,10 +109,13 @@ class ResumeTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request = self._setup(tmpdir)
             graph = _Graph(state)
-            with patch(
-                "app.control.resume_transaction.validate_resume_review_state",
-                side_effect=ResumeValidationError("stale request"),
-            ), self.assertRaisesRegex(ResumeTransactionError, "stale request"):
+            with (
+                patch(
+                    "app.control.resume_transaction.validate_resume_review_state",
+                    side_effect=ResumeValidationError("stale request"),
+                ),
+                self.assertRaisesRegex(ResumeTransactionError, "stale request"),
+            ):
                 execute_resume_transaction(
                     graph=graph,
                     config={"configurable": {"thread_id": "s1"}},
@@ -127,12 +140,14 @@ class ResumeTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir, state, request = self._setup(tmpdir)
             graph = _Graph(state, update_result=False)
-            with patch(
-                "app.control.resume_transaction.validate_resume_review_state"
-            ), patch(
-                "app.control.resume_transaction.resume_review_state",
-                return_value={"supervision_state": "running_stage"},
-            ), self.assertRaisesRegex(ResumeTransactionError, "returned False"):
+            with (
+                patch("app.control.resume_transaction.validate_resume_review_state"),
+                patch(
+                    "app.control.resume_transaction.resume_review_state",
+                    return_value={"supervision_state": "running_stage"},
+                ),
+                self.assertRaisesRegex(ResumeTransactionError, "returned False"),
+            ):
                 execute_resume_transaction(
                     graph=graph,
                     config={"configurable": {"thread_id": "s1"}},

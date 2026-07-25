@@ -8,14 +8,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import app.control.lifecycle as lifecycle
-from app.storage.ledger import Ledger
-from app.control.lifecycle import ResumeValidationError, resume_review_state, timeout_terminal_update
+from app.control.lifecycle import (
+    ResumeValidationError,
+    resume_review_state,
+    timeout_terminal_update,
+)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import load_review_request
 from app.schemas.state import initial_state
 from app.stages.assembly.nodes import block_assembly_for_human, select_route
+from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
-
 
 _RECOMMENDED_SELECTIONS = {
     "hifi": {
@@ -203,7 +206,10 @@ def test_route_selection_timeout_reads_from_review_policy_outcome():
         timeout = assembly["route_decision"]["metadata"]["blocked_timeout"]
         assert assembly["selected_route"] == "hifi"
         assert assembly["route_decision"]["decided_by"] == "llm_auto"
-        assert timeout["source"] == "review_request.review_policy_outcome.max_blocked_seconds"
+        assert (
+            timeout["source"]
+            == "review_request.review_policy_outcome.max_blocked_seconds"
+        )
 
 
 def test_route_selection_timeout_conflict_explicit_arg_wins_and_warns():
@@ -303,7 +309,9 @@ def test_timeout_terminal_update_delegates_shared_terminal_failure_shape():
     }
 
 
-def test_route_selection_timeout_rejects_invalid_decision_before_timeout_resolution(monkeypatch):
+def test_route_selection_timeout_rejects_invalid_decision_before_timeout_resolution(
+    monkeypatch,
+):
     with tempfile.TemporaryDirectory() as tmpdir:
         state = _blocked_route_state(tmpdir, "timeout_invalid_decision")
         request = _request(state, "invalid_choice")

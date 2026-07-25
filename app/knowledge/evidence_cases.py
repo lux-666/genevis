@@ -35,7 +35,8 @@ def validate_methods_source_shape(
         raise EvidenceCaseValidationError(f"{case_id}: methods_path is required")
     elif len(methods_path) > MAX_SOURCE_REFERENCE_CHARS:
         raise EvidenceCaseValidationError(
-            f"{case_id}: methods_path exceeds the {MAX_SOURCE_REFERENCE_CHARS}-character limit"
+            f"{case_id}: methods_path exceeds the {MAX_SOURCE_REFERENCE_CHARS}-"
+            "character limit"
         )
 
     spans = case.get("evidence_spans")
@@ -56,7 +57,9 @@ def validate_methods_source_shape(
     for index, span in enumerate(spans):
         field_path = f"evidence_spans[{index}]"
         if not isinstance(span, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path} must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path} must be a mapping"
+            )
         _reject_unknown_fields(
             span,
             allowed=_EVIDENCE_SPAN_FIELDS,
@@ -65,19 +68,25 @@ def validate_methods_source_shape(
         )
         span_id = span.get("span_id")
         if not isinstance(span_id, str) or not span_id.strip():
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path}.span_id is required")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path}.span_id is required"
+            )
         if len(span_id) > MAX_SOURCE_REFERENCE_CHARS:
             raise EvidenceCaseValidationError(
                 f"{case_id}: {field_path}.span_id exceeds the "
                 f"{MAX_SOURCE_REFERENCE_CHARS}-character limit"
             )
         if span_id in seen:
-            raise EvidenceCaseValidationError(f"{case_id}: duplicate span_id {span_id!r}")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: duplicate span_id {span_id!r}"
+            )
         seen.add(span_id)
 
         quote = span.get("quote")
         if not isinstance(quote, str) or not quote.strip():
-            raise EvidenceCaseValidationError(f"{case_id}: span {span_id!r} quote is required")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: span {span_id!r} quote is required"
+            )
         if len(quote) > MAX_SOURCE_EXCERPT_CHARS:
             raise EvidenceCaseValidationError(
                 f"{case_id}: span {span_id!r} quote exceeds the "
@@ -119,7 +128,9 @@ def validate_methods_source(
     try:
         content = content_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise EvidenceCaseValidationError(f"{case_id}: methods file must be valid UTF-8") from exc
+        raise EvidenceCaseValidationError(
+            f"{case_id}: methods file must be valid UTF-8"
+        ) from exc
     if not content.strip():
         raise EvidenceCaseValidationError(f"{case_id}: methods file must be non-empty")
 
@@ -138,9 +149,7 @@ def validate_referenced_excerpt_budget(
     """Enforce the retained per-document prompt excerpt budget."""
 
     excerpt_chars = sum(
-        len(span["quote"])
-        for span in spans
-        if span["span_id"] in referenced_span_ids
+        len(span["quote"]) for span in spans if span["span_id"] in referenced_span_ids
     )
     if excerpt_chars > MAX_SOURCE_EXCERPT_CHARS_PER_DOCUMENT:
         raise EvidenceCaseValidationError(
@@ -149,7 +158,9 @@ def validate_referenced_excerpt_budget(
         )
 
 
-def resolve_confined_methods_path(pack_root: Path, path_value: Any, *, case_id: str) -> Path:
+def resolve_confined_methods_path(
+    pack_root: Path, path_value: Any, *, case_id: str
+) -> Path:
     """Resolve a methods path while rejecting absolute paths and pack-root escape."""
 
     if not isinstance(path_value, str) or not path_value:
@@ -164,13 +175,17 @@ def resolve_confined_methods_path(pack_root: Path, path_value: Any, *, case_id: 
     try:
         resolved = (root / relative).resolve(strict=True)
     except FileNotFoundError as exc:
-        raise EvidenceCaseValidationError(f"{case_id}: methods file not found: {path_value}") from exc
+        raise EvidenceCaseValidationError(
+            f"{case_id}: methods file not found: {path_value}"
+        ) from exc
     if not resolved.is_relative_to(root):
         raise EvidenceCaseValidationError(
             f"{case_id}: methods_path escapes knowledge-pack root: {path_value}"
         )
     if not resolved.is_file():
-        raise EvidenceCaseValidationError(f"{case_id}: methods path is not a regular file: {path_value}")
+        raise EvidenceCaseValidationError(
+            f"{case_id}: methods path is not a regular file: {path_value}"
+        )
     return resolved
 
 
@@ -184,4 +199,6 @@ def _reject_unknown_fields(
     unknown = [key for key in value if key not in allowed]
     if unknown:
         key = min(unknown, key=lambda item: str(item))
-        raise EvidenceCaseValidationError(f"{case_id}: unknown field {field_path}.{key}")
+        raise EvidenceCaseValidationError(
+            f"{case_id}: unknown field {field_path}.{key}"
+        )

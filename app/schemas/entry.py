@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from app.config import default_data_root
 from app.schemas.manifest import Platform
@@ -43,7 +50,7 @@ class EntryRequest(BaseModel):
     requested_stages: list[RequestableStage] | None = None
 
     @model_validator(mode="after")
-    def _validate_entry_source(self):
+    def _validate_entry_source(self) -> EntryRequest:
         if not self.manifest and not self.source_paths:
             raise ValueError("manifest or source_paths is required")
         if self.manifest and self.source_paths:
@@ -56,7 +63,9 @@ class EntryRequest(BaseModel):
         if value is None:
             return value
         if value != value.strip():
-            raise ValueError("session_id must not contain leading or trailing whitespace")
+            raise ValueError(
+                "session_id must not contain leading or trailing whitespace"
+            )
         if "/" in value or "\\" in value:
             raise ValueError("session_id must not contain path separators")
         if value in {".", ".."}:

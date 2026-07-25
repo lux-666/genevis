@@ -146,7 +146,9 @@ class ExecutionRefactorContractTests(unittest.TestCase):
 
             self.assertEqual(snapshot.parent, paths.control_dir / "resume_decisions")
             self.assertRegex(snapshot.name, r"^decision\.[0-9a-f]{16}\.json$")
-            self.assertEqual(snapshot.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
+            )
             self.assertTrue(
                 paths.to_ref(snapshot).startswith("control/resume_decisions/decision.")
             )

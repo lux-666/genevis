@@ -1,10 +1,12 @@
 """Invariant: every registered method has a wired executable route."""
+
 import unittest
 from pathlib import Path
-from app.schemas.descriptors import DescriptorRegistry
+
 from app.domains.assembly.constants import ASSEMBLY_CANDIDATES
-from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
+from app.schemas.descriptors import DescriptorRegistry
 from app.stages.function_annotation.nodes import FUNCTION_EXECUTABLE_METHODS
+from app.stages.gene_annotation.nodes import GENE_EXECUTABLE_METHODS
 from app.stages.genome_survey.constants import GENOME_SURVEY_EXECUTABLE_METHODS
 
 WIRED_RUNNERS = set().union(
@@ -33,5 +35,9 @@ class RegistryExecutableInvariantTests(unittest.TestCase):
             for method_name, descriptor in descriptor_registry.methods.items()
             if descriptor.planner.execution_kind == "local"
         }
-        self.assertEqual(registry - WIRED_RUNNERS, set(), "registry methods with no wired runner")
-        self.assertEqual(WIRED_RUNNERS - registry, set(), "wired runners with no registry descriptor")
+        self.assertEqual(
+            registry - WIRED_RUNNERS, set(), "registry methods with no wired runner"
+        )
+        self.assertEqual(
+            WIRED_RUNNERS - registry, set(), "wired runners with no registry descriptor"
+        )

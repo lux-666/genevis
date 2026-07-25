@@ -219,14 +219,12 @@ def validate_top_level_state(value: Mapping[str, object]) -> "TopLevelState":
     unknown = set(value).difference(declared)
     if unknown:
         raise ValueError(
-            "TopLevelState contains unsupported fields: "
-            + ", ".join(sorted(unknown))
+            "TopLevelState contains unsupported fields: " + ", ".join(sorted(unknown))
         )
     missing = set(TopLevelState.__required_keys__).difference(value)
     if missing:
         raise ValueError(
-            "TopLevelState is missing required fields: "
-            + ", ".join(sorted(missing))
+            "TopLevelState is missing required fields: " + ", ".join(sorted(missing))
         )
 
     for name, field_value in value.items():
@@ -355,7 +353,6 @@ class ActiveInterrupt(TypedDict, total=False):
 
 
 class TopLevelState(TypedDict, total=False):
-
     # Stable run identity and storage root.
     session_id: Required[str]
     thread_id: NotRequired[str]
@@ -400,6 +397,29 @@ class TopLevelState(TypedDict, total=False):
 
     # Stage skip reasons keyed by stage name.
     skip_reasons: Required[dict[DomainStage, str]]
+
+
+class StateUpdate(TypedDict, total=False):
+    """Partial top-level state delta returned by graph nodes."""
+
+    session_id: str
+    thread_id: str
+    data_dir: str
+    control_state: ControlState
+    supervision_state: SupervisionState
+    current_stage: DomainStage
+    requested_stages: list[DomainStage] | None
+    input_manifest_ref: str
+    asset_registry_ref: str | None
+    stage_plan_ref: str | None
+    active_interrupt: ActiveInterrupt | None
+    shared_parameters: SharedParameters | dict[str, Any] | None
+    last_error: str | None
+    review_notes: list[str]
+    route_trace: list[str]
+    stage_outputs: StageOutputs
+    resource_refs: ResourceRefs
+    skip_reasons: dict[DomainStage, str]
 
 
 def initial_state(

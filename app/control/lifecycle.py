@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import read_artifact_records
+from langchain_core.runnables import RunnableConfig
+
 from app.review.base import ResumeReviewRequest
 from app.review.gates import (
+    ReviewGateDeclaration,
     apply_review_gate_decision,
     apply_review_gate_timeout,
     find_review_gate,
@@ -21,7 +23,9 @@ from app.review.persistence import ReviewPersistenceError, load_review_request
 from app.review.records import counts_by_origin, decision_records
 from app.schemas.artifacts import ArtifactRef
 from app.schemas.limits import ROUTE_TRACE_LIMIT
-from app.schemas.state import TopLevelState
+from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
+from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
 
@@ -42,8 +46,13 @@ class UnsupportedLifecycleOperationError(LifecycleError):
 
 
 def finalize_terminal_state(
-    graph: Any, config: dict[str, Any], state: dict[str, Any], session_id: str,
-    data_dir: str | Path, checkpointer: str, *,
+    graph: Any,
+    config: RunnableConfig,
+    state: dict[str, Any],
+    session_id: str,
+    data_dir: str | Path,
+    checkpointer: str,
+    *,
     report_kind: Literal["operator", "final"],
 ) -> str | None:
     """No-op active states; report terminals and soft-fail SQLite compaction."""
@@ -60,8 +69,11 @@ def finalize_terminal_state(
     if report_kind == "operator":
         refs = ledger.references_from(terminal_state, role_prefix="terminal.failure")
         ledger.record_session_terminal(
-            session_id, outcome="failed", stage=terminal_state.get("current_stage"),
-            error=terminal_state.get("last_error"), refs=refs,
+            session_id,
+            outcome="failed",
+            stage=terminal_state.get("current_stage"),
+            error=terminal_state.get("last_error"),
+            refs=refs,
             idempotency_key="session-terminal:failed",
         )
         review_report.write_operator_report(paths.run_dir, session_id, terminal_state)
@@ -93,14 +105,18 @@ def finalize_terminal_state(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         ledger.record_event(
-            session_id, "terminal_compaction_skipped", {"error": error},
+            session_id,
+            "terminal_compaction_skipped",
+            {"error": error},
             idempotency_key="terminal-compaction:skipped",
         )
         return error
 
     if compacted:
         ledger.record_event(
-            session_id, "terminal_compaction_completed", {"checkpoint_count": 1},
+            session_id,
+            "terminal_compaction_completed",
+            {"checkpoint_count": 1},
             idempotency_key="terminal-compaction:completed",
         )
     return None
@@ -310,7 +326,7 @@ def resume_review_state(
     *,
     blocked_timeout_seconds: float | None = None,
     now: datetime | None = None,
-) -> dict[str, Any]:
+) -> StateUpdate:
     """Apply a validated human review decision to an in-memory blocked state."""
 
     active_interrupt, request_record = _validated_resume_context(state, request)
@@ -348,7 +364,8 @@ def validate_resume_review_state(
 def reject_unsupported_lifecycle_operation(operation: str) -> None:
     if operation in {"retry", "rerun", "rebuild", "rebuild-from"}:
         raise UnsupportedLifecycleOperationError(
-            f"{operation} is not a resume operation and is not implemented in Phase 3 Task 02."
+            f"{operation} is not a resume operation and is not implemented in "
+            "Phase 3 Task 02."
         )
 
 
@@ -361,7 +378,7 @@ def _validate_common_resume_state(
 
 def _validate_resume_identity(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict[str, Any]:
+) -> ActiveInterrupt:
     active_interrupt, _request_record = _validated_resume_context(state, request)
     return active_interrupt
 
@@ -369,7 +386,7 @@ def _validate_resume_identity(
 def _validated_resume_context(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[ActiveInterrupt, dict[str, Any]]:
     if state.get("session_id") != request.session_id:
         raise ResumeValidationError("resume session_id does not match blocked state")
     if state.get("supervision_state") != "blocked_human":
@@ -426,8 +443,8 @@ def _validated_resume_context(
 
 
 def _load_verified_interrupt_request(
-    state: dict[str, Any],
-    active_interrupt: dict[str, Any],
+    state: Mapping[str, Any],
+    active_interrupt: Mapping[str, Any],
 ) -> dict[str, Any]:
     data_dir = state.get("data_dir")
     session_id = state.get("session_id")
@@ -459,7 +476,8 @@ def _load_verified_interrupt_request(
     request_id = str(active_interrupt.get("review_request_id") or "")
     if record.get("review_request_id") != request_id:
         raise ResumeValidationError(
-            "review request artifact ID does not match active_interrupt.review_request_id"
+            "review request artifact ID does not match "
+            "active_interrupt.review_request_id"
         )
     if record.get("stage") != active_interrupt.get("stage"):
         raise ResumeValidationError(
@@ -523,11 +541,14 @@ def _resolve_blocked_timeout_seconds(
             else {},
         )
 
-    source = {"source": "blocked_timeout_seconds"}
+    source: dict[str, Any] = {"source": "blocked_timeout_seconds"}
     if policy_timeout is not None and policy_timeout != blocked_timeout_seconds:
         source.update(
             {
-                "warning": "blocked_timeout_seconds overrides review_request.review_policy_outcome.max_blocked_seconds",
+                "warning": (
+                    "blocked_timeout_seconds overrides "
+                    "review_request.review_policy_outcome.max_blocked_seconds"
+                ),
                 "review_policy_outcome_max_blocked_seconds": policy_timeout,
             }
         )
@@ -546,7 +567,11 @@ def _review_policy_outcome_timeout_seconds(
     timeout = review_policy_outcome.get("max_blocked_seconds")
     if timeout is None:
         return None
-    return timeout
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise ResumeValidationError(
+            "review_policy_outcome.max_blocked_seconds must be numeric"
+        )
+    return float(timeout)
 
 
 def _with_timeout_source(
@@ -559,7 +584,7 @@ def _with_timeout_source(
 
 def _timeout_failed_update(
     state: TopLevelState, request: ResumeReviewRequest, timeout: dict[str, Any]
-) -> dict[str, Any]:
+) -> StateUpdate:
     """Handle timeout through the review-gate registry, then fall back to stop."""
     try:
         timeout_update = apply_review_gate_timeout(state, request, timeout)
@@ -584,7 +609,8 @@ def _timeout_failed_update(
         raise ResumeValidationError(
             f"Unsupported timeout stage: {request.stage}"
         ) from exc
-    return {**update, "last_error": f"{request.stage} blocked timeout expired"}
+    update["last_error"] = f"{request.stage} blocked timeout expired"
+    return update
 
 
 def terminal_failure_update(
@@ -616,7 +642,7 @@ def timeout_terminal_update(
     )
 
 
-def _stage_statuses(state: dict[str, Any]) -> dict[str, str]:
+def _stage_statuses(state: Mapping[str, Any]) -> dict[str, str]:
     statuses: dict[str, str] = {}
     for stage, output in (state.get("stage_outputs") or {}).items():
         if isinstance(output, dict):
@@ -624,7 +650,7 @@ def _stage_statuses(state: dict[str, Any]) -> dict[str, str]:
     return statuses
 
 
-def _latest_artifact_refs(state: dict[str, Any]) -> dict[str, Any]:
+def _latest_artifact_refs(state: Mapping[str, Any]) -> dict[str, Any]:
     refs: dict[str, Any] = {}
     for key in ("asset_registry_ref", "stage_plan_ref"):
         if state.get(key):
@@ -643,8 +669,8 @@ def _latest_artifact_refs(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decision_requirements_from_state(
-    state: dict[str, Any],
-    active_interrupt: dict[str, Any] | None,
+    state: Mapping[str, Any],
+    active_interrupt: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
     if not active_interrupt:
         return None
@@ -855,7 +881,7 @@ def _parameter_approval_resume_metadata(payload: dict[str, Any]) -> dict[str, An
 
 
 def _runtime_proposal_requirements(gate: Any) -> dict[str, Any]:
-    """Describe what this existing gate proposes without implying a recommender exists."""
+    "Describe what this existing gate proposes without implying a recommender exists."
 
     proposal = {
         "kind": gate.proposal_kind,
@@ -907,7 +933,7 @@ def _with_review_policy_requirements(
 
 
 def _blocked_timeout_status(
-    active_interrupt: dict[str, Any] | None,
+    active_interrupt: Mapping[str, Any] | None,
     blocked_timeout_seconds: float | None,
     *,
     now: datetime | None = None,
@@ -995,7 +1021,8 @@ def _latest_event(
 
 
 def _latest_artifact(
-    artifacts: list[dict[str, Any]], predicate
+    artifacts: list[dict[str, Any]],
+    predicate: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     for artifact in reversed(artifacts):
         if predicate(artifact):
@@ -1102,7 +1129,9 @@ def build_next_action(
     if summary.get("error"):
         return {
             "kind": "inspect_unavailable",
-            "summary": f"No durable ledger session found for {summary.get('session_id')!r}.",
+            "summary": (
+                f"No durable ledger session found for {summary.get('session_id')!r}."
+            ),
             "required_fields": [],
             "relevant_refs": [],
         }
@@ -1118,7 +1147,10 @@ def build_next_action(
         )
         return {
             "kind": "completed",
-            "summary": "Workflow completed; inspect the listed final report and function annotation artifacts.",
+            "summary": (
+                "Workflow completed; inspect the listed final report and function "
+                "annotation artifacts."
+            ),
             "required_fields": [],
             "relevant_refs": refs,
         }
@@ -1132,7 +1164,10 @@ def build_next_action(
 
     return {
         "kind": "unknown",
-        "summary": "No active operator action was inferred from durable ledger and artifact records.",
+        "summary": (
+            "No active operator action was inferred from durable ledger and artifact "
+            "records."
+        ),
         "required_fields": [],
         "relevant_refs": _artifact_refs(*summary.get("latest_relevant_artifacts", [])),
     }
@@ -1194,11 +1229,17 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     requirements = summary.get("decision_requirements") or {}
     stage = requirements.get("stage")
     gate_id = requirements.get("gate_id")
+    if not isinstance(stage, str):
+        raise ResumeValidationError(
+            "no active registered review decision requirements; registered stages: "
+            f"{registered_review_stage_label()}"
+        )
     try:
         gate = get_review_gate(stage, gate_id)
     except KeyError as exc:
         raise ResumeValidationError(
-            f"no active registered review decision requirements; registered stages: {registered_review_stage_label()}"
+            "no active registered review decision requirements; registered stages: "
+            f"{registered_review_stage_label()}"
         ) from exc
 
     decisions_allowed = list(requirements.get("decisions_allowed") or [])
@@ -1254,7 +1295,10 @@ def build_resume_decision_template(summary: dict[str, Any]) -> dict[str, Any]:
     return template
 
 
-def _preferred_template_decision(gate, decisions_allowed: list[str]) -> str:
+def _preferred_template_decision(
+    gate: ReviewGateDeclaration,
+    decisions_allowed: list[str],
+) -> str:
     if gate.template_preferred_decision in decisions_allowed:
         return str(gate.template_preferred_decision)
     return (
@@ -1285,9 +1329,15 @@ def _review_gate_next_action(
         f"--decision-file {template_hint} --checkpointer sqlite"
     )
     if not summary.get("durable_resume_available"):
-        resume_summary = "Durable resume is unavailable until the session has a sqlite checkpoint database."
+        resume_summary = (
+            "Durable resume is unavailable until the session has a sqlite "
+            "checkpoint database."
+        )
     else:
-        resume_summary = f"Human review is required for {stage}; write and edit a decision file, then resume."
+        resume_summary = (
+            f"Human review is required for {stage}; write and edit a decision file, "
+            "then resume."
+        )
     fields = [
         "session_id",
         "stage",
@@ -1330,7 +1380,10 @@ def _env_block_next_action(event: dict[str, Any]) -> dict[str, Any]:
     env_target = event.get("env_target")
     detail = event.get("detail") or "environment preflight failed"
     if kind == "missing_tool":
-        summary = f"Install or expose required tool(s) in {env_target}: {', '.join(missing_tools)}."
+        summary = (
+            f"Install or expose required tool(s) in {env_target}: "
+            f"{', '.join(missing_tools)}."
+        )
     else:
         summary = f"Fix the configured execution environment {env_target}: {detail}."
     return {
@@ -1392,9 +1445,15 @@ def _missing_input_next_action(block: dict[str, Any]) -> dict[str, Any]:
     blocked_ref = block.get("blocked_input_ref")
     detail = block.get("detail") or "required input is missing"
     if blocked_ref:
-        summary = f"Provide or correct the missing input path, then rerun with the original manifest: {blocked_ref}."
+        summary = (
+            "Provide or correct the missing input path, then rerun with the original "
+            f"manifest: {blocked_ref}."
+        )
     else:
-        summary = f"Provide or correct the missing input referenced by the manifest: {detail}."
+        summary = (
+            "Provide or correct the missing input referenced by the manifest: "
+            f"{detail}."
+        )
     return {
         "kind": "missing_input",
         "summary": summary,
@@ -1462,7 +1521,10 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
     if _is_function_protein_artifact_error(last_error):
         return {
             "kind": "materialized_proteins_required",
-            "summary": "Function annotation requires a materialized local predicted-proteins FASTA matching database_provenance input_proteins_ref.",
+            "summary": (
+                "Function annotation requires a materialized local predicted-proteins "
+                "FASTA matching database_provenance input_proteins_ref."
+            ),
             "stage": stage or "function_annotation",
             "last_error": last_error,
             "required_fields": [
@@ -1471,7 +1533,9 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
                 "function_annotation.database_provenance[*].input_proteins_ref",
             ],
             "manifest_asset_type": "predicted_proteins",
-            "run_config_path": "function_annotation.database_provenance[*].input_proteins_ref",
+            "run_config_path": (
+                "function_annotation.database_provenance[*].input_proteins_ref"
+            ),
             "relevant_refs": _artifact_refs(
                 payload.get("relevant_refs"),
                 summary.get("latest_relevant_artifacts"),
@@ -1489,7 +1553,10 @@ def _failed_terminal_next_action(summary: dict[str, Any]) -> dict[str, Any]:
         ]
         return {
             "kind": "provenance_required",
-            "summary": "Function annotation requires database_provenance records matching a materialized proteins_fasta_ref.",
+            "summary": (
+                "Function annotation requires database_provenance records matching a "
+                "materialized proteins_fasta_ref."
+            ),
             "stage": stage or "function_annotation",
             "last_error": last_error,
             "required_fields": required_fields,

@@ -13,7 +13,13 @@ from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import (
+    BaseCheckpointSaver,
+    ChannelVersions,
+    Checkpoint,
+    CheckpointMetadata,
+)
 
 from app.schemas.state import (
     TopLevelState,
@@ -26,10 +32,10 @@ CheckpointerBackend = Literal["sqlite", "memory"]
 DEFAULT_CHECKPOINTER_BACKEND: CheckpointerBackend = "sqlite"
 
 
-class StateBudgetCheckpointer(BaseCheckpointSaver):
+class StateBudgetCheckpointer(BaseCheckpointSaver[str]):
     """Delegate saver operations through the one whole-state write boundary."""
 
-    def __init__(self, inner: BaseCheckpointSaver) -> None:
+    def __init__(self, inner: BaseCheckpointSaver[str]) -> None:
         self.inner = inner
 
     def __getattribute__(self, name: str) -> Any:
@@ -42,13 +48,19 @@ class StateBudgetCheckpointer(BaseCheckpointSaver):
             return object.__getattribute__(self, name)
         return getattr(object.__getattribute__(self, "inner"), name)
 
-    def put(self, config, checkpoint, metadata, new_versions):
+    def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
         _validate_checkpoint_state(checkpoint)
         return self.inner.put(config, checkpoint, metadata, new_versions)
 
     def put_writes(
         self,
-        config,
+        config: RunnableConfig,
         writes: Sequence[tuple[str, Any]],
         task_id: str,
         task_path: str = "",
@@ -56,13 +68,19 @@ class StateBudgetCheckpointer(BaseCheckpointSaver):
         _validate_pending_writes(writes)
         self.inner.put_writes(config, writes, task_id, task_path)
 
-    async def aput(self, config, checkpoint, metadata, new_versions):
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
         _validate_checkpoint_state(checkpoint)
         return await self.inner.aput(config, checkpoint, metadata, new_versions)
 
     async def aput_writes(
         self,
-        config,
+        config: RunnableConfig,
         writes: Sequence[tuple[str, Any]],
         task_id: str,
         task_path: str = "",
@@ -78,7 +96,9 @@ class StateBudgetCheckpointer(BaseCheckpointSaver):
         return self if inner is self.inner else bound_checkpointer(inner)
 
 
-def bound_checkpointer(checkpointer: BaseCheckpointSaver) -> StateBudgetCheckpointer:
+def bound_checkpointer(
+    checkpointer: BaseCheckpointSaver[str],
+) -> StateBudgetCheckpointer:
     """Wrap any built-in or externally injected saver exactly once."""
 
     if isinstance(checkpointer, StateBudgetCheckpointer):
@@ -86,7 +106,7 @@ def bound_checkpointer(checkpointer: BaseCheckpointSaver) -> StateBudgetCheckpoi
     return StateBudgetCheckpointer(checkpointer)
 
 
-def _validate_checkpoint_state(checkpoint: Any) -> None:
+def _validate_checkpoint_state(checkpoint: Checkpoint) -> None:
     if not isinstance(checkpoint, dict):
         raise TypeError("checkpoint must be a JSON object")
     channel_values = checkpoint.get("channel_values")
@@ -95,9 +115,7 @@ def _validate_checkpoint_state(checkpoint: Any) -> None:
     start_value = channel_values.get("__start__")
     if start_value is not None:
         if not isinstance(start_value, dict):
-            raise TypeError(
-                "checkpoint __start__ value must be a TopLevelState object"
-            )
+            raise TypeError("checkpoint __start__ value must be a TopLevelState object")
         validate_top_level_state(start_value)
         return
     state = {

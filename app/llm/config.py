@@ -31,7 +31,9 @@ def load_llm_profile(env: Mapping[str, str] | None = None) -> LLMProfile:
     model = source.get(f"{prefix}MODEL", "gpt-5-mini")
     temperature = _float(source.get(f"{prefix}TEMPERATURE", "0.2"), "temperature")
     max_tokens = _int(source.get(f"{prefix}MAX_TOKENS", "4096"), "max_tokens")
-    timeout_seconds = _float(source.get(f"{prefix}TIMEOUT_SECONDS", "120"), "timeout_seconds")
+    timeout_seconds = _float(
+        source.get(f"{prefix}TIMEOUT_SECONDS", "120"), "timeout_seconds"
+    )
 
     return LLMProfile(
         provider=provider,

@@ -308,7 +308,9 @@ class MiniprotRunTests(unittest.TestCase):
         output_gff3 = Path(tmpdir) / "miniprot.gff3"
         script = Path(tmpdir) / "run_miniprot.sh"
         script.write_text(
-            "#!/bin/bash\nset -e\nminiprot --gff genome.fa proteins.fa > miniprot.gff3\ntest -f miniprot.gff3\n",
+            "#!/bin/bash\nset -e\n"
+            "miniprot --gff genome.fa proteins.fa > miniprot.gff3\n"
+            "test -f miniprot.gff3\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -555,7 +557,7 @@ class MiniprotCollectTests(unittest.TestCase):
             self.assertIn("miniprot.gff3", gene["reason"])
 
     def test_collect_loops_when_more_executable_methods_pending(self):
-        """When miniprot is done but augustus is still pending, status stays pending_execution."""
+        """Keep pending status while an executable augustus method remains."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self._collect_state(tmpdir)
             state["stage_outputs"]["gene_annotation"]["confirmed_methods"] = [
@@ -693,9 +695,9 @@ class MiniprotFullSliceTests(unittest.TestCase):
                 },
                 "gene_annotation": frozen,
             }
-            ran = run_method_attempts(run_state, MINIPROT_LIFECYCLE)[
-                "stage_outputs"
-            ]["gene_annotation"]
+            ran = run_method_attempts(run_state, MINIPROT_LIFECYCLE)["stage_outputs"][
+                "gene_annotation"
+            ]
             execution_ref = ran["execution_attempts"][0]["execution_ref"]
             self.assertEqual(set(execution_ref), set(attempt_ref))
             self.assertNotIn("env", execution_ref)
@@ -821,7 +823,9 @@ class AugustusRunTests(unittest.TestCase):
         output_gff3 = Path(tmpdir) / "augustus.gff3"
         script = Path(tmpdir) / "run_augustus.sh"
         script.write_text(
-            "#!/bin/bash\nset -e\naugustus --species=fly genome.fa > augustus.gff3\ntest -f augustus.gff3\n",
+            "#!/bin/bash\nset -e\n"
+            "augustus --species=fly genome.fa > augustus.gff3\n"
+            "test -f augustus.gff3\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -1095,9 +1099,9 @@ class MultiMethodExecutionTests(unittest.TestCase):
                 },
             }
             aug_collected = collect_augustus_artifacts(coll2)
-            coll2["stage_outputs"]["gene_annotation"] = aug_collected[
-                "stage_outputs"
-            ]["gene_annotation"]
+            coll2["stage_outputs"]["gene_annotation"] = aug_collected["stage_outputs"][
+                "gene_annotation"
+            ]
             aug_collect = build_gffread_graph().invoke(coll2)
             gene = aug_collect["stage_outputs"]["gene_annotation"]
             # Both methods done → candidates_ready

@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from app.storage.artifacts import publish_artifact_record
 from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.schemas.state import TopLevelState
+from app.storage.artifacts import publish_artifact_record
 from app.storage.paths import DataLayoutError, SessionPaths
 
 
@@ -67,7 +67,8 @@ class PersistedReviewRequest:
             unknown = set(bindings) - allowed
             if unknown:
                 raise ReviewPersistenceError(
-                    "unsupported compact interrupt bindings: " + ", ".join(sorted(unknown))
+                    "unsupported compact interrupt bindings: "
+                    + ", ".join(sorted(unknown))
                 )
             interrupt.update(bindings)
         return interrupt
@@ -142,7 +143,11 @@ def persist_review_recommendation(
     paths = SessionPaths.from_run_dir(data_dir)
     paths.require_session_id(session_id)
     _safe_component(review_request_id, "review_request_id")
-    ref = request_ref if isinstance(request_ref, ArtifactRef) else ArtifactRef.model_validate(request_ref)
+    ref = (
+        request_ref
+        if isinstance(request_ref, ArtifactRef)
+        else ArtifactRef.model_validate(request_ref)
+    )
     if request_hash != ref.sha256:
         raise ReviewPersistenceError(
             "review recommendation request_hash does not match request_ref.sha256"
@@ -224,12 +229,18 @@ def persist_review_decision(
     if validated_request_ref is not None:
         _verify_ref(paths, validated_request_ref)
         if request_hash is not None and request_hash != validated_request_ref.sha256:
-            raise ReviewPersistenceError("request_hash does not match request_ref.sha256")
+            raise ReviewPersistenceError(
+                "request_hash does not match request_ref.sha256"
+            )
         request_hash = validated_request_ref.sha256
-    if request_hash is None or len(request_hash) != 64 or any(
-        character not in "0123456789abcdef" for character in request_hash
+    if (
+        request_hash is None
+        or len(request_hash) != 64
+        or any(character not in "0123456789abcdef" for character in request_hash)
     ):
-        raise ReviewPersistenceError("decision requires the bound review request SHA256")
+        raise ReviewPersistenceError(
+            "decision requires the bound review request SHA256"
+        )
     record = {
         "schema_version": 2,
         "review_request_id": review_request_id,
@@ -267,12 +278,18 @@ def load_review_request(
     paths = SessionPaths.from_run_dir(data_dir)
     if session_id is not None:
         paths.require_session_id(session_id)
-    ref = request_ref if isinstance(request_ref, ArtifactRef) else ArtifactRef.model_validate(request_ref)
+    ref = (
+        request_ref
+        if isinstance(request_ref, ArtifactRef)
+        else ArtifactRef.model_validate(request_ref)
+    )
     path = _verify_ref(paths, ref)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ReviewPersistenceError(f"review request is unreadable: {ref.path_ref}") from exc
+        raise ReviewPersistenceError(
+            f"review request is unreadable: {ref.path_ref}"
+        ) from exc
     if not isinstance(payload, dict):
         raise ReviewPersistenceError(f"invalid review request record: {ref.path_ref}")
     _validate_review_request_record(payload, ref.path_ref)
@@ -327,9 +344,13 @@ def _verify_ref(paths: SessionPaths, ref: ArtifactRef) -> Path:
         size = path.stat().st_size
         digest = sha256_file(path)
     except OSError as exc:
-        raise ReviewPersistenceError(f"review artifact is missing: {ref.path_ref}") from exc
+        raise ReviewPersistenceError(
+            f"review artifact is missing: {ref.path_ref}"
+        ) from exc
     if size != ref.size_bytes or digest != ref.sha256:
-        raise ReviewPersistenceError(f"review artifact integrity mismatch: {ref.path_ref}")
+        raise ReviewPersistenceError(
+            f"review artifact integrity mismatch: {ref.path_ref}"
+        )
     return path
 
 
@@ -338,7 +359,9 @@ def _validate_optional_ref(
 ) -> ArtifactRef | None:
     if value is None:
         return None
-    return value if isinstance(value, ArtifactRef) else ArtifactRef.model_validate(value)
+    return (
+        value if isinstance(value, ArtifactRef) else ArtifactRef.model_validate(value)
+    )
 
 
 def _portable_value(paths: SessionPaths, value: Any) -> Any:
@@ -363,7 +386,7 @@ def _portable_value(paths: SessionPaths, value: Any) -> Any:
 def _dump_payload(payload: Mapping[str, Any] | Any) -> dict[str, Any]:
     if hasattr(payload, "model_dump"):
         dumped = payload.model_dump(mode="json")
-        fields_set = getattr(payload, "model_fields_set", set())
+        fields_set: set[str] = set(getattr(payload, "model_fields_set", set()))
         if dumped.get("gate_id") is None and "gate_id" not in fields_set:
             dumped.pop("gate_id", None)
     else:
@@ -408,7 +431,11 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
     bindings = record.get("bindings")
     body = record.get("payload")
     request_id = record.get("review_request_id")
-    if not isinstance(stage, str) or not isinstance(gate_id, str) or not isinstance(reason, str):
+    if (
+        not isinstance(stage, str)
+        or not isinstance(gate_id, str)
+        or not isinstance(reason, str)
+    ):
         raise ReviewPersistenceError(f"invalid review request envelope: {path_ref}")
     if not isinstance(bindings, dict) or not isinstance(body, dict):
         raise ReviewPersistenceError(f"invalid review request body: {path_ref}")
@@ -426,7 +453,9 @@ def _validate_review_request_record(record: Mapping[str, Any], path_ref: str) ->
         "bindings": bindings,
         "payload": body,
     }
-    expected_id = f"review_{sha256(_canonical_bytes(identity_payload)).hexdigest()[:24]}"
+    expected_id = (
+        f"review_{sha256(_canonical_bytes(identity_payload)).hexdigest()[:24]}"
+    )
     if request_id != expected_id:
         raise ReviewPersistenceError(
             f"review request ID does not match canonical content: {path_ref}"

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
+
+from typing_extensions import TypedDict
 
 from app.control.lifecycle import ResumeValidationError
 from app.domains.parameter_recommendation.facts import build_canonical_facts
 from app.execution.evidence import (
+    ExecutionEvidence,
     load_execution_evidence,
     read_execution_stderr_tail,
 )
@@ -47,6 +52,7 @@ from app.schemas.artifacts import (
     HIC_PARAMETER_RESPONSE_PARSE,
     ArtifactRef,
     ParameterAttempt,
+    ParameterAttemptTask,
     ParameterRecommendationCursor,
 )
 from app.schemas.parameter_recommendation import (
@@ -55,6 +61,7 @@ from app.schemas.parameter_recommendation import (
     ExecutionFailureTrigger,
     ParameterAttemptEvidenceV3,
     ParameterExecutionEvidence,
+    ParameterRecommendationManifestRefsV3,
     ParameterRecommendationManifestV3,
     RecommendationDependencyRefs,
     RecommendationInputSnapshotV3,
@@ -62,7 +69,7 @@ from app.schemas.parameter_recommendation import (
     ResolvedParameterSources,
     ReviewFailureTrigger,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir
 from app.stages.hic_scaffolding.method_application.support import (
     hic_output as _hic_output,
@@ -82,6 +89,7 @@ from app.stages.hic_scaffolding.parameters.storage import (
     recover_autohic_parameter_artifact,
     write_autohic_parameter_artifact,
 )
+from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ParameterRecommendationChainV3,
@@ -94,7 +102,15 @@ _RECOMMENDER_METHOD = "hic_scaffolding.parameter_recommender"
 _APPROVAL_METHOD = "hic_scaffolding.parameter_approval"
 
 
-def recommend_autohic_parameters(state: TopLevelState) -> dict:
+class _EffectiveRetryPolicy(TypedDict):
+    """Fully defaulted retry policy used by retry gates."""
+
+    retry_on_execution_failure: bool
+    max_execution_retries: int
+    max_review_retries: int
+
+
+def recommend_autohic_parameters(state: TopLevelState) -> StateUpdate:
     """Persist one attempt-local sparse recommendation and open approval."""
 
     hic_out = _hic_output(state)
@@ -116,10 +132,9 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             f"AutoHiC parameter attempt chain is invalid: {exc}",
             failure_kind="parameter_recommendation",
         )
-    recommendation_id = int(
-        hic_out.get("proposed_parameter_attempt_id")
-        if hic_out.get("proposed_parameter_attempt_id") is not None
-        else len(attempts_before)
+    proposed_attempt_id = hic_out.get("proposed_parameter_attempt_id")
+    recommendation_id = (
+        proposed_attempt_id if proposed_attempt_id is not None else len(attempts_before)
     )
     previous_attempt = attempts_before[-1] if attempts_before else None
     if task != "recommend_initial":
@@ -352,14 +367,14 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
             previous_attempt_seal_hash=(
                 previous_attempt.get("seal_hash") if previous_attempt else None
             ),
-            refs={
-                "input_snapshot_ref": input_snapshot_ref.model_dump(mode="json"),
-                "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
-                "model_request_ref": model_request_ref.model_dump(mode="json"),
-                "model_response_ref": model_response_ref.model_dump(mode="json"),
-                "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
-            },
+            refs=ParameterRecommendationManifestRefsV3(
+                input_snapshot_ref=input_snapshot_ref,
+                basis_snapshot_ref=basis_ref,
+                model_request_ref=model_request_ref,
+                model_response_ref=model_response_ref,
+                recommendation_ref=recommendation_ref,
+                response_parse_ref=response_parse_ref,
+            ),
             summary={"response_parsed": bool(decision.valid)},
         )
         manifest_ref = write_autohic_parameter_artifact(
@@ -476,7 +491,7 @@ def recommend_autohic_parameters(state: TopLevelState) -> dict:
 def apply_autohic_parameter_approval_decision(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> dict[str, Any]:
+) -> StateUpdate:
     """Apply a human decision bound to the immutable AutoHiC recommendation."""
 
     if request.stage != "hic_scaffolding" or request.gate_id != "parameter_approval":
@@ -639,24 +654,25 @@ def apply_autohic_parameter_approval_decision(
         decided_by=request.decided_by,
         review_request_id=request_id,
     )
-    outputs = dict(state.get("stage_outputs") or {})
     if request.decision == "reject_parameters":
-        outputs["hic_scaffolding"] = {
-            **hic_out,
-            "status": "failed",
-            "failure_kind": "parameter_recommendation_rejected",
-            "reason": "autohic_parameter_recommendation_rejected_by_human",
-            "active_interrupt": None,
-            "current_parameter_recommendation": cursor.model_copy(
-                update={"status": "rejected"}
-            ).model_dump(mode="json"),
-        }
+        stage_update = _update_hic_output(
+            state,
+            {
+                "status": "failed",
+                "failure_kind": "parameter_recommendation_rejected",
+                "reason": "autohic_parameter_recommendation_rejected_by_human",
+                "active_interrupt": None,
+                "current_parameter_recommendation": cursor.model_copy(
+                    update={"status": "rejected"}
+                ).model_dump(mode="json"),
+            },
+        )
         return {
             "current_stage": "hic_scaffolding",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             "last_error": "autohic_parameter_recommendation_rejected_by_human",
-            "stage_outputs": outputs,
+            **stage_update,
         }
 
     try:
@@ -682,24 +698,26 @@ def apply_autohic_parameter_approval_decision(
         retry_counts["execution"] = int(retry_counts.get("execution", 0)) + 1
     elif cursor.task == "retry_after_review_failure":
         retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
-    outputs["hic_scaffolding"] = {
-        **hic_out,
-        "status": "parameters_approved",
-        "active_interrupt": None,
-        "current_parameter_attempt_id": cursor.recommendation_id,
-        "parameter_attempts": attempts,
-        "retry_counts": retry_counts,
-        "current_parameter_recommendation": cursor.model_copy(
-            update={"status": "approved"}
-        ).model_dump(mode="json"),
-        "proposed_parameter_attempt_id": None,
-        "parameter_retry_request": None,
-    }
+    stage_update = _update_hic_output(
+        state,
+        {
+            "status": "parameters_approved",
+            "active_interrupt": None,
+            "current_parameter_attempt_id": cursor.recommendation_id,
+            "parameter_attempts": attempts,
+            "retry_counts": retry_counts,
+            "current_parameter_recommendation": cursor.model_copy(
+                update={"status": "approved"}
+            ).model_dump(mode="json"),
+            "proposed_parameter_attempt_id": None,
+            "parameter_retry_request": None,
+        },
+    )
     return {
         "current_stage": "hic_scaffolding",
         "supervision_state": "running_stage",
         "active_interrupt": None,
-        "stage_outputs": outputs,
+        **stage_update,
     }
 
 
@@ -708,8 +726,8 @@ def _fail_update(
     reason: str,
     *,
     failure_kind: str,
-    extra: dict[str, Any] | None = None,
-) -> dict:
+    extra: Mapping[str, object] | None = None,
+) -> StateUpdate:
     return _update_hic_output(
         state,
         {
@@ -721,7 +739,7 @@ def _fail_update(
     )
 
 
-def autohic_execution_retry_gate(state: TopLevelState) -> dict:
+def autohic_execution_retry_gate(state: TopLevelState) -> StateUpdate:
     """Seal a failed execution and apply the operator-owned retry policy."""
 
     hic_out = _hic_output(state)
@@ -731,7 +749,9 @@ def autohic_execution_retry_gate(state: TopLevelState) -> dict:
         attempts = _validate_parameter_attempt_chain(
             state, list(hic_out.get("parameter_attempts") or [])
         )
-        current_id = int(hic_out["current_parameter_attempt_id"])
+        current_id = hic_out.get("current_parameter_attempt_id")
+        if current_id is None:
+            raise ValueError("AutoHiC execution retry has no current attempt")
         current = ParameterAttempt.model_validate(attempts[current_id])
         if current.execution_ref is None:
             return {}
@@ -788,7 +808,7 @@ def autohic_execution_retry_gate(state: TopLevelState) -> dict:
 def prepare_autohic_review_retry(
     state: TopLevelState,
     decision_ref: ArtifactRef,
-) -> dict:
+) -> StateUpdate:
     """Seal reviewer feedback and create a ref-only retry cursor."""
 
     hic_out = _hic_output(state)
@@ -796,7 +816,9 @@ def prepare_autohic_review_retry(
         attempts = _validate_parameter_attempt_chain(
             state, list(hic_out.get("parameter_attempts") or [])
         )
-        current_id = int(hic_out["current_parameter_attempt_id"])
+        current_id = hic_out.get("current_parameter_attempt_id")
+        if current_id is None:
+            raise ValueError("AutoHiC review retry has no current attempt")
         current = ParameterAttempt.model_validate(attempts[current_id])
         if current.status != "executed":
             raise ValueError("AutoHiC review retry requires an executed attempt")
@@ -844,7 +866,7 @@ def prepare_autohic_review_retry(
     )
 
 
-def _parameter_prompt_task(hic_out: dict[str, Any]) -> str:
+def _parameter_prompt_task(hic_out: HiCScaffoldingCursor) -> ParameterAttemptTask:
     status = hic_out.get("status")
     if status == "retry_parameters_after_execution_failure":
         return "retry_after_execution_failure"
@@ -853,8 +875,10 @@ def _parameter_prompt_task(hic_out: dict[str, Any]) -> str:
     return "recommend_initial"
 
 
-def _parameter_retry_policy(hic_out: dict[str, Any]) -> dict[str, Any]:
-    policy = dict(hic_out.get("parameter_retry_policy") or {})
+def _parameter_retry_policy(
+    hic_out: HiCScaffoldingCursor,
+) -> _EffectiveRetryPolicy:
+    policy = hic_out.get("parameter_retry_policy") or {}
     return {
         "retry_on_execution_failure": bool(
             policy.get("retry_on_execution_failure", False)
@@ -865,7 +889,7 @@ def _parameter_retry_policy(hic_out: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_retry_context(
-    task: str,
+    task: ParameterAttemptTask,
     attempt_history: list[ParameterAttemptEvidenceV3],
 ) -> RecommendationRetryContext | None:
     if task == "recommend_initial":
@@ -882,11 +906,13 @@ def _build_retry_context(
         execution = latest.execution
         if execution is None:
             raise ValueError("AutoHiC execution retry has no execution evidence")
-        trigger = ExecutionFailureTrigger(
-            status=execution.status,
-            return_code=execution.return_code,
-            failure_class=execution.failure_class,
-            status_detail=execution.status_detail,
+        trigger: ExecutionFailureTrigger | ReviewFailureTrigger = (
+            ExecutionFailureTrigger(
+                status=execution.status,
+                return_code=execution.return_code,
+                failure_class=execution.failure_class,
+                status_detail=execution.status_detail,
+            )
         )
     elif task == "retry_after_review_failure":
         review = latest.review
@@ -903,22 +929,26 @@ def _build_retry_context(
 
 def _initial_dependency_refs(
     state: TopLevelState,
-    hic_out: dict[str, Any],
+    hic_out: HiCScaffoldingCursor,
 ) -> RecommendationDependencyRefs:
     stage_outputs = state.get("stage_outputs") or {}
     read_qc = stage_outputs.get("read_qc") or {}
     genome_survey = stage_outputs.get("genome_survey") or {}
-    fact_sources = {
-        role: value
-        for role, value in {
-            "read_qc_summary": canonical_parameter_dependency(
-                state, read_qc.get("summary_artifact_ref")
-            ),
-            "genome_survey_result": canonical_parameter_dependency(
-                state, genome_survey.get("result_artifact_ref")
-            ),
-        }.items()
-        if value is not None
+    read_qc_summary = read_qc.get("summary_artifact_ref")
+    if not isinstance(read_qc_summary, (str, dict)):
+        read_qc_summary = None
+    genome_survey_result = genome_survey.get("result_artifact_ref")
+    if not isinstance(genome_survey_result, (str, dict)):
+        genome_survey_result = None
+    fact_sources: dict[
+        Literal["read_qc_summary", "genome_survey_result"],
+        ArtifactRef | Mapping[str, Any] | str | Path | None,
+    ] = {
+        "read_qc_summary": canonical_parameter_dependency(state, read_qc_summary),
+        "genome_survey_result": canonical_parameter_dependency(
+            state,
+            genome_survey_result,
+        ),
     }
     registry_ref = canonical_parameter_dependency(
         state, state.get("asset_registry_ref")
@@ -1078,11 +1108,7 @@ def _hydrate_parameter_attempt(
             failure_class=(
                 execution_evidence.status if not execution_evidence.success else None
             ),
-            status_detail=(
-                execution_evidence.status_detail or execution_evidence.error or None
-            )[:500]
-            if execution_evidence.status_detail or execution_evidence.error
-            else None,
+            status_detail=_execution_status_detail(execution_evidence),
             resource_metrics=[],
             stderr_tail=stderr_tail,
         )
@@ -1109,6 +1135,13 @@ def _hydrate_parameter_attempt(
         execution=execution,
         review=review,
     )
+
+
+def _execution_status_detail(execution_evidence: ExecutionEvidence) -> str | None:
+    """Return the bounded runner detail after an explicit optional narrowing."""
+
+    detail = execution_evidence.status_detail or execution_evidence.error
+    return detail[:500] if detail else None
 
 
 def _seal_parameter_attempt(

@@ -115,9 +115,7 @@ class DirectAttemptOwner:
     ) -> list[FrozenAttemptSpec]:
         cursors = _direct_attempt_cursors(output, lifecycle)
         if any(cursor.status != "frozen" for cursor in cursors):
-            raise ValueError(
-                f"{lifecycle.name} execution attempt cursor is not frozen"
-            )
+            raise ValueError(f"{lifecycle.name} execution attempt cursor is not frozen")
         return [
             _load_frozen_attempt(state, cursor.frozen_attempt_ref, lifecycle, cursor)
             for cursor in cursors
@@ -166,8 +164,7 @@ class DirectAttemptOwner:
     ) -> list[MethodExecution]:
         cursors = _direct_attempt_cursors(output, lifecycle)
         if any(
-            cursor.status not in {"executed", "execution_failed"}
-            for cursor in cursors
+            cursor.status not in {"executed", "execution_failed"} for cursor in cursors
         ):
             raise ValueError(
                 f"{lifecycle.name} execution attempt cursor is not completed"

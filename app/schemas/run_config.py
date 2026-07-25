@@ -12,6 +12,7 @@ facts, and is not a method catalog.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -173,16 +174,13 @@ def infer_assembly_method(assembly: "AssemblyRunConfig") -> AssemblyMethod | Non
 def _provided_assembly_parameter_methods(
     assembly: "AssemblyRunConfig",
 ) -> list[AssemblyMethod]:
-    return [
-        name
-        for name, value in [
-            ("flye", assembly.flye_parameters),
-            ("nextdenovo", assembly.nextdenovo_parameters),
-            ("hifiasm", assembly.hifiasm_parameters),
-            ("hifiasm_ont", assembly.hifiasm_ont_parameters),
-        ]
-        if value is not None
-    ]
+    candidates: tuple[tuple[AssemblyMethod, BaseModel | None], ...] = (
+        ("flye", assembly.flye_parameters),
+        ("nextdenovo", assembly.nextdenovo_parameters),
+        ("hifiasm", assembly.hifiasm_parameters),
+        ("hifiasm_ont", assembly.hifiasm_ont_parameters),
+    )
+    return [name for name, value in candidates if value is not None]
 
 
 class AssemblyRunConfig(BaseModel):
@@ -277,7 +275,7 @@ def validate_genome_size_execution_plan(
     run_config: "RunConfig",
     manifest: InputManifest,
     *,
-    local_stages: list[str] | None = None,
+    local_stages: Sequence[str] | None = None,
 ) -> None:
     """Require a provided size unless an earlier local survey can produce it."""
 

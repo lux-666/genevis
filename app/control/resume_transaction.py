@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from langchain_core.runnables import RunnableConfig
+
 from app.control.lifecycle import (
     DurableResumeUnavailableError,
     ResumeValidationError,
@@ -20,6 +22,7 @@ from app.review.annotation_intake import (
     persist_annotation_intake_plan,
 )
 from app.review.base import ResumeReviewRequest
+from app.schemas.state import validate_top_level_state
 from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 
@@ -44,7 +47,7 @@ class ResumeTransactionError(RuntimeError):
 def execute_resume_transaction(
     *,
     graph: Any,
-    config: dict[str, Any],
+    config: RunnableConfig,
     session_id: str,
     data_dir: str | Path,
     request: ResumeReviewRequest,
@@ -93,7 +96,7 @@ def execute_resume_transaction(
                 "snapshot",
                 f"no checkpoint found for session_id {session_id!r}",
             )
-        state = snapshot.values
+        state = validate_top_level_state(snapshot.values)
 
         try:
             validate_resume_review_state(state, request)
@@ -142,11 +145,13 @@ def execute_resume_transaction(
                 "decision_apply", f"{type(exc).__name__}: {exc}"
             ) from exc
 
+        graph_update: dict[str, Any] = dict(update)
         intake = None
         try:
             if selection is not None:
+                intake_state = validate_top_level_state({**state, **graph_update})
                 intake = persist_annotation_intake_plan(
-                    state={**state, **update},
+                    state=intake_state,
                     recommended_plan=selection.recommended_plan,
                     final_plan=selection.final_plan,
                     request=request,
@@ -155,7 +160,7 @@ def execute_resume_transaction(
             elif collect_default_annotation_intake:
                 intake = maybe_collect_annotation_intake(
                     state=state,
-                    resume_update=update,
+                    resume_update=graph_update,
                     request=request,
                     source=source,
                     interactive=False,
@@ -165,10 +170,10 @@ def execute_resume_transaction(
                 "annotation_intake", f"{type(exc).__name__}: {exc}"
             ) from exc
         if intake is not None:
-            update = {**update, **intake.update}
+            graph_update.update(intake.update)
 
         try:
-            update_result = graph.update_state(config, update)
+            update_result = graph.update_state(config, graph_update)
         except Exception as exc:
             raise ResumeTransactionError(
                 "update_state", f"{type(exc).__name__}: {exc}"
@@ -185,7 +190,12 @@ def execute_resume_transaction(
 
         try:
             finalize_terminal_state(
-                graph, config, final, session_id, paths.run_dir, checkpointer,
+                graph,
+                config,
+                final,
+                session_id,
+                paths.run_dir,
+                checkpointer,
                 report_kind="final",
             )
         except Exception as exc:
@@ -200,9 +210,7 @@ def execute_resume_transaction(
         )
         raise
     except Exception as exc:
-        failure = ResumeTransactionError(
-            "snapshot", f"{type(exc).__name__}: {exc}"
-        )
+        failure = ResumeTransactionError("snapshot", f"{type(exc).__name__}: {exc}")
         ledger.record_event(
             session_id,
             "resume_failed",
@@ -223,7 +231,9 @@ def execute_resume_transaction(
     return ResumeTransactionResult(
         state=final,
         decision_artifact_path=(
-            decision_path if decision_path is not None and decision_path.is_file() else None
+            decision_path
+            if decision_path is not None and decision_path.is_file()
+            else None
         ),
         annotation_intake_artifact_ref=(
             intake.artifact_ref if intake is not None else None
@@ -237,13 +247,11 @@ def _decision_artifact_path(
 ) -> Path | None:
     if not request.review_request_id:
         return None
-    return paths.artifact_path(
-        "reviews", request.review_request_id, "decision.json"
-    )
+    return paths.artifact_path("reviews", request.review_request_id, "decision.json")
 
 
 def _decision_event_payload(request: ResumeReviewRequest) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "stage": request.stage,
         "gate_id": request.gate_id,
         "decision": request.decision,

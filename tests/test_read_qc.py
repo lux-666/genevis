@@ -2,27 +2,29 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
-import inspect
 from pathlib import Path
 
 from app.control.lifecycle import inspect_session
-from app.storage.ledger import Ledger
 from app.graph.builder import build_graph
 from app.schemas.descriptors import DescriptorRegistry
 from app.schemas.state import initial_state
+from app.stages.read_qc.builder import build_stage
+from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
+from app.stages.read_qc.method_application.seqkit_length_filter import (
+    build_seqkit_length_filter_graph,
+)
+from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
 from app.storage.audit import audit_run_storage
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
 from tests.data_v2 import v2_run_dir
-from app.stages.read_qc.builder import build_stage
-from app.stages.read_qc.method_application.seqkit_length_filter import build_seqkit_length_filter_graph
-from app.stages.read_qc.method_application.seqkit_stats import build_seqkit_stats_graph
-from app.stages.read_qc.method_application import seqkit_length_filter, seqkit_stats
 
 
 def _write_phase4_smoke_fixture(root: Path) -> tuple[Path, Path]:
@@ -63,7 +65,9 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
         method = registry.methods["read_qc.long_read_stats.seqkit_stats"]
         self.assertEqual(method.stage, "read_qc")
         self.assertEqual(method.package_ref, "seqkit")
-        self.assertIn("read_qc.long_read_stats.seqkit_stats", registry.by_stage["read_qc"])
+        self.assertIn(
+            "read_qc.long_read_stats.seqkit_stats", registry.by_stage["read_qc"]
+        )
 
     def test_descriptor_registry_loads_length_filter_candidates(self):
         registry = DescriptorRegistry.load(Path("descriptors/registry.yaml"))
@@ -76,6 +80,7 @@ class ReadQCSeqKitDescriptorTests(unittest.TestCase):
             self.assertIn(method_name, registry.methods)
             self.assertEqual(registry.methods[method_name].package_ref, package_name)
             self.assertIn(method_name, registry.by_stage["read_qc"])
+
 
 class ReadQCSeqKitStageTests(unittest.TestCase):
     def test_outer_graph_routes_to_method_subgraphs(self):
@@ -125,17 +130,19 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
         seqkit = bin_dir / "seqkit"
         seqkit.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" = \"stats\" ] && [ \"$2\" = \"-a\" ] && [ \"$3\" = \"-T\" ]; then\n"
-            "  printf 'file\\tformat\\ttype\\tnum_seqs\\tsum_len\\tmin_len\\tavg_len\\tmax_len\\tN50\\tQ20(%%)\\tQ30(%%)\\tAvgQual\\n'\n"
+            'if [ "$1" = "stats" ] && [ "$2" = "-a" ] && [ "$3" = "-T" ]; then\n'
+            "  printf 'file\\tformat\\ttype\\tnum_seqs\\tsum_len\\tmin_len"
+            "\\tavg_len\\tmax_len\\tN50\\tQ20(%%)\\tQ30(%%)\\tAvgQual\\n'\n"
             "  shift 3\n"
-            "  for input in \"$@\"; do\n"
-            "    printf '%s\\tFASTQ\\tDNA\\t1\\t4\\t4\\t4.0\\t4\\t4\\t75.0\\t50.0\\t18.5\\n' \"$input\"\n"
+            '  for input in "$@"; do\n'
+            "    printf '%s\\tFASTQ\\tDNA\\t1\\t4\\t4\\t4.0\\t4\\t4"
+            '\\t75.0\\t50.0\\t18.5\\n\' "$input"\n'
             "  done\n"
             "  exit 0\n"
             "fi\n"
-            "if [ \"$1\" = \"seq\" ] && [ \"$2\" = \"-m\" ]; then\n"
+            'if [ "$1" = "seq" ] && [ "$2" = "-m" ]; then\n'
             "  shift 3\n"
-            "  cat \"$@\"\n"
+            '  cat "$@"\n'
             "  exit 0\n"
             "fi\n"
             "exit 2\n",
@@ -186,7 +193,11 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                     }
                 ],
             )
-            state = initial_state(session_id="s1", input_manifest_ref="control/manifest.yaml", data_dir=str(v2_run_dir(data_dir, "s1")))
+            state = initial_state(
+                session_id="s1",
+                input_manifest_ref="control/manifest.yaml",
+                data_dir=str(v2_run_dir(data_dir, "s1")),
+            )
             state["current_stage"] = "read_qc"
             state["asset_registry_ref"] = str(registry)
             Ledger(state["data_dir"]).create_session("s1", "control/manifest.yaml")
@@ -206,7 +217,10 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(summary["next_action"]["kind"], "failed_terminal")
             artifact_index = run_dir / "artifacts" / "index.jsonl"
             artifact_types = (
-                [json.loads(line)["artifact_type"] for line in artifact_index.read_text(encoding="utf-8").splitlines()]
+                [
+                    json.loads(line)["artifact_type"]
+                    for line in artifact_index.read_text(encoding="utf-8").splitlines()
+                ]
                 if artifact_index.exists()
                 else []
             )
@@ -233,7 +247,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 }
             }
 
@@ -264,29 +280,39 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             artifact_index = Path(result["data_dir"]) / "artifacts" / "index.jsonl"
             self.assertTrue(artifact_index.exists())
-            artifact_events = [json.loads(line) for line in artifact_index.read_text().splitlines()]
+            artifact_events = [
+                json.loads(line) for line in artifact_index.read_text().splitlines()
+            ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.long_read_stats", artifact_types)
             self.assertIn("read_qc.long_read_summary", artifact_types)
             self.assertIn("command.stdout", artifact_types)
             self.assertIn("command.stderr", artifact_types)
 
-            summary_ref = Path(result["stage_outputs"]["read_qc"]["summary_artifact_ref"])
+            summary_ref = Path(
+                result["stage_outputs"]["read_qc"]["summary_artifact_ref"]
+            )
             self.assertTrue(summary_ref.exists())
             summary_payload = json.loads(summary_ref.read_text(encoding="utf-8"))
-            self.assertEqual(summary_payload["method_name"], "read_qc.long_read_stats.seqkit_stats")
+            self.assertEqual(
+                summary_payload["method_name"], "read_qc.long_read_stats.seqkit_stats"
+            )
             self.assertEqual(summary_payload["summary"]["num_seqs"], 1)
 
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("attempt_started", event_types)
             self.assertIn("attempt_succeeded", event_types)
             self.assertIn("artifact_registered", event_types)
             audit = audit_run_storage(result["data_dir"])
-            self.assertGreaterEqual(audit["artifact_index"]["reachable_record_count"], 2)
+            self.assertGreaterEqual(
+                audit["artifact_index"]["reachable_record_count"], 2
+            )
 
     def test_multi_file_quality_summary_weights_by_bases_before_read_count(self):
         from app.stages.read_qc.method_application.support import parse_seqkit_summary
@@ -325,7 +351,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 }
             }
 
@@ -333,10 +361,14 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             result = graph.invoke(state)
 
             read_qc = result["stage_outputs"]["read_qc"]
-            self.assertEqual(read_qc["substeps"]["long_read_stats"]["status"], "executed")
+            self.assertEqual(
+                read_qc["substeps"]["long_read_stats"]["status"], "executed"
+            )
             self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
             self.assertEqual(read_qc["length_filter_method"], "skip")
-            self.assertEqual(read_qc["length_filter_decision"], "skip filtering, use raw reads")
+            self.assertEqual(
+                read_qc["length_filter_decision"], "skip filtering, use raw reads"
+            )
             self.assertEqual(
                 read_qc["substeps"]["length_filter"]["skip_reason"],
                 "no_filtering_requested",
@@ -346,7 +378,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             artifact_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text()
+                .splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertNotIn("read_qc.long_reads.fofn", artifact_types)
@@ -377,7 +411,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                 }
             }
 
@@ -387,15 +423,24 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertEqual(read_qc["summary"]["files"], 2)
             self.assertEqual(read_qc["summary"]["num_seqs"], 2)
             self.assertEqual(read_qc["summary"]["sum_len"], 8)
-            self.assertEqual(read_qc["input_asset_refs"], [
-                "s1:raw_long_reads:reads_1.fastq",
-                "s1:raw_long_reads:reads_2.fastq",
-            ])
+            self.assertEqual(
+                read_qc["input_asset_refs"],
+                [
+                    "s1:raw_long_reads:reads_1.fastq",
+                    "s1:raw_long_reads:reads_2.fastq",
+                ],
+            )
             self.assertEqual(
                 result["resource_refs"]["long_reads"]["paths"],
                 [str(fq1), str(fq2)],
             )
-            stats_script = Path(result["data_dir"]) / "work" / "read_qc" / "seqkit_stats" / "run_seqkit_stats.sh"
+            stats_script = (
+                Path(result["data_dir"])
+                / "work"
+                / "read_qc"
+                / "seqkit_stats"
+                / "run_seqkit_stats.sh"
+            )
             stats_script_text = stats_script.read_text(encoding="utf-8")
             self.assertIn(str(fq1), stats_script_text)
             self.assertIn(str(fq2), stats_script_text)
@@ -419,7 +464,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "length_filter_request": {
                         "approved": True,
                         "method_name": "read_qc.length_filter.seqkit_seq",
@@ -437,35 +484,53 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
                 read_qc["substeps"]["length_filter"]["method_name"],
                 "read_qc.length_filter.seqkit_seq",
             )
-            self.assertEqual(read_qc["substeps"]["length_filter"]["thresholds"], {"min_len": 1000})
-            self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.seqkit_seq")
+            self.assertEqual(
+                read_qc["substeps"]["length_filter"]["thresholds"], {"min_len": 1000}
+            )
+            self.assertEqual(
+                read_qc["length_filter_method"], "read_qc.length_filter.seqkit_seq"
+            )
             self.assertEqual(read_qc["length_filter_decision"], "seqkit_seq")
             self.assertNotIn("length_filter_request", read_qc)
             filtered_ref = Path(read_qc["filtered_long_reads_ref"])
             self.assertTrue(filtered_ref.exists())
-            self.assertEqual(filtered_ref.read_text(encoding="utf-8"), fq.read_text(encoding="utf-8"))
+            self.assertEqual(
+                filtered_ref.read_text(encoding="utf-8"), fq.read_text(encoding="utf-8")
+            )
             self.assertEqual(
                 result["resource_refs"]["long_reads"]["paths"],
                 [str(filtered_ref)],
             )
 
-            filter_script = Path(result["data_dir"]) / "work" / "read_qc" / "length_filter" / "run_length_filter.sh"
+            filter_script = (
+                Path(result["data_dir"])
+                / "work"
+                / "read_qc"
+                / "length_filter"
+                / "run_length_filter.sh"
+            )
             filter_script_text = filter_script.read_text(encoding="utf-8")
             self.assertIn("seqkit seq -m 1000", filter_script_text)
             self.assertIn("seqkit stats -a -T", filter_script_text)
             post_filter_summary_ref = Path(read_qc["post_filter_summary_artifact_ref"])
             self.assertTrue(post_filter_summary_ref.exists())
-            post_filter_summary = json.loads(post_filter_summary_ref.read_text(encoding="utf-8"))
+            post_filter_summary = json.loads(
+                post_filter_summary_ref.read_text(encoding="utf-8")
+            )
             self.assertEqual(post_filter_summary["read_set"], "post_filter")
             self.assertEqual(post_filter_summary["thresholds"], {"min_len": 1000})
             self.assertEqual(post_filter_summary["summary"], read_qc["summary"])
             self.assertEqual(read_qc["post_filter_summary"], read_qc["summary"])
-            self.assertEqual(read_qc["summary_artifact_ref"], str(post_filter_summary_ref))
+            self.assertEqual(
+                read_qc["summary_artifact_ref"], str(post_filter_summary_ref)
+            )
             self.assertEqual(read_qc["final_read_set"], "post_filter")
             self.assertIn("raw_summary_artifact_ref", read_qc)
             artifact_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "artifacts" / "index.jsonl")
+                .read_text()
+                .splitlines()
             ]
             artifact_types = {event["artifact_type"] for event in artifact_events}
             self.assertIn("read_qc.filtered_long_reads", artifact_types)
@@ -497,7 +562,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "length_filter_request": {
                         "approved": True,
                         "method_name": "read_qc.length_filter.seqkit_seq",
@@ -510,17 +577,29 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             read_qc = result["stage_outputs"]["read_qc"]
             filtered_refs = [Path(ref) for ref in read_qc["filtered_long_reads_refs"]]
-            self.assertEqual([path.name for path in filtered_refs], [
-                "filtered_long_reads_1.fastq",
-                "filtered_long_reads_2.fastq",
-            ])
-            self.assertEqual(filtered_refs[0].read_text(encoding="utf-8"), fq1.read_text(encoding="utf-8"))
-            self.assertEqual(filtered_refs[1].read_text(encoding="utf-8"), fq2.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [path.name for path in filtered_refs],
+                [
+                    "filtered_long_reads_1.fastq",
+                    "filtered_long_reads_2.fastq",
+                ],
+            )
+            self.assertEqual(
+                filtered_refs[0].read_text(encoding="utf-8"),
+                fq1.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                filtered_refs[1].read_text(encoding="utf-8"),
+                fq2.read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 result["resource_refs"]["long_reads"]["paths"],
                 [str(path) for path in filtered_refs],
             )
-            self.assertEqual(read_qc["substeps"]["length_filter"]["artifact_refs"], [str(path) for path in filtered_refs])
+            self.assertEqual(
+                read_qc["substeps"]["length_filter"]["artifact_refs"],
+                [str(path) for path in filtered_refs],
+            )
 
     def test_approved_min_length_filter_names_fasta_output_with_fasta_extension(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -542,7 +621,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "length_filter_request": {
                         "approved": True,
                         "method_name": "read_qc.length_filter.seqkit_seq",
@@ -553,9 +634,14 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             result = build_stage().invoke(state)
 
-            filtered_ref = Path(result["stage_outputs"]["read_qc"]["filtered_long_reads_ref"])
+            filtered_ref = Path(
+                result["stage_outputs"]["read_qc"]["filtered_long_reads_ref"]
+            )
             self.assertEqual(filtered_ref.name, "filtered_long_reads.fasta")
-            self.assertEqual(filtered_ref.read_text(encoding="utf-8"), fasta.read_text(encoding="utf-8"))
+            self.assertEqual(
+                filtered_ref.read_text(encoding="utf-8"),
+                fasta.read_text(encoding="utf-8"),
+            )
 
     def test_unapproved_filter_thresholds_skip_filter_with_decision_reason(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -576,7 +662,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "length_filter_request": {
                         "method_name": "read_qc.length_filter.seqkit_seq",
                         "thresholds": {"min_len": 1000},
@@ -616,7 +704,9 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             state["stage_outputs"] = {
                 "read_qc": {
                     "execution_mode": "local",
-                    "env": {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+                    "env": {
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    },
                     "length_filter_request": {
                         "approved": True,
                         "method_name": "read_qc.length_filter.filtlong",
@@ -629,8 +719,13 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
 
             read_qc = result["stage_outputs"]["read_qc"]
             self.assertEqual(read_qc["substeps"]["length_filter"]["status"], "skipped")
-            self.assertEqual(read_qc["substeps"]["length_filter"]["skip_reason"], "unknown_filter_method")
-            self.assertEqual(read_qc["length_filter_method"], "read_qc.length_filter.filtlong")
+            self.assertEqual(
+                read_qc["substeps"]["length_filter"]["skip_reason"],
+                "unknown_filter_method",
+            )
+            self.assertEqual(
+                read_qc["length_filter_method"], "read_qc.length_filter.filtlong"
+            )
             self.assertEqual(result["resource_refs"]["long_reads"]["paths"], [str(fq)])
 
     def test_missing_seqkit_records_failed_attempt(self):
@@ -665,9 +760,13 @@ class ReadQCSeqKitStageTests(unittest.TestCase):
             self.assertFalse((stats_dir / "seqkit_stats.tsv").exists())
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
-            self.assertIn("attempt_failed", [event["event_type"] for event in ledger_events])
+            self.assertIn(
+                "attempt_failed", [event["event_type"] for event in ledger_events]
+            )
 
 
 class Phase4ReadQCSmokeTests(unittest.TestCase):
@@ -709,7 +808,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "blocked_input")
+            self.assertEqual(
+                result["stage_outputs"]["read_qc"]["status"], "blocked_input"
+            )
             self.assertIn("missing.fastq", result["last_error"])
 
     def test_missing_conda_env_blocks_with_blocked_env_status(self):
@@ -741,11 +842,15 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
 
             self.assertEqual(result["current_stage"], "read_qc")
             self.assertEqual(result["supervision_state"], "failed_terminal")
-            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "blocked_env")
+            self.assertEqual(
+                result["stage_outputs"]["read_qc"]["status"], "blocked_env"
+            )
             self.assertIn("conda", result["last_error"])
             ledger_events = [
                 json.loads(line)
-                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl").read_text().splitlines()
+                for line in (Path(result["data_dir"]) / "ledger" / "events.jsonl")
+                .read_text()
+                .splitlines()
             ]
             event_types = [event["event_type"] for event in ledger_events]
             self.assertIn("env_preflight_blocked", event_types)
@@ -770,18 +875,18 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             conda_stub = conda_stub_dir / "conda"
             conda_stub.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"run\" ]; then\n"
+                'if [ "$1" = "run" ]; then\n'
                 "  shift\n"
-                "  while [ \"$#\" -gt 0 ]; do\n"
-                "    case \"$1\" in\n"
+                '  while [ "$#" -gt 0 ]; do\n'
+                '    case "$1" in\n'
                 "      --live-stream|--no-capture-output) shift ;;\n"
                 "      -n|-p) shift 2 ;;\n"
                 "      *) break ;;\n"
                 "    esac\n"
                 "  done\n"
                 "  # Env probe is `true`; pretend it succeeded.\n"
-                "  if [ \"$1\" = \"true\" ]; then exit 0; fi\n"
-                "  # Tool probe is `sh -c command -v \"$1\" preflight TOOL`.\n"
+                '  if [ "$1" = "true" ]; then exit 0; fi\n'
+                '  # Tool probe is `sh -c command -v "$1" preflight TOOL`.\n'
                 "  exit 1\n"
                 "fi\n"
                 "exit 0\n",
@@ -798,7 +903,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
             finally:
                 os.environ["PATH"] = old_path
 
-            self.assertEqual(result["stage_outputs"]["read_qc"]["status"], "missing_tool")
+            self.assertEqual(
+                result["stage_outputs"]["read_qc"]["status"], "missing_tool"
+            )
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIn("seqkit", result["stage_outputs"]["read_qc"]["missing_tools"])
 
@@ -818,7 +925,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
         # The runner sets cwd to data_dir/work/.../seqkit_stats, so a raw
         # relative redirect target lands at a non-existent nested path. The
         # script must therefore embed an absolute work path.
-        from app.stages.read_qc.method_application.seqkit_stats import freeze_seqkit_attempt
+        from app.stages.read_qc.method_application.seqkit_stats import (
+            freeze_seqkit_attempt,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -849,12 +958,16 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                             "status": "planned",
                             "execution_mode": "local",
                             "raw_long_reads_path": str(fq),
-                            "input_asset_ref": "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz",
+                            "input_asset_ref": (
+                                "s1:raw_long_reads:BGI_CycloneSEQ_sample.fastq.gz"
+                            ),
                             "substeps": {
                                 "long_read_stats": {
                                     "name": "long_read_stats",
                                     "status": "planned",
-                                    "method_name": "read_qc.long_read_stats.seqkit_stats",
+                                    "method_name": (
+                                        "read_qc.long_read_stats.seqkit_stats"
+                                    ),
                                 }
                             },
                             # PATH bypass keeps env_dispatch happy without
@@ -867,7 +980,9 @@ class Phase4ReadQCSmokeTests(unittest.TestCase):
                 script_path = run_dir / "work/read_qc/seqkit_stats/run_seqkit_stats.sh"
                 self.assertTrue(script_path.exists())
                 script_text = script_path.read_text(encoding="utf-8")
-                expected_work_output = run_dir / "work/read_qc/seqkit_stats/seqkit_stats.tsv"
+                expected_work_output = (
+                    run_dir / "work/read_qc/seqkit_stats/seqkit_stats.tsv"
+                )
                 self.assertIn(str(expected_work_output), script_text)
                 # And the script must NOT carry the bare relative form
                 # that would resolve from the runner's cwd.
@@ -885,9 +1000,17 @@ def _env_geno_exec_has_seqkit() -> bool:
         return False
     probe = subprocess.run(
         [
-            "conda", "run", "--live-stream", "--no-capture-output",
-            "-n", "env_geno_exec", "sh", "-c", 'command -v "$1"',
-            "preflight", "seqkit",
+            "conda",
+            "run",
+            "--live-stream",
+            "--no-capture-output",
+            "-n",
+            "env_geno_exec",
+            "sh",
+            "-c",
+            'command -v "$1"',
+            "preflight",
+            "seqkit",
         ],
         capture_output=True,
         text=True,
@@ -925,19 +1048,27 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             )
             argv = [
                 "run",
-                "--session-id", session_id,
-                "--manifest", str(manifest),
-                "--data-dir", tmpdir,
-                "--run-config", str(run_config),
+                "--session-id",
+                session_id,
+                "--manifest",
+                str(manifest),
+                "--data-dir",
+                tmpdir,
+                "--run-config",
+                str(run_config),
             ]
             rc = run_main(argv)
             self.assertEqual(rc, 0)
 
-            artifact_dir = SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
+            artifact_dir = (
+                SessionPaths(tmpdir, session_id).run_dir / "artifacts" / "read_qc"
+            )
             stats = artifact_dir / "outputs" / "seqkit_stats" / "seqkit_stats.tsv"
             summary = artifact_dir / "outputs" / "seqkit_stats" / "read_qc_summary.json"
             self.assertTrue(stats.exists(), f"seqkit_stats.tsv missing at {stats}")
-            self.assertTrue(summary.exists(), f"read_qc_summary.json missing at {summary}")
+            self.assertTrue(
+                summary.exists(), f"read_qc_summary.json missing at {summary}"
+            )
             self.assertFalse((artifact_dir / "long_reads.fofn").exists())
 
             # SeqKit TSV header should be intact and we should see three reads.
@@ -945,7 +1076,6 @@ class Phase4ReadQCRealSmokeTests(unittest.TestCase):
             self.assertIn("num_seqs", stats_text)
             summary_payload = json.loads(summary.read_text(encoding="utf-8"))
             self.assertEqual(summary_payload["summary"]["num_seqs"], 3)
-
 
 
 if __name__ == "__main__":

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.t2t.state import T2TStageCursor, read_t2t_stage_output
 from app.workflow import is_terminal_failure
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("t2t") or {}
+def _output(state: TopLevelState) -> T2TStageCursor:
+    return read_t2t_stage_output(state)
 
 
 def route_after_enter(state: TopLevelState) -> str:

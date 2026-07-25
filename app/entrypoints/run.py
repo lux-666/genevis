@@ -16,9 +16,10 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import yaml
+from langchain_core.runnables import RunnableConfig
 
 from app.config import default_data_root
 from app.control.lifecycle import finalize_terminal_state
@@ -28,19 +29,24 @@ from app.domains.assembly.selection import (
     resolve_read_type,
 )
 from app.graph.builder import build_graph
-from app.graph.checkpointer import DEFAULT_CHECKPOINTER_BACKEND
+from app.graph.checkpointer import (
+    DEFAULT_CHECKPOINTER_BACKEND,
+    CheckpointerBackend,
+)
 from app.schemas.entry import EntryRequest
 from app.schemas.manifest import InputManifest
 from app.schemas.run_config import (
     AssemblyRunConfig,
     LocalExecStage,
+    ReviewPolicyStage,
     RunConfig,
     infer_assembly_method,
     load_run_config,
     validate_genome_size_execution_plan,
     validate_local_assembly_execution,
 )
-from app.schemas.state import initial_state
+from app.schemas.shared_parameters import SharedParameters
+from app.schemas.state import DomainStage, initial_state
 from app.storage.ledger import Ledger
 from app.storage.materialization import RunMaterializationError, materialize_run_layout
 from app.storage.paths import DataLayoutError, SessionPaths, locate_session_data_dir
@@ -76,14 +82,19 @@ def _assembly_parameter_dump(
 def _build_assembly_selection(
     *,
     assembly: AssemblyRunConfig,
-    shared_parameters: dict[str, Any] | None,
+    shared_parameters: SharedParameters | dict[str, Any] | None,
     shared_platform: Any = None,
 ) -> AssemblySelection | None:
+    shared_values = (
+        shared_parameters.model_dump(exclude_none=True)
+        if isinstance(shared_parameters, SharedParameters)
+        else (shared_parameters or {})
+    )
     assembly_method = infer_assembly_method(assembly)
     if assembly_method:
         read_type = resolve_read_type(
             ("assembly.assembly_route", assembly.assembly_route),
-            ("shared_parameters.read_type", (shared_parameters or {}).get("read_type")),
+            ("shared_parameters.read_type", shared_values.get("read_type")),
             ("shared_parameters.platform", None, shared_platform),
             context="entrypoints.run.assembly_selection",
         )
@@ -374,8 +385,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="SESSION_ID",
         help=(
-            "Attach to one blocked durable workflow session and review its "
-            "active gate"
+            "Attach to one blocked durable workflow session and review its active gate"
         ),
     )
 
@@ -401,7 +411,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _resolve_checkpointer_backend(args: argparse.Namespace) -> str:
+def _resolve_checkpointer_backend(args: argparse.Namespace) -> CheckpointerBackend:
     """Resolve the checkpoint backend with explicit > env var > default.
 
     Lets `gene-agent run` and `gene-agent resume` default to durable
@@ -409,10 +419,14 @@ def _resolve_checkpointer_backend(args: argparse.Namespace) -> str:
     that exports ``GENE_AGENT_CHECKPOINTER=memory``) opt out without
     threading kwargs through every call site.
     """
-    explicit = getattr(args, "checkpointer", None)
-    if explicit:
-        return explicit
-    return os.environ.get("GENE_AGENT_CHECKPOINTER") or DEFAULT_CHECKPOINTER_BACKEND
+    configured = (
+        getattr(args, "checkpointer", None)
+        or os.environ.get("GENE_AGENT_CHECKPOINTER")
+        or DEFAULT_CHECKPOINTER_BACKEND
+    )
+    if configured not in {"sqlite", "memory"}:
+        raise ValueError(f"unsupported checkpointer backend: {configured!r}")
+    return cast(CheckpointerBackend, configured)
 
 
 def _resolve_data_dir(data_dir: str) -> str:
@@ -468,6 +482,9 @@ def _run_session(args: argparse.Namespace) -> int:
     backend = _resolve_checkpointer_backend(args)
     data_dir = _resolve_data_dir(request.data_dir)
 
+    if request.manifest is None:
+        print("error: run request requires a manifest", file=sys.stderr)
+        return 1
     manifest_path = Path(request.manifest)
     if not manifest_path.exists():
         print(f"error: manifest not found: {manifest_path}", file=sys.stderr)
@@ -517,7 +534,17 @@ def _run_session(args: argparse.Namespace) -> int:
 
     cli_local_stages = list(getattr(args, "local_exec", []) or [])
     config_local_stages = list(run_config.local_exec) if run_config else []
-    local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
+    raw_local_stages = list(dict.fromkeys([*cli_local_stages, *config_local_stages]))
+    invalid_local_stages = [
+        stage for stage in raw_local_stages if stage not in _LOCAL_EXEC_STAGE_CHOICES
+    ]
+    if invalid_local_stages:
+        print(
+            f"error: unsupported local execution stages: {invalid_local_stages}",
+            file=sys.stderr,
+        )
+        return 1
+    local_stages = [cast(LocalExecStage, stage) for stage in raw_local_stages]
 
     if "assembly" in local_stages:
         try:
@@ -537,7 +564,11 @@ def _run_session(args: argparse.Namespace) -> int:
     # From this point on every runtime writer receives the session-local
     # directory.  Stage code can therefore keep its existing relative
     # artifact/work layout without spilling files into the shared root.
-    paths = SessionPaths(data_dir, request.session_id)
+    session_id = request.session_id
+    if session_id is None:
+        print("error: run request could not resolve a session_id", file=sys.stderr)
+        return 1
+    paths = SessionPaths(data_dir, session_id)
     try:
         materialize_run_layout(
             paths,
@@ -552,7 +583,7 @@ def _run_session(args: argparse.Namespace) -> int:
     run_dir = paths.run_dir
     request = request.model_copy(update={"data_dir": str(run_dir)})
     manifest_ref = paths.to_ref(paths.manifest_path)
-    Ledger(request.data_dir).create_session(request.session_id, manifest_ref)
+    Ledger(request.data_dir).create_session(session_id, manifest_ref)
 
     requested_stages = (
         list(run_config.requested_stages)
@@ -560,10 +591,14 @@ def _run_session(args: argparse.Namespace) -> int:
         else None
     )
     state = initial_state(
-        session_id=request.session_id,
+        session_id=session_id,
         input_manifest_ref=manifest_ref,
         data_dir=request.data_dir,
-        requested_stages=requested_stages,
+        requested_stages=(
+            [cast(DomainStage, stage) for stage in requested_stages]
+            if requested_stages is not None
+            else None
+        ),
     )
 
     stage_outputs = dict(state.get("stage_outputs") or {})
@@ -679,7 +714,12 @@ def _run_session(args: argparse.Namespace) -> int:
         t2t_out.update(run_config.t2t.model_dump(mode="json", exclude_none=True))
         stage_outputs["t2t"] = t2t_out
     if run_config and run_config.review_policy:
-        for review_stage in ["assembly", "assembly_review", "hic_scaffolding"]:
+        review_stages: tuple[ReviewPolicyStage, ...] = (
+            "assembly",
+            "assembly_review",
+            "hic_scaffolding",
+        )
+        for review_stage in review_stages:
             stage_out = dict(stage_outputs.get(review_stage) or {})
             stage_out["review_policy"] = run_config.review_policy.effective_for_stage(
                 review_stage
@@ -710,7 +750,7 @@ def _run_session(args: argparse.Namespace) -> int:
         state["stage_outputs"] = stage_outputs
 
     graph = build_graph(backend=backend, data_dir=request.data_dir)
-    config = {"configurable": {"thread_id": request.session_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
     try:
         result = graph.invoke(state, config=config)
     except Exception as exc:
@@ -730,7 +770,7 @@ def _run_session(args: argparse.Namespace) -> int:
         error = f"{type(exc).__name__}: {exc}"
         failure_result = {
             **latest_state,
-            "session_id": request.session_id,
+            "session_id": session_id,
             "data_dir": request.data_dir,
             "input_manifest_ref": manifest_ref,
             "supervision_state": "failed_terminal",
@@ -741,7 +781,7 @@ def _run_session(args: argparse.Namespace) -> int:
             graph,
             config,
             failure_result,
-            request.session_id,
+            session_id,
             request.data_dir,
             backend,
             report_kind="operator",
@@ -763,7 +803,7 @@ def _run_session(args: argparse.Namespace) -> int:
     terminal_finalized_by_resume = False
     if supervision == "blocked_human" and interactive_gate and backend == "sqlite":
         result = _interactive_gate_loop(
-            graph, config, result, request.session_id, request.data_dir
+            graph, config, result, session_id, request.data_dir
         )
         supervision = result.get("supervision_state", "unknown")
         terminal_finalized_by_resume = supervision in {"completed", "failed_terminal"}
@@ -774,7 +814,7 @@ def _run_session(args: argparse.Namespace) -> int:
     stage_plan_ref = result.get("stage_plan_ref")
     active_interrupt = result.get("active_interrupt")
 
-    print(f"session_id: {request.session_id}")
+    print(f"session_id: {session_id}")
     print(f"current_stage: {current_stage}")
     print(f"supervision_state: {supervision}")
     print(f"checkpoint_persistence: {backend}")
@@ -806,7 +846,7 @@ def _run_session(args: argparse.Namespace) -> int:
             graph,
             config,
             result,
-            request.session_id,
+            session_id,
             request.data_dir,
             backend,
             report_kind="final",
@@ -826,11 +866,11 @@ def _run_session(args: argparse.Namespace) -> int:
 
 def _interactive_gate_loop(
     graph: Any,
-    config: dict,
-    result: dict,
+    config: RunnableConfig,
+    result: dict[str, Any],
     session_id: str,
     data_dir: str,
-) -> dict:
+) -> dict[str, Any]:
     """Loop on human gates: prompt operator, resume, repeat until not blocked."""
     from app.control.resume_transaction import (
         ResumeTransactionError,
@@ -1150,7 +1190,10 @@ def _run_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_inspect_text(summary: dict, filters: dict[str, str]) -> None:
+def _print_inspect_text(
+    summary: dict[str, Any],
+    filters: dict[str, str],
+) -> None:
     print(f"session_id: {summary['session_id']}")
     print(f"supervision_state: {summary['supervision_state']}")
     print(f"checkpoint_persistence: {summary['checkpoint_persistence']}")
@@ -1226,8 +1269,9 @@ def _parse_inspect_filters(raw_filters: list[str]) -> dict[str, str] | None:
 
 
 def _filter_review_decisions(
-    decisions: list[dict], filters: dict[str, str]
-) -> list[dict]:
+    decisions: list[dict[str, Any]],
+    filters: dict[str, str],
+) -> list[dict[str, Any]]:
     decided_by = filters.get("decided_by")
     if not decided_by:
         return decisions
@@ -1344,7 +1388,7 @@ def _run_resume(args: argparse.Namespace) -> int:
         return 1
 
     graph = build_graph(backend=backend, data_dir=str(data_dir))
-    config = {"configurable": {"thread_id": args.session_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": args.session_id}}
     try:
         paths = SessionPaths.from_run_dir(data_dir)
         decision_path = _snapshot_resume_decision(
@@ -1545,13 +1589,13 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
     print("\nPackage preflight:")
     preflight_results = preflight_all(resolver)
     all_ok = True
-    for package_name, result in preflight_results:
-        if result.status == "ok":
+    for package_name, preflight_result in preflight_results:
+        if preflight_result.status == "ok":
             print(f"  ✓ {package_name}: all canary paths present")
         else:
-            print(f"  ❌ {package_name}: {result.detail}")
-            if result.missing_paths:
-                for path in result.missing_paths:
+            print(f"  ❌ {package_name}: {preflight_result.detail}")
+            if preflight_result.missing_paths:
+                for path in preflight_result.missing_paths:
                     print(f"      - missing: {path}")
             all_ok = False
 

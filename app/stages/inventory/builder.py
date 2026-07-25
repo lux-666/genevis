@@ -6,12 +6,14 @@ registers assets, and routes to success / review / failure.
 
 from __future__ import annotations
 
-from langgraph.graph import END, START, StateGraph
+from typing import cast
 
-from app.storage.ledger import Ledger
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+
 from app.review.base import ReviewPayload
 from app.review.persistence import persist_review_request
-from app.schemas.state import TopLevelState
+from app.schemas.state import ActiveInterrupt, StateUpdate, TopLevelState
 from app.stages.inventory.nodes import (
     commit_inventory,
     enter_inventory,
@@ -19,11 +21,16 @@ from app.stages.inventory.nodes import (
     validate_inputs,
 )
 from app.stages.inventory.routing import route_from_inventory
+from app.stages.inventory.state import (
+    read_inventory_stage_output,
+    update_inventory_stage_output,
+)
+from app.storage.ledger import Ledger
 
 
-def _review_gate(state: TopLevelState) -> dict:
+def _review_gate(state: TopLevelState) -> StateUpdate:
     """Set an active interrupt for ambiguous or questionable inventory results."""
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    inventory_out = read_inventory_stage_output(state)
     warnings = inventory_out.get("warnings", [])
     reason = "review_required"
     payload = ReviewPayload(
@@ -47,29 +54,39 @@ def _review_gate(state: TopLevelState) -> dict:
         state["session_id"],
         "inventory",
         reason=reason,
-        review_request_artifact_ref=persisted_request.request_ref.model_dump(mode="json"),
+        review_request_artifact_ref=persisted_request.request_ref.model_dump(
+            mode="json"
+        ),
         auto_decidable=False,
     )
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["inventory"] = {
-        **inventory_out,
-        "status": "blocked_human",
-        "review_request_artifact_ref": persisted_request.request_ref.model_dump(mode="json"),
-    }
-    return {
-        "active_interrupt": persisted_request.compact_interrupt(
-            stage="inventory",
-            gate_id="inventory_review",
-            reason=reason,
-        ),
-        "supervision_state": "blocked_human",
-        "stage_outputs": outputs,
-    }
+    update = update_inventory_stage_output(
+        state,
+        {
+            "status": "blocked_human",
+            "review_request_artifact_ref": (
+                persisted_request.request_ref.model_dump(mode="json")
+            ),
+        },
+    )
+    update.update(
+        {
+            "active_interrupt": cast(
+                ActiveInterrupt,
+                persisted_request.compact_interrupt(
+                    stage="inventory",
+                    gate_id="inventory_review",
+                    reason=reason,
+                ),
+            ),
+            "supervision_state": "blocked_human",
+        }
+    )
+    return update
 
 
-def _fail_inventory(state: TopLevelState) -> dict:
+def _fail_inventory(state: TopLevelState) -> StateUpdate:
     """Record inventory failure and stop."""
-    inventory_out = (state.get("stage_outputs") or {}).get("inventory", {})
+    inventory_out = read_inventory_stage_output(state)
     errors = [str(error) for error in inventory_out.get("errors", [])]
     if errors:
         reason = "inventory validation failed: " + "; ".join(errors)
@@ -82,7 +99,12 @@ def _fail_inventory(state: TopLevelState) -> dict:
     }
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the inventory subgraph with real validation and routing."""
     graph = StateGraph(TopLevelState)
 

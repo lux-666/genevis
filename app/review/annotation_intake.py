@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from app.storage.ledger import Ledger
-from app.entrypoints.ask_interactive import _UserAbort, _prompt_confirm, _prompt_for_answer, _render_plan_summary
+from app.entrypoints.ask_interactive import (
+    _prompt_confirm,
+    _prompt_for_answer,
+    _render_plan_summary,
+    _UserAbort,
+)
 from app.entrypoints.ask_planner import (
     _auto_fill_inferred_defaults,
     _fill_missing_method_defaults,
@@ -19,25 +24,28 @@ from app.entrypoints.ask_planner import (
     _parameter_values_request,
     _recommended_stages_from_manifest,
     _validate_selected_methods,
-    build_run_plan_summary,
     build_run_config_payload,
+    build_run_plan_summary,
     merge_clarification_response,
 )
-from app.storage.artifacts import publish_artifact_record
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.ask_plan import AskClarificationRequest, AskPlanState
-from app.schemas.state import TopLevelState
-from app.workflow import STAGE_ORDER
+from app.schemas.state import DomainStage, TopLevelState, validate_top_level_state
 from app.stages.base import resolve_run_ref
+from app.storage.artifacts import publish_artifact_record
+from app.storage.ledger import Ledger
 from app.storage.paths import SessionPaths
+from app.workflow import STAGE_ORDER
 
 ANNOTATION_INTAKE_PLAN = "annotation.intake_plan"
 ANNOTATION_INTAKE_METHOD = "annotation.intake"
-ASSEMBLY_REVIEW_STAGE = "assembly_review"
+ASSEMBLY_REVIEW_STAGE: Literal["assembly_review"] = "assembly_review"
 CONTINUE_DOWNSTREAM_DECISIONS = frozenset({"accept", "pass", "continue_low_confidence"})
 ASSEMBLY_OPERATION_DECISIONS = frozenset({"purge", "polish", "rerun"})
 TERMINATE_DECISIONS = frozenset({"stop_human_review"})
-DOWNSTREAM_STAGES = tuple(STAGE_ORDER[STAGE_ORDER.index(ASSEMBLY_REVIEW_STAGE) + 1 :])
+DOWNSTREAM_STAGES: tuple[DomainStage, ...] = tuple(
+    STAGE_ORDER[STAGE_ORDER.index(ASSEMBLY_REVIEW_STAGE) + 1 :]
+)
 DOWNSTREAM_PLAN_TITLE = "Downstream Plan After Assembly Review"
 DOWNSTREAM_FLOW = " -> ".join(DOWNSTREAM_STAGES)
 
@@ -72,13 +80,16 @@ def classify_assembly_review_decision(decision: str) -> str:
 
 
 def should_collect_annotation_intake(stage: str, decision: str) -> bool:
-    return stage == ASSEMBLY_REVIEW_STAGE and classify_assembly_review_decision(decision) == "continue_downstream"
+    return (
+        stage == ASSEMBLY_REVIEW_STAGE
+        and classify_assembly_review_decision(decision) == "continue_downstream"
+    )
 
 
 def maybe_collect_annotation_intake(
     *,
     state: TopLevelState,
-    resume_update: dict[str, Any],
+    resume_update: Mapping[str, object],
     request: Any,
     source: str,
     interactive: bool = True,
@@ -115,9 +126,13 @@ def collect_annotation_intake_selection(
         return None
 
     recommended = build_recommended_annotation_plan(state)
-    final_plan = prompt_annotation_intake_plan(recommended) if interactive else recommended
+    final_plan = (
+        prompt_annotation_intake_plan(recommended) if interactive else recommended
+    )
     final_plan = _auto_fill_inferred_defaults(final_plan)
-    return AnnotationIntakeSelection(recommended_plan=recommended, final_plan=final_plan)
+    return AnnotationIntakeSelection(
+        recommended_plan=recommended, final_plan=final_plan
+    )
 
 
 def build_recommended_annotation_plan(state: TopLevelState) -> AskPlanState:
@@ -130,7 +145,11 @@ def build_recommended_annotation_plan(state: TopLevelState) -> AskPlanState:
         )
         if stage in DOWNSTREAM_STAGES
     ]
-    selected = prior_downstream if prior_downstream or state.get("requested_stages") is None else manifest_downstream
+    selected = (
+        prior_downstream
+        if prior_downstream or state.get("requested_stages") is None
+        else manifest_downstream
+    )
     if not selected:
         selected = manifest_downstream
     selected = _ordered_downstream(selected)
@@ -160,9 +179,14 @@ def build_recommended_annotation_plan(state: TopLevelState) -> AskPlanState:
 def prompt_annotation_intake_plan(plan: AskPlanState) -> AskPlanState:
     """Render, accept, or edit a downstream annotation intake plan."""
     try:
-        _render_plan_summary(build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True)
+        _render_plan_summary(
+            build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True
+        )
         print(f"\nDownstream order: {DOWNSTREAM_FLOW}")
-        print("Assembly review resumes into Hi-C/T2T first when those stages are selected; annotation comes after that.")
+        print(
+            "Assembly review resumes into Hi-C/T2T first when those stages are "
+            "selected; annotation comes after that."
+        )
         if _prompt_confirm("Accept this downstream plan?"):
             return plan.model_copy(update={"confirmed": True})
 
@@ -172,7 +196,9 @@ def prompt_annotation_intake_plan(plan: AskPlanState) -> AskPlanState:
         plan = _collect_downstream_stage_selection(plan)
         plan = _collect_downstream_method_selection(plan)
         plan = _collect_downstream_parameters(plan)
-        _render_plan_summary(build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True)
+        _render_plan_summary(
+            build_run_plan_summary(plan), title=DOWNSTREAM_PLAN_TITLE, preview=True
+        )
         if _prompt_confirm("Proceed with this downstream plan?"):
             return plan.model_copy(update={"confirmed": True})
     except (_UserAbort, EOFError, KeyboardInterrupt) as exc:
@@ -202,7 +228,9 @@ def persist_annotation_intake_plan(
         final_plan.resolved_execution_order or [],
     )
     run_config_preview = build_run_config_payload(final_plan)
-    update = _checkpoint_update_from_plan(state, final_plan, requested_stages, run_config_preview)
+    update = _checkpoint_update_from_plan(
+        state, final_plan, requested_stages, run_config_preview
+    )
 
     payload = {
         "session_id": session_id,
@@ -296,29 +324,43 @@ def load_annotation_intake_plan(state: TopLevelState) -> dict[str, Any]:
     read as a JSON object so the gene_annotation entry node can fail before any
     gate runs.
     """
-    ref = ((state.get("stage_outputs") or {}).get(ASSEMBLY_REVIEW_STAGE) or {}).get("annotation_intake_plan_ref")
+    ref = ((state.get("stage_outputs") or {}).get(ASSEMBLY_REVIEW_STAGE) or {}).get(
+        "annotation_intake_plan_ref"
+    )
     if not ref:
-        raise ValueError("annotation.intake_plan missing: assembly_review.annotation_intake_plan_ref is not set")
+        raise ValueError(
+            "annotation.intake_plan missing: "
+            "assembly_review.annotation_intake_plan_ref is not set"
+        )
     path = Path(str(ref))
     if not path.exists():
         raise ValueError(f"annotation.intake_plan missing: file not found at {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"annotation.intake_plan invalid: cannot read {path}: {exc}") from exc
+        raise ValueError(
+            f"annotation.intake_plan invalid: cannot read {path}: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
-        raise ValueError("annotation.intake_plan invalid: top-level JSON is not an object")
+        raise ValueError(
+            "annotation.intake_plan invalid: top-level JSON is not an object"
+        )
     return payload
 
 
 def rewrite_requested_stages_after_assembly_review(
-    current_requested: list[str] | tuple[str, ...] | None,
-    downstream_stages: list[str] | tuple[str, ...],
+    current_requested: Sequence[str] | None,
+    downstream_stages: Sequence[str],
 ) -> list[str]:
     """Preserve the prefix through assembly_review and replace the downstream suffix."""
     downstream = _ordered_downstream(downstream_stages)
     if current_requested is None:
-        prefix = [stage for stage in STAGE_ORDER if stage != "inventory" and STAGE_ORDER.index(stage) <= STAGE_ORDER.index(ASSEMBLY_REVIEW_STAGE)]
+        prefix: list[str] = [
+            stage
+            for stage in STAGE_ORDER
+            if stage != "inventory"
+            and STAGE_ORDER.index(stage) <= STAGE_ORDER.index(ASSEMBLY_REVIEW_STAGE)
+        ]
         return [*prefix, *downstream]
 
     requested = list(current_requested)
@@ -344,9 +386,15 @@ def _collect_downstream_stage_selection(plan: AskPlanState) -> AskPlanState:
             "Fixed order: hic_scaffolding -> t2t -> repeat_annotation -> "
             "gene_annotation -> function_annotation."
         ),
-        choices={"available_stages": list(DOWNSTREAM_STAGES), "suggested_stages": plan.selected_stages or []},
+        choices={
+            "available_stages": list(DOWNSTREAM_STAGES),
+            "suggested_stages": plan.selected_stages or [],
+        },
         required_fields=["selected_stages"],
-        response_schema={"kind": "stage_selection", "selected_stages": plan.selected_stages or []},
+        response_schema={
+            "kind": "stage_selection",
+            "selected_stages": plan.selected_stages or [],
+        },
         next_action={"kind": "interactive_downstream_plan"},
     )
     response = _prompt_for_answer(req, plan)
@@ -365,12 +413,18 @@ def _collect_downstream_stage_selection(plan: AskPlanState) -> AskPlanState:
 
 def _collect_downstream_method_selection(plan: AskPlanState) -> AskPlanState:
     if not plan.resolved_execution_order:
-        return plan.model_copy(update={"selected_methods": None, "method_parameters": None})
+        return plan.model_copy(
+            update={"selected_methods": None, "method_parameters": None}
+        )
     req = _method_selection_request(plan, "annotation_intake")
     response = _prompt_for_answer(req, plan)
     plan = merge_clarification_response(plan, response)
     selected = dict(plan.selected_methods or {})
-    selected = {stage: methods for stage, methods in selected.items() if stage in DOWNSTREAM_STAGES}
+    selected = {
+        stage: methods
+        for stage, methods in selected.items()
+        if stage in DOWNSTREAM_STAGES
+    }
     return plan.model_copy(update={"selected_methods": selected or None})
 
 
@@ -414,7 +468,9 @@ def _checkpoint_update_from_plan(
         # suffix are still omitted by the guard above.
         stage_out: dict[str, Any] = dict(existing_downstream.get(stage) or {})
         methods = selected_methods.get(stage)
-        method_list = methods if isinstance(methods, list) else [methods] if methods else []
+        method_list = (
+            methods if isinstance(methods, list) else [methods] if methods else []
+        )
         if method_list:
             stage_out["selected_methods"] = method_list
             if len(method_list) == 1:
@@ -426,7 +482,9 @@ def _checkpoint_update_from_plan(
         stage_outputs[stage] = stage_out
 
     if plan.shared_parameters is not None:
-        update["shared_parameters"] = plan.shared_parameters.model_dump(exclude_none=True)
+        update["shared_parameters"] = plan.shared_parameters.model_dump(
+            exclude_none=True
+        )
 
     update["stage_outputs"] = stage_outputs
     update["skip_reasons"] = skip_reasons
@@ -460,12 +518,15 @@ def _prior_downstream_requested_stages(state: TopLevelState) -> list[str]:
     return _ordered_downstream(list(requested)[idx + 1 :])
 
 
-def _ordered_downstream(stages: list[str] | tuple[str, ...]) -> list[str]:
+def _ordered_downstream(stages: Sequence[str]) -> list[str]:
     selected = set(stages)
     return [stage for stage in DOWNSTREAM_STAGES if stage in selected]
 
 
-def _merge_state_update(state: TopLevelState, update: dict[str, Any]) -> TopLevelState:
+def _merge_state_update(
+    state: TopLevelState,
+    update: Mapping[str, object],
+) -> TopLevelState:
     merged: dict[str, Any] = dict(state)
     for key, value in update.items():
         if key == "stage_outputs" and isinstance(value, dict):
@@ -474,4 +535,4 @@ def _merge_state_update(state: TopLevelState, update: dict[str, Any]) -> TopLeve
             merged[key] = stage_outputs
         else:
             merged[key] = value
-    return merged  # type: ignore[return-value]
+    return validate_top_level_state(merged)

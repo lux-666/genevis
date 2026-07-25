@@ -12,6 +12,7 @@ from app.domains.read_inputs import AssemblyInputError, resolve_assembly_read_pa
 from app.execution.attempt_owners import ParameterAttemptOwner
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
+    CompiledMethodGraph,
     MethodExecutionLifecycle,
     build_method_graph,
     load_method_executions,
@@ -19,7 +20,7 @@ from app.execution.lifecycle import (
 from app.execution.parameter_attempts import (
     current_parameter_attempt,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly.command_builder import (
     ParameterCommandError,
     parameter_sources_payload,
@@ -34,7 +35,12 @@ from app.stages.assembly.method_application.support import (
     load_assembly_execution_contract,
     load_current_approved_recommendation,
 )
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.assembly.state import (
+    assembly_stage_output,
+    update_assembly_stage_output,
+    validated_assembly_stage_payload,
+)
+from app.stages.base import absolute_data_dir
 from app.storage.paths import SessionPaths
 from app.storage.publish import publish_file, shell_publish_file
 
@@ -48,15 +54,15 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_nextdenovo_graph():
+def build_nextdenovo_graph() -> CompiledMethodGraph:
     return build_method_graph(
         LIFECYCLE, freeze_nextdenovo_attempt, collect_nextdenovo_artifacts
     )
 
 
-def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
+def freeze_nextdenovo_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze a local NextDenovo attempt for the selected primary candidate."""
-    output = stage_output(state, "assembly")
+    output = assembly_stage_output(state)
     if output.get("status") != "nextdenovo_execution_planned":
         return {}
     if NEXTDENOVO_METHOD not in load_descriptor_registry().methods:
@@ -81,7 +87,9 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if env_blocked is not None:
-        return update_stage_output(state, "assembly", env_blocked)
+        return update_assembly_stage_output(
+            state, validated_assembly_stage_payload(env_blocked)
+        )
 
     approved_bundle, recommendation_error = load_current_approved_recommendation(
         state,
@@ -211,8 +219,8 @@ def freeze_nextdenovo_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_nextdenovo_artifacts(state: TopLevelState) -> dict:
-    output = stage_output(state, "assembly")
+def collect_nextdenovo_artifacts(state: TopLevelState) -> StateUpdate:
+    output = assembly_stage_output(state)
     [execution] = load_method_executions(state, LIFECYCLE)
     attempt = execution.attempt
     metadata = dict(attempt.metadata or {})

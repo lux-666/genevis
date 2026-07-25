@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from app.workflow import is_terminal_failure
 from app.schemas.state import TopLevelState
+from app.stages.genome_survey.state import (
+    GenomeSurveyCursor,
+    genome_survey_output,
+)
+from app.workflow import is_terminal_failure
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("genome_survey") or {}
+def _output(state: TopLevelState) -> GenomeSurveyCursor:
+    return genome_survey_output(state)
 
 
 def route_after_resolve(state: TopLevelState) -> str:

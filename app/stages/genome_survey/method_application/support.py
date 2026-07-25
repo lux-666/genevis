@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from app.schemas.artifacts import ArtifactMeta
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
+from app.stages.genome_survey.state import (
+    GenomeSurveyCursor,
+    genome_survey_output,
+    update_genome_survey_output,
+)
 from app.storage.artifacts import publish_or_recover_work_artifact
 from app.storage.ledger import Ledger
 
 
-def genome_survey_output(state: TopLevelState) -> dict[str, Any]:
+def survey_output(state: TopLevelState) -> GenomeSurveyCursor:
     """Return a shallow copy of the genome-survey stage output."""
-    return dict((state.get("stage_outputs") or {}).get("genome_survey", {}))
+    return genome_survey_output(state)
 
 
-def update_genome_survey_output(state: TopLevelState, payload: dict[str, Any]) -> dict:
+def update_survey_output(
+    state: TopLevelState, payload: Mapping[str, object]
+) -> StateUpdate:
     """Merge a method update into the genome-survey stage output."""
-    outputs = dict(state.get("stage_outputs") or {})
-    outputs["genome_survey"] = {**genome_survey_output(state), **payload}
-    return {"stage_outputs": outputs}
+    return update_genome_survey_output(state, payload)
 
 
 def attempt_artifacts(
@@ -64,7 +69,9 @@ def record_attempt_success(
     data_dir = Path(state.get("data_dir", "data"))
     ledger = Ledger(data_dir)
     artifact_payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
-    ledger.record_attempt_succeeded(attempt.session_id, attempt, artifacts=artifact_payloads)
+    ledger.record_attempt_succeeded(
+        attempt.session_id, attempt, artifacts=artifact_payloads
+    )
     for artifact in artifact_payloads:
         ledger.record_artifact_registered(
             attempt.session_id,

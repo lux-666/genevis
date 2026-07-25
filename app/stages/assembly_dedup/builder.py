@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.assembly_dedup.nodes import (
@@ -19,7 +20,12 @@ from app.stages.assembly_dedup.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the assembly deduplication subgraph."""
     graph = StateGraph(TopLevelState)
 
@@ -30,7 +36,9 @@ def build_stage():
     graph.add_node("fail", fail_assembly_dedup)
 
     graph.add_edge(START, "enter")
-    graph.add_conditional_edges("enter", route_after_enter, {"plan": "plan", "fail": "fail"})
+    graph.add_conditional_edges(
+        "enter", route_after_enter, {"plan": "plan", "fail": "fail"}
+    )
     graph.add_conditional_edges(
         "plan",
         route_after_plan,

@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import register_artifact_records
+from app.integrity import sha256_file
 from app.schemas.artifacts import ArtifactMeta, ArtifactRef
+from app.storage.artifacts import register_artifact_records
 from app.storage.audit import (
     audit_run_storage,
     build_cleanup_manifest,
     verify_checkpoint_free_artifact_retention,
 )
-from app.integrity import sha256_file
 from app.storage.ledger import Ledger
 from app.storage.paths import DataLayoutError, SessionPaths, ensure_run_layout
 
@@ -63,7 +63,15 @@ class StorageAuditTests(unittest.TestCase):
             )
             connection.execute(
                 "INSERT INTO checkpoints VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("audit-session", "", "checkpoint-001", None, serialization_type, payload, b"{}"),
+                (
+                    "audit-session",
+                    "",
+                    "checkpoint-001",
+                    None,
+                    serialization_type,
+                    payload,
+                    b"{}",
+                ),
             )
             connection.commit()
         finally:
@@ -90,7 +98,10 @@ class StorageAuditTests(unittest.TestCase):
         )
         manifest_ref = self._register_json(
             "recommendation_manifest.json",
-            {"schema_version": 2, "response_parse_ref": leaf_ref.model_dump(mode="json")},
+            {
+                "schema_version": 2,
+                "response_parse_ref": leaf_ref.model_dump(mode="json"),
+            },
             artifact_type="assembly.parameter.recommendation_manifest",
         )
         orphan_ref = self._register_json(
@@ -102,7 +113,9 @@ class StorageAuditTests(unittest.TestCase):
         unindexed.write_text('{"unindexed": true}\n', encoding="utf-8")
 
         self.paths.run_config_path.write_text(
-            json.dumps({"recommendation_manifest_ref": manifest_ref.model_dump(mode="json")}),
+            json.dumps(
+                {"recommendation_manifest_ref": manifest_ref.model_dump(mode="json")}
+            ),
             encoding="utf-8",
         )
         duplicate_bytes = b"same derived bytes\n"
@@ -128,9 +141,10 @@ class StorageAuditTests(unittest.TestCase):
         self.assertEqual(before, after, "the default storage audit must be read-only")
         self.assertEqual(audit["schema_version"], 2)
         self.assertEqual(audit["session_id"], "audit-session")
-        self.assertEqual(set(audit["layers"]), {
-            "control", "ledger", "checkpoints", "artifacts", "reports", "work"
-        })
+        self.assertEqual(
+            set(audit["layers"]),
+            {"control", "ledger", "checkpoints", "artifacts", "reports", "work"},
+        )
         self.assertEqual(audit["layers"]["reports"]["file_count"], 1)
         self.assertEqual(audit["layers"]["reports"]["bytes"], len(duplicate_bytes))
 
@@ -148,13 +162,19 @@ class StorageAuditTests(unittest.TestCase):
         self.assertEqual(index["verified_record_count"], 3)
         self.assertEqual(index["reachable_record_count"], 2)
         self.assertEqual(index["unreachable_record_count"], 1)
-        self.assertEqual(index["unreachable_artifacts"][0]["artifact_id"], orphan_ref.artifact_id)
+        self.assertEqual(
+            index["unreachable_artifacts"][0]["artifact_id"], orphan_ref.artifact_id
+        )
         self.assertEqual(index["unindexed_file_count"], 1)
-        self.assertEqual(index["unindexed_artifacts"][0]["path_ref"], self.paths.to_ref(unindexed))
+        self.assertEqual(
+            index["unindexed_artifacts"][0]["path_ref"], self.paths.to_ref(unindexed)
+        )
 
         duplicate_groups = audit["duplicates"]["groups"]
         group = next(
-            item for item in duplicate_groups if self.paths.to_ref(report) in item["path_refs"]
+            item
+            for item in duplicate_groups
+            if self.paths.to_ref(report) in item["path_refs"]
         )
         self.assertEqual(group["file_count"], 2)
         self.assertEqual(group["logical_duplicate_bytes"], len(duplicate_bytes))
@@ -169,7 +189,9 @@ class StorageAuditTests(unittest.TestCase):
         self.assertEqual(manifest["candidate_bytes"], len(duplicate_bytes))
         self.assertEqual(manifest["retained_work_file_count"], 1)
         self.assertEqual(manifest["retained_work_bytes"], len(duplicate_bytes))
-        self.assertFalse(any(item["path_ref"].startswith("work/") for item in manifest["entries"]))
+        self.assertFalse(
+            any(item["path_ref"].startswith("work/") for item in manifest["entries"])
+        )
 
     def test_requires_strict_v2_run_root(self) -> None:
         with self.assertRaises(DataLayoutError):
@@ -178,22 +200,32 @@ class StorageAuditTests(unittest.TestCase):
             audit_run_storage(self.paths.control_dir)
 
     def test_corrupt_artifact_index_fails_closed(self) -> None:
-        self._register_json("evidence.json", {"ok": True}, artifact_type="test.evidence")
+        self._register_json(
+            "evidence.json", {"ok": True}, artifact_type="test.evidence"
+        )
         self.paths.artifact_index_path.write_text("{not-json}\n", encoding="utf-8")
         with self.assertRaisesRegex(DataLayoutError, "malformed artifact index"):
             audit_run_storage(self.paths.run_dir)
 
     def test_traversing_artifact_index_ref_fails_closed(self) -> None:
-        self._register_json("evidence.json", {"ok": True}, artifact_type="test.evidence")
+        self._register_json(
+            "evidence.json", {"ok": True}, artifact_type="test.evidence"
+        )
         record = json.loads(self.paths.artifact_index_path.read_text(encoding="utf-8"))
         record["path_ref"] = "artifacts/../control/run.json"
-        self.paths.artifact_index_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        self.paths.artifact_index_path.write_text(
+            json.dumps(record) + "\n", encoding="utf-8"
+        )
         with self.assertRaises(DataLayoutError):
             audit_run_storage(self.paths.run_dir)
 
     def test_registered_artifact_integrity_mismatch_fails_closed(self) -> None:
-        ref = self._register_json("evidence.json", {"ok": True}, artifact_type="test.evidence")
-        self.paths.resolve_ref(ref.path_ref).write_text('{"ok": false}\n', encoding="utf-8")
+        ref = self._register_json(
+            "evidence.json", {"ok": True}, artifact_type="test.evidence"
+        )
+        self.paths.resolve_ref(ref.path_ref).write_text(
+            '{"ok": false}\n', encoding="utf-8"
+        )
         with self.assertRaisesRegex(DataLayoutError, "integrity mismatch"):
             audit_run_storage(self.paths.run_dir)
 
@@ -290,7 +322,10 @@ class StorageAuditTests(unittest.TestCase):
         self.assertEqual(audit["checkpoint"]["row_count"], 1)
         self.assertEqual(audit["checkpoint"]["parsed_row_count"], 0)
         self.assertTrue(
-            any("unsupported serialization type" in warning for warning in audit["warnings"])
+            any(
+                "unsupported serialization type" in warning
+                for warning in audit["warnings"]
+            )
         )
 
     def test_live_checkpoint_wal_is_not_opened_mutably(self) -> None:

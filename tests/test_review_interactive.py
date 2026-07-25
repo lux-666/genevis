@@ -511,15 +511,19 @@ class RunInteractiveReviewTests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
                 "requested_stages": ["read_qc", "assembly", "assembly_review"],
+                "input_manifest_ref": "control/manifest.yaml",
                 "active_interrupt": {
                     "stage": "assembly_review",
                     "gate_id": "assembly_review",
                 },
+                "review_notes": [],
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
                 "route_trace": [],
+                "skip_reasons": {},
             }
             graph = type(
                 "FakeGraph",
@@ -549,7 +553,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
                 ),
-                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.graph.builder.build_graph", return_value=graph),
                 patch(
                     "app.review.annotation_intake.collect_annotation_intake_selection",
                     side_effect=RuntimeError("annotation intake cancelled"),
@@ -586,14 +590,18 @@ class RunInteractiveReviewTests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
+                "input_manifest_ref": "control/manifest.yaml",
                 "active_interrupt": {
                     "stage": "assembly_review",
                     "gate_id": "assembly_review",
                 },
+                "review_notes": [],
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
                 "route_trace": [],
+                "skip_reasons": {},
             }
             graph = type(
                 "FakeGraph",
@@ -628,7 +636,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
                 ),
-                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.graph.builder.build_graph", return_value=graph),
                 patch(
                     "app.review.annotation_intake.collect_annotation_intake_selection",
                     return_value=None,
@@ -658,14 +666,18 @@ class RunInteractiveReviewTests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
+                "input_manifest_ref": "control/manifest.yaml",
                 "active_interrupt": {
                     "stage": "assembly_review",
                     "gate_id": "assembly_review",
                 },
+                "review_notes": [],
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
                 "route_trace": [],
+                "skip_reasons": {},
             }
             graph = type(
                 "FakeGraph",
@@ -700,7 +712,7 @@ class RunInteractiveReviewTests(unittest.TestCase):
                     "app.entrypoints.review_interactive.collect_gate_decision",
                     return_value=(request, raw_decision),
                 ),
-                patch("app.entrypoints.run.build_graph", return_value=graph),
+                patch("app.graph.builder.build_graph", return_value=graph),
                 patch(
                     "app.review.annotation_intake.collect_annotation_intake_selection",
                     return_value=intake_selection,
@@ -775,8 +787,10 @@ class RunInteractiveReviewTests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(data_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "inventory",
+                "input_manifest_ref": "control/manifest.yaml",
                 "stage_outputs": {
                     "inventory": {
                         "status": "validated",
@@ -784,7 +798,9 @@ class RunInteractiveReviewTests(unittest.TestCase):
                         "warnings": ["raw_long_reads: platform unknown"],
                     }
                 },
+                "review_notes": [],
                 "route_trace": [],
+                "skip_reasons": {},
             }
             persisted = persist_review_request(
                 state,

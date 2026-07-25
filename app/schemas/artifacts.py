@@ -616,7 +616,7 @@ class FunctionDatabaseProvenance(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _require_command_or_descriptor_version(self):
+    def _require_command_or_descriptor_version(self) -> FunctionDatabaseProvenance:
         if not (self.command and self.command.strip()) and not (
             self.descriptor_version and self.descriptor_version.strip()
         ):

@@ -3391,9 +3391,11 @@ class InteractiveGateLoopTests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(run_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
                 "requested_stages": ["read_qc", "assembly", "assembly_review"],
+                "input_manifest_ref": paths.to_ref(paths.manifest_path),
                 "active_interrupt": persisted.compact_interrupt(
                     stage="assembly_review",
                     gate_id="assembly_review",
@@ -3413,7 +3415,9 @@ class InteractiveGateLoopTests(unittest.TestCase):
                         ),
                     }
                 },
+                "review_notes": [],
                 "route_trace": [],
+                "skip_reasons": {},
             }
             graph = _FakeResumeGraph(
                 state, result={"supervision_state": "blocked_human"}
@@ -3605,14 +3609,19 @@ class ResumeCLITests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(run_dir),
+                "control_state": "running",
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
+                "input_manifest_ref": paths.to_ref(paths.manifest_path),
                 "active_interrupt": persisted.compact_interrupt(
                     stage="assembly_review",
                     gate_id="assembly_review",
                     reason="needs_review",
                 ),
+                "review_notes": [],
+                "route_trace": [],
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "skip_reasons": {},
             }
             graph = _FakeResumeGraph(state)
 
@@ -3691,6 +3700,7 @@ class ResumeCLITests(unittest.TestCase):
             state = {
                 "session_id": session_id,
                 "data_dir": str(run_dir),
+                "control_state": "running",
                 "input_manifest_ref": paths.to_ref(manifest_ref),
                 "supervision_state": "blocked_human",
                 "current_stage": "assembly_review",
@@ -3700,7 +3710,10 @@ class ResumeCLITests(unittest.TestCase):
                     gate_id="assembly_review",
                     reason="needs_review",
                 ),
+                "review_notes": [],
+                "route_trace": [],
                 "stage_outputs": {"assembly_review": {"status": "blocked_human"}},
+                "skip_reasons": {},
             }
             graph = _FakeResumeGraph(state)
 

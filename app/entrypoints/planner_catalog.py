@@ -27,7 +27,9 @@ class PlannerMethodCatalog(BaseModel):
         return dict(method) if method else None
 
 
-def load_planner_method_catalog(registry_path: Path | None = None) -> PlannerMethodCatalog:
+def load_planner_method_catalog(
+    registry_path: Path | None = None,
+) -> PlannerMethodCatalog:
     """Load the descriptor registry and derive planner-facing method metadata."""
 
     registry = (
@@ -62,7 +64,8 @@ def _planner_method_spec(descriptor: MethodDescriptor) -> dict[str, Any]:
         "stage": descriptor.stage,
         "required_parameters": list(planner.required_parameters),
         "conditional_required_parameters": [
-            item.model_dump(mode="json") for item in planner.conditional_required_parameters
+            item.model_dump(mode="json")
+            for item in planner.conditional_required_parameters
         ],
         "parameter_defaults": dict(planner.parameter_defaults),
         "execution_kind": planner.execution_kind,

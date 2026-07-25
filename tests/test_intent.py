@@ -93,10 +93,17 @@ class IntentParsingTests(IsolatedEnvTestCase):
         request = EntryRequest(manifest="inputs/manifest.yaml")
 
         self.assertIsNone(request.session_id)
-        self.assertEqual(request.to_cli_argv(), ["run", "--manifest", "inputs/manifest.yaml", "--data-dir", "data"])
+        self.assertEqual(
+            request.to_cli_argv(),
+            ["run", "--manifest", "inputs/manifest.yaml", "--data-dir", "data"],
+        )
 
-    def test_entry_request_can_start_from_source_paths_before_manifest_materialization(self):
-        request = EntryRequest(session_id="s1", source_paths=["inputs/assembly.fa"], data_dir="out")
+    def test_entry_request_can_start_from_source_paths_before_manifest_materialization(
+        self,
+    ):
+        request = EntryRequest(
+            session_id="s1", source_paths=["inputs/assembly.fa"], data_dir="out"
+        )
 
         self.assertEqual(request.source_paths, ["inputs/assembly.fa"])
         with self.assertRaisesRegex(ValueError, "manifest"):
@@ -139,7 +146,9 @@ class IntentParsingTests(IsolatedEnvTestCase):
             parse_intent_response('{"command":"run","session_id":"s1"}')
 
     def test_manifest_and_source_paths_are_mutually_exclusive(self):
-        with self.assertRaisesRegex(ValueError, "manifest and source_paths are mutually exclusive"):
+        with self.assertRaisesRegex(
+            ValueError, "manifest and source_paths are mutually exclusive"
+        ):
             parse_intent_response(
                 '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml","source_paths":["reads.fastq"]}'
             )
@@ -147,14 +156,21 @@ class IntentParsingTests(IsolatedEnvTestCase):
     def test_blank_paths_are_rejected(self):
         for field in ("manifest", "data_dir"):
             with self.subTest(field=field):
-                payload = {"command": "run", "session_id": "s1", "manifest": "inputs/manifest.yaml", "data_dir": "data"}
+                payload = {
+                    "command": "run",
+                    "session_id": "s1",
+                    "manifest": "inputs/manifest.yaml",
+                    "data_dir": "data",
+                }
                 payload[field] = ""
                 with self.assertRaisesRegex(ValueError, field):
                     parse_intent_response(json.dumps(payload))
 
     def test_blank_source_paths_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "source_paths"):
-            parse_intent_response('{"command":"run","session_id":"s1","source_paths":[""]}')
+            parse_intent_response(
+                '{"command":"run","session_id":"s1","source_paths":[""]}'
+            )
 
     def test_non_positive_genome_size_hint_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "genome_size_estimate"):
@@ -215,7 +231,9 @@ class IntentParsingTests(IsolatedEnvTestCase):
             )
         )
 
-        self.assertEqual(request.source_paths, ["/data/work/genevis/data/bht.Nanopore.pass.fa"])
+        self.assertEqual(
+            request.source_paths, ["/data/work/genevis/data/bht.Nanopore.pass.fa"]
+        )
         self.assertEqual(request.platform, "cycloneseq")
         self.assertEqual(request.asset_type_hint, "raw_long_reads")
         self.assertEqual(request.requested_stages, ["assembly"])
@@ -235,7 +253,8 @@ class IntentParsingTests(IsolatedEnvTestCase):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, field):
                     parse_intent_response(
-                        '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml","%s":"x"}' % field
+                        '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml","%s":"x"}'
+                        % field
                     )
 
     def test_non_object_json_fails(self):
@@ -258,13 +277,21 @@ class IntentParsingTests(IsolatedEnvTestCase):
             )
 
     def test_lifecycle_requests_are_rejected(self):
-        for text in ("resume session s1", "inspect s1", "retry assembly", "继续 s1", "重建 s1"):
+        for text in (
+            "resume session s1",
+            "inspect s1",
+            "retry assembly",
+            "继续 s1",
+            "重建 s1",
+        ):
             with self.subTest(text=text):
                 with self.assertRaisesRegex(ValueError, "Lifecycle requests"):
                     reject_lifecycle_request(text)
 
     def test_fake_model_integration_returns_entry_request(self):
-        model = _FakeModel('{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml"}')
+        model = _FakeModel(
+            '{"command":"run","session_id":"s1","manifest":"inputs/manifest.yaml"}'
+        )
 
         request = parse_request_with_llm("use inputs/manifest.yaml for s1", model=model)
 
@@ -286,7 +313,9 @@ class IntentParsingTests(IsolatedEnvTestCase):
             )
         )
 
-        request = parse_request_with_llm("/data/input/reads.fastq.gz 做一下组装", model=model)
+        request = parse_request_with_llm(
+            "/data/input/reads.fastq.gz 做一下组装", model=model
+        )
 
         self.assertIsNone(request.requested_stages)
 
@@ -302,7 +331,9 @@ class IntentParsingTests(IsolatedEnvTestCase):
             )
         )
 
-        request = parse_request_with_llm("/data/input/reads.fastq.gz 用 Flye", model=model)
+        request = parse_request_with_llm(
+            "/data/input/reads.fastq.gz 用 Flye", model=model
+        )
 
         self.assertIsNone(request.requested_stages)
 
@@ -314,7 +345,14 @@ class IntentParsingTests(IsolatedEnvTestCase):
                     "source_paths": ["/Users/a1/data/bht.Nanopore.pass.first500.fa"],
                     "platform": "ont",
                     "asset_type_hint": "raw_long_reads",
-                    "requested_stages": ["read_qc", "genome_survey", "assembly", "assembly_review", "hic_scaffolding", "t2t"],
+                    "requested_stages": [
+                        "read_qc",
+                        "genome_survey",
+                        "assembly",
+                        "assembly_review",
+                        "hic_scaffolding",
+                        "t2t",
+                    ],
                 }
             )
         )
@@ -335,14 +373,18 @@ class IntentParsingTests(IsolatedEnvTestCase):
             model=model,
         )
 
-        self.assertEqual(request.source_paths, ["/Users/a1/data/bht.Nanopore.pass.first500.fa"])
+        self.assertEqual(
+            request.source_paths, ["/Users/a1/data/bht.Nanopore.pass.first500.fa"]
+        )
         self.assertEqual(request.platform, "ont")
         self.assertEqual(request.asset_type_hint, "raw_long_reads")
         self.assertEqual(request.target_species, "卵鳎")
         self.assertEqual(request._intent_parse_source, "deterministic_fallback")
         self.assertIsNone(request.requested_stages)
 
-    def test_parse_request_wraps_llm_failure_when_no_deterministic_fallback_exists(self):
+    def test_parse_request_wraps_llm_failure_when_no_deterministic_fallback_exists(
+        self,
+    ):
         with self.assertRaisesRegex(RuntimeError, "Intent LLM call failed: OSError"):
             parse_request_with_llm("帮我做一下", model=_FailingModel())
 

@@ -301,7 +301,7 @@ class AssemblyStageTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 f"{f'echo nextdenovo-called > {marker!s}' if marker else ':'}\n"
                 'cfg="$1"\n'
-                'workdir=$(awk -F= \'/^workdir[[:space:]]*=/'
+                "workdir=$(awk -F= '/^workdir[[:space:]]*=/"
                 '{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2}\' "$cfg")\n'
                 'mkdir -p "$workdir/03.ctg_graph"\n'
                 "printf '>nd_contig1\\nACGTACGT\\n' > "

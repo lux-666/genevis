@@ -14,8 +14,12 @@ from app.schemas.parameter_recommendation import (
     CanonicalSpeciesFacts,
 )
 
-AUTOHIC_METHOD = "hic_scaffolding.candidate.autohic"
-PARAMETER_RECOMMENDATION_CONTRACT = "parameter_recommendation_v1"
+AUTOHIC_METHOD: Literal["hic_scaffolding.candidate.autohic"] = (
+    "hic_scaffolding.candidate.autohic"
+)
+PARAMETER_RECOMMENDATION_CONTRACT: Literal["parameter_recommendation_v1"] = (
+    "parameter_recommendation_v1"
+)
 
 
 class _StrictRequestModel(BaseModel):

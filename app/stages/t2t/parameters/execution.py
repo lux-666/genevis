@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -16,6 +16,7 @@ from app.schemas.parameter_recommendation import (
 )
 from app.schemas.state import TopLevelState
 from app.stages.t2t.parameters.storage import read_t2t_parameter_artifact
+from app.stages.t2t.state import T2TStageCursor, read_t2t_stage_output
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 
 
@@ -67,12 +68,12 @@ class T2TFrozenExecutionInputs(BaseModel):
 def load_t2t_frozen_execution_inputs(
     state: TopLevelState,
     *,
-    output: Mapping[str, Any] | None = None,
+    output: T2TStageCursor | None = None,
 ) -> T2TFrozenExecutionInputs:
     """Load execution values without consulting mutable checkpoint copies."""
 
     if output is None:
-        output = (state.get("stage_outputs") or {}).get("t2t") or {}
+        output = read_t2t_stage_output(state)
     attempt = current_parameter_attempt(
         output,
         method_id=T2T_METHOD,

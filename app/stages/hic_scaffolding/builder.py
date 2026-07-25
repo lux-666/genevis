@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.schemas.state import TopLevelState
 from app.stages.hic_scaffolding.method_application import build_autohic_graph
@@ -28,7 +29,12 @@ from app.stages.hic_scaffolding.routing import (
 )
 
 
-def build_stage():
+def build_stage() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build direct AutoHiC execution with parameter and adoption gates."""
 
     graph = StateGraph(TopLevelState)

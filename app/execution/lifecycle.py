@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
+from langchain_core.runnables import RunnableLambda
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.execution.attempt_owners import (
     AttemptOwner,
@@ -21,12 +23,18 @@ from app.execution.method_runner import (
 )
 from app.execution.runner import Runner
 from app.schemas.descriptors import FrozenAttemptSpec
-from app.schemas.state import JsonValue, TopLevelState
+from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.base import stage_output, update_stage_output
 from app.storage.ledger import LedgerConflictError
 
 ProcessFailurePolicy = Literal["fail", "collect"]
-StageNode = Callable[[TopLevelState], dict]
+StageNode = Callable[[TopLevelState], StateUpdate]
+CompiledMethodGraph = CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -50,24 +58,28 @@ def build_method_graph(
     collect: StageNode,
     *,
     runner: Runner | None = None,
-):
+) -> CompiledMethodGraph:
     """Build the canonical freeze -> run -> collect method subgraph."""
 
     graph = StateGraph(TopLevelState)
-    graph.add_node("freeze", freeze)
+    graph.add_node("freeze", _as_langgraph_node(freeze))
     graph.add_node(
         "run",
-        lambda state: run_method_attempts(state, lifecycle, runner=runner),
+        _as_langgraph_node(
+            lambda state: run_method_attempts(state, lifecycle, runner=runner)
+        ),
     )
     graph.add_node(
         "collect",
-        lambda state: collect_with_failure_boundary(
-            state,
-            lifecycle=lifecycle,
-            collect=collect,
+        _as_langgraph_node(
+            lambda state: collect_with_failure_boundary(
+                state,
+                lifecycle=lifecycle,
+                collect=collect,
+            )
         ),
     )
-    graph.add_node("done", lambda _state: {})
+    graph.add_node("done", _as_langgraph_node(_empty_update))
     graph.add_conditional_edges(
         START,
         lambda state: _route_method_entry(state, lifecycle),
@@ -126,7 +138,7 @@ def freeze_method_attempts(
     *,
     owner_metadata: dict[str, JsonValue] | None = None,
     stage_updates: dict[str, JsonValue] | None = None,
-) -> dict:
+) -> StateUpdate:
     """Persist frozen runner inputs once, then bind them through the owner."""
 
     if not attempts:
@@ -185,7 +197,7 @@ def run_method_attempts(
     lifecycle: MethodExecutionLifecycle,
     *,
     runner: Runner | None = None,
-) -> dict:
+) -> StateUpdate:
     """Run every owner-frozen attempt through one durable execution kernel."""
 
     output = stage_output(state, lifecycle.stage)
@@ -300,7 +312,7 @@ def _failure_update(
     reason: str,
     *,
     owner_updates: dict[str, JsonValue] | None = None,
-) -> dict:
+) -> StateUpdate:
     payload: dict[str, JsonValue] = {
         "status": "failed",
         "reason": bounded_failure_reason(reason),
@@ -310,3 +322,18 @@ def _failure_update(
     if owner_updates:
         payload.update(owner_updates)
     return update_stage_output(state, lifecycle.stage, payload)
+
+
+def _empty_update(_state: TopLevelState) -> StateUpdate:
+    return {}
+
+
+def _as_langgraph_node(
+    node: StageNode,
+) -> RunnableLambda[TopLevelState, dict[str, Any]]:
+    """Adapt the typed partial-state contract to LangGraph's dict protocol."""
+
+    def invoke(state: TopLevelState) -> dict[str, Any]:
+        return dict(node(state))
+
+    return RunnableLambda(invoke)

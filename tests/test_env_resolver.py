@@ -14,9 +14,6 @@ from app.execution.env_resolver import (
     DEFAULT_CONFIG_PATH,
     EnvResolver,
     EnvSpec,
-    PackageSpec,
-    PreflightResult,
-    package_preflight,
     preflight,
 )
 from app.execution.local_runner import LocalRunner
@@ -28,7 +25,9 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = root / "envs.yaml"
-            config.write_text("default:\n  fallback_env: shared_env\n", encoding="utf-8")
+            config.write_text(
+                "default:\n  fallback_env: shared_env\n", encoding="utf-8"
+            )
             with patch.object(env_resolver, "DEFAULT_CONFIG_PATH", config):
                 resolver = EnvResolver()
 
@@ -74,9 +73,13 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         self.assertTrue(autohic_spec.conda_env or autohic_spec.conda_prefix)
         self.assertIn("python3.9", autohic_spec.required_tools)
         self.assertIn("java", autohic_spec.required_tools)
-        self.assertEqual(autohic_spec.package_tools, ["autohic", "juicer", "three_d_dna"])
+        self.assertEqual(
+            autohic_spec.package_tools, ["autohic", "juicer", "three_d_dna"]
+        )
         packages = resolver.packages_for_spec(autohic_spec)
-        self.assertEqual({pkg.name for pkg in packages}, {"autohic", "juicer", "three_d_dna"})
+        self.assertEqual(
+            {pkg.name for pkg in packages}, {"autohic", "juicer", "three_d_dna"}
+        )
         self.assertTrue(all(pkg.install_root for pkg in packages))
 
         repeatmasker_spec = resolver.resolve(
@@ -139,9 +142,7 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "envs.yaml"
             path.write_text(
-                "default:\n"
-                "  conda_bin: conda\n"
-                "  fallback_env: base_env\n",
+                "default:\n  conda_bin: conda\n  fallback_env: base_env\n",
                 encoding="utf-8",
             )
             resolver = EnvResolver(path)
@@ -172,8 +173,14 @@ class EnvResolverPrecedenceTests(unittest.TestCase):
             self.assertEqual(spec.conda_prefix, "/opt/envs/gene_agent")
             self.assertEqual(
                 spec.conda_run_prefix(),
-                ["conda", "run", "--live-stream", "--no-capture-output",
-                 "-p", "/opt/envs/gene_agent"],
+                [
+                    "conda",
+                    "run",
+                    "--live-stream",
+                    "--no-capture-output",
+                    "-p",
+                    "/opt/envs/gene_agent",
+                ],
             )
 
     def test_env_and_prefix_mutually_exclusive(self):
@@ -200,7 +207,12 @@ class EnvPreflightTests(unittest.TestCase):
         os_path = os.environ.get("PATH", "")
         try:
             os.environ["PATH"] = ""
-            result = preflight(spec, runner=lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""))
+            result = preflight(
+                spec,
+                runner=lambda *a, **k: SimpleNamespace(
+                    returncode=0, stdout="", stderr=""
+                ),
+            )
             self.assertEqual(result.status, "blocked_env")
             self.assertIn("conda", result.detail)
         finally:
@@ -214,8 +226,12 @@ class EnvPreflightTests(unittest.TestCase):
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{tmp}{os.pathsep}{old_path}"
             try:
+
                 def fake_run(argv, **kwargs):
-                    return SimpleNamespace(returncode=1, stdout="", stderr="env not found")
+                    return SimpleNamespace(
+                        returncode=1, stdout="", stderr="env not found"
+                    )
+
                 result = preflight(self._spec(), runner=fake_run)
                 self.assertEqual(result.status, "blocked_env")
                 self.assertIn("env not found", result.detail)
@@ -294,8 +310,10 @@ class EnvPreflightTests(unittest.TestCase):
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{tmp}{os.pathsep}{old_path}"
             try:
+
                 def fake_run(argv, **kwargs):
                     return SimpleNamespace(returncode=0, stdout="", stderr="")
+
                 result = preflight(self._spec(), runner=fake_run)
                 self.assertEqual(result.status, "ok")
                 self.assertEqual(result.missing_tools, [])
@@ -304,15 +322,20 @@ class EnvPreflightTests(unittest.TestCase):
 
 
 class LocalRunnerCondaWrappingTests(unittest.TestCase):
-    def _spec(self, tmp: Path, *, conda_bin: str, conda_env: str | None = None,
-              conda_prefix: str | None = None) -> FrozenAttemptSpec:
+    def _spec(
+        self,
+        tmp: Path,
+        *,
+        conda_bin: str,
+        conda_env: str | None = None,
+        conda_prefix: str | None = None,
+    ) -> FrozenAttemptSpec:
         working = tmp / "work"
         working.mkdir(parents=True, exist_ok=True)
         output = working / "touched.txt"
         script = working / "run.sh"
         script.write_text(
-            "#!/bin/sh\n"
-            f"echo hello > {output}\n",
+            f"#!/bin/sh\necho hello > {output}\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
@@ -340,20 +363,22 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
             conda_stub = tmp_path / "conda"
             conda_stub.write_text(
                 "#!/bin/sh\n"
-                f"echo \"$@\" > {log_file}\n"
-                "while [ \"$#\" -gt 0 ]; do\n"
-                "  case \"$1\" in\n"
+                f'echo "$@" > {log_file}\n'
+                'while [ "$#" -gt 0 ]; do\n'
+                '  case "$1" in\n'
                 "    run|--live-stream|--no-capture-output) shift ;;\n"
                 "    -n|-p) shift 2 ;;\n"
                 "    *) break ;;\n"
                 "  esac\n"
                 "done\n"
-                "exec \"$@\"\n",
+                'exec "$@"\n',
                 encoding="utf-8",
             )
             conda_stub.chmod(0o755)
 
-            spec = self._spec(tmp_path, conda_bin=str(conda_stub), conda_env="env_read_qc")
+            spec = self._spec(
+                tmp_path, conda_bin=str(conda_stub), conda_env="env_read_qc"
+            )
             result = LocalRunner().run(spec)
 
             self.assertTrue(result.success)
@@ -371,20 +396,22 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
             conda_stub = tmp_path / "conda"
             conda_stub.write_text(
                 "#!/bin/sh\n"
-                f"echo \"$@\" > {log_file}\n"
-                "while [ \"$#\" -gt 0 ]; do\n"
-                "  case \"$1\" in\n"
+                f'echo "$@" > {log_file}\n'
+                'while [ "$#" -gt 0 ]; do\n'
+                '  case "$1" in\n'
                 "    run|--live-stream|--no-capture-output) shift ;;\n"
                 "    -n|-p) shift 2 ;;\n"
                 "    *) break ;;\n"
                 "  esac\n"
                 "done\n"
-                "exec \"$@\"\n",
+                'exec "$@"\n',
                 encoding="utf-8",
             )
             conda_stub.chmod(0o755)
 
-            spec = self._spec(tmp_path, conda_bin=str(conda_stub), conda_prefix="/opt/envs/read_qc")
+            spec = self._spec(
+                tmp_path, conda_bin=str(conda_stub), conda_prefix="/opt/envs/read_qc"
+            )
             result = LocalRunner().run(spec)
 
             self.assertTrue(result.success)
@@ -395,7 +422,9 @@ class LocalRunnerCondaWrappingTests(unittest.TestCase):
     def test_runner_preserves_legacy_path_when_conda_env_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            spec = self._spec(tmp_path, conda_bin="conda", conda_env=None, conda_prefix=None)
+            spec = self._spec(
+                tmp_path, conda_bin="conda", conda_env=None, conda_prefix=None
+            )
             # Without conda_env set, runner must not invoke conda. Remove conda
             # from PATH so the test fails loudly if LocalRunner tries.
             old_path = os.environ.get("PATH", "")

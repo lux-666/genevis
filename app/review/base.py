@@ -68,7 +68,9 @@ class ResumeReviewRequest(BaseModel):
     @model_validator(mode="after")
     def _require_rationale_for_non_human(self) -> "ResumeReviewRequest":
         if self.decided_by != "human" and not self.rationale_artifact_ref:
-            raise ValueError("rationale_artifact_ref is required when decided_by is not human")
+            raise ValueError(
+                "rationale_artifact_ref is required when decided_by is not human"
+            )
         if (self.review_request_id is None) != (self.review_request_hash is None):
             raise ValueError(
                 "review_request_id and review_request_hash must be provided together"
@@ -91,7 +93,9 @@ def load_resume_review_request(path: str | Path) -> ResumeReviewRequest:
     try:
         text = decision_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ValueError(f"decision file is not readable: {decision_path}: {exc}") from exc
+        raise ValueError(
+            f"decision file is not readable: {decision_path}: {exc}"
+        ) from exc
     try:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:

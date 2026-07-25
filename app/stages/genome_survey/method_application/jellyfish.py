@@ -5,6 +5,8 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+from langgraph.graph.state import CompiledStateGraph
+
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
     MethodExecutionLifecycle,
@@ -14,13 +16,17 @@ from app.execution.lifecycle import (
 )
 from app.execution.method_runner import build_frozen_attempt
 from app.schemas.artifacts import GENOME_SURVEY_KMER_DB, GENOME_SURVEY_KMER_HIST
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.genome_survey.method_application.support import (
     attempt_artifacts,
-    genome_survey_output,
     record_attempt_success,
-    update_genome_survey_output,
+    survey_output,
+    update_survey_output,
+)
+from app.stages.genome_survey.state import (
+    ResolvedSurveyAssetsCursor,
+    SurveyAssetCursor,
 )
 
 METHOD_NAME = "genome_survey.kmer_count.jellyfish"
@@ -36,7 +42,9 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_jellyfish_graph():
+def build_jellyfish_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         LIFECYCLE,
         freeze_jellyfish_attempt,
@@ -44,18 +52,19 @@ def build_jellyfish_graph():
     )
 
 
-def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
+def freeze_jellyfish_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze the Jellyfish count/histo attempt."""
-    output = genome_survey_output(state)
+    output = survey_output(state)
     if output.get("status") != "local_execution_planned":
         return {}
 
-    params = dict(output["survey_parameters"])
+    params = output["survey_parameters"]
     input_family = output.get("survey_input_family") or "clean_short_dna_reads"
-    assets = (output.get("resolved_assets") or {}).get(input_family) or []
+    resolved_assets = output.get("resolved_assets") or {}
+    assets = _assets_for_family(resolved_assets, input_family)
     read_paths = [str(Path(asset["path"])) for asset in assets if asset.get("path")]
     if not read_paths:
-        return update_genome_survey_output(
+        return update_survey_output(
             state,
             {
                 "status": "failed",
@@ -70,7 +79,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     if missing:
         preview = ", ".join(missing[:3])
         more = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
-        return update_genome_survey_output(
+        return update_survey_output(
             state,
             {
                 "status": "failed",
@@ -84,7 +93,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, blocked = resolve_method_env(
-        output,
+        dict(output),
         stage="genome_survey",
         method_name=METHOD_NAME,
         session_id=session_id,
@@ -92,7 +101,7 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
-        return update_genome_survey_output(state, blocked)
+        return update_survey_output(state, blocked)
 
     working_dir = stage_work_dir(state, "genome_survey", "jellyfish")
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -103,9 +112,11 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     reads_arg = " ".join(shlex.quote(path) for path in read_paths)
     script_path.write_text(
         "set -e\n"
-        f"jellyfish count -C -m {int(params['kmer_size'])} -s {shlex.quote(str(params['hash_size']))} "
+        f"jellyfish count -C -m {int(params['kmer_size'])} "
+        f"-s {shlex.quote(str(params['hash_size']))} "
         f"-t {int(params['threads'])} {reads_arg} -o {shlex.quote(str(kmer_db))}\n"
-        f"jellyfish histo -t {int(params['threads'])} {shlex.quote(str(kmer_db))} > {shlex.quote(str(kmer_hist))}\n",
+        f"jellyfish histo -t {int(params['threads'])} "
+        f"{shlex.quote(str(kmer_db))} > {shlex.quote(str(kmer_hist))}\n",
         encoding="utf-8",
     )
     script_path.chmod(0o755)
@@ -139,9 +150,9 @@ def freeze_jellyfish_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
+def collect_jellyfish_artifacts(state: TopLevelState) -> StateUpdate:
     """Collect Jellyfish k-mer database and histogram outputs."""
-    output = genome_survey_output(state)
+    output = survey_output(state)
     if output.get("status") != RAN_STATUS:
         return {}
 
@@ -162,15 +173,16 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
     kmer_hist_ref = str(artifacts[1].file_path)
 
     substeps = dict(output.get("substeps") or {})
+    kmer_count = substeps.get("kmer_count") or {}
     substeps["kmer_count"] = {
-        **dict(substeps.get("kmer_count") or {}),
+        **kmer_count,
         "name": "kmer_count",
         "status": "executed",
         "method_name": attempt.method_name,
         "kmer_db_ref": kmer_db_ref,
         "kmer_hist_ref": kmer_hist_ref,
     }
-    return update_genome_survey_output(
+    return update_survey_output(
         state,
         {
             "status": COLLECTED_STATUS,
@@ -185,3 +197,18 @@ def collect_jellyfish_artifacts(state: TopLevelState) -> dict:
             "substeps": substeps,
         },
     )
+
+
+def _assets_for_family(
+    assets: ResolvedSurveyAssetsCursor,
+    family: str,
+) -> list[SurveyAssetCursor]:
+    if family == "clean_short_dna_reads":
+        return list(assets.get("clean_short_dna_reads") or [])
+    if family == "raw_short_dna_reads":
+        return list(assets.get("raw_short_dna_reads") or [])
+    if family == "clean_long_reads":
+        return list(assets.get("clean_long_reads") or [])
+    if family == "raw_long_reads":
+        return list(assets.get("raw_long_reads") or [])
+    return []

@@ -6,6 +6,7 @@ Usage:
 
 Output:  /tmp/gene_agent_ncbi_demo/
 """
+
 from __future__ import annotations
 
 import json
@@ -48,22 +49,29 @@ def main() -> None:
 
     print("Building evidence pack...")
     evidence_pack = build_related_species_evidence_pack(SPECIES)
-    print(f"  status={evidence_pack['status']}  matching_mode={evidence_pack.get('matching_mode')}  "
-          f"records={len(evidence_pack.get('selected_records') or [])}")
+    print(
+        f"  status={evidence_pack['status']}  "
+        f"matching_mode={evidence_pack.get('matching_mode')}  "
+        f"records={len(evidence_pack.get('selected_records') or [])}"
+    )
     if evidence_pack.get("notes"):
         print(f"  notes: {evidence_pack['notes']}")
 
     print("\nBuilding statistics pack...")
-    statistics_pack = build_related_species_statistics_pack(SPECIES, target_metrics=TARGET_METRICS)
+    statistics_pack = build_related_species_statistics_pack(
+        SPECIES, target_metrics=TARGET_METRICS
+    )
     print(f"  status={statistics_pack['status']}")
     tier_counts = statistics_pack.get("tier_counts", {})
     print(f"  tier counts: {tier_counts}")
     target_pos = statistics_pack.get("target_position", {})
     if target_pos.get("available"):
-        print(f"  target percentiles: n50={target_pos.get('n50_percentile')}th  "
-              f"size={target_pos.get('assembly_size_percentile')}th  "
-              f"gc={target_pos.get('gc_percentile')}th  "
-              f"busco_complete={target_pos.get('busco_complete_percentile')}th")
+        print(
+            f"  target percentiles: n50={target_pos.get('n50_percentile')}th  "
+            f"size={target_pos.get('assembly_size_percentile')}th  "
+            f"gc={target_pos.get('gc_percentile')}th  "
+            f"busco_complete={target_pos.get('busco_complete_percentile')}th"
+        )
 
     STATS_PACK_PATH.write_text(
         json.dumps(statistics_pack, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -71,11 +79,15 @@ def main() -> None:
     print(f"\nStatistics pack → {STATS_PACK_PATH}")
 
     print("\nRendering figures...")
-    figure_paths = render_statistics_figures(statistics_pack, FIGURES_DIR, target_metrics=TARGET_METRICS)
+    figure_paths = render_statistics_figures(
+        statistics_pack, FIGURES_DIR, target_metrics=TARGET_METRICS
+    )
     for name, path in figure_paths.items():
         print(f"  {name}.png → {path}")
 
-    figures_relpaths = {name: f"figures/{Path(p).name}" for name, p in figure_paths.items()}
+    figures_relpaths = {
+        name: f"figures/{Path(p).name}" for name, p in figure_paths.items()
+    }
 
     print("\nBuilding notebook...")
     notebook = build_assembly_review_notebook(

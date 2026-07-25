@@ -6,8 +6,8 @@ import os
 import shlex
 import subprocess
 
-from app.schemas.execution import ExecutionResult
 from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.execution import ExecutionResult
 
 
 class LocalRunner:
@@ -32,7 +32,11 @@ class LocalRunner:
         script_name = spec.script_path.name
         if use_conda:
             conda_bin = spec.conda_bin or "conda"
-            target = ["-p", spec.conda_prefix] if spec.conda_prefix else ["-n", spec.conda_env]
+            target = (
+                ["-p", spec.conda_prefix]
+                if spec.conda_prefix
+                else ["-n", spec.conda_env]
+            )
             command: list[str] | str = [
                 conda_bin,
                 "run",
@@ -51,10 +55,13 @@ class LocalRunner:
             command = " && ".join(parts)
             shell = True
 
-        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-            "w",
-            encoding="utf-8",
-        ) as stderr:
+        with (
+            stdout_path.open("w", encoding="utf-8") as stdout,
+            stderr_path.open(
+                "w",
+                encoding="utf-8",
+            ) as stderr,
+        ):
             completed = subprocess.run(
                 command,
                 cwd=spec.working_dir,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from app.domains.assembly.selection import AssemblySelection
 from app.schemas.parameter_recommendation import (
@@ -10,7 +10,7 @@ from app.schemas.parameter_recommendation import (
     RecommendationRetryContext,
 )
 from app.schemas.state import TopLevelState
-from app.stages.base import stage_output
+from app.stages.assembly.state import AssemblyStageCursor, assembly_stage_output
 
 AssemblyContextRoute = Literal["hifi", "ont", "cyclone"]
 AssemblyTargetLevel = Literal["draft", "near_t2t", "strict_t2t"]
@@ -22,13 +22,13 @@ _TARGET_LEVELS = frozenset({"draft", "near_t2t", "strict_t2t"})
 def build_assembly_recommendation_context(
     state: TopLevelState,
     *,
-    assembly_out: dict[str, Any] | None = None,
+    assembly_out: AssemblyStageCursor | None = None,
     retry_context: RecommendationRetryContext | None = None,
 ) -> AssemblyRecommendationContext:
     """Build context only from the canonical selection and explicit stage fields."""
 
     if assembly_out is None:
-        assembly_out = stage_output(state, "assembly")
+        assembly_out = assembly_stage_output(state)
 
     selection = _require_selection(assembly_out.get("assembly_selection"))
     assembly_route = _require_route(assembly_out.get("assembly_route"))
@@ -43,7 +43,7 @@ def build_assembly_recommendation_context(
     )
 
 
-def _require_selection(raw: Any) -> AssemblySelection:
+def _require_selection(raw: object) -> AssemblySelection:
     if raw is None:
         raise ValueError("assembly recommendation context requires assembly_selection")
     try:
@@ -54,7 +54,7 @@ def _require_selection(raw: Any) -> AssemblySelection:
         ) from exc
 
 
-def _require_route(raw: Any) -> AssemblyContextRoute:
+def _require_route(raw: object) -> AssemblyContextRoute:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(
             "assembly recommendation context requires explicit assembly_route"
@@ -67,7 +67,7 @@ def _require_route(raw: Any) -> AssemblyContextRoute:
     return cast(AssemblyContextRoute, route)
 
 
-def _require_target_level(raw: Any) -> AssemblyTargetLevel:
+def _require_target_level(raw: object) -> AssemblyTargetLevel:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(
             "assembly recommendation context requires explicit target_level"

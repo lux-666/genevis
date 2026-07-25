@@ -36,4 +36,8 @@ def resolve_t2t_mode(value: str | None) -> T2TMode:
         raise ValueError(f"unsupported T2T mode: {resolved!r}")
     if spec.allowed_values is None or resolved not in spec.allowed_values:
         raise ValueError(f"T2T mode is not allowed by the catalog: {resolved!r}")
-    return resolved
+    if resolved == "propose_only":
+        return "propose_only"
+    if resolved == "manual_review":
+        return "manual_review"
+    return "auto_patch"

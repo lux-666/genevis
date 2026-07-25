@@ -186,8 +186,7 @@ class Ledger:
         already succeeded, so one attempt never carries both terminal facts.
         """
         return any(
-            row["event_type"] == "attempt_succeeded"
-            and row["subject_id"] == attempt_id
+            row["event_type"] == "attempt_succeeded" and row["subject_id"] == attempt_id
             for row in self.read_event_rows(session_id)
         )
 
@@ -539,7 +538,8 @@ class Ledger:
                         continue
                     if _semantic_body(existing) != semantic:
                         raise LedgerConflictError(
-                            f"idempotency key {key!r} already owns a different ledger fact"
+                            f"idempotency key {key!r} already owns a different "
+                            "ledger fact"
                         )
                     return existing
 
@@ -612,7 +612,8 @@ class Ledger:
             raise LedgerFormatError(f"malformed v2 ledger row at line {line_number}")
         if row["schema_version"] != LEDGER_SCHEMA_VERSION:
             raise LedgerFormatError(
-                f"unsupported ledger schema at line {line_number}: {row['schema_version']!r}"
+                f"unsupported ledger schema at line {line_number}: "
+                f"{row['schema_version']!r}"
             )
         if row["session_id"] != self.paths.session_id:
             raise LedgerFormatError(

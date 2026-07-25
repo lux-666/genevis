@@ -4,8 +4,8 @@ ResourceRef is the canonical cross-stage resource handoff protocol.
 Replaces scattered stage_outputs key scanning with explicit resource declarations.
 """
 
-from dataclasses import dataclass, field
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import os
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import yaml
 
 from app.execution.env_resolver import EnvResolver
-
 
 _SHARED_TARGET_KEY = "shared_conda_target"
 _AUTOHIC_TARGET_KEY = "autohic_conda_target"
@@ -34,7 +34,7 @@ class ProjectConfigChange:
 
     file: Path
     field: str
-    value: str = field(repr=False)
+    value: str = dataclass_field(repr=False)
     secret: bool = False
 
     def display_value(self) -> str:
@@ -47,10 +47,13 @@ class ProjectBootstrapPlan:
 
     config_path: Path
     dotenv_path: Path
-    config_data: dict[str, Any] = field(repr=False)
-    dotenv_updates: dict[str, str] = field(default_factory=dict, repr=False)
-    changes: list[ProjectConfigChange] = field(default_factory=list)
-    unresolved_fields: list[str] = field(default_factory=list)
+    config_data: dict[str, Any] = dataclass_field(repr=False)
+    dotenv_updates: dict[str, str] = dataclass_field(
+        default_factory=dict,
+        repr=False,
+    )
+    changes: list[ProjectConfigChange] = dataclass_field(default_factory=list)
+    unresolved_fields: list[str] = dataclass_field(default_factory=list)
     config_changed: bool = False
 
     @property
@@ -83,7 +86,11 @@ def build_project_bootstrap_plan(
     :class:`EnvResolver`.
     """
     config_path = Path(config_path)
-    values = {str(key): str(value) for key, value in (config_values or {}).items() if str(value).strip()}
+    values = {
+        str(key): str(value)
+        for key, value in (config_values or {}).items()
+        if str(value).strip()
+    }
     approved = set(approved_overwrites or set())
     dotenv_path = project_root_for_config(config_path) / ".env"
 
@@ -115,7 +122,11 @@ def build_project_bootstrap_plan(
         _record(changes, config_path, "default.conda_bin", "conda")
     if _target_missing(default, fallback=True):
         _set_target(default, shared_target, fallback=True)
-        field_name = "default.fallback_prefix" if _is_prefix(shared_target) else "default.fallback_env"
+        field_name = (
+            "default.fallback_prefix"
+            if _is_prefix(shared_target)
+            else "default.fallback_env"
+        )
         _record(changes, config_path, field_name, shared_target)
     _replace_placeholder_targets(draft, shared_target)
 
@@ -165,7 +176,9 @@ def collect_project_bootstrap_plan(
     """Ask only for currently missing project values and return a write plan."""
     config_path = Path(config_path)
     source_exists = config_path.exists()
-    source_path = config_path if source_exists else _resolve_template(config_path, template_path)
+    source_path = (
+        config_path if source_exists else _resolve_template(config_path, template_path)
+    )
     source = _read_yaml(source_path) if source_path is not None else _minimal_config()
     inspect = deepcopy(source)
     values: dict[str, str] = {}
@@ -179,9 +192,7 @@ def collect_project_bootstrap_plan(
         )
 
     packages = _mapping(inspect.get("packages"))
-    configure_autohic = (
-        bool(packages.get("autohic")) if source_exists else True
-    )
+    configure_autohic = bool(packages.get("autohic")) if source_exists else True
     if source_exists and not configure_autohic:
         configure_autohic = _ask_yes_no(
             prompt,
@@ -234,7 +245,9 @@ def collect_project_bootstrap_plan(
     ):
         if secret_prompt is not None:
             try:
-                api_key = secret_prompt("GENE_AGENT_LLM_API_KEY (hidden, blank to skip): ").strip()
+                api_key = secret_prompt(
+                    "GENE_AGENT_LLM_API_KEY (hidden, blank to skip): "
+                ).strip()
             except (EOFError, KeyboardInterrupt):
                 api_key = ""
             if api_key:
@@ -328,8 +341,14 @@ def _is_prefix(value: str) -> bool:
 def _target_missing(entry: dict[str, Any], *, fallback: bool) -> bool:
     env_key = "fallback_env" if fallback else "conda_env"
     prefix_key = "fallback_prefix" if fallback else "conda_prefix"
-    return not entry.get(env_key) and not entry.get(prefix_key) or any(
-        _is_placeholder(entry.get(key)) for key in (env_key, prefix_key) if entry.get(key)
+    return (
+        not entry.get(env_key)
+        and not entry.get(prefix_key)
+        or any(
+            _is_placeholder(entry.get(key))
+            for key in (env_key, prefix_key)
+            if entry.get(key)
+        )
     )
 
 
@@ -346,7 +365,9 @@ def _replace_placeholder_targets(node: object, target: str) -> None:
         for key, value in list(node.items()):
             if key in {"conda_env", "fallback_env"} and value == "your_tool_env":
                 node.pop(key)
-                replacement = "conda_prefix" if key == "conda_env" else "fallback_prefix"
+                replacement = (
+                    "conda_prefix" if key == "conda_env" else "fallback_prefix"
+                )
                 node[replacement if _is_prefix(target) else key] = target
             else:
                 _replace_placeholder_targets(value, target)
@@ -360,7 +381,11 @@ def _ensure_autohic_shape(draft: dict[str, Any]) -> None:
     package_defaults: dict[str, dict[str, Any]] = {
         "autohic": {
             "entrypoints": ["autohic.py"],
-            "canary_paths": ["autohic.py", "src/common/run.sh", "src/models/cfgs/error_model.py"],
+            "canary_paths": [
+                "autohic.py",
+                "src/common/run.sh",
+                "src/models/cfgs/error_model.py",
+            ],
         },
         "juicer": {
             "conform_on_bootstrap": True,
@@ -481,7 +506,9 @@ def _dotenv_updates(
         key = str(raw_key).strip()
         value = str(raw_value)
         if not key.startswith("GENE_AGENT_"):
-            raise ValueError(f"bootstrap only writes GENE_AGENT_* values to .env: {key}")
+            raise ValueError(
+                f"bootstrap only writes GENE_AGENT_* values to .env: {key}"
+            )
         if "\n" in value or "\r" in value:
             raise ValueError(f".env value cannot contain a newline: {key}")
         if not value or existing.get(key) == value:
@@ -539,11 +566,15 @@ def _write_dotenv(path: Path, updates: Mapping[str, str]) -> None:
     os.chmod(path, 0o600)
 
 
-def _record(changes: list[ProjectConfigChange], path: Path, field_name: str, value: str) -> None:
+def _record(
+    changes: list[ProjectConfigChange], path: Path, field_name: str, value: str
+) -> None:
     changes.append(ProjectConfigChange(path, field_name, str(value)))
 
 
-def _ask_text(prompt: Callable[[str], str], label: str, *, default: str | None = None) -> str:
+def _ask_text(
+    prompt: Callable[[str], str], label: str, *, default: str | None = None
+) -> str:
     suffix = f" [{default}]" if default is not None else ""
     try:
         answer = prompt(f"{label}{suffix}: ").strip()

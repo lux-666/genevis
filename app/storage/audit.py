@@ -22,7 +22,6 @@ from app.integrity import sha256_file
 from app.storage.artifacts import read_artifact_records
 from app.storage.paths import DataLayoutError, SessionPaths, validate_data_layout
 
-
 _LAYER_NAMES = (
     "control",
     "ledger",
@@ -176,7 +175,9 @@ def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
                 "requires_output_verification",
             )
         }
-        path_parts = Path(entry["path_ref"]).parts if isinstance(entry["path_ref"], str) else ()
+        path_parts = (
+            Path(entry["path_ref"]).parts if isinstance(entry["path_ref"], str) else ()
+        )
         if (
             not isinstance(entry["path_ref"], str)
             or entry["path_ref"].startswith("/")
@@ -194,7 +195,9 @@ def build_cleanup_manifest(audit: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError("cleanup candidate is not a normalized audited file")
         if (path_parts[0] == "work") != entry["requires_output_verification"]:
-            raise ValueError("cleanup candidate has an invalid layer safety classification")
+            raise ValueError(
+                "cleanup candidate has an invalid layer safety classification"
+            )
         if path_parts[0] == "work":
             retained_work.append(entry)
         else:
@@ -251,8 +254,7 @@ def verify_checkpoint_free_artifact_retention(
         context="terminal checkpoint state",
     )
     unreachable = {
-        str(item["artifact_id"])
-        for item in artifact_index["unreachable_artifacts"]
+        str(item["artifact_id"]) for item in artifact_index["unreachable_artifacts"]
     }
     reachable = set(by_id).difference(unreachable)
     missing = sorted(required.difference(reachable))
@@ -265,7 +267,9 @@ def verify_checkpoint_free_artifact_retention(
     }
 
 
-def _inventory_layer(paths: SessionPaths, layer_name: str, root: Path) -> list[_FileInfo]:
+def _inventory_layer(
+    paths: SessionPaths, layer_name: str, root: Path
+) -> list[_FileInfo]:
     if root.is_symlink() or not root.is_dir():
         raise DataLayoutError(f"missing or invalid v2 {layer_name}/ layer: {root}")
 
@@ -275,7 +279,9 @@ def _inventory_layer(paths: SessionPaths, layer_name: str, root: Path) -> list[_
         for name in sorted(directory_names):
             candidate = directory_path / name
             if candidate.is_symlink():
-                raise DataLayoutError(f"symlink is not allowed inside a v2 run: {candidate}")
+                raise DataLayoutError(
+                    f"symlink is not allowed inside a v2 run: {candidate}"
+                )
             if paths.session_id in candidate.relative_to(paths.run_dir).parts[1:]:
                 raise DataLayoutError(
                     f"session_id is repeated below the run root: {candidate}"
@@ -284,7 +290,9 @@ def _inventory_layer(paths: SessionPaths, layer_name: str, root: Path) -> list[_
         for name in sorted(file_names):
             candidate = directory_path / name
             if candidate.is_symlink():
-                raise DataLayoutError(f"symlink is not allowed inside a v2 run: {candidate}")
+                raise DataLayoutError(
+                    f"symlink is not allowed inside a v2 run: {candidate}"
+                )
             stat_before = candidate.stat()
             if not candidate.is_file():
                 raise DataLayoutError(f"non-regular entry inside a v2 run: {candidate}")
@@ -308,7 +316,9 @@ def _inventory_layer(paths: SessionPaths, layer_name: str, root: Path) -> list[_
                 stat_after.st_mtime_ns,
             )
             if identity_before != identity_after:
-                raise DataLayoutError(f"file changed while storage audit was reading it: {candidate}")
+                raise DataLayoutError(
+                    f"file changed while storage audit was reading it: {candidate}"
+                )
             files.append(
                 _FileInfo(
                     path=candidate,
@@ -377,14 +387,16 @@ def _audit_checkpoints(
         try:
             connection.execute("PRAGMA query_only = ON")
             rows = connection.execute(
-                "SELECT rowid, thread_id, checkpoint_ns, checkpoint_id, type, checkpoint "
+                "SELECT rowid, thread_id, checkpoint_ns, checkpoint_id, type, "
+                "checkpoint "
                 "FROM checkpoints ORDER BY rowid"
             ).fetchall()
         finally:
             connection.close()
     except (OSError, sqlite3.DatabaseError) as exc:
         result["warnings"].append(
-            f"checkpoint database could not be parsed safely: {type(exc).__name__}: {exc}"
+            "checkpoint database could not be parsed safely: "
+            f"{type(exc).__name__}: {exc}"
         )
         return result, []
 
@@ -429,7 +441,8 @@ def _audit_checkpoints(
                 size = len(serialized)
             except Exception as exc:
                 result["warnings"].append(
-                    f"checkpoint {checkpoint_id} field {field!r} could not be measured: "
+                    f"checkpoint {checkpoint_id} field {field!r} could not be "
+                    "measured: "
                     f"{type(exc).__name__}"
                 )
                 continue
@@ -496,12 +509,16 @@ def _audit_artifact_index(
     index_snapshot = inventory.get(index_ref)
     index_exists_now = paths.artifact_index_path.is_file()
     if (index_snapshot is None) != (not index_exists_now):
-        raise DataLayoutError("artifact index changed while storage audit was reading it")
+        raise DataLayoutError(
+            "artifact index changed while storage audit was reading it"
+        )
     if index_snapshot is not None and (
         paths.artifact_index_path.stat().st_size != index_snapshot.size_bytes
         or sha256_file(paths.artifact_index_path) != index_snapshot.sha256
     ):
-        raise DataLayoutError("artifact index changed while storage audit was reading it")
+        raise DataLayoutError(
+            "artifact index changed while storage audit was reading it"
+        )
 
     for record in records:
         file = inventory.get(record["path_ref"])
@@ -598,8 +615,7 @@ def _audit_artifact_index(
             "reason": "file exists under artifacts/ but has no artifact-index row",
         }
         for file in artifact_files
-        if file.path_ref != index_ref
-        and file.path_ref not in indexed_paths
+        if file.path_ref != index_ref and file.path_ref not in indexed_paths
     ]
     unindexed.sort(key=lambda item: item["path_ref"])
 
@@ -770,9 +786,7 @@ def _resolve_declared_reference(
         id_record = by_id.get(artifact_id)
         path_record = by_path.get(path_ref)
         if id_record is None or path_record is None or id_record is not path_record:
-            raise DataLayoutError(
-                f"dangling or conflicting ArtifactRef ({details})"
-            )
+            raise DataLayoutError(f"dangling or conflicting ArtifactRef ({details})")
         for key, expected in (
             ("sha256", path_record["sha256"]),
             ("size_bytes", path_record["size_bytes"]),
@@ -796,9 +810,11 @@ def _resolve_declared_reference(
     path_value = Path(value)
     if path_value.is_absolute():
         try:
-            value = path_value.resolve(strict=False).relative_to(
-                paths.run_dir.resolve(strict=False)
-            ).as_posix()
+            value = (
+                path_value.resolve(strict=False)
+                .relative_to(paths.run_dir.resolve(strict=False))
+                .as_posix()
+            )
         except ValueError:
             if require_artifact:
                 raise DataLayoutError(
@@ -826,8 +842,7 @@ def _is_legacy_asset_value_ref(value: Mapping[str, Any]) -> bool:
     if not isinstance(role, str) or not isinstance(value.get("path_ref"), str):
         return False
     if any(
-        key in value
-        for key in ("artifact_id", "sha256", "size_bytes", "artifact_type")
+        key in value for key in ("artifact_id", "sha256", "size_bytes", "artifact_type")
     ):
         return False
     role_parts = [part for part in role.split(".") if part and not part.isdigit()]
@@ -894,7 +909,9 @@ def _reclaimable_candidates(
     candidates.extend(
         {
             **file.public(),
-            "reason": "mutable work candidate; verify every required output was published",
+            "reason": (
+                "mutable work candidate; verify every required output was published"
+            ),
             "requires_output_verification": True,
         }
         for file in work

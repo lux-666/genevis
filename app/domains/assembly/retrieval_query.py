@@ -21,7 +21,9 @@ def build_hifiasm_retrieval_query(
     """Build a typed retrieval query from canonical facts and stage context."""
 
     if task != "recommend_initial":
-        raise ValueError("hifiasm numeric retrieval only supports task='recommend_initial'")
+        raise ValueError(
+            "hifiasm numeric retrieval only supports task='recommend_initial'"
+        )
 
     genome_fact = facts.genome.effective_genome_size
     genome_size_bp = genome_fact.value if genome_fact is not None else None

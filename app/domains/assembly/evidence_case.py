@@ -7,15 +7,15 @@ import math
 import weakref
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol, TypeGuard
 
 import yaml
 
 from app.knowledge.evidence_cases import (
-    EvidenceCaseValidationError,
     MAX_SOURCE_EXCERPT_CHARS,
     MAX_SOURCE_EXCERPTS_PER_CASE,
     MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE,
+    EvidenceCaseValidationError,
     validate_methods_source,
     validate_methods_source_shape,
     validate_referenced_excerpt_budget,
@@ -165,14 +165,16 @@ def validate_hifiasm_evidence_cases(
                 candidates.append(case)
                 continue
             raise EvidenceCaseValidationError(
-                f"{case.get('case_id') or '<missing-case-id>'}: unsupported hifiasm schema_version "
+                f"{case.get('case_id') or '<missing-case-id>'}: unsupported hifiasm "
+                "schema_version "
                 f"{case.get('schema_version')!r}"
             )
     else:
         for case in candidates:
             if not is_hifiasm_evidence_case(case):
                 raise EvidenceCaseValidationError(
-                    f"{case.get('case_id') or '<missing-case-id>'}: hifiasm v3 shard requires "
+                    f"{case.get('case_id') or '<missing-case-id>'}: hifiasm v3 shard "
+                    "requires "
                     f"schema_version=3, got {case.get('schema_version')!r}"
                 )
 
@@ -183,13 +185,43 @@ def validate_hifiasm_evidence_cases(
         if not case_id:
             raise EvidenceCaseValidationError("hifiasm EvidenceCase requires case_id")
         if case_id in seen:
-            raise EvidenceCaseValidationError(f"duplicate hifiasm EvidenceCase case_id: {case_id}")
+            raise EvidenceCaseValidationError(
+                f"duplicate hifiasm EvidenceCase case_id: {case_id}"
+            )
         seen.add(case_id)
         normalized.append(_validate_case(case, pack_root=pack_root))
     return normalized
 
 
-def _build_validation_boundary():
+class _ValidateCase(Protocol):
+    def __call__(
+        self,
+        case: dict[str, Any],
+        *,
+        pack_root: Path | None,
+    ) -> dict[str, Any]: ...
+
+
+class _CaseProjector(Protocol):
+    def __call__(self, case: dict[str, Any]) -> dict[str, Any]: ...
+
+
+class _RankCase(Protocol):
+    def __call__(
+        self,
+        case: dict[str, Any],
+        *,
+        numeric_match: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+
+def _build_validation_boundary() -> tuple[
+    _ValidateCase,
+    _CaseProjector,
+    _CaseProjector,
+    _RankCase,
+    _CaseProjector,
+]:
     """Track validated case semantics outside caller-writable mapping state."""
 
     registry: dict[
@@ -201,7 +233,9 @@ def _build_validation_boundary():
         __slots__ = ("__weakref__",)
 
         def __new__(cls, *args: Any, **kwargs: Any) -> "ValidatedCase":
-            raise TypeError("validated hifiasm cases can only be created by Task 2 validation")
+            raise TypeError(
+                "validated hifiasm cases can only be created by Task 2 validation"
+            )
 
         def __copy__(self) -> "ValidatedCase":
             return _copy_registered(self)
@@ -212,7 +246,9 @@ def _build_validation_boundary():
     def _semantic_proof(case: dict[str, Any]) -> str:
         return json.dumps(case, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
-    def _registered_proof(case: dict[str, Any]) -> tuple[str, str, str | None, bool] | None:
+    def _registered_proof(
+        case: dict[str, Any],
+    ) -> tuple[str, str, str | None, bool] | None:
         entry = registry.get(id(case))
         if entry is None or entry[0]() is not case:
             return None
@@ -244,8 +280,7 @@ def _build_validation_boundary():
         dict.__init__(case, values)
         return _register(
             case,
-            proof
-            or (kind, _semantic_proof(case), curation_status, retrieval_eligible),
+            proof or (kind, _semantic_proof(case), curation_status, retrieval_eligible),
         )
 
     def _require_registered(
@@ -264,7 +299,9 @@ def _build_validation_boundary():
             raise EvidenceCaseValidationError(
                 f"{case_id}: case differs from its Task 2 validation-owned attestation"
             )
-        if require_retrieval_eligible and (proof[2] != "approved" or proof[3] is not True):
+        if require_retrieval_eligible and (
+            proof[2] != "approved" or proof[3] is not True
+        ):
             raise EvidenceCaseValidationError(
                 f"{case_id}: Task 2 attestation is not retrieval-eligible"
             )
@@ -294,7 +331,9 @@ def _build_validation_boundary():
             retrieval_eligible=values.get("retrieval_eligible") is True,
         )
 
-    def _validate_case(case: dict[str, Any], *, pack_root: Path | None) -> dict[str, Any]:
+    def _validate_case(
+        case: dict[str, Any], *, pack_root: Path | None
+    ) -> dict[str, Any]:
         case_id = str(case.get("case_id") or "<missing-case-id>")
         _reject_unknown_fields(
             case,
@@ -316,26 +355,38 @@ def _build_validation_boundary():
             )
 
         curation = result.get("curation")
-        if not isinstance(curation, dict) or curation.get("status") not in _ALLOWED_CURATION_STATUSES:
+        if (
+            not isinstance(curation, dict)
+            or curation.get("status") not in _ALLOWED_CURATION_STATUSES
+        ):
             raise EvidenceCaseValidationError(
-                f"{case_id}: curation.status must be one of {sorted(_ALLOWED_CURATION_STATUSES)}"
+                f"{case_id}: curation.status must be one of "
+                f"{sorted(_ALLOWED_CURATION_STATUSES)}"
             )
         status = str(curation["status"])
         if status == "approved" and not curation.get("curator"):
-            raise EvidenceCaseValidationError(f"{case_id}: approved case requires curation.curator")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: approved case requires curation.curator"
+            )
 
         source = result.get("source")
         if not isinstance(source, dict) or source.get("kind") != "paper":
             raise EvidenceCaseValidationError(f"{case_id}: source.kind must be paper")
         if not any(source.get(key) for key in ("doi", "title")):
-            raise EvidenceCaseValidationError(f"{case_id}: paper source requires doi or title")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: paper source requires doi or title"
+            )
         year = source.get("year")
         if year is not None and (not isinstance(year, int) or isinstance(year, bool)):
-            raise EvidenceCaseValidationError(f"{case_id}: source.year must be an integer")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: source.year must be an integer"
+            )
 
         applicability = result.get("applicability")
         if not isinstance(applicability, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: applicability must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: applicability must be a mapping"
+            )
         for field_name in ("read_type", "source_tool"):
             if not isinstance(applicability.get(field_name), str):
                 raise EvidenceCaseValidationError(
@@ -344,9 +395,13 @@ def _build_validation_boundary():
 
         intervention = result.get("intervention")
         if not isinstance(intervention, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: intervention must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: intervention must be a mapping"
+            )
         if not isinstance(intervention.get("tool"), str):
-            raise EvidenceCaseValidationError(f"{case_id}: intervention.tool is required")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: intervention.tool is required"
+            )
         _validate_parameter_flags(intervention, case_id=case_id)
         _validate_case_type_contract(result)
 
@@ -363,7 +418,9 @@ def _build_validation_boundary():
 
         source_excerpts = validate_methods_source(case, pack_root=pack_root)
         span_documents = {span["span_id"]: span["document"] for span in source_excerpts}
-        referenced_span_ids = _validate_provenance(result, span_documents=span_documents)
+        referenced_span_ids = _validate_provenance(
+            result, span_documents=span_documents
+        )
         validate_referenced_excerpt_budget(
             source_excerpts,
             referenced_span_ids=referenced_span_ids,
@@ -394,7 +451,9 @@ def _build_validation_boundary():
             field_path="case",
         )
         validate_methods_source_shape(case, required=False)
-        normalized = _normalize_case_fields(case, schema=_PROMPT_CASE_SCHEMA, case_id=case_id)
+        normalized = _normalize_case_fields(
+            case, schema=_PROMPT_CASE_SCHEMA, case_id=case_id
+        )
         if "source_excerpts" in case:
             source_excerpts = _normalize_value(
                 case["source_excerpts"],
@@ -502,7 +561,9 @@ def _validate_unique_span_ids(spans: list[dict[str, Any]], *, case_id: str) -> N
     for span in spans:
         span_id = span["span_id"]
         if span_id in seen:
-            raise EvidenceCaseValidationError(f"{case_id}: duplicate source_excerpts span_id {span_id!r}")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: duplicate source_excerpts span_id {span_id!r}"
+            )
         seen.add(span_id)
 
 
@@ -520,7 +581,8 @@ def _normalize_value(value: Any, schema: Any, *, case_id: str, field_path: str) 
     if schema is _SCHEMA_VERSION:
         if type(value) is not int or value != HIFIASM_EVIDENCE_SCHEMA_VERSION:
             raise EvidenceCaseValidationError(
-                f"{case_id}: schema_version must be the integer {HIFIASM_EVIDENCE_SCHEMA_VERSION}"
+                f"{case_id}: schema_version must be the integer "
+                f"{HIFIASM_EVIDENCE_SCHEMA_VERSION}"
             )
         return value
     if schema is _SOURCE_EXCERPT_TEXT:
@@ -534,8 +596,12 @@ def _normalize_value(value: Any, schema: Any, *, case_id: str, field_path: str) 
 
     if isinstance(schema, dict):
         if not isinstance(value, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path} must be a mapping")
-        _reject_unknown_fields(value, allowed=set(schema), case_id=case_id, field_path=field_path)
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path} must be a mapping"
+            )
+        _reject_unknown_fields(
+            value, allowed=set(schema), case_id=case_id, field_path=field_path
+        )
         return {
             field_name: _normalize_value(
                 value[field_name],
@@ -574,7 +640,9 @@ def _normalize_value(value: Any, schema: Any, *, case_id: str, field_path: str) 
         ]
     if kind == "mapping":
         if not isinstance(value, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path} must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path} must be a mapping"
+            )
         max_items = schema[2]
         if len(value) > max_items:
             raise EvidenceCaseValidationError(
@@ -608,9 +676,13 @@ def _normalize_string_list(
         )
     normalized: list[str] = []
     for index, item in enumerate(value):
-        _validate_bounded_text(item, case_id=case_id, field_path=f"{field_path}[{index}]")
+        _validate_bounded_text(
+            item, case_id=case_id, field_path=f"{field_path}[{index}]"
+        )
         if item in normalized:
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path} must not contain duplicates")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path} must not contain duplicates"
+            )
         normalized.append(item)
     return normalized
 
@@ -634,16 +706,19 @@ def _validate_bounded_text(
     max_chars: int = MAX_EVIDENCE_TEXT_FIELD_CHARS,
 ) -> None:
     if not isinstance(value, str) or not value.strip():
-        raise EvidenceCaseValidationError(f"{case_id}: {field_path} must be a non-empty string")
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path} must be a non-empty string"
+        )
     if len(value) > max_chars:
         raise EvidenceCaseValidationError(
-            f"{case_id}: {field_path} exceeds the "
-            f"{max_chars}-character limit"
+            f"{case_id}: {field_path} exceeds the {max_chars}-character limit"
         )
 
 
 def _validate_prompt_safe_text_budget(value: dict[str, Any], *, case_id: str) -> None:
-    structured_value = {key: item for key, item in value.items() if key != "source_excerpts"}
+    structured_value = {
+        key: item for key, item in value.items() if key != "source_excerpts"
+    }
     structured_total = _text_character_count(structured_value)
     if structured_total > MAX_PROMPT_SAFE_TEXT_CHARS_PER_CASE:
         raise EvidenceCaseValidationError(
@@ -651,8 +726,7 @@ def _validate_prompt_safe_text_budget(value: dict[str, Any], *, case_id: str) ->
             f"{MAX_PROMPT_SAFE_TEXT_CHARS_PER_CASE}-character limit"
         )
     excerpt_chars = sum(
-        len(span["quote"])
-        for span in value.get("source_excerpts") or []
+        len(span["quote"]) for span in value.get("source_excerpts") or []
     )
     if excerpt_chars > MAX_TOTAL_SOURCE_EXCERPT_CHARS_PER_CASE:
         raise EvidenceCaseValidationError(
@@ -667,7 +741,9 @@ def _text_character_count(value: Any) -> int:
     if isinstance(value, list):
         return sum(_text_character_count(item) for item in value)
     if isinstance(value, dict):
-        return sum(len(str(key)) + _text_character_count(item) for key, item in value.items())
+        return sum(
+            len(str(key)) + _text_character_count(item) for key, item in value.items()
+        )
     return 0
 
 
@@ -689,7 +765,8 @@ def _validate_parameter_flags(intervention: dict[str, Any], *, case_id: str) -> 
     for parameter_name, parameter in (intervention.get("parameters") or {}).items():
         if "reported" in parameter and not isinstance(parameter["reported"], bool):
             raise EvidenceCaseValidationError(
-                f"{case_id}: intervention.parameters.{parameter_name}.reported must be a boolean"
+                f"{case_id}: intervention.parameters.{parameter_name}.reported must "
+                "be a boolean"
             )
 
 
@@ -703,7 +780,9 @@ def _validate_case_type_contract(case: dict[str, Any]) -> None:
         )
 
 
-def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]) -> set[str]:
+def _validate_provenance(
+    case: dict[str, Any], *, span_documents: dict[str, str]
+) -> set[str]:
     case_id = str(case["case_id"])
     referenced: set[str] = set()
 
@@ -718,17 +797,21 @@ def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]
             _require_known_spans(case_id, field_path, span_ids, span_documents)
             referenced.update(span_ids)
 
-    for parameter_name, parameter in (case.get("intervention") or {}).get("parameters", {}).items():
+    for parameter_name, parameter in (
+        (case.get("intervention") or {}).get("parameters", {}).items()
+    ):
         field_path = f"intervention.parameters.{parameter_name}"
         for required_field in ("value", "reported"):
             if required_field not in parameter:
                 raise EvidenceCaseValidationError(
-                    f"{case_id}: {field_path}.{required_field} is required for approved cases"
+                    f"{case_id}: {field_path}.{required_field} is required for "
+                    "approved cases"
                 )
         span_ids = list(parameter.get("evidence_span_ids") or [])
         if parameter.get("reported") is True and not span_ids:
             raise EvidenceCaseValidationError(
-                f"{case_id}: reported parameter {parameter_name} requires evidence_span_ids"
+                f"{case_id}: reported parameter {parameter_name} requires "
+                "evidence_span_ids"
             )
         _require_known_spans(case_id, field_path, span_ids, span_documents)
         referenced.update(span_ids)
@@ -737,14 +820,20 @@ def _validate_provenance(case: dict[str, Any], *, span_documents: dict[str, str]
     for index, claim in enumerate(case.get("rationale_claims") or []):
         field_path = f"rationale_claims[{index}]"
         for required_field in ("claim_id", "statement", "explicitness", "effect_area"):
-            if not isinstance(claim.get(required_field), str) or not claim[required_field].strip():
+            if (
+                not isinstance(claim.get(required_field), str)
+                or not claim[required_field].strip()
+            ):
                 raise EvidenceCaseValidationError(
-                    f"{case_id}: {field_path}.{required_field} must be a non-empty string "
+                    f"{case_id}: {field_path}.{required_field} must be a non-empty "
+                    "string "
                     "for approved cases"
                 )
         claim_id = str(claim["claim_id"])
         if claim_id in seen_claim_ids:
-            raise EvidenceCaseValidationError(f"{case_id}: duplicate rationale claim_id {claim_id!r}")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: duplicate rationale claim_id {claim_id!r}"
+            )
         seen_claim_ids.add(claim_id)
 
         explicitness = claim["explicitness"]
@@ -770,7 +859,9 @@ def _require_known_spans(
 ) -> None:
     for span_id in span_ids:
         if span_id not in span_documents:
-            raise EvidenceCaseValidationError(f"{case_id}: {field_name} references unknown span_id {span_id!r}")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_name} references unknown span_id {span_id!r}"
+            )
 
 
 def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:
@@ -786,7 +877,9 @@ def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:
     ):
         return None
 
-    candidates = _manifest_case_list(manifest, source_path=manifest_path, required=False)
+    candidates = _manifest_case_list(
+        manifest, source_path=manifest_path, required=False
+    )
     for rel_path in manifest.get("case_files") or []:
         if not isinstance(rel_path, str):
             continue
@@ -797,7 +890,9 @@ def _manifest_hifiasm_cases(pack_root: Path) -> list[dict[str, Any]] | None:
         raw = yaml.safe_load(shard_path.read_text(encoding="utf-8")) or {}
         if isinstance(raw, list):
             raw = {"cases": raw}
-        candidates.extend(_manifest_case_list(raw, source_path=shard_path, required=True))
+        candidates.extend(
+            _manifest_case_list(raw, source_path=shard_path, required=True)
+        )
     return candidates
 
 
@@ -811,15 +906,19 @@ def _manifest_case_list(
         raise EvidenceCaseValidationError(f"expected a mapping in {source_path}")
     if "cases" not in raw:
         if required:
-            raise EvidenceCaseValidationError(f"cases list is required in {source_path}")
+            raise EvidenceCaseValidationError(
+                f"cases list is required in {source_path}"
+            )
         return []
     cases = raw["cases"]
     if not isinstance(cases, list) or not all(isinstance(case, dict) for case in cases):
-        raise EvidenceCaseValidationError(f"cases entries must be mappings in {source_path}")
+        raise EvidenceCaseValidationError(
+            f"cases entries must be mappings in {source_path}"
+        )
     return cases
 
 
-def _is_number(value: Any) -> bool:
+def _is_number(value: Any) -> TypeGuard[int | float]:
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -833,7 +932,9 @@ def _validate_approved_numeric_facts(case: dict[str, Any]) -> None:
     if observed_facts is None:
         observed_facts = {}
     if not isinstance(observed_facts, dict):
-        raise EvidenceCaseValidationError(f"{case_id}: observed_facts must be a mapping")
+        raise EvidenceCaseValidationError(
+            f"{case_id}: observed_facts must be a mapping"
+        )
     for field_name in _NUMERIC_OBSERVED_FACTS:
         if field_name not in observed_facts:
             continue
@@ -856,7 +957,9 @@ def _validate_approved_numeric_facts(case: dict[str, Any]) -> None:
         raise EvidenceCaseValidationError(f"{case_id}: outcomes must be a mapping")
     for field_name, fact in outcomes.items():
         if not isinstance(fact, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: outcomes.{field_name} must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: outcomes.{field_name} must be a mapping"
+            )
         _validate_numeric_fact(
             fact,
             case_id=case_id,
@@ -878,7 +981,9 @@ def _validate_numeric_fact(
 
     if uncertainty is not None:
         if not isinstance(uncertainty, dict):
-            raise EvidenceCaseValidationError(f"{case_id}: {field_path}.uncertainty must be a mapping")
+            raise EvidenceCaseValidationError(
+                f"{case_id}: {field_path}.uncertainty must be a mapping"
+            )
         kind = uncertainty.get("kind")
         if kind not in {"point", "interval"}:
             raise EvidenceCaseValidationError(
@@ -896,13 +1001,15 @@ def _validate_numeric_fact(
             missing = [bound for bound in ("min", "max") if bound not in uncertainty]
             if missing:
                 raise EvidenceCaseValidationError(
-                    f"{case_id}: {field_path}.uncertainty interval requires {', '.join(missing)}"
+                    f"{case_id}: {field_path}.uncertainty interval requires "
+                    f"{', '.join(missing)}"
                 )
             lower = uncertainty.get("min")
             upper = uncertainty.get("max")
             if not _is_number(lower) or not _is_number(upper):
                 raise EvidenceCaseValidationError(
-                    f"{case_id}: {field_path}.uncertainty min and max must be finite numbers"
+                    f"{case_id}: {field_path}.uncertainty min and max must be finite "
+                    "numbers"
                 )
             if lower > upper:
                 raise EvidenceCaseValidationError(
@@ -915,8 +1022,14 @@ def _validate_numeric_fact(
             f"{case_id}: {field_path} requires a finite numeric value or interval"
         )
     if value is not None and not _is_number(value):
-        raise EvidenceCaseValidationError(f"{case_id}: {field_path}.value must be a finite number")
-    if value is not None and interval is not None and not interval[0] <= float(value) <= interval[1]:
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path}.value must be a finite number"
+        )
+    if (
+        value is not None
+        and interval is not None
+        and not interval[0] <= float(value) <= interval[1]
+    ):
         raise EvidenceCaseValidationError(
             f"{case_id}: {field_path}.value must fall within its uncertainty interval"
         )
@@ -927,12 +1040,16 @@ def _validate_numeric_fact(
     if field_name in {"genome_size_mb", "coverage", "read_n50_kb"} and any(
         item <= 0 for item in values
     ):
-        raise EvidenceCaseValidationError(f"{case_id}: {field_path} values must be positive")
+        raise EvidenceCaseValidationError(
+            f"{case_id}: {field_path} values must be positive"
+        )
     if field_name == "heterozygosity" and any(not 0 <= item <= 1 for item in values):
         raise EvidenceCaseValidationError(
             f"{case_id}: {field_path} values must be fractions between 0 and 1"
         )
-    if field_name == "ploidy" and any(item <= 0 or not item.is_integer() for item in values):
+    if field_name == "ploidy" and any(
+        item <= 0 or not item.is_integer() for item in values
+    ):
         raise EvidenceCaseValidationError(
             f"{case_id}: {field_path}.value must be a positive integer"
         )

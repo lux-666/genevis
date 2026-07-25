@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -148,7 +148,7 @@ def normalize_read_type(
     value: Any, *, platform: Any = None
 ) -> NormalizedReadType | None:
     if value in SHARED_TO_METHOD_READ_TYPE:
-        return value
+        return cast(NormalizedReadType, value)
     if value in ROUTE_TO_READ_TYPE:
         return ROUTE_TO_READ_TYPE[str(value)]
     if value in FLYE_TO_SHARED_READ_TYPE:

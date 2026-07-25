@@ -11,9 +11,12 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from langchain_core.runnables import RunnableConfig
 
 from app.review.gates import find_review_gate, registered_review_stage_label
+from app.schemas.state import ActiveInterrupt, validate_top_level_state
 from app.storage.paths import SessionPaths, locate_session_data_dir
 
 if TYPE_CHECKING:
@@ -97,8 +100,7 @@ DECISION_HELP = {
         "reject the AutoHiC result and continue with the prior contig assembly."
     ),
     "request_parameter_retry": (
-        "seal this AutoHiC attempt and request a fresh sparse parameter "
-        "recommendation."
+        "seal this AutoHiC attempt and request a fresh sparse parameter recommendation."
     ),
     "select_method": "choose one available method/result for this gate.",
     "skip": "do not use this stage's result; continue with the previous assembly.",
@@ -117,8 +119,7 @@ DECISION_HELP = {
         "execution."
     ),
     "reject_parameters": (
-        "reject this parameter recommendation and stop the current workflow "
-        "attempt."
+        "reject this parameter recommendation and stop the current workflow attempt."
     ),
 }
 
@@ -148,7 +149,10 @@ def render_blocked_summary(summary: dict[str, Any]) -> None:
     print()
 
 
-def _render_assembly_review(requirements: dict, summary: dict) -> None:
+def _render_assembly_review(
+    requirements: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
     decisions = requirements.get("decisions_allowed", [])
     _render_choices(decisions)
     _render_assembly_review_downstream_context(decisions)
@@ -188,7 +192,10 @@ def _render_assembly_review_downstream_context(decisions: list[str]) -> None:
         _render_decision_meanings(decisions)
 
 
-def _render_hic_scaffolding(requirements: dict, summary: dict) -> None:
+def _render_hic_scaffolding(
+    requirements: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
     decisions = requirements.get("decisions_allowed", [])
     _render_choices(decisions)
     _render_decision_meanings(decisions)
@@ -240,7 +247,7 @@ def _render_decision_meanings(decisions: list[str]) -> None:
         print(f"  {_choice_display(decision)}: {help_text}")
 
 
-def _render_generic_gate(requirements: dict) -> None:
+def _render_generic_gate(requirements: dict[str, Any]) -> None:
     decisions = requirements.get("decisions_allowed", [])
     _render_choices(decisions)
     _render_decision_meanings(decisions)
@@ -363,9 +370,10 @@ def prompt_assembly_review_decision(
         rejected = [c for c in candidate_ids if c != candidate_id]
 
     if decision in ("purge", "polish"):
-        metadata = _prompt_transform_action_metadata(decision)
-        if metadata is None:
+        transform_metadata = _prompt_transform_action_metadata(decision)
+        if transform_metadata is None:
             return None
+        metadata = transform_metadata
         final_assembly_ref = metadata.get("action_output_ref")
     notes_raw = _prompt_notes()
 
@@ -822,8 +830,7 @@ def render_decision_brief(brief: dict[str, Any]) -> None:
     print(f"Stage:    {brief.get('stage')}")
     print(f"State:    {brief.get('supervision_state')}")
     choices = ", ".join(
-        _choice_display(decision)
-        for decision in brief.get("decisions_allowed", [])
+        _choice_display(decision) for decision in brief.get("decisions_allowed", [])
     )
     print(f"Choices:  {choices}")
 
@@ -929,9 +936,10 @@ def _load_artifact_payload(artifact: dict[str, Any] | None) -> dict[str, Any] | 
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _brief_parameter_approval(
@@ -1262,15 +1270,17 @@ def _checkpoint_blocked_summary(
     ):
         return None
 
-    state = snapshot.values
+    state = validate_top_level_state(snapshot.values)
     summary = inspect_state(state)
     summary["checkpoint_persistence"] = "sqlite"
     summary["durable_resume_available"] = True
     summary["latest_review_request_artifact"] = None
-    active_interrupt = state.get("active_interrupt") or {}
-    request_ref = active_interrupt.get("review_request_artifact_ref")
-    if request_ref:
-        summary["latest_review_request_artifact"] = {"file_path": request_ref}
+    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
+    request_ref = active_interrupt.get("request_ref")
+    if request_ref and request_ref.get("path_ref"):
+        summary["latest_review_request_artifact"] = {
+            "file_path": request_ref["path_ref"]
+        }
     summary["latest_review_request"] = {"payload": active_interrupt}
     summary["next_action"] = build_result_next_action(
         {
@@ -1284,7 +1294,7 @@ def _checkpoint_blocked_summary(
 
 
 def persist_decision_artifact(
-    raw_decision: dict,
+    raw_decision: dict[str, Any],
     stage: str,
     session_id: str,
     data_dir: str,
@@ -1351,10 +1361,10 @@ def run_interactive_review(
         print(f"error: no checkpoint database at {db_path}", file=sys.stderr)
         return 1
 
-    from app.entrypoints.run import build_graph
+    from app.graph.builder import build_graph
 
     graph = build_graph(backend="sqlite", data_dir=data_dir)
-    config = {"configurable": {"thread_id": session_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": session_id}}
 
     try:
         transaction = execute_resume_transaction(

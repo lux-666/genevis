@@ -8,7 +8,6 @@ from typing import Any, Mapping
 
 from app.llm.prompts import load_prompt_bundle, render_prompt_messages
 
-
 _BUNDLE_BY_METHOD = {
     "flye": "assembly.parameter_flye",
     "nextdenovo": "assembly.parameter_nextdenovo",

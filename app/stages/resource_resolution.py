@@ -43,7 +43,7 @@ class ResourceResolution:
     """Resolved paths (multiple if allow_multiple=True)."""
 
     source: str
-    """Source identifier: 'override', 'resource_refs', 'asset_registry', or 'missing'."""
+    ("Source identifier: 'override', 'resource_refs', 'asset_registry', or 'missing'.")
 
     source_type: str
     """Source type: 'override', 'resource_refs', 'asset', or 'missing'."""

@@ -6,7 +6,6 @@ to verify command construction without requiring actual tools.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from app.schemas.descriptors import FrozenAttemptSpec
@@ -26,7 +25,7 @@ class FakeRunner:
         assert fake_runner.executed_commands[0] == ["hifiasm", "-t", "8", ...]
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.executed_commands: list[dict[str, Any]] = []
         """List of all executed command specs (for inspection in tests)."""
 
@@ -46,18 +45,20 @@ class FakeRunner:
         spec.working_dir.mkdir(parents=True, exist_ok=True)
 
         # Record the command for test inspection
-        self.executed_commands.append({
-            "attempt_id": spec.attempt_id,
-            "stage": spec.stage,
-            "method_name": spec.method_name,
-            "script_path": spec.script_path,
-            "working_dir": spec.working_dir,
-            "interpreter": spec.interpreter,
-            "expected_outputs": spec.expected_outputs,
-            "env": spec.env,
-            "conda_env": spec.conda_env,
-            "conda_prefix": spec.conda_prefix,
-        })
+        self.executed_commands.append(
+            {
+                "attempt_id": spec.attempt_id,
+                "stage": spec.stage,
+                "method_name": spec.method_name,
+                "script_path": spec.script_path,
+                "working_dir": spec.working_dir,
+                "interpreter": spec.interpreter,
+                "expected_outputs": spec.expected_outputs,
+                "env": spec.env,
+                "conda_env": spec.conda_env,
+                "conda_prefix": spec.conda_prefix,
+            }
+        )
 
         # Check if there's a pre-configured result for this command
         key = f"{spec.stage}:{spec.method_name}"

@@ -275,7 +275,7 @@ def _model_safe_value(value: Any) -> Any:
 
 
 def _mapping_identifies_audit_metadata(value: Mapping[Any, Any]) -> bool:
-    locator_fields = ("path", "key", "field", "signal_id")
+    locator_fields: tuple[str, ...] = ("path", "key", "field", "signal_id")
     if {"id", "section", "name", "value"}.issubset(value):
         locator_fields = (*locator_fields, "id", "name")
     for field in locator_fields:

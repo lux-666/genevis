@@ -6,6 +6,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from langgraph.graph.state import CompiledStateGraph
+
 from app.configuration import load_descriptor_registry
 from app.domains.parameter_recommendation.resolution import (
     render_config_keys,
@@ -28,7 +30,7 @@ from app.schemas.artifacts import (
     ParameterAttempt,
 )
 from app.schemas.parameter_recommendation import ResolvedParameterSources
-from app.schemas.state import TopLevelState
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.base import absolute_data_dir, stage_work_dir
 from app.stages.hic_scaffolding.method_application.support import (
     collect_method_artifacts,
@@ -43,6 +45,7 @@ from app.stages.hic_scaffolding.parameters.storage import (
     publish_autohic_parameter_file,
     write_autohic_parameter_artifact,
 )
+from app.stages.hic_scaffolding.state import HiCScaffoldingCursor
 from app.storage.parameter_evidence import load_approved_parameter_chain_v3
 from app.storage.paths import SessionPaths
 from app.storage.publish import shell_publish_variable
@@ -61,7 +64,12 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_autohic_graph():
+def build_autohic_graph() -> CompiledStateGraph[
+    TopLevelState,
+    None,
+    TopLevelState,
+    TopLevelState,
+]:
     """Build the AutoHiC freeze -> run -> collect lifecycle."""
     return build_method_graph(
         LIFECYCLE,
@@ -70,7 +78,7 @@ def build_autohic_graph():
     )
 
 
-def freeze_autohic_attempt(state: TopLevelState) -> dict:
+def freeze_autohic_attempt(state: TopLevelState) -> StateUpdate:
     """Freeze one end-to-end AutoHiC run from contigs and paired Hi-C reads."""
     output = hic_output(state)
     if not is_enabled(output):
@@ -97,7 +105,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     data_dir = absolute_data_dir(state)
     session_id = state["session_id"]
     env_spec, packages, env_blocked = resolve_method_env(
-        output,
+        dict(output),
         stage="hic_scaffolding",
         method_name=METHOD,
         session_id=session_id,
@@ -138,6 +146,8 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
         missing_models.append("packages.autohic.models.chromosome")
     if missing_models:
         return update_hic_output(state, _missing_block(", ".join(missing_models)))
+    assert error_model is not None
+    assert chromosome_model is not None
     parameters["error_model_ref"] = str(error_model.resolve())
     parameters["chromosome_model_ref"] = str(chromosome_model.resolve())
 
@@ -365,7 +375,7 @@ def freeze_autohic_attempt(state: TopLevelState) -> dict:
     )
 
 
-def collect_autohic_artifacts(state: TopLevelState) -> dict:
+def collect_autohic_artifacts(state: TopLevelState) -> StateUpdate:
     """Register AutoHiC's chromosome FASTA, .hic, .assembly, and report."""
     output = hic_output(state)
     parameter_attempts = [
@@ -408,7 +418,7 @@ def collect_autohic_artifacts(state: TopLevelState) -> dict:
     )
 
 
-def is_enabled(output: dict[str, Any]) -> bool:
+def is_enabled(output: HiCScaffoldingCursor) -> bool:
     """Return whether selected-stage execution has approved frozen parameters."""
 
     return (
@@ -419,7 +429,7 @@ def is_enabled(output: dict[str, Any]) -> bool:
 
 def _parameters(
     state: TopLevelState,
-    output: dict[str, Any],
+    output: HiCScaffoldingCursor,
     assembly: Path,
 ) -> tuple[
     dict[str, Any],
@@ -713,7 +723,11 @@ def _missing_tool_block(tool: str, root: Path) -> dict[str, Any]:
     }
 
 
-def _blocked(state: TopLevelState, output: dict[str, Any], note: str) -> dict:
+def _blocked(
+    state: TopLevelState,
+    output: HiCScaffoldingCursor,
+    note: str,
+) -> StateUpdate:
     return update_hic_output(
         state,
         {

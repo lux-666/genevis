@@ -35,13 +35,16 @@ def reject_lifecycle_request(request_text: str) -> None:
     for pattern in _LIFECYCLE_PATTERNS:
         if re.search(pattern, request_text, flags=re.IGNORECASE):
             raise ValueError(
-                "Lifecycle requests such as continue/resume/inspect/retry/rerun/rebuild "
+                "Lifecycle requests such as "
+                "continue/resume/inspect/retry/rerun/rebuild "
                 "are not supported by the start parser. Use a structured run request, "
                 "or wait for the review/resume command surface."
             )
 
 
-def parse_intent_response(response_text: str, *, defaults: Mapping[str, Any] | None = None) -> EntryRequest:
+def parse_intent_response(
+    response_text: str, *, defaults: Mapping[str, Any] | None = None
+) -> EntryRequest:
     """Parse one LLM response into a validated entry request."""
 
     payload = _parse_single_json_object(response_text)
@@ -50,7 +53,8 @@ def parse_intent_response(response_text: str, *, defaults: Mapping[str, Any] | N
         return EntryRequest.model_validate(merged)
     except ValidationError as exc:
         details = "; ".join(
-            f"{'.'.join(str(part) for part in err.get('loc', ()))}: {err.get('msg', 'invalid value')}"
+            f"{'.'.join(str(part) for part in err.get('loc', ()))}: "
+            f"{err.get('msg', 'invalid value')}"
             for err in exc.errors()
         )
         raise ValueError(
@@ -84,7 +88,9 @@ def parse_request_with_llm(
         fallback = _parse_request_deterministically(request_text, defaults=defaults)
         if fallback is not None:
             return fallback
-        raise RuntimeError(f"Intent LLM call failed: {type(exc).__name__}: {exc}") from exc
+        raise RuntimeError(
+            f"Intent LLM call failed: {type(exc).__name__}: {exc}"
+        ) from exc
     response_text = _response_to_text(response)
     request = parse_intent_response(response_text, defaults=defaults)
     request = _fill_target_species_from_text(request, request_text)
@@ -117,7 +123,7 @@ def _parse_request_deterministically(
     *,
     defaults: Mapping[str, Any] | None = None,
 ) -> EntryRequest | None:
-    """Best-effort local parser for path-shaped start requests when LLM is unavailable."""
+    "Best-effort local parser for path-shaped start requests when LLM is unavailable."
 
     source_paths = _extract_source_paths(request_text)
     if not source_paths:
@@ -134,7 +140,9 @@ def _parse_request_deterministically(
     if any(token in lower for token in ("nanopore", "ont")):
         payload["platform"] = "ont"
         payload["asset_type_hint"] = "raw_long_reads"
-    elif any(token in lower for token in ("cycloneseq", "cyclone sequencing", "cyclone文件")):
+    elif any(
+        token in lower for token in ("cycloneseq", "cyclone sequencing", "cyclone文件")
+    ):
         payload["platform"] = "cycloneseq"
         payload["asset_type_hint"] = "raw_long_reads"
 
@@ -142,7 +150,9 @@ def _parse_request_deterministically(
     if target_species:
         payload["target_species"] = target_species
 
-    request = parse_intent_response(json.dumps(payload, ensure_ascii=False), defaults=defaults)
+    request = parse_intent_response(
+        json.dumps(payload, ensure_ascii=False), defaults=defaults
+    )
     request._intent_parse_source = "deterministic_fallback"
     return request
 
@@ -167,7 +177,9 @@ _TARGET_SPECIES_PATTERNS = [
 ]
 
 
-def _fill_target_species_from_text(request: EntryRequest, request_text: str) -> EntryRequest:
+def _fill_target_species_from_text(
+    request: EntryRequest, request_text: str
+) -> EntryRequest:
     if request.target_species:
         return request
     target_species = _infer_target_species_from_text(request_text)
@@ -205,10 +217,17 @@ def _parse_single_json_object(response_text: str) -> dict[str, Any]:
     return payload
 
 
-def _merge_defaults(payload: Mapping[str, Any], defaults: Mapping[str, Any] | None) -> dict[str, Any]:
+def _merge_defaults(
+    payload: Mapping[str, Any], defaults: Mapping[str, Any] | None
+) -> dict[str, Any]:
     merged = dict(payload)
     for key in ("session_id", "data_dir"):
-        if key not in merged and defaults and key in defaults and defaults[key] is not None:
+        if (
+            key not in merged
+            and defaults
+            and key in defaults
+            and defaults[key] is not None
+        ):
             merged[key] = defaults[key]
     return merged
 
@@ -221,7 +240,9 @@ def _extract_json_object(text: str) -> str:
     if stripped.startswith("["):
         return stripped
 
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    fenced = re.search(
+        r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL | re.IGNORECASE
+    )
     if fenced:
         fenced_text = fenced.group(1).strip()
         if fenced_text.startswith("["):
@@ -230,7 +251,9 @@ def _extract_json_object(text: str) -> str:
         if len(fenced_payloads) == 1:
             return fenced_payloads[0]
         if len(fenced_payloads) > 1:
-            raise ValueError("Intent parser found multiple JSON objects inside one fenced block.")
+            raise ValueError(
+                "Intent parser found multiple JSON objects inside one fenced block."
+            )
         if fenced_text.startswith("{"):
             return fenced_text
 
@@ -238,7 +261,9 @@ def _extract_json_object(text: str) -> str:
     if len(payloads) == 1:
         return payloads[0]
     if len(payloads) > 1:
-        raise ValueError("Intent parser found multiple JSON objects in the LLM response.")
+        raise ValueError(
+            "Intent parser found multiple JSON objects in the LLM response."
+        )
     if stripped.startswith("{"):
         return stripped
 

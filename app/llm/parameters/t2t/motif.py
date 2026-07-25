@@ -19,7 +19,7 @@ from app.schemas.parameter_recommendation import (
 from app.schemas.shared_parameters import DnaMotif, normalize_dna_motif
 
 PROMPT_BUNDLE = "t2t.telomere_motif"
-MOTIF_RESOLUTION_CONTRACT = "t2t_telomere_motif_v1"
+MOTIF_RESOLUTION_CONTRACT: Literal["t2t_telomere_motif_v1"] = "t2t_telomere_motif_v1"
 
 
 class T2TMotifRequest(BaseModel):

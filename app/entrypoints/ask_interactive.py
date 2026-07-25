@@ -8,7 +8,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import ValidationError
 
@@ -43,6 +43,7 @@ from app.schemas.ask_plan import (
 from app.schemas.shared_parameters import (
     SharedParameters,
 )
+from app.stages.preflight import PlanValidation
 
 try:
     import questionary
@@ -488,7 +489,7 @@ def _draft_stage_parameter_lines(
     missing = set(summary.get("missing_parameter_fields") or [])
     shared_stage = _shared_parameter_stage(plan)
     if stage == shared_stage:
-        shared_values = {}
+        shared_values: dict[str, Any] = {}
         shared_values.update(summary.get("shared_parameter_defaults") or {})
         shared_values.update(summary.get("shared_parameters") or {})
         shared_sources = summary.get("shared_parameter_default_sources") or {}
@@ -528,7 +529,7 @@ def _draft_stage_parameter_lines(
                 seen.add(field)
                 lines.append(f"[{short}] {field.rsplit('.', 1)[-1]}: missing")
 
-    stage_values = {}
+    stage_values: dict[str, Any] = {}
     stage_values.update(
         (summary.get("stage_parameter_defaults") or {}).get(stage) or {}
     )
@@ -554,10 +555,10 @@ def _draft_stage_attention(
     summary: dict[str, Any],
     attention_items: list[tuple[str, str]],
 ) -> list[str]:
-    (
-        "Collect attention items for a specific stage. "
-        "Filters inline instead of pre-aggregating."
-    )
+    """Collect attention items for one stage.
+
+    Filtering stays inline instead of using a pre-aggregated mapping.
+    """
     attention: list[str] = []
     for item_stage, message in attention_items:
         if item_stage == stage:
@@ -665,9 +666,10 @@ def _prompt_draft_action(plan: AskPlanState) -> str:
             questionary.Choice("edit stage list", value="stages"),
             questionary.Choice("restart manually", value="restart"),
         ]
-        return _safe_ask(
+        answer = _safe_ask(
             questionary.select("Plan action:", choices=choices, default="continue")
         )
+        return str(answer)
 
     raw = input("plan> ").strip().lower()
     if raw in ("", "c", "continue", "y", "yes"):
@@ -1172,9 +1174,15 @@ def _ordered_summary_methods(summary: dict[str, Any]) -> list[str]:
     return ordered
 
 
+class _MissingFieldScopes(TypedDict):
+    shared: list[str]
+    stage: dict[str, list[str]]
+    method: dict[str, list[str]]
+
+
 def _group_missing_fields_by_scope(
     missing_fields: list[str], methods: set[str] | None = None
-) -> dict[str, Any]:
+) -> _MissingFieldScopes:
     """Parse missing_fields and group by scope: shared, stage, or method.
 
     Returns dict with keys:
@@ -1320,7 +1328,7 @@ def _prompt_for_answer(
 
 def _prompt_confirm(message: str) -> bool:
     if _HAS_QUESTIONARY:
-        return _safe_ask(questionary.confirm(message, default=False))
+        return bool(_safe_ask(questionary.confirm(message, default=False)))
     raw = input(f"{message} [y/N] ").strip().lower()
     return raw in ("y", "yes")
 
@@ -1577,9 +1585,16 @@ def _prompt_parameter_values(
                 value = _parse_genome_size(value)
             params.setdefault(method_key, {})[param_name] = value
             _update_derived_defaults(method_key, param_name, value, defaults)
+    normalized_shared = (
+        SharedParameters.model_validate(
+            _derive_shared_parameter_defaults(shared_params)
+        )
+        if shared_params
+        else None
+    )
     return AskClarificationResponse(
         kind="parameter_values",
-        shared_parameters=_derive_shared_parameter_defaults(shared_params) or None,
+        shared_parameters=normalized_shared,
         method_parameters=params or None,
         stage_parameters=stage_params or None,
     )
@@ -1827,10 +1842,10 @@ def _find_default(field: str, defaults: dict[str, Any]) -> Any:
 def _update_derived_defaults(
     method_key: str, param_name: str, value: Any, defaults: dict[str, Any]
 ) -> None:
-    (
-        "After user provides a value, derive related defaults "
-        "(e.g. BUSCO lineage fields from path)."
-    )
+    """Derive related defaults after the user provides a value.
+
+    For example, infer BUSCO lineage fields from its path.
+    """
     if (
         method_key == "assembly_review.eval.busco"
         and param_name == "lineage_path"
@@ -1887,22 +1902,26 @@ def _apply_set_params(plan: AskPlanState, set_params: list[str]) -> AskPlanState
         else {}
     )
     for key, value in parsed.items():
+        normalized_value: Any = value
         alias = _PARAM_ALIASES.get(key)
         if alias:
             method, param = alias
             if method == "shared_parameters":
                 if param == "estimated_genome_size":
-                    value = _parse_genome_size(value)
+                    normalized_value = _parse_genome_size(value)
                 if param == "read_type":
-                    value = FLYE_TO_SHARED_READ_TYPE.get(str(value), value)
+                    normalized_value = FLYE_TO_SHARED_READ_TYPE.get(
+                        str(normalized_value),
+                        normalized_value,
+                    )
                 if param == "platform":
-                    value = _normalize_shared_platform(value)
-                shared[param] = value
+                    normalized_value = _normalize_shared_platform(normalized_value)
+                shared[param] = normalized_value
                 continue
             bucket = dict(existing.get(method, {}))
-            bucket[param] = value
+            bucket[param] = normalized_value
             existing[method] = bucket
-    update = {}
+    update: dict[str, Any] = {}
     if existing:
         update["method_parameters"] = existing
     if shared:
@@ -1984,7 +2003,7 @@ def _attempt_preflight_validation(plan: AskPlanState) -> bool:
         return True
 
 
-def _render_validation_errors(validation) -> None:
+def _render_validation_errors(validation: PlanValidation) -> None:
     """Display friendly validation errors to the user."""
     print(f"\n{validation.summary}\n")
 

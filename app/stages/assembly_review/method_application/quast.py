@@ -7,6 +7,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from langgraph.graph.state import CompiledStateGraph
+
 from app.execution.attempt_owners import DIRECT_ATTEMPTS_KEY
 from app.execution.env_dispatch import resolve_method_env
 from app.execution.lifecycle import (
@@ -21,8 +23,10 @@ from app.schemas.artifacts import (
     ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
     ASSEMBLY_REVIEW_QUAST_SUMMARY,
     ArtifactMeta,
+    AssemblyEvalSignal,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.descriptors import FrozenAttemptSpec
+from app.schemas.state import StateUpdate, TopLevelState
 from app.stages.assembly_review.method_application.support import (
     local_execution_enabled,
     mark_missing_signals,
@@ -34,6 +38,7 @@ from app.stages.assembly_review.method_application.support import (
     update_review_output,
     update_signal,
 )
+from app.stages.assembly_review.state import AssemblyReviewCursor
 from app.stages.base import absolute_data_dir, ordered_unique, stage_work_dir
 from app.storage.artifacts import publish_or_recover_work_artifact
 from app.storage.ledger import Ledger
@@ -52,7 +57,9 @@ LIFECYCLE = MethodExecutionLifecycle(
 )
 
 
-def build_quast_graph():
+def build_quast_graph() -> CompiledStateGraph[
+    TopLevelState, None, TopLevelState, TopLevelState
+]:
     return build_method_graph(
         LIFECYCLE,
         freeze_quast_attempts,
@@ -60,7 +67,7 @@ def build_quast_graph():
     )
 
 
-def freeze_quast_attempts(state: TopLevelState) -> dict:
+def freeze_quast_attempts(state: TopLevelState) -> StateUpdate:
     """Freeze local QUAST attempts for materialized assembly candidates."""
     output = review_output(state)
     review_plan = output.get("review_plan") or {}
@@ -68,28 +75,39 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
         return {}
     descriptor_error = review_methods_error([QUAST_METHOD])
     if descriptor_error:
-        return update_review_output(state, {"status": "failed", "reason": descriptor_error})
+        return update_review_output(
+            state, {"status": "failed", "reason": descriptor_error}
+        )
     candidates = output.get("candidates", [])
     materialized = materialized_candidates(candidates)
     signals = mark_missing_signals(
-        output.get("signals", []), candidates, signal_name="quast", method_name=QUAST_METHOD,
+        output.get("signals", []),
+        candidates,
+        signal_name="quast",
+        method_name=QUAST_METHOD,
         reason="quast_requires_materialized_draft_assembly",
         materialized_ids={candidate.get("candidate_id") for candidate in materialized},
     )
     if not materialized:
-        return rewrite_eval_bundle(state, {**output, "signals": signals}, status="quast_skipped")
+        return rewrite_eval_bundle(
+            state, {**output, "signals": signals}, status="quast_skipped"
+        )
     threads, error = quast_threads(output)
     if error:
         return update_review_output(state, {"status": "failed", "reason": error})
     session_id = state["session_id"]
     data_dir = absolute_data_dir(state)
     env_spec, _packages, blocked = resolve_method_env(
-        output, stage="assembly_review", method_name=QUAST_METHOD, session_id=session_id, data_dir=data_dir,
+        dict(output),
+        stage="assembly_review",
+        method_name=QUAST_METHOD,
+        session_id=session_id,
+        data_dir=data_dir,
         input_manifest_ref=state.get("input_manifest_ref", ""),
     )
     if blocked is not None:
         return update_review_output(state, blocked)
-    attempts = []
+    attempts: list[FrozenAttemptSpec] = []
     for candidate in materialized:
         candidate_id = candidate.get("candidate_id", "unknown")
         safe_id = safe_candidate_id(candidate_id)
@@ -98,32 +116,52 @@ def freeze_quast_attempts(state: TopLevelState) -> dict:
         script_path = working_dir / "run_quast.sh"
         out_dir = working_dir / "quast_out"
         report_tsv = out_dir / "report.tsv"
-        assembly_ref = Path(candidate["final_assembly_ref"])
+        final_ref = candidate.get("final_assembly_ref")
+        if final_ref is None:
+            continue
+        assembly_ref = Path(final_ref)
         script_path.write_text(
             "set -e\n"
             f"mkdir -p {shlex.quote(str(out_dir))}\n"
-            f"quast.py {shlex.quote(str(assembly_ref))} -o {shlex.quote(str(out_dir))} --threads {threads}\n"
+            f"quast.py {shlex.quote(str(assembly_ref))} "
+            f"-o {shlex.quote(str(out_dir))} --threads {threads}\n"
             f"test -f {shlex.quote(str(report_tsv))}\n",
             encoding="utf-8",
         )
         script_path.chmod(0o755)
         attempt = build_frozen_attempt(
-            attempt_id=f"{session_id}:assembly_review:quast:{safe_id}", session_id=session_id,
-            stage="assembly_review", method_name=QUAST_METHOD, script_path=script_path,
-            working_dir=working_dir, expected_outputs=[report_tsv], env=output.get("env"), env_spec=env_spec,
-            metadata={"candidate_id": candidate_id, "draft_assembly_ref": str(assembly_ref),
-                      "quast_output_dir": str(out_dir), "report_tsv": str(report_tsv), "threads": threads},
+            attempt_id=f"{session_id}:assembly_review:quast:{safe_id}",
+            session_id=session_id,
+            stage="assembly_review",
+            method_name=QUAST_METHOD,
+            script_path=script_path,
+            working_dir=working_dir,
+            expected_outputs=[report_tsv],
+            env=output.get("env"),
+            env_spec=env_spec,
+            metadata={
+                "candidate_id": candidate_id,
+                "draft_assembly_ref": str(assembly_ref),
+                "quast_output_dir": str(out_dir),
+                "report_tsv": str(report_tsv),
+                "threads": threads,
+            },
         )
         attempts.append(attempt)
     return freeze_method_attempts(
         state,
         LIFECYCLE,
         attempts,
-        stage_updates={"signals": signals},
+        stage_updates={
+            "signals": [
+                AssemblyEvalSignal.model_validate(signal).model_dump(mode="json")
+                for signal in signals
+            ]
+        },
     )
 
 
-def collect_quast_artifacts(state: TopLevelState) -> dict:
+def collect_quast_artifacts(state: TopLevelState) -> StateUpdate:
     """Collect QUAST artifacts and update review signals."""
     output = review_output(state)
     if output.get("status") != RAN_STATUS:
@@ -141,9 +179,16 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
         artifacts: list[ArtifactMeta] = []
         metric_refs: list[str] = []
         notes = ["thresholds_not_applied_without_human_approval"]
-        metadata: dict[str, Any] = {"attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "quast_output_dir": attempt.metadata.get("quast_output_dir")}
+        metadata: dict[str, Any] = {
+            "attempt_id": attempt.attempt_id,
+            "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"),
+            "quast_output_dir": attempt.metadata.get("quast_output_dir"),
+        }
         if result.success:
-            artifact_metadata = {"attempt_id": attempt.attempt_id, "candidate_id": candidate_id}
+            artifact_metadata = {
+                "attempt_id": attempt.attempt_id,
+                "candidate_id": candidate_id,
+            }
             report_tsv = publish_or_recover_work_artifact(
                 data_dir,
                 session_id,
@@ -153,7 +198,15 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
                 artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
                 metadata=artifact_metadata,
             ).path
-            artifacts.append(ArtifactMeta.from_file(report_tsv, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV, metadata=artifact_metadata))
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    report_tsv,
+                    stage="assembly_review",
+                    method_name=QUAST_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TSV,
+                    metadata=artifact_metadata,
+                )
+            )
             metric_refs.append(str(report_tsv))
             report_txt = Path(attempt.metadata["quast_output_dir"]) / "report.txt"
             try:
@@ -169,11 +222,37 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
             except FileNotFoundError:
                 pass
             else:
-                artifacts.append(ArtifactMeta.from_file(report_txt, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT, metadata=artifact_metadata))
+                artifacts.append(
+                    ArtifactMeta.from_file(
+                        report_txt,
+                        stage="assembly_review",
+                        method_name=QUAST_METHOD,
+                        artifact_type=ASSEMBLY_REVIEW_QUAST_REPORT_TXT,
+                        metadata=artifact_metadata,
+                    )
+                )
                 metric_refs.append(str(report_txt))
             metrics = parse_quast_report_tsv(report_tsv)
             summary_source = Path(attempt.working_dir) / "quast_summary.json"
-            summary_source.write_text(json.dumps({"session_id": session_id, "method_name": QUAST_METHOD, "candidate_id": candidate_id, "attempt_id": attempt.attempt_id, "draft_assembly_ref": attempt.metadata.get("draft_assembly_ref"), "report_tsv_ref": str(report_tsv), "metrics": metrics, "notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
+            summary_source.write_text(
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "method_name": QUAST_METHOD,
+                        "candidate_id": candidate_id,
+                        "attempt_id": attempt.attempt_id,
+                        "draft_assembly_ref": attempt.metadata.get(
+                            "draft_assembly_ref"
+                        ),
+                        "report_tsv_ref": str(report_tsv),
+                        "metrics": metrics,
+                        "notes": notes,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             summary_path = publish_or_recover_work_artifact(
                 data_dir,
                 session_id,
@@ -183,19 +262,53 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
                 artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY,
                 metadata=artifact_metadata,
             ).path
-            artifacts.append(ArtifactMeta.from_file(summary_path, stage="assembly_review", method_name=QUAST_METHOD, artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY, metadata=artifact_metadata))
+            artifacts.append(
+                ArtifactMeta.from_file(
+                    summary_path,
+                    stage="assembly_review",
+                    method_name=QUAST_METHOD,
+                    artifact_type=ASSEMBLY_REVIEW_QUAST_SUMMARY,
+                    metadata=artifact_metadata,
+                )
+            )
             metric_refs.append(str(summary_path))
             payloads = [artifact.model_dump(mode="json") for artifact in artifacts]
             ledger.record_attempt_succeeded(session_id, attempt, artifacts=payloads)
             for artifact in payloads:
-                ledger.record_artifact_registered(session_id, artifact, attempt_id=attempt.attempt_id)
+                ledger.record_artifact_registered(
+                    session_id, artifact, attempt_id=attempt.attempt_id
+                )
             artifact_refs.extend(str(artifact.file_path) for artifact in artifacts)
-            metadata.update({"metrics": metrics, "quast_summary_ref": str(summary_path)})
-            signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="available", metric_refs=metric_refs, notes=[*notes, "quast_executed"], metadata=metadata)
+            metadata.update(
+                {"metrics": metrics, "quast_summary_ref": str(summary_path)}
+            )
+            signals = update_signal(
+                signals,
+                signal_name="quast",
+                method_name=QUAST_METHOD,
+                candidate_id=candidate_id,
+                status="available",
+                metric_refs=metric_refs,
+                notes=[*notes, "quast_executed"],
+                metadata=metadata,
+            )
         else:
             metadata.update({"return_code": result.return_code, "error": result.error})
-            signals = update_signal(signals, signal_name="quast", method_name=QUAST_METHOD, candidate_id=candidate_id, status="failed", metric_refs=[], notes=["quast_execution_failed", "candidate_not_rejected_from_metrics"], metadata=metadata)
-    update = rewrite_eval_bundle(state, {**output, "signals": signals, "artifact_refs": ordered_unique(artifact_refs)}, status="evaluating")
+            signals = update_signal(
+                signals,
+                signal_name="quast",
+                method_name=QUAST_METHOD,
+                candidate_id=candidate_id,
+                status="failed",
+                metric_refs=[],
+                notes=["quast_execution_failed", "candidate_not_rejected_from_metrics"],
+                metadata=metadata,
+            )
+    update = rewrite_eval_bundle(
+        state,
+        {**output, "signals": signals, "artifact_refs": ordered_unique(artifact_refs)},
+        status="evaluating",
+    )
     outputs = update["stage_outputs"]
     outputs["assembly_review"] = {
         **outputs["assembly_review"],
@@ -204,17 +317,25 @@ def collect_quast_artifacts(state: TopLevelState) -> dict:
     return {"stage_outputs": outputs}
 
 
-def quast_threads(output: dict[str, Any]) -> tuple[int, str | None]:
-    try:
-        threads = int(dict(output.get("quast_parameters") or {}).get("threads", 1))
-    except (TypeError, ValueError):
-        return 0, "assembly_review.quast_parameters.threads must be a positive integer"
-    return (threads, None) if threads > 0 else (0, "assembly_review.quast_parameters.threads must be a positive integer")
+def quast_threads(output: AssemblyReviewCursor) -> tuple[int, str | None]:
+    threads = (output.get("quast_parameters") or {}).get("threads", 1)
+    return (
+        (threads, None)
+        if threads > 0
+        else (0, "assembly_review.quast_parameters.threads must be a positive integer")
+    )
 
 
 def parse_quast_report_tsv(path: Path) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    key_map = {"# contigs": "contig_count", "largest contig": "largest_contig", "total length": "total_length", "n50": "n50", "l50": "l50", "gc (%)": "gc_percent"}
+    key_map = {
+        "# contigs": "contig_count",
+        "largest contig": "largest_contig",
+        "total length": "total_length",
+        "n50": "n50",
+        "l50": "l50",
+        "gc (%)": "gc_percent",
+    }
     for line in path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         if len(parts) < 2 or (out_key := key_map.get(parts[0].strip().lower())) is None:

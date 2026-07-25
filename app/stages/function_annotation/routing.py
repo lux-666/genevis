@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from app.schemas.state import TopLevelState
+from app.stages.function_annotation.state import (
+    FunctionAnnotationCursor,
+    function_annotation_output,
+)
 
 
-def _output(state: TopLevelState) -> dict:
-    return (state.get("stage_outputs") or {}).get("function_annotation") or {}
+def _output(state: TopLevelState) -> FunctionAnnotationCursor:
+    return function_annotation_output(state)
 
 
 def route_after_resolve(state: TopLevelState) -> str:
@@ -20,12 +24,15 @@ def route_after_method_plan(state: TopLevelState) -> str:
 
 
 def route_after_provenance_validation(state: TopLevelState) -> str:
-    """Route after validating database provenance — dispatch to diamond execution or crash-recovery."""
+    """Route after validating database provenance — dispatch to diamond \
+execution or crash-recovery."""
     status = _output(state).get("status")
     if status == "failed":
         return "fail"
     if status in {"provenance_validated", "diamond_frozen", "diamond_ran"}:
-        return "diamond" if _output(state).get("execution_mode") == "local" else "commit"
+        return (
+            "diamond" if _output(state).get("execution_mode") == "local" else "commit"
+        )
     if status == "diamond_completed":
         return "commit"
     return "commit"

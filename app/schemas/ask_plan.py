@@ -27,7 +27,9 @@ class AskPlanState(BaseModel):
     version: Literal[1] = 1
     session_id: str
     data_dir: str
-    request_text: str | None = None  # original NL request, serialized for audit; not read back by code
+    request_text: str | None = (
+        None  # original NL request, serialized for audit; not read back by code
+    )
     entry_request: dict[str, Any]
     manifest_ref: str
     selected_stages: list[str] | None = None
@@ -84,7 +86,10 @@ class AskClarificationResponse(BaseModel):
         if self.kind == "parameter_values" and not (
             self.method_parameters or self.shared_parameters or self.stage_parameters
         ):
-            raise ValueError("parameter_values response requires method_parameters, shared_parameters, or stage_parameters")
+            raise ValueError(
+                "parameter_values response requires method_parameters, "
+                "shared_parameters, or stage_parameters"
+            )
         if self.kind == "confirm" and self.confirmed is None:
             raise ValueError("confirm response requires confirmed field")
         return self
@@ -101,7 +106,10 @@ def load_ask_plan(path: str | Path) -> AskPlanState:
 def save_ask_plan(plan: AskPlanState, path: str | Path) -> Path:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
+    out.write_text(
+        json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return out
 
 
@@ -110,7 +118,9 @@ def load_ask_clarification_response(path: str | Path) -> AskClarificationRespons
     try:
         return AskClarificationResponse.model_validate(payload)
     except ValidationError as exc:
-        raise ValueError(f"ask clarification response failed validation: {exc}") from exc
+        raise ValueError(
+            f"ask clarification response failed validation: {exc}"
+        ) from exc
 
 
 def _load_json_object(path: str | Path, *, label: str) -> dict[str, Any]:

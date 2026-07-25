@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from app.control.lifecycle import ResumeValidationError
 from app.domains.assembly.selection import AssemblySelection
@@ -36,9 +38,6 @@ from app.llm.parameters.assembly.recommender import (
     restore_assembly_parameter_decision,
 )
 from app.llm.parameters.assembly.request import build_parameter_request_dto
-from app.llm.parameters.assembly.response import (
-    PARAMETER_RECOMMENDATION_CONTRACT,
-)
 from app.review.base import ResumeReviewRequest
 from app.review.persistence import (
     ReviewPersistenceError,
@@ -60,6 +59,7 @@ from app.schemas.artifacts import (
     ASSEMBLY_PARAMETER_REVIEW,
     ArtifactRef,
     ParameterAttempt,
+    ParameterAttemptTask,
     ParameterRecommendationCursor,
 )
 from app.schemas.parameter_recommendation import (
@@ -68,6 +68,7 @@ from app.schemas.parameter_recommendation import (
     ExecutionFailureTrigger,
     ParameterAttemptEvidenceV3,
     ParameterExecutionEvidence,
+    ParameterRecommendationManifestRefsV3,
     ParameterRecommendationManifestV3,
     RecommendationDependencyRefs,
     RecommendationInputSnapshotV3,
@@ -75,7 +76,7 @@ from app.schemas.parameter_recommendation import (
     ResolvedParameterSources,
     ReviewFailureTrigger,
 )
-from app.schemas.state import TopLevelState
+from app.schemas.state import JsonValue, StateUpdate, TopLevelState
 from app.stages.assembly.parameters.basis import build_parameter_basis_snapshot
 from app.stages.assembly.parameters.catalog import load_parameter_catalog
 from app.stages.assembly.parameters.context import build_assembly_recommendation_context
@@ -86,7 +87,13 @@ from app.stages.assembly.parameters.storage import (
     write_attempt_json_artifact,
     write_recommendation_json_artifact,
 )
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.stages.assembly.state import (
+    AssemblyStageCursor,
+    assembly_stage_output,
+    update_assembly_stage_output,
+    validated_assembly_stage_payload,
+)
+from app.stages.base import absolute_data_dir
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
     ParameterEvidenceError,
@@ -98,10 +105,10 @@ from app.storage.parameter_evidence import (
 )
 
 
-def recommend_assembly_parameters(state: TopLevelState) -> dict:
+def recommend_assembly_parameters(state: TopLevelState) -> StateUpdate:
     """Run the existing recommender while persisting each fact separately."""
 
-    assembly_out = stage_output(state, "assembly")
+    assembly_out = assembly_stage_output(state)
     if assembly_out.get("status") not in {
         "selected",
         "retry_parameters_after_execution_failure",
@@ -120,9 +127,10 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         )
     except (ParameterPersistenceError, ValueError) as exc:
         return _fail_update(state, f"Assembly parameter inputs failed: {exc}")
-    recommendation_id = int(
-        assembly_out.get("proposed_parameter_attempt_id")
-        if assembly_out.get("proposed_parameter_attempt_id") is not None
+    proposed_id = assembly_out.get("proposed_parameter_attempt_id")
+    recommendation_id = (
+        proposed_id
+        if proposed_id is not None
         else assembly_out.get("current_parameter_attempt_id") or len(attempts_before)
     )
     previous_attempt = _previous_parameter_attempt(assembly_out, recommendation_id)
@@ -389,7 +397,9 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         )
 
     if not decision.valid:
-        cursor_status = "response_invalid"
+        cursor_status: Literal["response_invalid", "pending_approval"] = (
+            "response_invalid"
+        )
         stage_status = "parameter_response_invalid"
     else:
         cursor_status = "pending_approval"
@@ -401,7 +411,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     try:
         manifest = ParameterRecommendationManifestV3(
             schema_version=3,
-            recommendation_contract=PARAMETER_RECOMMENDATION_CONTRACT,
+            recommendation_contract="parameter_recommendation_v1",
             stage="assembly",
             method_id=catalog.method_id,
             task=task,
@@ -414,14 +424,14 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             previous_attempt_seal_hash=(
                 previous_attempt.get("seal_hash") if previous_attempt else None
             ),
-            refs={
-                "input_snapshot_ref": input_snapshot_ref.model_dump(mode="json"),
-                "basis_snapshot_ref": basis_ref.model_dump(mode="json"),
-                "model_request_ref": model_request_ref.model_dump(mode="json"),
-                "model_response_ref": model_response_ref.model_dump(mode="json"),
-                "recommendation_ref": recommendation_ref.model_dump(mode="json"),
-                "response_parse_ref": response_parse_ref.model_dump(mode="json"),
-            },
+            refs=ParameterRecommendationManifestRefsV3(
+                input_snapshot_ref=input_snapshot_ref,
+                basis_snapshot_ref=basis_ref,
+                model_request_ref=model_request_ref,
+                model_response_ref=model_response_ref,
+                recommendation_ref=recommendation_ref,
+                response_parse_ref=response_parse_ref,
+            ),
             summary={"response_parsed": bool(decision.valid)},
         )
         manifest_ref = write_recommendation_json_artifact(
@@ -450,7 +460,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
             previous_attempt.get("seal_hash") if previous_attempt else None
         ),
     )
-    update: dict[str, Any] = {
+    update: AssemblyStageCursor = {
         "status": stage_status,
         "proposed_parameter_attempt_id": recommendation_id,
         "current_parameter_recommendation": cursor.model_dump(mode="json"),
@@ -459,7 +469,7 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
         update["reason"] = (
             "Assembly parameter recommendation response could not be parsed"
         )
-        return update_stage_output(state, "assembly", update)
+        return update_assembly_stage_output(state, update)
     bindings = {
         "attempt_id": recommendation_id,
         "task": task,
@@ -521,17 +531,19 @@ def recommend_assembly_parameters(state: TopLevelState) -> dict:
     update.update(
         {
             "block_reason": "assembly_parameter_approval_required",
-            "active_interrupt": interrupt,
+            "active_interrupt": validated_assembly_stage_payload(
+                {"active_interrupt": interrupt}
+            ).get("active_interrupt"),
             "current_parameter_recommendation": cursor.model_dump(mode="json"),
         }
     )
-    return update_stage_output(state, "assembly", update)
+    return update_assembly_stage_output(state, update)
 
 
 def apply_parameter_approval_decision(
     state: TopLevelState,
     request: ResumeReviewRequest,
-) -> dict[str, Any]:
+) -> StateUpdate:
     """Apply one decision bound to a verified immutable recommendation manifest."""
 
     if request.stage != "assembly":
@@ -540,7 +552,7 @@ def apply_parameter_approval_decision(
         raise ResumeValidationError(
             "parameter approval resume requires explicit gate_id=parameter_approval"
         )
-    assembly_out = stage_output(state, "assembly")
+    assembly_out = assembly_stage_output(state)
     interrupt = state.get("active_interrupt") or assembly_out.get("active_interrupt")
     if (
         not isinstance(interrupt, dict)
@@ -652,10 +664,14 @@ def apply_parameter_approval_decision(
         if attempts or previous_id is not None:
             raise ResumeValidationError("initial parameter approval chain head changed")
     else:
+        if previous_id is None:
+            raise ResumeValidationError(
+                "parameter approval attempt chain has no predecessor"
+            )
         if (
             not attempts
             or attempts[-1].get("attempt_id") != previous_id
-            or attempt_id != int(previous_id) + 1
+            or attempt_id != previous_id + 1
         ):
             raise ResumeValidationError("parameter approval attempt chain head changed")
         if cursor.previous_attempt_seal_hash != attempts[-1].get("seal_hash"):
@@ -710,27 +726,30 @@ def apply_parameter_approval_decision(
         review_request_id=request_id,
     )
 
-    outputs = dict(state.get("stage_outputs") or {})
     if request.decision == "reject_parameters":
         rejected_cursor = cursor.model_copy(update={"status": "rejected"})
-        outputs["assembly"] = {
-            **assembly_out,
-            "status": "parameter_recommendation_rejected_by_human",
-            "reason": "parameter_recommendation_rejected_by_human",
-            "active_interrupt": None,
-            "current_parameter_recommendation": rejected_cursor.model_dump(mode="json"),
-            "parameter_rejection": {
-                "recommendation_id": attempt_id,
-                "manifest_ref": manifest_ref.model_dump(mode="json"),
-                "decision_ref": decision_ref.model_dump(mode="json"),
+        stage_update = update_assembly_stage_output(
+            state,
+            {
+                "status": "parameter_recommendation_rejected_by_human",
+                "reason": "parameter_recommendation_rejected_by_human",
+                "active_interrupt": None,
+                "current_parameter_recommendation": rejected_cursor.model_dump(
+                    mode="json"
+                ),
+                "parameter_rejection": {
+                    "recommendation_id": attempt_id,
+                    "manifest_ref": manifest_ref.model_dump(mode="json"),
+                    "decision_ref": decision_ref.model_dump(mode="json"),
+                },
             },
-        }
+        )
         return {
+            **stage_update,
             "current_stage": "assembly",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             "last_error": "parameter_recommendation_rejected_by_human",
-            "stage_outputs": outputs,
         }
 
     attempt = ParameterAttempt(
@@ -752,29 +771,31 @@ def apply_parameter_approval_decision(
     elif cursor.task == "retry_after_review_failure":
         retry_counts["review"] = int(retry_counts.get("review", 0)) + 1
     approved_cursor = cursor.model_copy(update={"status": "approved"})
-    outputs["assembly"] = {
-        **assembly_out,
-        "status": "parameters_approved",
-        "current_parameter_attempt_id": attempt_id,
-        "parameter_attempts": attempts,
-        "retry_counts": retry_counts,
-        "active_interrupt": None,
-        "current_parameter_recommendation": approved_cursor.model_dump(mode="json"),
-        "proposed_parameter_attempt_id": None,
-        "parameter_retry_request": None,
-    }
+    stage_update = update_assembly_stage_output(
+        state,
+        {
+            "status": "parameters_approved",
+            "current_parameter_attempt_id": attempt_id,
+            "parameter_attempts": attempts,
+            "retry_counts": retry_counts,
+            "active_interrupt": None,
+            "current_parameter_recommendation": approved_cursor.model_dump(mode="json"),
+            "proposed_parameter_attempt_id": None,
+            "parameter_retry_request": None,
+        },
+    )
     return {
+        **stage_update,
         "current_stage": "assembly",
         "supervision_state": "running_stage",
         "active_interrupt": None,
-        "stage_outputs": outputs,
     }
 
 
-def execution_retry_gate(state: TopLevelState) -> dict:
+def execution_retry_gate(state: TopLevelState) -> StateUpdate:
     """Prepare a ref-only retry cursor after command execution failure."""
 
-    assembly_out = stage_output(state, "assembly")
+    assembly_out = assembly_stage_output(state)
     if assembly_out.get("status") != "failed" or not assembly_out.get(
         "parameter_attempts"
     ):
@@ -807,18 +828,16 @@ def execution_retry_gate(state: TopLevelState) -> dict:
         "max_execution_retries", 1
     )
     if used >= int(max_retries):
-        return update_stage_output(
+        return update_assembly_stage_output(
             state,
-            "assembly",
             {
                 "status": "execution_parameter_retries_exhausted",
                 "reason": "execution_retry_budget_exhausted",
                 "parameter_attempts": updated_attempts,
             },
         )
-    return update_stage_output(
+    return update_assembly_stage_output(
         state,
-        "assembly",
         {
             "status": "retry_parameters_after_execution_failure",
             "proposed_parameter_attempt_id": attempt_id + 1,
@@ -834,17 +853,17 @@ def execution_retry_gate(state: TopLevelState) -> dict:
     )
 
 
-def parameter_quality_gate(state: TopLevelState) -> dict:
+def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
     """Persist review evidence and prepare a ref-only quality retry cursor."""
 
-    assembly_out = stage_output(state, "assembly")
+    assembly_out = assembly_stage_output(state)
     review_out = (state.get("stage_outputs") or {}).get("assembly_review") or {}
-    metrics = dict(
+    metrics_value = (
         review_out.get("metrics")
         or review_out.get("summary")
         or assembly_out.get("review_metrics")
-        or {}
     )
+    metrics = dict(metrics_value) if isinstance(metrics_value, dict) else {}
     diagnosis = _review_failure_diagnosis(metrics)
     try:
         current_id = current_parameter_attempt(
@@ -891,9 +910,8 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
         "review_ref": review_ref.model_dump(mode="json"),
     }
     if diagnosis["passed"]:
-        return update_stage_output(
+        return update_assembly_stage_output(
             state,
-            "assembly",
             {
                 "status": "parameter_quality_passed",
                 "quality_gate": compact_quality,
@@ -907,9 +925,8 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
         "max_review_retries", 2
     )
     if used >= int(max_retries):
-        return update_stage_output(
+        return update_assembly_stage_output(
             state,
-            "assembly",
             {
                 "status": "review_parameter_retries_exhausted",
                 "quality_gate": compact_quality,
@@ -917,9 +934,8 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
                 "reason": "review_retry_budget_exhausted",
             },
         )
-    return update_stage_output(
+    return update_assembly_stage_output(
         state,
-        "assembly",
         {
             "status": "retry_parameters_after_review_failure",
             "proposed_parameter_attempt_id": current_id + 1,
@@ -947,11 +963,13 @@ def _assembly_retry_context(
         execution = latest.execution
         if execution is None:
             raise ValueError("Assembly execution retry has no execution evidence")
-        trigger = ExecutionFailureTrigger(
-            status=execution.status,
-            return_code=execution.return_code,
-            failure_class=execution.failure_class,
-            status_detail=execution.status_detail,
+        trigger: ExecutionFailureTrigger | ReviewFailureTrigger = (
+            ExecutionFailureTrigger(
+                status=execution.status,
+                return_code=execution.return_code,
+                failure_class=execution.failure_class,
+                status_detail=execution.status_detail,
+            )
         )
     elif task == "retry_after_review_failure":
         review = latest.review
@@ -968,23 +986,25 @@ def _assembly_retry_context(
 
 def _initial_assembly_dependency_refs(
     state: TopLevelState,
-    assembly_out: dict[str, Any],
+    assembly_out: AssemblyStageCursor,
 ) -> RecommendationDependencyRefs:
     stage_outputs = state.get("stage_outputs") or {}
     read_qc = stage_outputs.get("read_qc") or {}
     genome_survey = stage_outputs.get("genome_survey") or {}
-    fact_sources = {
-        role: value
-        for role, value in {
-            "read_qc_summary": canonical_parameter_dependency(
-                state, read_qc.get("summary_artifact_ref")
-            ),
-            "genome_survey_result": canonical_parameter_dependency(
-                state, genome_survey.get("result_artifact_ref")
-            ),
-        }.items()
-        if value is not None
-    }
+    read_qc_dependency = canonical_parameter_dependency(
+        state, _dependency_value(read_qc.get("summary_artifact_ref"))
+    )
+    survey_dependency = canonical_parameter_dependency(
+        state, _dependency_value(genome_survey.get("result_artifact_ref"))
+    )
+    fact_sources: dict[
+        Literal["read_qc_summary", "genome_survey_result"],
+        ArtifactRef | Mapping[str, Any] | Path,
+    ] = {}
+    if read_qc_dependency is not None:
+        fact_sources["read_qc_summary"] = read_qc_dependency
+    if survey_dependency is not None:
+        fact_sources["genome_survey_result"] = survey_dependency
 
     registry_ref = canonical_parameter_dependency(
         state, state.get("asset_registry_ref")
@@ -994,7 +1014,8 @@ def _initial_assembly_dependency_refs(
     else:
         raw_inputs = assembly_out.get("input_ref")
         if not isinstance(raw_inputs, list):
-            raw_inputs = [raw_inputs or assembly_out.get("primary_long_reads_ref")]
+            primary_input = raw_inputs or assembly_out.get("primary_long_reads_ref")
+            raw_inputs = [primary_input] if primary_input is not None else []
         stage_inputs = {
             f"assembly_input_{index:06d}": dependency
             for index, value in enumerate(raw_inputs)
@@ -1318,7 +1339,7 @@ def _validate_parameter_attempt_chain(
 
 def build_parameter_attempt_timeline(
     state: TopLevelState,
-    assembly_out: dict[str, Any],
+    assembly_out: AssemblyStageCursor,
     *,
     status: str,
     reason: str,
@@ -1365,13 +1386,11 @@ def build_parameter_attempt_timeline(
     }
 
 
-def _fail_update(state: TopLevelState, reason: str) -> dict:
-    return update_stage_output(
-        state, "assembly", {"status": "failed", "reason": reason}
-    )
+def _fail_update(state: TopLevelState, reason: str) -> StateUpdate:
+    return update_assembly_stage_output(state, {"status": "failed", "reason": reason})
 
 
-def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
+def _selected_parameter_method(assembly_out: AssemblyStageCursor) -> str | None:
     if (
         assembly_out.get("status") == "selected"
         and assembly_out.get("execution_mode") != "local"
@@ -1389,7 +1408,9 @@ def _selected_parameter_method(assembly_out: dict[str, Any]) -> str | None:
     return None
 
 
-def _parameter_prompt_task(assembly_out: dict[str, Any]) -> str:
+def _parameter_prompt_task(
+    assembly_out: AssemblyStageCursor,
+) -> ParameterAttemptTask:
     status = assembly_out.get("status")
     if status == "retry_parameters_after_execution_failure":
         return "retry_after_execution_failure"
@@ -1399,7 +1420,7 @@ def _parameter_prompt_task(assembly_out: dict[str, Any]) -> str:
 
 
 def _previous_parameter_attempt(
-    assembly_out: dict[str, Any],
+    assembly_out: AssemblyStageCursor,
     attempt_id: int,
 ) -> dict[str, Any]:
     attempts = [
@@ -1415,17 +1436,16 @@ def _previous_parameter_attempt(
     )
 
 
-def _retry_transition_failure(state: TopLevelState, reason: str) -> dict[str, Any]:
-    return update_stage_output(
+def _retry_transition_failure(state: TopLevelState, reason: str) -> StateUpdate:
+    return update_assembly_stage_output(
         state,
-        "assembly",
         {"status": "parameter_retry_invalid_transition", "reason": reason},
     )
 
 
 def _parameter_recommendation_config(
     state: TopLevelState,
-    assembly_out: dict[str, Any],
+    assembly_out: AssemblyStageCursor,
 ) -> dict[str, Any]:
     config = dict(assembly_out.get("parameter_recommendation") or {})
     shared = state.get("shared_parameters") or {}
@@ -1435,9 +1455,27 @@ def _parameter_recommendation_config(
         )
         config = {**assembly_config, **config}
     return {
-        "max_execution_retries": int(config.get("max_execution_retries", 1)),
-        "max_review_retries": int(config.get("max_review_retries", 2)),
+        "max_execution_retries": _cursor_int(config.get("max_execution_retries"), 1),
+        "max_review_retries": _cursor_int(config.get("max_review_retries"), 2),
     }
+
+
+def _dependency_value(
+    value: JsonValue | None,
+) -> str | dict[str, JsonValue] | None:
+    if isinstance(value, (str, dict)):
+        return value
+    return None
+
+
+def _cursor_int(value: JsonValue | None, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, (bool, int, float, str)):
+        return int(value)
+    raise TypeError(
+        f"expected integer-compatible cursor value, got {type(value).__name__}"
+    )
 
 
 def _review_failure_diagnosis(metrics: dict[str, Any]) -> dict[str, Any]:

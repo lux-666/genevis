@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import AbstractSet, Any
 
 import yaml
 from pydantic import ValidationError
@@ -301,10 +302,10 @@ def merge_clarification_response(
             }
         )
     if response.kind == "parameter_values":
-        existing = dict(plan.method_parameters or {})
-        existing.update(response.method_parameters or {})
+        method_parameter_existing = dict(plan.method_parameters or {})
+        method_parameter_existing.update(response.method_parameters or {})
         update: dict[str, Any] = {
-            "method_parameters": existing or None,
+            "method_parameters": method_parameter_existing or None,
             "confirmed": False,
         }
         stage_existing = dict(plan.stage_parameters or {})
@@ -762,13 +763,13 @@ def _runtime_parameter_contracts(plan: AskPlanState) -> list[dict[str, Any]]:
     selected_stages = set(plan.resolved_execution_order or plan.selected_stages or [])
     if "hic_scaffolding" in selected_stages:
         try:
-            catalog = load_autohic_parameter_catalog()
+            autohic_catalog = load_autohic_parameter_catalog()
         except (FileNotFoundError, ValueError):
-            catalog = None
-        if catalog is not None:
+            autohic_catalog = None
+        if autohic_catalog is not None:
             dynamic_names = [
                 name
-                for name, spec in catalog.parameters.items()
+                for name, spec in autohic_catalog.parameters.items()
                 if spec.layers.l2 is not None
             ]
             supplied = dict(
@@ -810,10 +811,10 @@ def _method_parameter_default_sources(
     *,
     manifest: InputManifest | None = None,
 ) -> dict[str, dict[str, str]]:
-    (
-        "Generate parameter default source labels. "
-        "Pass manifest to avoid repeated disk loading."
-    )
+    """Generate parameter-default source labels.
+
+    Accepting a manifest avoids repeated disk loading.
+    """
     sources: dict[str, dict[str, str]] = {}
     for method, values in defaults.items():
         method_sources: dict[str, str] = {}
@@ -831,10 +832,10 @@ def _shared_parameter_default_sources(
     *,
     manifest: InputManifest | None = None,
 ) -> dict[str, str]:
-    (
-        "Generate shared parameter default source labels. "
-        "Pass manifest to avoid repeated disk loading."
-    )
+    """Generate shared-parameter default source labels.
+
+    Accepting a manifest avoids repeated disk loading.
+    """
     sources: dict[str, str] = {}
     entry = plan.entry_request or {}
     if manifest is None:
@@ -939,7 +940,10 @@ def _stage_without_method_status(stage: str) -> str:
     return "no registered method yet"
 
 
-def _stage_input_status(stage: str, asset_types: set[str]) -> list[str]:
+def _stage_input_status(
+    stage: str,
+    asset_types: AbstractSet[str],
+) -> list[str]:
     if (
         stage == "hic_scaffolding"
         and not {"hic_reads_registered", "hic_alignment_bam", "hic_merged_nodups"}
@@ -1078,7 +1082,7 @@ def _needs_method_selection(plan: AskPlanState) -> bool:
     )
 
 
-def _iter_selected_methods(plan: AskPlanState) -> list[tuple[str, str]]:
+def _iter_selected_methods(plan: AskPlanState) -> Iterator[tuple[str, str]]:
     """Yield (stage, method_name) pairs, flattening list values."""
     for stage, methods in (plan.selected_methods or {}).items():
         if isinstance(methods, list):
@@ -1316,10 +1320,10 @@ def _missing_parameters_and_defaults(
     dict[str, dict[str, Any]],
     list[str],
 ]:
-    (
-        "Compute missing parameters and defaults. "
-        "Pass manifest to avoid repeated disk loading."
-    )
+    """Compute missing parameters and defaults.
+
+    Accepting a manifest avoids repeated disk loading.
+    """
     missing_fields: list[str] = []
     defaults: dict[str, dict[str, Any]] = {}
     stage_defaults: dict[str, dict[str, Any]] = {}
@@ -1389,10 +1393,10 @@ def _infer_parameter_defaults(
     *,
     manifest: InputManifest | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    (
-        "Infer parameter defaults for a method. "
-        "Pass manifest to avoid repeated disk loading."
-    )
+    """Infer parameter defaults for a method.
+
+    Accepting a manifest avoids repeated disk loading.
+    """
     inferred = dict(cap.get("parameter_defaults") or {})
     warnings: list[str] = []
     if method == "assembly_review.eval.busco":
@@ -1502,10 +1506,7 @@ def _assembly_needs_shared_genome_size(plan: AskPlanState) -> bool:
 
 
 def _can_defer_genome_size_to_survey(plan: AskPlanState) -> bool:
-    (
-        "Defer when executable Survey precedes assembly with short or long "
-        "genomic reads."
-    )
+    "Defer when executable Survey precedes assembly with short or long genomic reads."
     order = plan.resolved_execution_order or []
     if "genome_survey" not in order or "assembly" not in order:
         return False

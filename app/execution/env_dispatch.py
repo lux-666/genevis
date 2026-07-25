@@ -10,10 +10,11 @@ blocked payload plus a durable `env_preflight_blocked` ledger event.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
-from app.storage.ledger import Ledger
+from typing_extensions import TypedDict
+
 from app.execution import env_resolver
 from app.execution.env_resolver import (
     EnvResolver,
@@ -23,9 +24,20 @@ from app.execution.env_resolver import (
     package_preflight,
     preflight,
 )
+from app.storage.ledger import Ledger
 
 
-def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
+class MethodEnvBlock(TypedDict):
+    """Structured stage update emitted when environment preflight blocks."""
+
+    status: str
+    reason: str
+    env_target: str
+    missing_tools: list[str]
+    method_name: str
+
+
+def has_explicit_path_override(stage_out: Mapping[str, object]) -> bool:
     """True when the caller already supplied a PATH env override.
 
     Existing fake-binary stage tests inject PATH into
@@ -36,11 +48,11 @@ def has_explicit_path_override(stage_out: dict[str, Any]) -> bool:
     independent of conda/PATH).
     """
     env = stage_out.get("env") or {}
-    return isinstance(env, dict) and bool(env.get("PATH"))
+    return isinstance(env, Mapping) and bool(env.get("PATH"))
 
 
 def resolve_method_env(
-    stage_out: dict[str, Any],
+    stage_out: Mapping[str, object],
     *,
     stage: str,
     method_name: str,
@@ -48,7 +60,7 @@ def resolve_method_env(
     data_dir: str | Path,
     input_manifest_ref: str,
     config_path: Path | None = None,
-) -> tuple[EnvSpec | None, list[PackageSpec], dict[str, Any] | None]:
+) -> tuple[EnvSpec | None, list[PackageSpec], MethodEnvBlock | None]:
     """Resolve and preflight the conda env + external packages for one method.
 
     Returns ``(spec, packages, None)`` when the caller should attach ``spec``'s
@@ -75,16 +87,20 @@ def resolve_method_env(
             for package in packages:
                 check = package_preflight(package)
                 if check.status != "ok":
-                    return None, [], _record_preflight_block(
-                        data_dir=data_dir,
-                        session_id=session_id,
-                        input_manifest_ref=input_manifest_ref,
-                        stage=stage,
-                        method_name=method_name,
-                        status="missing_tool",
-                        env_target=package.install_root,
-                        missing_tools=check.missing_paths,
-                        detail=check.detail,
+                    return (
+                        None,
+                        [],
+                        _record_preflight_block(
+                            data_dir=data_dir,
+                            session_id=session_id,
+                            input_manifest_ref=input_manifest_ref,
+                            stage=stage,
+                            method_name=method_name,
+                            status="missing_tool",
+                            env_target=package.install_root,
+                            missing_tools=check.missing_paths,
+                            detail=check.detail,
+                        ),
                     )
             return None, packages, None
         return None, [], None
@@ -94,16 +110,20 @@ def resolve_method_env(
     spec = resolver.resolve(stage=stage, method_name=method_name)
     conda_result = preflight(spec)
     if conda_result.status != "ok":
-        return None, [], _record_preflight_block(
-            data_dir=data_dir,
-            session_id=session_id,
-            input_manifest_ref=input_manifest_ref,
-            stage=stage,
-            method_name=method_name,
-            status=conda_result.status,
-            env_target=conda_result.env_target,
-            missing_tools=conda_result.missing_tools,
-            detail=conda_result.detail,
+        return (
+            None,
+            [],
+            _record_preflight_block(
+                data_dir=data_dir,
+                session_id=session_id,
+                input_manifest_ref=input_manifest_ref,
+                stage=stage,
+                method_name=method_name,
+                status=conda_result.status,
+                env_target=conda_result.env_target,
+                missing_tools=conda_result.missing_tools,
+                detail=conda_result.detail,
+            ),
         )
 
     packages = resolver.packages_for_spec(spec)
@@ -115,23 +135,25 @@ def resolve_method_env(
 
     if missing_by_package:
         all_missing = [
-            rel
-            for _, result in missing_by_package
-            for rel in result.missing_paths
+            rel for _, result in missing_by_package for rel in result.missing_paths
         ]
         detail = "; ".join(
             f"{name}: {result.detail}" for name, result in missing_by_package
         )
-        return None, [], _record_preflight_block(
-            data_dir=data_dir,
-            session_id=session_id,
-            input_manifest_ref=input_manifest_ref,
-            stage=stage,
-            method_name=method_name,
-            status="missing_tool",
-            env_target=packages[0].install_root,
-            missing_tools=all_missing,
-            detail=detail,
+        return (
+            None,
+            [],
+            _record_preflight_block(
+                data_dir=data_dir,
+                session_id=session_id,
+                input_manifest_ref=input_manifest_ref,
+                stage=stage,
+                method_name=method_name,
+                status="missing_tool",
+                env_target=packages[0].install_root,
+                missing_tools=all_missing,
+                detail=detail,
+            ),
         )
 
     return spec, packages, None
@@ -148,7 +170,7 @@ def _record_preflight_block(
     env_target: str,
     missing_tools: list[str],
     detail: str,
-) -> dict[str, Any]:
+) -> MethodEnvBlock:
     event = {
         "stage": stage,
         "method_name": method_name,

@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import gzip
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from app.review.base import ResumeReviewRequest
+from app.review.persistence import load_review_request
+from app.schemas.state import initial_state
 from app.stages.inventory.builder import build_stage
 from app.stages.inventory.nodes import apply_inventory_resume_decision
-from app.schemas.state import initial_state
-from app.review.persistence import load_review_request
 from tests.data_v2 import v2_run_dir
-import yaml
 
 
 class InventoryStageTests(unittest.TestCase):
@@ -78,7 +79,9 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(result["current_stage"], "inventory")
             self.assertEqual(result["supervision_state"], "failed_terminal")
             self.assertIsNone(result.get("asset_registry_ref"))
-            self.assertEqual(result["stage_outputs"]["inventory"]["status"], "validated")
+            self.assertEqual(
+                result["stage_outputs"]["inventory"]["status"], "validated"
+            )
             self.assertFalse(result["stage_outputs"]["inventory"]["valid"])
             self.assertIn("inventory validation failed", result["last_error"])
             self.assertIn("raw_long_reads: missing files", result["last_error"])
@@ -107,7 +110,9 @@ class InventoryStageTests(unittest.TestCase):
             self.assertEqual(registry["session_id"], "s1")
             self.assertEqual(len(registry["assets"]), 1)
             asset = registry["assets"][0]
-            self.assertEqual(asset["provenance"]["manifest_ref"], "control/manifest.yaml")
+            self.assertEqual(
+                asset["provenance"]["manifest_ref"], "control/manifest.yaml"
+            )
             self.assertEqual(asset["provenance"]["declared_path"], str(fq))
             self.assertNotIn("manifest", result["stage_outputs"]["inventory"])
 
@@ -134,7 +139,9 @@ class InventoryStageTests(unittest.TestCase):
             warnings = result["stage_outputs"]["inventory"]["warnings"]
             self.assertTrue(any("platform unknown" in warning for warning in warnings))
 
-    def test_inventory_shared_platform_overrides_registered_raw_long_read_platform(self):
+    def test_inventory_shared_platform_overrides_registered_raw_long_read_platform(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmpdir:
             fq = Path(tmpdir) / "_250F701999011_barcode10_01.fastq.gz"
             fq.write_bytes(gzip.compress(b"@r1\nACGT\n+\n!!!!\n"))
@@ -152,7 +159,12 @@ class InventoryStageTests(unittest.TestCase):
 
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
             self.assertEqual(registry["assets"][0]["platform"], "ont")
-            self.assertFalse(any("platform unknown" in warning for warning in result["stage_outputs"]["inventory"]["warnings"]))
+            self.assertFalse(
+                any(
+                    "platform unknown" in warning
+                    for warning in result["stage_outputs"]["inventory"]["warnings"]
+                )
+            )
 
     def test_inventory_registers_cycloneseq_fastq_as_raw_long_reads(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,7 +206,10 @@ class InventoryStageTests(unittest.TestCase):
                 "session_id": "s2",
                 "assets": [
                     {"asset_type": "raw_long_reads", "paths": [str(ont)]},
-                    {"asset_type": "raw_short_dna_reads", "paths": [str(short1), str(short2)]},
+                    {
+                        "asset_type": "raw_short_dna_reads",
+                        "paths": [str(short1), str(short2)],
+                    },
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
@@ -216,7 +231,10 @@ class InventoryStageTests(unittest.TestCase):
                 "session_id": "s3",
                 "assets": [
                     {"asset_type": "raw_long_reads", "paths": [str(genomic)]},
-                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": [str(transcript)]},
+                    {
+                        "asset_type": "raw_isoseq_or_long_rna_reads",
+                        "paths": [str(transcript)],
+                    },
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
@@ -244,7 +262,10 @@ class InventoryStageTests(unittest.TestCase):
                 "session_id": "s3-continue",
                 "assets": [
                     {"asset_type": "raw_long_reads", "paths": [str(genomic)]},
-                    {"asset_type": "raw_isoseq_or_long_rna_reads", "paths": [str(transcript)]},
+                    {
+                        "asset_type": "raw_isoseq_or_long_rna_reads",
+                        "paths": [str(transcript)],
+                    },
                 ],
             }
             path = self._build_manifest_file(tmpdir, manifest)
@@ -283,12 +304,23 @@ class InventoryStageTests(unittest.TestCase):
             graph = build_stage()
             result = graph.invoke(state)
             self.assertEqual(result["current_stage"], "assembly_review")
-            self.assertEqual(result["skip_reasons"]["read_qc"], "existing_assembly_input")
-            self.assertEqual(result["skip_reasons"]["genome_survey"], "existing_assembly_input")
-            self.assertEqual(result["skip_reasons"]["assembly"], "existing_assembly_input")
-            self.assertEqual(result["stage_outputs"]["inventory"]["target_assembly_level"], "chromosome")
+            self.assertEqual(
+                result["skip_reasons"]["read_qc"], "existing_assembly_input"
+            )
+            self.assertEqual(
+                result["skip_reasons"]["genome_survey"], "existing_assembly_input"
+            )
+            self.assertEqual(
+                result["skip_reasons"]["assembly"], "existing_assembly_input"
+            )
+            self.assertEqual(
+                result["stage_outputs"]["inventory"]["target_assembly_level"],
+                "chromosome",
+            )
             registry = json.loads(Path(result["asset_registry_ref"]).read_text())
-            self.assertEqual(registry["assets"][0]["asset_type"], "assembly_fasta_registered")
+            self.assertEqual(
+                registry["assets"][0]["asset_type"], "assembly_fasta_registered"
+            )
 
     def test_inventory_existing_assembly_with_provided_gene_annotation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -328,7 +360,10 @@ class InventoryStageTests(unittest.TestCase):
             manifest = {
                 "session_id": "s4-missing-annotation",
                 "assets": [
-                    {"asset_type": "assembly_fasta_registered", "paths": [str(assembly)]},
+                    {
+                        "asset_type": "assembly_fasta_registered",
+                        "paths": [str(assembly)],
+                    },
                     {"asset_type": "predicted_proteins", "paths": [str(missing)]},
                 ],
             }
@@ -360,7 +395,9 @@ class InventoryStageTests(unittest.TestCase):
             lines = events_path.read_text().strip().split("\n")
             events = [json.loads(line) for line in lines]
             self.assertTrue(any(e["event_type"] == "assets_registered" for e in events))
-            asset_event = next(e for e in events if e["event_type"] == "assets_registered")
+            asset_event = next(
+                e for e in events if e["event_type"] == "assets_registered"
+            )
             self.assertEqual(asset_event["summary"]["asset_count"], 1)
 
 

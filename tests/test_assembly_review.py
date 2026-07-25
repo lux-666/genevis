@@ -279,7 +279,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 'mkdir -p "$outdir"\n'
                 "printf 'Assembly\tassembly\n# contigs\t1\n"
                 "Largest contig\t8\nTotal length\t8\nN50\t8\n"
-                "L50\t1\nGC (%)\t50.00\n' > \"$outdir/report.tsv\"\n"
+                'L50\t1\nGC (%)\t50.00\n\' > "$outdir/report.tsv"\n'
                 "printf 'fake quast report\n' > \"$outdir/report.txt\"\n"
                 "printf 'fake quast stdout\n'\n",
                 encoding="utf-8",
@@ -318,7 +318,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 "2\tComplete and duplicated BUSCOs (D)\n"
                 "1\tFragmented BUSCOs (F)\n"
                 "1\tMissing BUSCOs (M)\n"
-                "100\tTotal BUSCO groups searched\n' > \"$summary\"\n"
+                '100\tTotal BUSCO groups searched\n\' > "$summary"\n'
                 "printf 'fake busco stdout\n'\n",
                 encoding="utf-8",
             )
@@ -334,7 +334,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 assets=[
                     {
                         "asset_id": (
-                            "test-session:assembly_fasta_registered:" "existing.fa"
+                            "test-session:assembly_fasta_registered:existing.fa"
                         ),
                         "asset_type": "assembly_fasta_registered",
                         "path": str(assembly_fasta),
@@ -1145,7 +1145,7 @@ class AssemblyReviewStageTests(unittest.TestCase):
                 assets=[
                     {
                         "asset_id": (
-                            "test-session:assembly_fasta_registered:" "existing.fa"
+                            "test-session:assembly_fasta_registered:existing.fa"
                         ),
                         "asset_type": "assembly_fasta_registered",
                         "path": str(assembly_fasta),
@@ -1720,8 +1720,7 @@ class AssemblyReviewCutoverTests(unittest.TestCase):
                     {
                         "session_id": session_id,
                         "candidate_id": (
-                            f"{session_id}:assembly.candidate.flye:"
-                            f"alternative_{i + 1}"
+                            f"{session_id}:assembly.candidate.flye:alternative_{i + 1}"
                         ),
                         "method_name": "assembly.candidate.flye",
                         "status": "executed",

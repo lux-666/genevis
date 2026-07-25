@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import yaml
@@ -45,7 +45,14 @@ from app.schemas.artifacts import (
     ReviewDecisionArtifact,
 )
 from app.schemas.plan import AssemblyReviewPlan
-from app.schemas.state import TopLevelState
+from app.schemas.state import (
+    DOMAIN_STAGES,
+    ActiveInterrupt,
+    DomainStage,
+    StateUpdate,
+    TopLevelState,
+    validate_stage_outputs,
+)
 from app.stages.assembly.method_application.support import (
     ASSEMBLY_EXECUTION_CONTRACT_KEY,
     AssemblyExecutionContract,
@@ -60,6 +67,17 @@ from app.stages.assembly_review.notebook import (
     build_assembly_review_notebook,
     render_statistics_figures,
     write_notebook,
+)
+from app.stages.assembly_review.state import (
+    ASSEMBLY_CANDIDATE_CURSOR_ADAPTER,
+    ASSEMBLY_EVAL_SIGNAL_CURSOR_ADAPTER,
+    ASSEMBLY_REVIEW_CURSOR_ADAPTER,
+    ASSEMBLY_REVIEW_PLAN_CURSOR_ADAPTER,
+    AssemblyCandidateCursor,
+    AssemblyEvalSignalCursor,
+    AssemblyReviewCursor,
+    assembly_review_output,
+    update_assembly_review_output,
 )
 from app.stages.base import (
     absolute_data_dir,
@@ -80,7 +98,7 @@ logger = logging.getLogger(__name__)
 ASSEMBLY_REVIEW_CONTRACT_METHOD = "assembly_review.contract"
 
 
-def enter_assembly_review(state: TopLevelState) -> dict:
+def enter_assembly_review(state: TopLevelState) -> StateUpdate:
     """Mark assembly_review as running.  No side effects."""
     stage_outputs = state.get("stage_outputs") or {}
     assembly_out = stage_outputs.get("assembly") or {}
@@ -91,27 +109,27 @@ def enter_assembly_review(state: TopLevelState) -> dict:
         "flye_rerun_frozen",
         "flye_rerun_ran",
     }:
-        outputs = dict(stage_outputs)
-        outputs["assembly_review"] = {
-            **dict(outputs.get("assembly_review") or {}),
-            "status": "failed",
-            "reason": (
-                "unsupported legacy Flye rerun lifecycle state or rerun_request "
-                f"(status={legacy_status!r}); use the v3 Assembly parameter retry "
-                "workflow"
-            ),
-        }
+        review_update = update_assembly_review_output(
+            state,
+            {
+                "status": "failed",
+                "reason": (
+                    "unsupported legacy Flye rerun lifecycle state or rerun_request "
+                    f"(status={legacy_status!r}); use the v3 Assembly parameter retry "
+                    "workflow"
+                ),
+            },
+        )
         return {
             "supervision_state": "running_stage",
-            "stage_outputs": outputs,
+            **review_update,
         }
     return {"supervision_state": "running_stage"}
 
 
-def resolve_candidates(state: TopLevelState) -> dict:
+def resolve_candidates(state: TopLevelState) -> StateUpdate:
     """Resolve current assembly candidates from the central resource table."""
-    stage_outputs = state.get("stage_outputs") or {}
-    candidates: list[dict[str, Any]] = []
+    candidates: list[AssemblyCandidateCursor] = []
     assembly = resolve_stage_resource(
         state,
         resource_spec=ASSEMBLY_CANDIDATES_SPEC,
@@ -119,7 +137,7 @@ def resolve_candidates(state: TopLevelState) -> dict:
     bundle_refs = list(assembly.metadata.get("candidate_bundle_refs") or [])
     assembly_candidates = _load_selected_candidate_refs(bundle_refs)
     assembly_candidates.extend(
-        bundle
+        ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(bundle)
         for bundle in assembly.metadata.get("candidate_bundles") or []
         if isinstance(bundle, dict)
     )
@@ -129,14 +147,17 @@ def resolve_candidates(state: TopLevelState) -> dict:
         if final_ref:
             materialized_from_bundles.add(str(final_ref))
         candidates.append(
-            {
-                "candidate_id": bundle.get("candidate_id", "unknown"),
-                "method_name": bundle.get("method_name", "unknown"),
-                "source": assembly.source,
-                "bundle_ref": bundle.get("candidate_ref") or bundle.get("bundle_ref"),
-                "status": bundle.get("status", "planned"),
-                "final_assembly_ref": final_ref,
-            }
+            ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
+                {
+                    "candidate_id": bundle.get("candidate_id", "unknown"),
+                    "method_name": bundle.get("method_name", "unknown"),
+                    "source": assembly.source,
+                    "bundle_ref": bundle.get("candidate_ref")
+                    or bundle.get("bundle_ref"),
+                    "status": bundle.get("status", "planned"),
+                    "final_assembly_ref": final_ref,
+                }
+            )
         )
     for index, assembly_ref in enumerate(assembly.paths):
         if assembly_ref in materialized_from_bundles:
@@ -152,17 +173,21 @@ def resolve_candidates(state: TopLevelState) -> dict:
             in (assembly.metadata.get("asset_types") or [])
         )
         candidates.append(
-            {
-                "candidate_id": (
-                    "existing_assembly"
-                    if is_registered_input and index == 0
-                    else f"{assembly.source}:{index}"
-                ),
-                "method_name": assembly.metadata.get("method_name", "user_provided"),
-                "source": assembly.source,
-                "status": "materialized",
-                "final_assembly_ref": assembly_ref,
-            }
+            ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
+                {
+                    "candidate_id": (
+                        "existing_assembly"
+                        if is_registered_input and index == 0
+                        else f"{assembly.source}:{index}"
+                    ),
+                    "method_name": assembly.metadata.get(
+                        "method_name", "user_provided"
+                    ),
+                    "source": assembly.source,
+                    "status": "materialized",
+                    "final_assembly_ref": assembly_ref,
+                }
+            )
         )
 
     # Build review plan
@@ -172,10 +197,7 @@ def resolve_candidates(state: TopLevelState) -> dict:
         notes=[],
     )
 
-    outputs = dict(stage_outputs)
-    existing_review = dict(stage_outputs.get("assembly_review") or {})
-    outputs["assembly_review"] = {
-        **existing_review,
+    payload: dict[str, object] = {
         "status": "resolved",
         "candidate_count": len(candidates),
         "candidates": candidates,
@@ -184,20 +206,20 @@ def resolve_candidates(state: TopLevelState) -> dict:
     }
 
     if not candidates:
-        outputs["assembly_review"]["status"] = "failed"
-        outputs["assembly_review"]["reason"] = "no_assembly_candidates_found"
+        payload["status"] = "failed"
+        payload["reason"] = "no_assembly_candidates_found"
 
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(state, payload)
 
 
-def plan_review_metrics(state: TopLevelState) -> dict:
+def plan_review_metrics(state: TopLevelState) -> StateUpdate:
     """Plan evaluation signals based on available inputs.
 
     Plans signals only when inputs exist; does not execute tools.
     Thresholds are not stored here.
     """
     stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
 
     if ar_out.get("status") == "failed":
         return {}
@@ -216,11 +238,14 @@ def plan_review_metrics(state: TopLevelState) -> dict:
 
     planned_signals: list[str] = ["quast", "busco"]
 
-    review_plan_data = ar_out.get("review_plan", {})
-    review_plan_data["planned_signals"] = planned_signals
-    review_plan_data["status"] = "evaluating"
+    review_plan = AssemblyReviewPlan.model_validate(
+        {
+            **ar_out.get("review_plan", {}),
+            "planned_signals": planned_signals,
+            "status": "evaluating",
+        }
+    )
 
-    signals: list[dict[str, Any]] = []
     eval_signals: list[AssemblyEvalSignal] = []
     candidate_ids = [
         candidate.get("candidate_id", "unknown")
@@ -228,13 +253,6 @@ def plan_review_metrics(state: TopLevelState) -> dict:
     ]
     for signal_name in planned_signals:
         method_name = _review_signal_method_name(signal_name)
-        signals.append(
-            ReviewSignal(
-                signal_name=signal_name,
-                method_name=method_name,
-                status="pending",
-            ).model_dump(mode="json")
-        )
         for candidate_id in candidate_ids:
             eval_signals.append(
                 AssemblyEvalSignal(
@@ -261,26 +279,24 @@ def plan_review_metrics(state: TopLevelState) -> dict:
         artifact_type=ASSEMBLY_REVIEW_EVAL_BUNDLE,
     )
 
-    preserved = {
-        key: ar_out[key]
-        for key in ["execution_mode", "env", "quast_parameters"]
-        if key in ar_out
-    }
-    ar_out["review_plan"] = review_plan_data
+    ar_out["review_plan"] = ASSEMBLY_REVIEW_PLAN_CURSOR_ADAPTER.validate_python(
+        review_plan.model_dump(mode="json")
+    )
     ar_out["planned_signals"] = planned_signals
-    ar_out["signals"] = [signal.model_dump(mode="json") for signal in eval_signals]
+    ar_out["signals"] = [
+        ASSEMBLY_EVAL_SIGNAL_CURSOR_ADAPTER.validate_python(
+            signal.model_dump(mode="json")
+        )
+        for signal in eval_signals
+    ]
     ar_out["eval_bundle_ref"] = eval_bundle_ref
-    ar_out.update(preserved)
 
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = ar_out
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(state, ar_out)
 
 
-def evaluate_review_rules(state: TopLevelState) -> dict:
+def evaluate_review_rules(state: TopLevelState) -> StateUpdate:
     """Evaluate structural rules and record candidate count for routing."""
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
 
     if ar_out.get("status") == "failed":
         return {}
@@ -288,12 +304,10 @@ def evaluate_review_rules(state: TopLevelState) -> dict:
     candidates = ar_out.get("candidates", [])
     ar_out["candidate_count"] = len(candidates)
 
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = ar_out
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(state, ar_out)
 
 
-def parameter_quality_gate(state: TopLevelState) -> dict:
+def parameter_quality_gate(state: TopLevelState) -> StateUpdate:
     """Route Phase10 assembly-review failures back to assembly parameter replan."""
 
     stage_outputs = dict(state.get("stage_outputs") or {})
@@ -301,57 +315,60 @@ def parameter_quality_gate(state: TopLevelState) -> dict:
     if not assembly_out.get("parameter_attempts"):
         return {}
 
-    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    ar_out = assembly_review_output(state)
     metrics = _phase10_review_metrics(ar_out, assembly_out)
+    gate_state = state.copy()
     if metrics and not ar_out.get("metrics"):
-        ar_out["metrics"] = metrics
-        stage_outputs["assembly_review"] = ar_out
+        gate_state.update(update_assembly_review_output(state, {"metrics": metrics}))
 
     from app.stages.assembly.parameters.workflow import (
         parameter_quality_gate as assembly_parameter_quality_gate,
     )
 
-    gate_update = assembly_parameter_quality_gate(
-        {**state, "stage_outputs": stage_outputs}
-    )
+    gate_update = assembly_parameter_quality_gate(gate_state)
     updated_outputs = dict(gate_update.get("stage_outputs") or stage_outputs)
     updated_assembly = dict(updated_outputs.get("assembly") or {})
     quality_gate = updated_assembly.get("quality_gate")
+    updated_state = state.copy()
+    updated_state["stage_outputs"] = validate_stage_outputs(updated_outputs)
 
     if updated_assembly.get("status") == "retry_parameters_after_review_failure":
-        updated_outputs["assembly_review"] = {
-            **ar_out,
-            "status": "parameter_replan_requested",
-            "parameter_quality_gate": quality_gate,
-        }
+        review_update = update_assembly_review_output(
+            updated_state,
+            {
+                "status": "parameter_replan_requested",
+                "parameter_quality_gate": quality_gate,
+            },
+        )
         return {
             "current_stage": "assembly",
             "supervision_state": "running_stage",
             "active_interrupt": None,
-            "stage_outputs": updated_outputs,
+            **review_update,
         }
 
     if updated_assembly.get("status") == "review_parameter_retries_exhausted":
-        updated_outputs["assembly_review"] = {
-            **ar_out,
+        return update_assembly_review_output(
+            updated_state,
+            {
+                "parameter_quality_gate": quality_gate,
+                "parameter_retries_exhausted": True,
+                "parameter_quality_checked": True,
+            },
+        )
+
+    return update_assembly_review_output(
+        updated_state,
+        {
             "parameter_quality_gate": quality_gate,
-            "parameter_retries_exhausted": True,
             "parameter_quality_checked": True,
-        }
-        return {"stage_outputs": updated_outputs}
-
-    updated_outputs["assembly_review"] = {
-        **ar_out,
-        "parameter_quality_gate": quality_gate,
-        "parameter_quality_checked": True,
-    }
-    return {"stage_outputs": updated_outputs}
+        },
+    )
 
 
-def build_related_species_evidence_pack(state: TopLevelState) -> dict:
+def build_related_species_evidence_pack(state: TopLevelState) -> StateUpdate:
     """Build non-blocking local NCBI evidence for the review report and LLM."""
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    ar_out = assembly_review_output(state)
     if is_terminal_failure(ar_out.get("status")):
         return {}
 
@@ -373,16 +390,18 @@ def build_related_species_evidence_pack(state: TopLevelState) -> dict:
         evidence_pack,
         artifact_type=ASSEMBLY_REVIEW_RELATED_SPECIES_EVIDENCE_PACK,
     )
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = {
-        **ar_out,
-        "related_species_evidence_pack": evidence_pack,
-        "related_species_evidence_pack_ref": evidence_ref,
-    }
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(
+        state,
+        {
+            "related_species_evidence_pack": evidence_pack,
+            "related_species_evidence_pack_ref": evidence_ref,
+        },
+    )
 
 
-def _related_species_reference_dir(ar_out: dict[str, Any]) -> str | Path | None:
+def _related_species_reference_dir(
+    ar_out: AssemblyReviewCursor,
+) -> str | Path | None:
     """Return validated NCBI reference directory path from stage output or environment.
 
     Returns None if no valid path is configured, triggering default reference directory.
@@ -413,10 +432,11 @@ def _related_species_reference_dir(ar_out: dict[str, Any]) -> str | Path | None:
     return ref_path
 
 
-def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
+def build_related_species_statistics_and_notebook(
+    state: TopLevelState,
+) -> StateUpdate:
     """Build statistics pack and comparative notebook for assembly review."""
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = dict(stage_outputs.get("assembly_review") or {})
+    ar_out = assembly_review_output(state)
     if is_terminal_failure(ar_out.get("status")):
         return {}
 
@@ -549,21 +569,21 @@ def build_related_species_statistics_and_notebook(state: TopLevelState) -> dict:
         destination=notebook_path,
     ).path
 
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = {
-        **ar_out,
-        "related_species_statistics_pack": statistics_pack,
-        "related_species_statistics_pack_ref": statistics_ref,
-        "assembly_review_comparative_notebook_ref": str(notebook_path),
-        "comparative_figures": figure_paths,
-    }
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(
+        state,
+        {
+            "related_species_statistics_pack": statistics_pack,
+            "related_species_statistics_pack_ref": statistics_ref,
+            "assembly_review_comparative_notebook_ref": str(notebook_path),
+            "comparative_figures": figure_paths,
+        },
+    )
 
 
 def _extract_target_metrics_from_signals(
-    ar_out: dict[str, Any],
+    ar_out: AssemblyReviewCursor,
 ) -> dict[str, float] | None:
-    """Extract target assembly metrics from available signals for percentile """
+    """Extract target assembly metrics from available signals for percentile"""
     """computation.
 
     Returns None when multiple candidates exist (no single target to position).
@@ -601,7 +621,7 @@ def _extract_target_metrics_from_signals(
 
 
 def _phase10_review_metrics(
-    ar_out: dict[str, Any], assembly_out: dict[str, Any]
+    ar_out: AssemblyReviewCursor, assembly_out: dict[str, Any]
 ) -> dict[str, Any]:
     if isinstance(ar_out.get("metrics"), dict):
         return dict(ar_out["metrics"])
@@ -639,21 +659,23 @@ def _phase10_review_metrics(
     return metrics
 
 
-def human_review_gate(state: TopLevelState) -> dict:
+def human_review_gate(state: TopLevelState) -> StateUpdate:
     """Set an active interrupt for unresolved assembly review decisions."""
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
     ar_out, report_refs, comparison_context = _ensure_assembly_review_reports(
         state, ar_out
     )
     candidates = ar_out.get("candidates", [])
     signals = ar_out.get("signals", [])
+    candidate_payloads: list[dict[str, Any]] = [
+        dict(candidate) for candidate in candidates
+    ]
 
     payload = ReviewPayload(
         stage="assembly_review",
         gate_id="assembly_review",
         reason="assembly_review_human_decision_required",
-        candidates=candidates,
+        candidates=candidate_payloads,
         signals=[ReviewSignal.model_validate(s) for s in signals],
         decisions_allowed=[
             "accept",
@@ -698,30 +720,35 @@ def human_review_gate(state: TopLevelState) -> dict:
         "assembly_review",
         reason="assembly_review_human_decision_required",
         signals=[s.model_dump(mode="json") for s in payload.signals],
-        candidates=candidates,
+        candidates=candidate_payloads,
         review_request_artifact_ref=request_ref.model_dump(mode="json"),
         auto_decidable=payload.auto_decidable,
         policy_mode=outcome.mode,
         pending_human_confirmation=pending_confirmation,
     )
 
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = {
-        **ar_out,
-        "status": "blocked_human",
-        "review_request_artifact_ref": request_ref.model_dump(mode="json"),
-        "review_policy_outcome": outcome.model_dump(mode="json"),
-        "auto_decidable": payload.auto_decidable,
-        "pending_human_confirmation": pending_confirmation,
-    }
-    blocked_update = {
-        "active_interrupt": persisted_request.compact_interrupt(
-            stage="assembly_review",
-            gate_id="assembly_review",
-            reason="assembly_review_human_decision_required",
+    review_update = update_assembly_review_output(
+        state,
+        {
+            **ar_out,
+            "status": "blocked_human",
+            "review_request_artifact_ref": request_ref.model_dump(mode="json"),
+            "review_policy_outcome": outcome.model_dump(mode="json"),
+            "auto_decidable": payload.auto_decidable,
+            "pending_human_confirmation": pending_confirmation,
+        },
+    )
+    blocked_update: StateUpdate = {
+        "active_interrupt": cast(
+            ActiveInterrupt,
+            persisted_request.compact_interrupt(
+                stage="assembly_review",
+                gate_id="assembly_review",
+                reason="assembly_review_human_decision_required",
+            ),
         ),
         "supervision_state": "blocked_human",
-        "stage_outputs": outputs,
+        **review_update,
     }
     if outcome.action == "BLOCK_WITH_TIMEOUT":
         ledger.record_event(
@@ -748,7 +775,9 @@ def human_review_gate(state: TopLevelState) -> dict:
         )
         from app.control.lifecycle import resume_review_state
 
-        auto_update = resume_review_state({**state, **blocked_update}, recommendation)
+        blocked_state = state.copy()
+        blocked_state.update(blocked_update)
+        auto_update = resume_review_state(blocked_state, recommendation)
     except (RecommendationError, ResumeValidationError, ValueError) as exc:
         ledger.record_event(
             state["session_id"],
@@ -778,12 +807,11 @@ def human_review_gate(state: TopLevelState) -> dict:
     return auto_update
 
 
-def commit_assembly_review(state: TopLevelState) -> dict:
+def commit_assembly_review(state: TopLevelState) -> StateUpdate:
     """Commit the assembly review decision and advance routing."""
     from app.workflow import next_stage_name, skipped_stages_until_next
 
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
 
     decision = ar_out.get("decision", "stop_human_review")
     selected_candidate_id = ar_out.get("selected_candidate_id")
@@ -807,7 +835,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "assembly_review",
         state.get("requested_stages"),
     ):
-        skip_reasons.setdefault(skipped_stage, "not_requested")
+        if skipped_stage in DOMAIN_STAGES:
+            skip_reasons.setdefault(cast(DomainStage, skipped_stage), "not_requested")
     decided_by = ar_out.get("decided_by", "human")
     rationale_artifact_ref = ar_out.get("rationale_artifact_ref")
     action_metadata = {
@@ -825,14 +854,17 @@ def commit_assembly_review(state: TopLevelState) -> dict:
 
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
+    rejected_candidate_ids = (
+        rejected_candidates
+        if isinstance(rejected_candidates, list)
+        else list(rejected_candidates)
+    )
     decision_artifact = ReviewDecisionArtifact(
         session_id=state["session_id"],
         stage="assembly_review",
         decision=decision,
         candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidates
-        if isinstance(rejected_candidates, list)
-        else list(rejected_candidates),
+        rejected_candidates=rejected_candidate_ids,
         final_assembly_ref=final_assembly_ref,
         notes=ar_out.get("notes", []),
         metadata=action_metadata,
@@ -859,7 +891,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         "assembly_review",
         decision=decision,
         candidate_id=selected_candidate_id,
-        rejected_candidates=rejected_candidates,
+        rejected_candidates=rejected_candidate_ids,
         notes=ar_out.get("notes", []),
         artifact_ref=decision_ref.model_dump(mode="json"),
         metadata=action_metadata,
@@ -873,6 +905,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
         and pre_action_ref
         and final_assembly_ref
         and output_assembly_ref
+        and decision in {"accept", "pass", "purge", "polish", "continue_low_confidence"}
     ):
         action_artifact = AssemblyReviewActionArtifact(
             session_id=state["session_id"],
@@ -898,7 +931,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             artifact_type=ASSEMBLY_REVIEW_ACTION,
         )
 
-    update: dict[str, Any] = {
+    update: StateUpdate = {
         "current_stage": next_stage,
         "supervision_state": "completed" if next_stage == "done" else "running_stage",
         "route_trace": trace,
@@ -906,7 +939,7 @@ def commit_assembly_review(state: TopLevelState) -> dict:
     }
 
     if selected_candidate_id:
-        committed_out = {
+        committed_out: dict[str, object] = {
             **ar_out,
             "status": "completed",
             "decision": decision,
@@ -927,7 +960,8 @@ def commit_assembly_review(state: TopLevelState) -> dict:
             committed_out["polished_assembly"] = final_assembly_ref
         if method_name:
             committed_out["action_method_name"] = method_name
-        update["stage_outputs"] = {**stage_outputs, "assembly_review": committed_out}
+        review_update = update_assembly_review_output(state, committed_out)
+        update["stage_outputs"] = review_update["stage_outputs"]
         if output_assembly_ref:
             update["resource_refs"] = update_resource_ref(
                 state,
@@ -946,15 +980,15 @@ def commit_assembly_review(state: TopLevelState) -> dict:
 
 def apply_assembly_review_resume_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict:
+) -> StateUpdate:
     """Apply a validated assembly review decision to a blocked state."""
 
     if request.stage != "assembly_review":
         raise ResumeValidationError(
             "assembly review resume requires stage assembly_review"
         )
-    ar_out = dict((state.get("stage_outputs") or {}).get("assembly_review") or {})
-    active_interrupt = state.get("active_interrupt") or {}
+    ar_out = assembly_review_output(state)
+    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
     review_request_id = request.review_request_id or active_interrupt.get(
         "review_request_id"
     )
@@ -997,8 +1031,7 @@ def apply_assembly_review_resume_decision(
     )
     action_payload = _assembly_review_action_payload(request, candidate_final_ref)
 
-    stage_outputs = dict(state.get("stage_outputs") or {})
-    stage_outputs["assembly_review"] = {
+    review_payload: dict[str, object] = {
         **ar_out,
         "decision": request.decision,
         "selected_candidate_id": request.candidate_id,
@@ -1017,19 +1050,18 @@ def apply_assembly_review_resume_decision(
         "review_request_hash": review_request_hash,
     }
     if action_payload["action_type"] == "purge":
-        stage_outputs["assembly_review"]["purged_assembly"] = action_payload[
-            "final_assembly_ref"
-        ]
+        review_payload["purged_assembly"] = action_payload["final_assembly_ref"]
     if action_payload["action_type"] == "polish":
-        stage_outputs["assembly_review"]["polished_assembly"] = action_payload[
-            "final_assembly_ref"
-        ]
-    updated_state = {
-        **state,
-        "stage_outputs": stage_outputs,
-        "active_interrupt": None,
-        "supervision_state": "running_stage",
-    }
+        review_payload["polished_assembly"] = action_payload["final_assembly_ref"]
+    review_update = update_assembly_review_output(state, review_payload)
+    updated_state = state.copy()
+    updated_state.update(
+        {
+            "stage_outputs": review_update["stage_outputs"],
+            "active_interrupt": None,
+            "supervision_state": "running_stage",
+        }
+    )
     commit_update = commit_assembly_review(updated_state)
     return {**commit_update, "active_interrupt": None}
 
@@ -1137,9 +1169,10 @@ def _assembly_review_action_payload(
     }
 
 
-def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) -> dict:
-    stage_outputs = dict(state.get("stage_outputs") or {})
-    ar_out = dict(stage_outputs.get("assembly_review") or {})
+def _stop_assembly_review(
+    state: TopLevelState, request: ResumeReviewRequest
+) -> StateUpdate:
+    ar_out = assembly_review_output(state)
     data_dir = state.get("data_dir", "data")
     ledger = Ledger(data_dir)
     decision_artifact = ReviewDecisionArtifact(
@@ -1152,7 +1185,7 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         notes=request.notes,
         metadata=request.metadata,
     )
-    active_interrupt = state.get("active_interrupt") or {}
+    active_interrupt = cast(ActiveInterrupt, state.get("active_interrupt") or {})
     review_request_id = request.review_request_id or active_interrupt.get(
         "review_request_id"
     )
@@ -1187,28 +1220,30 @@ def _stop_assembly_review(state: TopLevelState, request: ResumeReviewRequest) ->
         rationale_artifact_ref=request.rationale_artifact_ref,
         review_request_id=review_request_id,
     )
-    stage_outputs["assembly_review"] = {
-        **ar_out,
-        "status": "failed_terminal",
-        "decision": "stop_human_review",
-        "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
-        "notes": request.notes,
-        "decided_by": request.decided_by,
-        "rationale_artifact_ref": request.rationale_artifact_ref,
-    }
+    review_update = update_assembly_review_output(
+        state,
+        {
+            **ar_out,
+            "status": "failed_terminal",
+            "decision": "stop_human_review",
+            "review_decision_artifact_ref": decision_ref.model_dump(mode="json"),
+            "notes": request.notes,
+            "decided_by": request.decided_by,
+            "rationale_artifact_ref": request.rationale_artifact_ref,
+        },
+    )
     return {
         "current_stage": "assembly_review",
         "supervision_state": "failed_terminal",
         "active_interrupt": None,
-        "stage_outputs": stage_outputs,
+        **review_update,
         "last_error": "assembly_review stopped by human review decision",
     }
 
 
-def generate_candidate_comparison(state: TopLevelState) -> dict:
+def generate_candidate_comparison(state: TopLevelState) -> StateUpdate:
     """Generate a candidate comparison artifact when multiple candidates exist."""
-    stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
     candidates = ar_out.get("candidates", [])
 
     if len(candidates) < 2:
@@ -1258,9 +1293,9 @@ def generate_candidate_comparison(state: TopLevelState) -> dict:
         },
     )
 
-    outputs = dict(stage_outputs)
-    outputs["assembly_review"] = {**ar_out, "candidate_comparison_ref": comparison_ref}
-    return {"stage_outputs": outputs}
+    return update_assembly_review_output(
+        state, {"candidate_comparison_ref": comparison_ref}
+    )
 
 
 def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -> bool:
@@ -1271,7 +1306,7 @@ def _json_artifact_payload_matches(artifact_ref: Any, payload: dict[str, Any]) -
         existing = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return False
-    return existing == payload
+    return bool(existing == payload)
 
 
 def _target_species_name(state: TopLevelState) -> str | None:
@@ -1307,8 +1342,8 @@ def _target_species_name(state: TopLevelState) -> str | None:
 
 def _ensure_assembly_review_reports(
     state: TopLevelState,
-    ar_out: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+    ar_out: AssemblyReviewCursor,
+) -> tuple[AssemblyReviewCursor, dict[str, str], dict[str, Any]]:
     candidates = ar_out.get("candidates", [])
     report_kind = (
         "candidate_comparison_review"
@@ -1328,11 +1363,13 @@ def _ensure_assembly_review_reports(
         _render_assembly_review_markdown(payload, title="Assembly Review Report"),
     )
 
-    updated = {
-        **ar_out,
-        "assembly_review_report_ref": report_ref,
-        "assembly_review_packet_ref": data_ref,
-    }
+    updated = ASSEMBLY_REVIEW_CURSOR_ADAPTER.validate_python(
+        {
+            **ar_out,
+            "assembly_review_report_ref": report_ref,
+            "assembly_review_packet_ref": data_ref,
+        }
+    )
     report_refs = {
         "assembly_review_report": report_ref,
         "review_packet": data_ref,
@@ -1350,7 +1387,7 @@ def _ensure_assembly_review_reports(
 
 def _assembly_review_report_payload(
     state: TopLevelState,
-    ar_out: dict[str, Any],
+    ar_out: AssemblyReviewCursor,
     *,
     report_kind: str,
 ) -> dict[str, Any]:
@@ -1394,8 +1431,8 @@ def _assembly_review_report_payload(
 
 
 def _candidate_report_row(
-    candidate: dict[str, Any],
-    signals: list[dict[str, Any]],
+    candidate: AssemblyCandidateCursor,
+    signals: list[AssemblyEvalSignalCursor],
     assembly_out: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_id = candidate.get("candidate_id", "unknown")
@@ -1427,8 +1464,15 @@ def _candidate_report_row(
     }
 
 
-def _signal_status_buckets(signals: list[dict[str, Any]]) -> dict[str, list[str]]:
-    buckets = {"available": [], "missing": [], "failed": [], "pending": []}
+def _signal_status_buckets(
+    signals: list[AssemblyEvalSignalCursor],
+) -> dict[str, list[str]]:
+    buckets: dict[str, list[str]] = {
+        "available": [],
+        "missing": [],
+        "failed": [],
+        "pending": [],
+    }
     for signal in signals:
         status = signal.get("status", "pending")
         signal_name = signal.get("signal_name")
@@ -1437,7 +1481,7 @@ def _signal_status_buckets(signals: list[dict[str, Any]]) -> dict[str, list[str]
     return {key: sorted(values) for key, values in buckets.items()}
 
 
-def _candidate_comparison_context(ar_out: dict[str, Any]) -> dict[str, Any]:
+def _candidate_comparison_context(ar_out: AssemblyReviewCursor) -> dict[str, Any]:
     candidates = ar_out.get("candidates", [])
     context: dict[str, Any] = {
         "candidate_ids": [
@@ -1640,9 +1684,7 @@ def _append_related_species_sanity_check(
         excluded_accessions = ", ".join(
             str(record.get("accession")) for record in excluded
         )
-        lines.append(
-            f"- Excluded alternate-haplotype records: {excluded_accessions}"
-        )
+        lines.append(f"- Excluded alternate-haplotype records: {excluded_accessions}")
     summary = pack.get("computed_summary") or {}
     if summary:
         lines.extend(
@@ -1702,7 +1744,7 @@ def _write_derived_report_text(
 
 
 def _candidate_parameters(
-    candidate: dict[str, Any], assembly_out: dict[str, Any]
+    candidate: AssemblyCandidateCursor, assembly_out: dict[str, Any]
 ) -> dict[str, Any]:
     bundle_ref = candidate.get("bundle_ref")
     if bundle_ref and Path(str(bundle_ref)).exists():
@@ -1737,7 +1779,7 @@ def _candidate_parameters(
 
 
 def _candidate_metrics(
-    candidate_id: str, signals: list[dict[str, Any]]
+    candidate_id: str, signals: list[AssemblyEvalSignalCursor]
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for signal in signals:
@@ -1752,42 +1794,45 @@ def _candidate_metrics(
     return metrics
 
 
-def fail_assembly_review(state: TopLevelState) -> dict:
+def fail_assembly_review(state: TopLevelState) -> StateUpdate:
     """Record assembly review failure and stop."""
     stage_outputs = state.get("stage_outputs") or {}
-    ar_out = stage_outputs.get("assembly_review", {})
+    ar_out = assembly_review_output(state)
     assembly_out = stage_outputs.get("assembly", {})
-    status = ar_out.get("status") or assembly_out.get("status") or "failed"
+    status = str(ar_out.get("status") or assembly_out.get("status") or "failed")
     default_reason = {
         "blocked_env": "assembly_review blocked on missing conda environment",
         "missing_tool": "assembly_review blocked on missing tool",
     }.get(status, "assembly_review failed")
+    reason = ar_out.get("reason") or assembly_out.get("reason") or default_reason
     return {
         "current_stage": "assembly_review",
         "supervision_state": "failed_terminal",
-        "last_error": ar_out.get("reason")
-        or assembly_out.get("reason")
-        or default_reason,
+        "last_error": str(reason),
     }
 
 
-def _load_selected_candidate_refs(candidate_refs: list[str]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
+def _load_selected_candidate_refs(
+    candidate_refs: list[str],
+) -> list[AssemblyCandidateCursor]:
+    candidates: list[AssemblyCandidateCursor] = []
     for candidate_ref in candidate_refs:
         path = Path(candidate_ref)
         if not path.exists():
             candidates.append(
-                {
-                    "candidate_id": candidate_ref,
-                    "method_name": "unknown",
-                    "status": "missing",
-                    "bundle_ref": candidate_ref,
-                }
+                ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(
+                    {
+                        "candidate_id": candidate_ref,
+                        "method_name": "unknown",
+                        "status": "missing",
+                        "bundle_ref": candidate_ref,
+                    }
+                )
             )
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["bundle_ref"] = str(path)
-        candidates.append(payload)
+        candidates.append(ASSEMBLY_CANDIDATE_CURSOR_ADAPTER.validate_python(payload))
     return candidates
 
 
@@ -1805,7 +1850,7 @@ def _existing_assembly_ref(registry_ref: str) -> str | None:
 _EVAL_SIGNAL_NAMES = {"quast", "busco"}
 
 
-def _assembly_review_auto_decidable(ar_out: dict[str, Any]) -> bool:
+def _assembly_review_auto_decidable(ar_out: AssemblyReviewCursor) -> bool:
     candidates = ar_out.get("candidates") or []
     if not any(isinstance(c, dict) and c.get("candidate_id") for c in candidates):
         return False

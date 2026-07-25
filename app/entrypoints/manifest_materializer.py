@@ -156,12 +156,12 @@ def _build_asset_specs(
         )
 
     assets = []
-    for (asset_type, file_format, platform), paths in grouped.items():
+    for (asset_type, file_format, asset_platform), paths in grouped.items():
         spec: dict[str, Any] = {
             "asset_type": asset_type,
             "paths": [str(path) for path in paths],
             "format": file_format,
-            "platform": platform,
+            "platform": asset_platform,
             "metadata": {"manifest_materialized_from": "ask"},
         }
         if request.sample_id:

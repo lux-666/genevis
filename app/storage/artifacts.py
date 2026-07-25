@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, TextIO
 from uuid import NAMESPACE_URL, uuid5
 
-from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.integrity import sha256_file
+from app.schemas.artifacts import ArtifactMeta, ArtifactRef
 from app.storage.paths import (
     DataLayoutError,
     SessionPaths,
@@ -348,7 +348,8 @@ def artifact_ref_for_path(
         raise DataLayoutError(f"artifact path is not present in the index: {path_ref}")
     if expected_type is not None and ref.artifact_type != expected_type:
         raise DataLayoutError(
-            f"artifact path has type {ref.artifact_type!r}, expected {expected_type!r}: "
+            f"artifact path has type {ref.artifact_type!r}, "
+            f"expected {expected_type!r}: "
             f"{path_ref}"
         )
     resolve_artifact_ref(paths.run_dir, session_id, ref)
@@ -376,7 +377,8 @@ def _registration_for(paths: SessionPaths, artifact: ArtifactMeta) -> dict[str, 
         artifact_relative = artifact_path.relative_to(paths.artifacts_dir)
     except ValueError as exc:
         raise DataLayoutError(
-            f"registered artifact must be published under {paths.artifacts_dir}: {artifact_path}"
+            f"registered artifact must be published under {paths.artifacts_dir}: "
+            f"{artifact_path}"
         ) from exc
     if (
         artifact_path == paths.artifact_index_path
@@ -439,7 +441,8 @@ def _work_artifact_destination(paths: SessionPaths, source: Path, stage: str) ->
         relative = source.relative_to(stage_work_dir)
     except ValueError as exc:
         raise DataLayoutError(
-            f"work artifact is outside the declared stage workspace {stage_work_dir}: {source}"
+            f"work artifact is outside the declared stage workspace {stage_work_dir}: "
+            f"{source}"
         ) from exc
     if paths.session_id in relative.parts:
         raise DataLayoutError(f"session_id must not be repeated below work/: {source}")
@@ -477,7 +480,8 @@ def _artifact_destination_path(
         relative = destination_path.relative_to(paths.artifacts_dir)
     except ValueError as exc:
         raise DataLayoutError(
-            f"artifact destination must be below {paths.artifacts_dir}: {destination_path}"
+            f"artifact destination must be below {paths.artifacts_dir}: "
+            f"{destination_path}"
         ) from exc
     if not relative.parts or relative.parts[0] == "index.jsonl":
         raise DataLayoutError("the artifact index cannot be a publication destination")
@@ -516,7 +520,8 @@ def _load_records(handle: TextIO, paths: SessionPaths) -> list[dict[str, Any]]:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
             raise DataLayoutError(
-                f"malformed artifact index row {line_number}: {paths.artifact_index_path}"
+                f"malformed artifact index row {line_number}: "
+                f"{paths.artifact_index_path}"
             ) from exc
         _validate_record(record, paths, line_number)
         existing_path = by_path.get(record["path_ref"])
@@ -541,7 +546,8 @@ def _validate_record(record: Any, paths: SessionPaths, line_number: int) -> None
     missing = [field for field in _INDEX_REQUIRED_FIELDS if field not in record]
     if missing:
         raise DataLayoutError(
-            f"artifact index row {line_number} is missing v2 fields: {', '.join(missing)}"
+            f"artifact index row {line_number} is missing v2 fields: "
+            f"{', '.join(missing)}"
         )
     if record["schema_version"] != 2:
         raise DataLayoutError(f"artifact index row {line_number} is not schema v2")
@@ -564,7 +570,8 @@ def _validate_record(record: Any, paths: SessionPaths, line_number: int) -> None
         resolved.relative_to(paths.artifacts_dir)
     except ValueError as exc:
         raise DataLayoutError(
-            f"artifact index row {line_number} points outside artifacts/: {record['path_ref']}"
+            f"artifact index row {line_number} points outside artifacts/: "
+            f"{record['path_ref']}"
         ) from exc
     relative = resolved.relative_to(paths.run_dir)
     if len(relative.parts) < 2 or relative.parts[0] != "artifacts":

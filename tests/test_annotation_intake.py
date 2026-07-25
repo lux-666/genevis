@@ -7,8 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.ledger import Ledger
-from app.storage.artifacts import read_artifact_records
 from app.review.annotation_intake import (
     ANNOTATION_INTAKE_PLAN,
     build_recommended_annotation_plan,
@@ -18,6 +16,8 @@ from app.review.annotation_intake import (
     rewrite_requested_stages_after_assembly_review,
 )
 from app.review.base import ResumeReviewRequest
+from app.storage.artifacts import read_artifact_records
+from app.storage.ledger import Ledger
 from tests.data_v2 import v2_run_dir
 
 
@@ -42,13 +42,16 @@ def _manifest(path: Path, session_id: str) -> Path:
     return manifest_ref
 
 
-def _state(data_root: Path, session_id: str, requested_stages: list[str] | None) -> dict:
+def _state(
+    data_root: Path, session_id: str, requested_stages: list[str] | None
+) -> dict:
     data_dir = v2_run_dir(data_root, session_id)
     manifest_ref = _manifest(data_dir / "control", session_id)
     return {
         "session_id": session_id,
         "thread_id": session_id,
         "data_dir": str(data_dir),
+        "control_state": "running",
         "input_manifest_ref": str(manifest_ref),
         "supervision_state": "blocked_human",
         "current_stage": "assembly_review",
@@ -56,7 +59,6 @@ def _state(data_root: Path, session_id: str, requested_stages: list[str] | None)
         "active_interrupt": {
             "stage": "assembly_review",
             "gate_id": "assembly_review",
-            "decisions_allowed": ["accept", "pass", "continue_low_confidence", "rerun", "stop_human_review"],
         },
         "stage_outputs": {
             "assembly_review": {"status": "blocked_human"},
@@ -64,6 +66,7 @@ def _state(data_root: Path, session_id: str, requested_stages: list[str] | None)
         },
         "route_trace": ["inventory_stage", "read_qc_stage", "assembly_stage"],
         "review_notes": [],
+        "skip_reasons": {},
     }
 
 
@@ -95,10 +98,19 @@ def _diamond_provenance() -> list[dict[str, str]]:
 
 class AnnotationIntakeTests(unittest.TestCase):
     def test_decision_classifier_only_continue_downstream_triggers_intake(self):
-        self.assertEqual(classify_assembly_review_decision("accept"), "continue_downstream")
-        self.assertEqual(classify_assembly_review_decision("continue_low_confidence"), "continue_downstream")
-        self.assertEqual(classify_assembly_review_decision("rerun"), "assembly_operation")
-        self.assertEqual(classify_assembly_review_decision("stop_human_review"), "terminate")
+        self.assertEqual(
+            classify_assembly_review_decision("accept"), "continue_downstream"
+        )
+        self.assertEqual(
+            classify_assembly_review_decision("continue_low_confidence"),
+            "continue_downstream",
+        )
+        self.assertEqual(
+            classify_assembly_review_decision("rerun"), "assembly_operation"
+        )
+        self.assertEqual(
+            classify_assembly_review_decision("stop_human_review"), "terminate"
+        )
 
     def test_rewrite_preserves_prefix_and_replaces_downstream_suffix(self):
         requested = ["read_qc", "assembly", "assembly_review", "repeat_annotation"]
@@ -108,7 +120,13 @@ class AnnotationIntakeTests(unittest.TestCase):
         )
         self.assertEqual(
             rewritten,
-            ["read_qc", "assembly", "assembly_review", "hic_scaffolding", "gene_annotation"],
+            [
+                "read_qc",
+                "assembly",
+                "assembly_review",
+                "hic_scaffolding",
+                "gene_annotation",
+            ],
         )
 
     def test_recommendation_uses_manifest_when_plan_stops_at_assembly_review(self):
@@ -128,7 +146,9 @@ class AnnotationIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s2"
-            state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
+            state = _state(
+                data_dir, session_id, ["read_qc", "assembly", "assembly_review"]
+            )
             run_dir = Path(state["data_dir"])
             Ledger(run_dir).create_session(session_id, "control/manifest.json")
             resume_update = {
@@ -155,12 +175,24 @@ class AnnotationIntakeTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(
                 result.final_requested_stages,
-                ["read_qc", "assembly", "assembly_review", "t2t", "repeat_annotation", "gene_annotation", "function_annotation"],
+                [
+                    "read_qc",
+                    "assembly",
+                    "assembly_review",
+                    "t2t",
+                    "repeat_annotation",
+                    "gene_annotation",
+                    "function_annotation",
+                ],
             )
             self.assertFalse(result.changed)
-            self.assertEqual(result.update["requested_stages"], result.final_requested_stages)
             self.assertEqual(
-                result.update["stage_outputs"]["assembly_review"]["annotation_intake_plan_ref"],
+                result.update["requested_stages"], result.final_requested_stages
+            )
+            self.assertEqual(
+                result.update["stage_outputs"]["assembly_review"][
+                    "annotation_intake_plan_ref"
+                ],
                 result.artifact_ref,
             )
 
@@ -169,22 +201,39 @@ class AnnotationIntakeTests(unittest.TestCase):
             self.assertFalse(payload["changed"])
             self.assertEqual(payload["decision"]["decision"], "accept")
 
-            artifact_types = [record["artifact_type"] for record in read_artifact_records(run_dir, session_id)]
+            artifact_types = [
+                record["artifact_type"]
+                for record in read_artifact_records(run_dir, session_id)
+            ]
             self.assertIn(ANNOTATION_INTAKE_PLAN, artifact_types)
             events = Ledger(run_dir).read_events(session_id)
-            self.assertTrue(any(event["event_type"] == "annotation_intake_planned" for event in events))
+            self.assertTrue(
+                any(
+                    event["event_type"] == "annotation_intake_planned"
+                    for event in events
+                )
+            )
 
     def test_override_can_add_downstream_stage_not_in_original_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s3"
-            state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review", "repeat_annotation"])
-            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
+            state = _state(
+                data_dir,
+                session_id,
+                ["read_qc", "assembly", "assembly_review", "repeat_annotation"],
+            )
+            Ledger(Path(state["data_dir"])).create_session(
+                session_id, "control/manifest.json"
+            )
             recommended = build_recommended_annotation_plan(state)
             final = recommended.model_copy(
                 update={
                     "selected_stages": ["hic_scaffolding", "repeat_annotation"],
-                    "resolved_execution_order": ["hic_scaffolding", "repeat_annotation"],
+                    "resolved_execution_order": [
+                        "hic_scaffolding",
+                        "repeat_annotation",
+                    ],
                     "selected_methods": {
                         "hic_scaffolding": "hic_scaffolding.candidate.autohic",
                         "repeat_annotation": ["repeat_annotation.masking.repeatmasker"],
@@ -204,7 +253,13 @@ class AnnotationIntakeTests(unittest.TestCase):
             self.assertTrue(result.changed)
             self.assertEqual(
                 result.final_requested_stages,
-                ["read_qc", "assembly", "assembly_review", "hic_scaffolding", "repeat_annotation"],
+                [
+                    "read_qc",
+                    "assembly",
+                    "assembly_review",
+                    "hic_scaffolding",
+                    "repeat_annotation",
+                ],
             )
             self.assertEqual(
                 result.update["stage_outputs"]["hic_scaffolding"]["primary_method"],
@@ -219,16 +274,24 @@ class AnnotationIntakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s6"
-            state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
-            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
+            state = _state(
+                data_dir, session_id, ["read_qc", "assembly", "assembly_review"]
+            )
+            Ledger(Path(state["data_dir"])).create_session(
+                session_id, "control/manifest.json"
+            )
             provenance = _diamond_provenance()
             recommended = build_recommended_annotation_plan(state)
             final = recommended.model_copy(
                 update={
                     "selected_stages": ["function_annotation"],
                     "resolved_execution_order": ["function_annotation"],
-                    "selected_methods": {"function_annotation": ["function_annotation.candidate.diamond"]},
-                    "stage_parameters": {"function_annotation": {"database_provenance": provenance}},
+                    "selected_methods": {
+                        "function_annotation": ["function_annotation.candidate.diamond"]
+                    },
+                    "stage_parameters": {
+                        "function_annotation": {"database_provenance": provenance}
+                    },
                     "confirmed": True,
                 }
             )
@@ -252,9 +315,18 @@ class AnnotationIntakeTests(unittest.TestCase):
             state = _state(
                 data_dir,
                 session_id,
-                ["read_qc", "assembly", "assembly_review", "repeat_annotation", "gene_annotation", "function_annotation"],
+                [
+                    "read_qc",
+                    "assembly",
+                    "assembly_review",
+                    "repeat_annotation",
+                    "gene_annotation",
+                    "function_annotation",
+                ],
             )
-            Ledger(Path(state["data_dir"])).create_session(session_id, "control/manifest.json")
+            Ledger(Path(state["data_dir"])).create_session(
+                session_id, "control/manifest.json"
+            )
             state["skip_reasons"] = {
                 "repeat_annotation": "old skip",
                 "gene_annotation": "old skip",
@@ -262,9 +334,15 @@ class AnnotationIntakeTests(unittest.TestCase):
             }
             state["stage_outputs"].update(
                 {
-                    "repeat_annotation": {"status": "old", "primary_method": "old.repeat"},
+                    "repeat_annotation": {
+                        "status": "old",
+                        "primary_method": "old.repeat",
+                    },
                     "gene_annotation": {"status": "old", "primary_method": "old.gene"},
-                    "function_annotation": {"status": "old", "primary_method": "old.function"},
+                    "function_annotation": {
+                        "status": "old",
+                        "primary_method": "old.function",
+                    },
                 }
             )
             recommended = build_recommended_annotation_plan(state)
@@ -272,7 +350,9 @@ class AnnotationIntakeTests(unittest.TestCase):
                 update={
                     "selected_stages": ["hic_scaffolding"],
                     "resolved_execution_order": ["hic_scaffolding"],
-                    "selected_methods": {"hic_scaffolding": "hic_scaffolding.candidate.autohic"},
+                    "selected_methods": {
+                        "hic_scaffolding": "hic_scaffolding.candidate.autohic"
+                    },
                     "confirmed": True,
                 }
             )
@@ -292,16 +372,24 @@ class AnnotationIntakeTests(unittest.TestCase):
             self.assertIn("assembly", result.update["stage_outputs"])
             self.assertIn("assembly_review", result.update["stage_outputs"])
             self.assertIn("hic_scaffolding", result.update["stage_outputs"])
-            for stale_stage in ("repeat_annotation", "gene_annotation", "function_annotation"):
+            for stale_stage in (
+                "repeat_annotation",
+                "gene_annotation",
+                "function_annotation",
+            ):
                 self.assertNotIn(stale_stage, result.update["stage_outputs"])
                 self.assertNotIn(stale_stage, result.update["skip_reasons"])
-            self.assertEqual(result.update["skip_reasons"]["assembly"], "upstream preserved")
+            self.assertEqual(
+                result.update["skip_reasons"]["assembly"], "upstream preserved"
+            )
 
     def test_non_continue_decision_skips_intake(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             session_id = "s4"
-            state = _state(data_dir, session_id, ["read_qc", "assembly", "assembly_review"])
+            state = _state(
+                data_dir, session_id, ["read_qc", "assembly", "assembly_review"]
+            )
 
             result = maybe_collect_annotation_intake(
                 state=state,

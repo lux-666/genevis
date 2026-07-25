@@ -396,9 +396,7 @@ class TerminalCheckpointCompactionTests(unittest.TestCase):
             terminal_state = dict(graph.get_state(config).values)
             self.assertGreater(len(list(saver.list(config))), 1)
 
-            self.assertTrue(
-                compact_terminal_checkpoint(saver, config, terminal_state)
-            )
+            self.assertTrue(compact_terminal_checkpoint(saver, config, terminal_state))
             self.assertEqual(len(list(saver.list(config))), 1)
 
             saver.conn.execute(

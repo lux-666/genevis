@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from app.control.lifecycle import ResumeValidationError
 from app.domains.parameter_recommendation.facts import build_canonical_facts
@@ -81,8 +82,8 @@ from app.schemas.parameter_recommendation import (
     T2TRecommendationContext,
 )
 from app.schemas.shared_parameters import DnaMotif, normalize_dna_motif
-from app.schemas.state import TopLevelState
-from app.stages.base import absolute_data_dir, stage_output, update_stage_output
+from app.schemas.state import StateUpdate, TopLevelState
+from app.stages.base import absolute_data_dir
 from app.stages.t2t.parameters.catalog import load_t2t_parameter_catalog
 from app.stages.t2t.parameters.context import build_t2t_recommendation_context
 from app.stages.t2t.parameters.execution import (
@@ -94,6 +95,11 @@ from app.stages.t2t.parameters.storage import (
     read_t2t_parameter_artifact,
     recover_t2t_parameter_artifact,
     write_t2t_parameter_artifact,
+)
+from app.stages.t2t.state import (
+    ArtifactRefJson,
+    read_t2t_stage_output,
+    update_t2t_stage_output,
 )
 from app.storage.ledger import Ledger
 from app.storage.parameter_evidence import (
@@ -115,10 +121,10 @@ _LEGACY_MOTIF_FIELDS = (
 )
 
 
-def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
+def resolve_t2t_telomere_motif(state: TopLevelState) -> StateUpdate:
     """Resolve one motif before any T2T recommendation or sequence scan."""
 
-    output = stage_output(state, "t2t")
+    output = read_t2t_stage_output(state)
     if output.get("status") != "resolved":
         return {}
     legacy_fields = sorted(field for field in _LEGACY_MOTIF_FIELDS if field in output)
@@ -188,9 +194,8 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
             )
         except (OSError, ValueError, T2TParameterPersistenceError) as exc:
             return _fail(state, f"T2T motif resolution persistence failed: {exc}")
-        return update_stage_output(
+        return update_t2t_stage_output(
             state,
-            "t2t",
             {
                 "status": "motif_resolved",
                 "resolved_telomere_motif": motif,
@@ -266,11 +271,16 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
             artifact_type=T2T_MOTIF_RESPONSE_PARSE,
             method_name="t2t.telomere_motif_response_parser",
         )
+        if decision.valid and decision.status is None:
+            raise ValueError("T2T motif response has no resolution status")
+        resolution_status: Literal["resolved", "unresolved", "invalid"] = (
+            decision.status if decision.status is not None else "invalid"
+        )
         resolution_ref, manifest_ref = _write_t2t_motif_resolution_chain(
             state,
             input_snapshot_ref=input_snapshot_ref,
             resolution_mode="llm_species_resolution",
-            status=decision.status if decision.valid else "invalid",
+            status=resolution_status,
             motif=decision.resolved_telomere_motif,
             summary=decision.summary,
             model_request_ref=request_ref,
@@ -300,9 +310,8 @@ def resolve_t2t_telomere_motif(state: TopLevelState) -> dict:
             "T2T telomere motif is unresolved for the supplied species facts",
             refs,
         )
-    return update_stage_output(
+    return update_t2t_stage_output(
         state,
-        "t2t",
         {
             "status": "motif_resolved",
             "resolved_telomere_motif": decision.resolved_telomere_motif,
@@ -317,8 +326,8 @@ def _write_t2t_motif_resolution_chain(
     state: TopLevelState,
     *,
     input_snapshot_ref: ArtifactRef,
-    resolution_mode: str,
-    status: str,
+    resolution_mode: Literal["provided_species_fact", "llm_species_resolution"],
+    status: Literal["resolved", "unresolved", "invalid"],
     motif: DnaMotif | None,
     summary: str | None,
     model_request_ref: ArtifactRef | None = None,
@@ -369,8 +378,8 @@ def _write_t2t_motif_resolution_chain(
 
 def _hydrate_t2t_motif_resolution(
     state: TopLevelState,
-    manifest_value: ArtifactRef | dict[str, Any],
-) -> tuple[dict, T2TMotifInputSnapshotV3]:
+    manifest_value: ArtifactRef | ArtifactRefJson,
+) -> tuple[StateUpdate, T2TMotifInputSnapshotV3]:
     manifest_record = read_t2t_parameter_artifact(
         state,
         manifest_value,
@@ -426,6 +435,12 @@ def _hydrate_t2t_motif_resolution(
             "telomere_motif_model_response_ref": manifest.refs.model_response_ref,
             "telomere_motif_response_parse_ref": manifest.refs.response_parse_ref,
         }
+        if (
+            manifest.refs.model_request_ref is None
+            or manifest.refs.model_response_ref is None
+            or manifest.refs.response_parse_ref is None
+        ):
+            raise ValueError("T2T motif manifest is missing required model refs")
         request_record = read_t2t_parameter_artifact(
             state,
             manifest.refs.model_request_ref,
@@ -470,9 +485,8 @@ def _hydrate_t2t_motif_resolution(
             snapshot,
         )
     return (
-        update_stage_output(
+        update_t2t_stage_output(
             state,
-            "t2t",
             {
                 "status": "motif_resolved",
                 "resolved_telomere_motif": resolution["resolved_telomere_motif"],
@@ -523,19 +537,18 @@ def _validate_t2t_motif_resolution_record(
 def _fail_with_motif_refs(
     state: TopLevelState,
     reason: str,
-    refs: dict[str, Any],
-) -> dict:
-    return update_stage_output(
+    refs: Mapping[str, object],
+) -> StateUpdate:
+    return update_t2t_stage_output(
         state,
-        "t2t",
         {"status": "failed", "reason": reason, **refs},
     )
 
 
-def recommend_t2t_parameters(state: TopLevelState) -> dict:
+def recommend_t2t_parameters(state: TopLevelState) -> StateUpdate:
     """Persist one sparse recommendation and block at mandatory approval."""
 
-    output = stage_output(state, "t2t")
+    output = read_t2t_stage_output(state)
     if output.get("status") != "motif_resolved":
         return {}
     read_inputs = output.get("ont_read_inputs")
@@ -550,8 +563,8 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
         )
     except (ValueError, T2TParameterPersistenceError) as exc:
         return _fail(state, f"T2T motif evidence is missing or changed: {exc}")
-    hydrated_state = {**state, **hydrated_update}
-    hydrated_output = stage_output(hydrated_state, "t2t")
+    hydrated_state: TopLevelState = {**state, **hydrated_update}
+    hydrated_output = read_t2t_stage_output(hydrated_state)
     if hydrated_output.get("status") != "motif_resolved":
         return hydrated_update
     bound_fields = (
@@ -739,9 +752,8 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
         recommendation_hash=manifest_ref.sha256,
     )
     if not decision.valid:
-        return update_stage_output(
+        return update_t2t_stage_output(
             state,
-            "t2t",
             {
                 "status": "parameter_response_invalid",
                 "reason": "T2T parameter recommendation response could not be parsed",
@@ -804,9 +816,8 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
         auto_decidable=False,
         pending_human_confirmation=True,
     )
-    return update_stage_output(
+    return update_t2t_stage_output(
         state,
-        "t2t",
         {
             "status": "blocked_human",
             "block_reason": "t2t_parameter_approval_required",
@@ -821,14 +832,14 @@ def recommend_t2t_parameters(state: TopLevelState) -> dict:
 
 def apply_t2t_parameter_approval_decision(
     state: TopLevelState, request: ResumeReviewRequest
-) -> dict[str, Any]:
+) -> StateUpdate:
     """Apply one fully bound decision for T2T's initial recommendation."""
 
     if request.stage != "t2t" or request.gate_id != "parameter_approval":
         raise ResumeValidationError(
             "T2T parameter approval requires t2t/parameter_approval"
         )
-    output = stage_output(state, "t2t")
+    output = read_t2t_stage_output(state)
     interrupt = state.get("active_interrupt") or output.get("active_interrupt")
     if (
         not isinstance(interrupt, dict)
@@ -1026,24 +1037,25 @@ def apply_t2t_parameter_approval_decision(
         decided_by=request.decided_by,
         review_request_id=request_id,
     )
-    outputs = dict(state.get("stage_outputs") or {})
     if request.decision == "reject_parameters":
-        outputs["t2t"] = {
-            **output,
-            "status": "failed",
-            "reason": "t2t_parameter_recommendation_rejected_by_human",
-            "active_interrupt": None,
-            "current_parameter_recommendation": cursor.model_copy(
-                update={"status": "rejected"}
-            ).model_dump(mode="json"),
-            "proposed_parameter_attempt_id": None,
-        }
+        stage_update = update_t2t_stage_output(
+            state,
+            {
+                "status": "failed",
+                "reason": "t2t_parameter_recommendation_rejected_by_human",
+                "active_interrupt": None,
+                "current_parameter_recommendation": cursor.model_copy(
+                    update={"status": "rejected"}
+                ).model_dump(mode="json"),
+                "proposed_parameter_attempt_id": None,
+            },
+        )
         return {
             "current_stage": "t2t",
             "supervision_state": "failed_terminal",
             "active_interrupt": None,
             "last_error": "t2t_parameter_recommendation_rejected_by_human",
-            "stage_outputs": outputs,
+            **stage_update,
         }
     attempt = ParameterAttempt(
         schema_version=3,
@@ -1057,29 +1069,31 @@ def apply_t2t_parameter_approval_decision(
         recommendation_contract=manifest.recommendation_contract,
         previous_attempt_seal_hash=manifest.previous_attempt_seal_hash,
     )
-    outputs["t2t"] = {
-        **output,
-        "status": "parameters_approved",
-        "active_interrupt": None,
-        "current_parameter_attempt_id": manifest.recommendation_id,
-        "parameter_attempts": [attempt.model_dump(mode="json")],
-        "current_parameter_recommendation": cursor.model_copy(
-            update={"status": "approved"}
-        ).model_dump(mode="json"),
-        "proposed_parameter_attempt_id": None,
-    }
+    stage_update = update_t2t_stage_output(
+        state,
+        {
+            "status": "parameters_approved",
+            "active_interrupt": None,
+            "current_parameter_attempt_id": manifest.recommendation_id,
+            "parameter_attempts": [attempt.model_dump(mode="json")],
+            "current_parameter_recommendation": cursor.model_copy(
+                update={"status": "approved"}
+            ).model_dump(mode="json"),
+            "proposed_parameter_attempt_id": None,
+        },
+    )
     return {
         "current_stage": "t2t",
         "supervision_state": "running_stage",
         "active_interrupt": None,
-        "stage_outputs": outputs,
+        **stage_update,
     }
 
 
-def freeze_t2t_parameters(state: TopLevelState) -> dict:
+def freeze_t2t_parameters(state: TopLevelState) -> StateUpdate:
     """Freeze approved thresholds from the immutable v3 snapshot and catalog."""
 
-    output = stage_output(state, "t2t")
+    output = read_t2t_stage_output(state)
     if output.get("status") != "parameters_approved":
         return {}
     try:
@@ -1104,16 +1118,18 @@ def freeze_t2t_parameters(state: TopLevelState) -> dict:
         context = bundle.chain.input_snapshot.stage_context
         if not isinstance(context, T2TRecommendationContext):
             raise ValueError("approved snapshot does not contain T2T context")
-        execution_inputs = T2TFrozenExecutionInputs(
-            thresholds=effective,
-            resolved_telomere_motif=context.resolved_telomere_motif,
-            motif_source=context.motif_source,
-            mode=mode,
-            input_assembly_ref=output.get("input_assembly_ref"),
-            ont_read_inputs=tuple(output.get("ont_read_inputs") or ()),
-            chromosome_list_ref=output.get("chromosome_list_ref"),
-            work_dir=output.get("work_dir"),
-            execution_enabled=output.get("execution_enabled"),
+        execution_inputs = T2TFrozenExecutionInputs.model_validate(
+            {
+                "thresholds": effective.model_dump(mode="json"),
+                "resolved_telomere_motif": context.resolved_telomere_motif,
+                "motif_source": context.motif_source,
+                "mode": mode,
+                "input_assembly_ref": output.get("input_assembly_ref"),
+                "ont_read_inputs": output.get("ont_read_inputs") or [],
+                "chromosome_list_ref": output.get("chromosome_list_ref"),
+                "work_dir": output.get("work_dir"),
+                "execution_enabled": output.get("execution_enabled"),
+            }
         )
         effective_json = effective.model_dump(mode="json")
         recommendation_manifest_ref = attempt.recommendation_manifest_ref.model_dump(
@@ -1151,9 +1167,8 @@ def freeze_t2t_parameters(state: TopLevelState) -> dict:
         T2TParameterPersistenceError,
     ) as exc:
         return _fail(state, f"T2T approved parameters are not executable: {exc}")
-    return update_stage_output(
+    return update_t2t_stage_output(
         state,
-        "t2t",
         {
             "status": "parameters_ready",
             "thresholds": effective_json,
@@ -1174,5 +1189,5 @@ def _t2t_ont_input_path(item: Any, *, index: int) -> str:
     return path
 
 
-def _fail(state: TopLevelState, reason: str) -> dict:
-    return update_stage_output(state, "t2t", {"status": "failed", "reason": reason})
+def _fail(state: TopLevelState, reason: str) -> StateUpdate:
+    return update_t2t_stage_output(state, {"status": "failed", "reason": reason})

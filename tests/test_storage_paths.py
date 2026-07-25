@@ -8,14 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.storage.artifacts import (
-    publish_artifact_records,
-    publish_artifact_record,
-    publish_or_recover_work_artifact,
-    read_artifact_records,
-    register_artifact_records,
-    resolve_artifact_ref,
-)
 from app.execution.evidence import (
     ExecutionEvidence,
     execution_log_paths,
@@ -27,8 +19,16 @@ from app.execution.evidence import (
     validate_execution_evidence,
 )
 from app.execution.method_runner import build_frozen_attempt, run_frozen_attempt
-from app.schemas.execution import ExecutionResult
 from app.schemas.artifacts import ArtifactMeta
+from app.schemas.execution import ExecutionResult
+from app.storage.artifacts import (
+    publish_artifact_record,
+    publish_artifact_records,
+    publish_or_recover_work_artifact,
+    read_artifact_records,
+    register_artifact_records,
+    resolve_artifact_ref,
+)
 from app.storage.paths import (
     DataLayoutError,
     SessionPaths,
@@ -49,7 +49,9 @@ class SessionPathsTests(unittest.TestCase):
         self.assertEqual(paths.work_dir, paths.run_dir / "work")
         self.assertEqual(paths.artifact_index_path, paths.artifacts_dir / "index.jsonl")
         self.assertEqual(paths.ledger_events_path, paths.ledger_dir / "events.jsonl")
-        self.assertEqual(paths.checkpoint_db_path, paths.checkpoints_dir / "checkpoints.sqlite")
+        self.assertEqual(
+            paths.checkpoint_db_path, paths.checkpoints_dir / "checkpoints.sqlite"
+        )
         self.assertEqual(
             paths.artifact_path("assembly", "outputs", "draft.fa"),
             paths.artifacts_dir / "assembly" / "outputs" / "draft.fa",
@@ -106,8 +108,15 @@ class SessionPathsTests(unittest.TestCase):
         artifact = paths.artifact_path("assembly", "outputs", "draft.fa")
 
         self.assertEqual(paths.to_ref(artifact), "artifacts/assembly/outputs/draft.fa")
-        self.assertEqual(paths.resolve_ref("artifacts/assembly/outputs/draft.fa"), artifact)
-        for invalid in ("/tmp/escape", "../escape", "artifacts/../control/run.json", ""):
+        self.assertEqual(
+            paths.resolve_ref("artifacts/assembly/outputs/draft.fa"), artifact
+        )
+        for invalid in (
+            "/tmp/escape",
+            "../escape",
+            "artifacts/../control/run.json",
+            "",
+        ):
             with self.subTest(invalid=invalid), self.assertRaises(DataLayoutError):
                 paths.resolve_ref(invalid)
         with self.assertRaises(DataLayoutError):
@@ -116,7 +125,9 @@ class SessionPathsTests(unittest.TestCase):
     def test_layout_marker_is_v2_and_rejects_flat_runtime_roots(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = ensure_data_layout(tmpdir)
-            self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), {"schema_version": 2})
+            self.assertEqual(
+                json.loads(marker.read_text(encoding="utf-8")), {"schema_version": 2}
+            )
             self.assertEqual(ensure_data_layout(tmpdir), marker)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,7 +150,9 @@ class SessionPathsTests(unittest.TestCase):
             paths = SessionPaths(tmpdir, "s1")
             ensure_run_layout(paths)
             self.assertEqual(locate_session_data_dir(tmpdir, "s1"), paths.run_dir)
-            self.assertEqual(locate_session_data_dir(paths.run_dir, "s1"), paths.run_dir)
+            self.assertEqual(
+                locate_session_data_dir(paths.run_dir, "s1"), paths.run_dir
+            )
 
 
 class ArtifactIndexV2Tests(unittest.TestCase):
@@ -159,7 +172,10 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 stage="inventory",
                 method_name="inventory.register_assets",
                 artifact_type="asset_registry",
-                metadata={"attempt_id": "inventory-0", "business_status": "must-not-be-indexed"},
+                metadata={
+                    "attempt_id": "inventory-0",
+                    "business_status": "must-not-be-indexed",
+                },
             )
 
             refs = register_artifact_records(paths.run_dir, "s1", [artifact])
@@ -193,7 +209,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             [artifact_ref] = publish_artifact_records(paths.run_dir, "s1", [artifact])
 
             published = paths.resolve_ref(artifact_ref.path_ref)
-            self.assertEqual(published, paths.artifact_path("assembly", "outputs", "flye", "log"))
+            self.assertEqual(
+                published, paths.artifact_path("assembly", "outputs", "flye", "log")
+            )
             self.assertFalse(source.exists())
             self.assertNotIn("s1", published.relative_to(paths.run_dir).parts)
             self.assertEqual(artifact.file_path, published)
@@ -216,7 +234,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
 
             self.assertFalse(source.exists())
             self.assertTrue(published.path.is_file())
-            self.assertEqual(published.path.read_text(encoding="utf-8"), "##gff-version 3\n")
+            self.assertEqual(
+                published.path.read_text(encoding="utf-8"), "##gff-version 3\n"
+            )
             self.assertEqual(
                 published.path,
                 paths.artifact_path(
@@ -291,7 +311,9 @@ class ArtifactIndexV2Tests(unittest.TestCase):
                 artifact_type="asset_registry",
             )
 
-            with self.assertRaisesRegex(DataLayoutError, "outside the declared stage workspace"):
+            with self.assertRaisesRegex(
+                DataLayoutError, "outside the declared stage workspace"
+            ):
                 publish_artifact_records(paths.run_dir, "s1", [artifact])
 
             self.assertEqual(destination.read_text(encoding="utf-8"), "old bytes\n")
@@ -336,9 +358,7 @@ class ArtifactIndexV2Tests(unittest.TestCase):
             self.assertEqual(
                 published_path.read_text(encoding="utf-8"), "first output\n"
             )
-            self.assertEqual(
-                read_artifact_records(paths.run_dir, "s1"), first_records
-            )
+            self.assertEqual(read_artifact_records(paths.run_dir, "s1"), first_records)
 
     def test_registration_rejects_external_reports_and_repeated_session_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -396,9 +416,13 @@ class ImmutablePublishTests(unittest.TestCase):
 
             from app.storage.publish import shell_publish_file
 
-            subprocess.run(shell_publish_file(source, destination), shell=True, check=True)
+            subprocess.run(
+                shell_publish_file(source, destination), shell=True, check=True
+            )
             source.write_text("first output\n", encoding="utf-8")
-            subprocess.run(shell_publish_file(source, destination), shell=True, check=True)
+            subprocess.run(
+                shell_publish_file(source, destination), shell=True, check=True
+            )
 
             self.assertFalse(source.exists())
             self.assertEqual(destination.read_text(encoding="utf-8"), "first output\n")
@@ -451,7 +475,9 @@ class ImmutablePublishTests(unittest.TestCase):
                 outcome.result.stdout_path.parent,
                 paths.artifact_path("read_qc", "logs"),
             )
-            self.assertNotIn("s1", outcome.result.stdout_path.relative_to(paths.run_dir).parts)
+            self.assertNotIn(
+                "s1", outcome.result.stdout_path.relative_to(paths.run_dir).parts
+            )
             self.assertFalse(stdout.exists())
 
             state = {"session_id": "s1", "data_dir": str(paths.run_dir)}
