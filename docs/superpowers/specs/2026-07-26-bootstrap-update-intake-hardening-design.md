@@ -70,9 +70,12 @@ Before confirmation, the bootstrap plan is validated without publishing it:
 
 `apply_project_bootstrap_plan` revalidates the plan so programmatic callers
 cannot bypass the boundary. Config and `.env` files are staged in their target
-directories and replaced only after validation. Existing `.env` content is
-preserved except for approved `GENE_AGENT_*` updates. Its mode is forced to
-`0600` after both creation and replacement.
+directories and replaced only after validation. Publication is atomic per
+file; it is not represented as a cross-file transaction. Existing `.env`
+content is preserved except for approved `GENE_AGENT_*` updates. Its mode is
+forced to `0600` after both creation and replacement. A conformance failure
+after publication returns nonzero, retains the already committed config/`.env`
+changes, and still reports the final package-preflight result.
 
 ## TUI Intake Corrections
 
@@ -105,25 +108,40 @@ the complete execution attempt. A second process that cannot acquire it treats
 the session as actively executing and refuses duplicate execution. Process
 exit releases the lock automatically.
 
-After frozen-input integrity validation, `/resume` routes as follows:
+After frozen-input integrity validation, `/resume` routes as follows. Both a
+fresh start and a checkpoint continuation call the same frozen executor with
+the durable SQLite checkpointer and never rematerialize control inputs.
 
 | Durable state | Action |
 |---|---|
 | execution lock held | Refuse duplicate execution or input edits |
-| no lock, no terminal/review result | Execute from the immutable frozen inputs |
+| no lock, no execution checkpoint or execution artifacts | Start from the immutable frozen inputs |
+| no lock, resumable nonterminal SQLite checkpoint | Continue the same session from that checkpoint |
+| no lock, partial execution evidence without a resumable checkpoint | Refuse a fresh restart and report that recovery is unavailable |
 | blocked human review | Enter the existing review path |
 | completed or failed terminal | Offer a child rerun draft |
 
 This closes the crash window between publishing `frozen_inputs.json` and
-starting the graph. Resume never mutates the frozen control inputs.
+starting the graph without rerunning completed work after a later crash.
+Resume never mutates the frozen control inputs.
 
 ## Dependency Snapshot Scope
 
-Freeze derives configured stage and method names from the validated run config
-and passes them into dependency snapshot capture. The snapshot contains the
-default environment plus only selected stage/method environment entries and
-only packages referenced by those resolved specs. It does not serialize
-unrelated configured packages or `.env` values.
+The confirmed planner passes its resolved execution order and selected methods
+into the freeze boundary alongside the run-config draft. The freeze boundary
+validates the run config first and verifies that the supplied stage selection
+agrees with its requested/local-execution scope. It then builds the execution
+dependency closure: explicitly selected methods plus any registered method
+choices that a selected stage is allowed to make after freeze. Dynamic choices
+are therefore bounded by the selected stage instead of being inferred from a
+`RunConfig` that does not retain general method selections.
+
+Dependency snapshot capture receives this validated closure. The snapshot
+contains the default environment plus only stage/method entries in the closure
+and only packages referenced by those resolved specs. It does not serialize
+methods from unrelated stages, unrelated configured packages, or `.env`
+values. The snapshot's stage and method keys durably record the closure used at
+execution time.
 
 The frozen resolver continues to fail closed if a selected spec references a
 package absent from the snapshot. Execution never falls back to live
@@ -154,9 +172,12 @@ Focused tests must cover:
 8. explicit unlpaired Hi-C text is never accepted as ONT;
 9. Hi-C replacement requires confirmation and removes old pairs;
 10. a held execution lock refuses duplicate execution;
-11. an unlocked frozen-but-not-started session resumes execution;
-12. selected dependency snapshots omit unrelated methods/packages; and
-13. the existing frozen hash, child rerun, and live-config isolation tests
+11. an unlocked frozen-but-not-started session starts execution;
+12. an unlocked nonterminal checkpoint resumes without fresh execution, while
+    partial execution without a resumable checkpoint fails closed;
+13. selected dependency closures omit unrelated-stage methods/packages while
+    retaining allowed post-freeze choices for selected stages; and
+14. the existing frozen hash, child rerun, and live-config isolation tests
     remain green.
 
 Verification runs `ruff check app tests`, the focused bootstrap/TUI/frozen
